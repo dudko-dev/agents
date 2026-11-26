@@ -382,6 +382,45 @@ What this does NOT protect against:
   can print instructions. And a program that the user approved once is not approved
   forever - each run is gated.
 
+## MCP server instructions: third-party text in a system prompt
+
+An MCP server may send `instructions` when it connects, and the agent shows them to the model
+(planner and executor system prompts). That text is written by whoever runs the server. A system
+prompt is the most trusted place a model reads, so this is a prompt-injection surface, and a
+wider one than a tool result: it is there before the first call.
+
+**What is enforced**
+
+- **It is labelled.** The section opens with a fixed preamble: third-party text, guidance for
+  that server's own tools only, never overriding the operator's rules, the user's request or a
+  tool-approval decision.
+- **It is quoted.** Every line a server wrote starts with `| `, and the server's name is your
+  configuration key on one line: a server cannot write something that reads as a heading of
+  your prompt, as the end of the section, or as another server's note. Invisible and control
+  characters (zero-width, bidirectional overrides) are removed, so what the model reads is what
+  you would read in a log.
+- **It is bounded.** 2000 characters per server, 8000 in total, cuts marked. A server cannot
+  push your own instructions out of a small window.
+- **It comes last and goes to two stages.** After your `systemPrompt` and the stage's rules; not
+  to the replanner, and not to the synthesizer that writes the user's answer.
+- **It cannot change under a run.** The text is fixed when the agent is created.
+- **Consent does not read it.** `toolApproval` runs in code, inside every tool's `execute`:
+  nothing a server writes in its instructions can approve a call or lift the tool-call budget.
+
+**What is NOT protected**
+
+- **A model can still be persuaded.** Labels and quoting lower the odds; they are not a
+  boundary. A hostile server can tell the model to call *its own* tools in harmful ways, or to
+  pass it data from the conversation as tool arguments — which a server could also do through
+  its tool descriptions and results. Connect only servers you would let read the conversation.
+- **`mcpInstructions: false`** removes the surface: use it for servers you do not control, and
+  for user-supplied ("bring your own MCP") servers unless you show the user what they sent
+  (`connected.instructions`).
+- **Structured results are data, like any tool result.** A value that breaks the tool's
+  `outputSchema` is passed to the model with a note rather than refused (refusing would report
+  a call that ran as failed, and invite a repeat): do not treat the schema as a validation
+  boundary for what your own code does with `structuredContent`.
+
 ## Pipelines: a definition is data
 
 A pipeline definition is meant to be saved, shared and loaded - including one that

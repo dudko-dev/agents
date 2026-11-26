@@ -219,7 +219,16 @@ read-only by the consent gate. A failing server is reported in `results`; the
 others still mount. With hundreds of tools the agent switches to tool search
 automatically (see [docs/capabilities.md](docs/capabilities.md#large-tool-catalogues-several-mcp-servers)).
 
-`connectMcpHttp` returns `{ tools, catalog, results, refreshServer, close }`.
+A server's `instructions` (from its `initialize` result) reach the planner's and
+the executor's system prompts, marked as third-party text and capped; a tool's
+`structuredContent` reaches the model once, as JSON, and a result that breaks
+its `outputSchema` is passed on with a note instead of failing the call. See
+[docs/capabilities.md](docs/capabilities.md#mcp-server-instructions-and-structured-results);
+the instructions are a prompt-injection surface
+([docs/security.md](docs/security.md#mcp-server-instructions-third-party-text-in-a-system-prompt)) —
+`mcpInstructions: false` switches them off.
+
+`connectMcpHttp` returns `{ tools, catalog, results, instructions, refreshServer, close }`.
 `tools` and `catalog` are mutated **in place** by `refreshServer(name)`, so an
 agent built from them picks up a server's new tool list (react to it via the
 `onToolsChanged` option) without being rebuilt. Filtering is plain object work:
@@ -539,6 +548,7 @@ Loading a definition someone else wrote: [docs/security.md](docs/security.md#pip
 | `promptCaching` | `true` | stable system prefixes, Anthropic breakpoints, OpenAI cache key |
 | `vision` / `inputs` | inferred | what the model takes as attachments (`run(goal, { images, files })`); see `agent.capabilities` |
 | `systemPrompt` / `prompts` | — | prepended to every phase / override any phase's prompt builder |
+| `mcpInstructions` | `true` | show the model the `instructions` MCP servers send on connect (planner + executor, marked third-party, capped); `false` keeps them out |
 | `describeState` | — | serialize world state into prompt context |
 | `memory` | — | `ContextStore` (`IndexedDBStore` / `MemoryStore`); recent turns are read back into the planner prompt |
 | `sessionId` | — | names the stored conversation in `memory`, and the bucket `agent.sessionUsage()` counts into |

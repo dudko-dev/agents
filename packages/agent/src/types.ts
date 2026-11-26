@@ -392,6 +392,12 @@ export interface IAgentConfig {
   // Default connect + tools/list timeout for every MCP server (each server
   // can override it). Default 30_000; 0 disables.
   mcpConnectTimeoutMs?: number
+  // Show the model the `instructions` a connected MCP server returned in its
+  // initialize result (planner and executor system prompts, under a preamble
+  // that marks them as third-party text; capped per server and in total).
+  // Default true. Set false for servers you do not trust to write into a
+  // system prompt: the text is a prompt-injection surface.
+  mcpInstructions?: boolean
   // Provider prompt caching. Default true: run-stable system prompts, an
   // Anthropic cache breakpoint on them, and an OpenAI prompt cache key.
   promptCaching?: PromptCachingSetting
