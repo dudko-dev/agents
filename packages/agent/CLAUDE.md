@@ -112,8 +112,21 @@
   - The MCP client is the official 2.x SDK, `@modelcontextprotocol/client` (stdio from its
     `/stdio` subpath, the JSON Schema validator from `/validators/ajv`); `@modelcontextprotocol/sdk`
     1.x is gone from this package (the test servers keep it, for their `legacy` mode).
-    `versionNegotiation` stays at the SDK's default, `'legacy'`: the 2025 `initialize` handshake,
-    the same wire as before; opting into 2026-07-28 is a separate change. `mcp.ts` deliberately
+    The revision is a per-server opt-in, `protocol: 'legacy' | 'auto' | 'modern'` (both config
+    shapes; `mcpProtocolMode` / `mcpVersionNegotiation` in `mcp-shared.ts` map it to the SDK's
+    `versionNegotiation`: nothing is passed for `'legacy'`, `'auto'`, a pin to 2026-07-28 for
+    `'modern'`). Without the field the client is built with the options it always had and the wire
+    does not move: `tests/mcp-protocol.test.ts` compares every request (method, headers, body)
+    with `tests/fixtures/mcp-wire-without-protocol.json`, RECORDED before the option existed
+    (`tests/helpers/mcp-wire.ts`; re-record only after a deliberate change of the 2025 wire). The
+    same suite runs each mode against the `legacy` / `dual` / `modern` test servers. On a modern
+    connection: `Mcp-Method` / `Mcp-Name` are set by the transport from the message (so
+    `client.request` is enough; `Mcp-Param-*` is `callTool`'s own and is not sent), tool list
+    changes need `client.listen` (opened at connect when `onToolsChanged` is given; never opened
+    again), `inputRequired.autoFulfill` is off and an `input_required` answer is a `McpToolError`
+    (elicitation is not implemented), a stdio probe runs on a sibling process and is bounded by
+    `MCP_STDIO_PROBE_TIMEOUT_MS`. The negotiated revision is in `IConnectedMcp.protocols`. Same
+    names and rules in the browser sibling: change both. `mcp.ts` deliberately
     does NOT use the typed verbs: `tools/list` goes page by page through `client.request`
     (`listAllTools`: our page cap and repeated-cursor guard; `client.listTools()` would aggregate,
     throw past its own cap, skip servers without the tools capability and switch on the SDK's
@@ -122,8 +135,7 @@
     never starts an interactive authorization (`onInsufficientScope: 'throw'` for a provider with a
     `redirectUrl`). OAuth guards on this boundary - the `iss` check, the refusal of a callback
     without discovery state, the issuer stamp surviving the store, the scope policy - each have a
-    test in `tests/mcp-connect.test.ts` and need a mutation check; `tests/mcp-protocol.test.ts`
-    runs the connector against the test server in `legacy`, `dual` and `modern` mode.
+    test in `tests/mcp-connect.test.ts` and need a mutation check.
   - `pipeline-engine.ts` + `pipeline.ts` (`createPipeline`: a graph of agents with conditions and
     loops, described in plain JSON). The engine (definition types, `validatePipeline`, the conditions
     with the non-backtracking `matches` matcher, the wave scheduler; pure, no imports) is a COPY of

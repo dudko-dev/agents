@@ -33,6 +33,7 @@ Required env vars (set directly or via --env-file):
   AGENT_API_KEY         provider API key
   AGENT_MODEL           model id
   MCP_SERVERS           JSON: { "<name>": { "url": "...", "headers"?: {...} } | { "command": "...", "args"?: [], "env"?: {} } }
+                        each entry may add "protocol": "legacy" (default) | "auto" | "modern" (the MCP revision: 2026-07-28 when offered / only)
 
 Optional env vars (see env.example for the full list):
   AGENT_EXECUTOR_LIGHT_MODEL  a cheaper executor model for steps the planner rates "low"

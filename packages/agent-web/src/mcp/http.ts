@@ -1,9 +1,12 @@
 import {
   auth,
   Client,
+  SdkError,
+  SdkErrorCode,
   StreamableHTTPClientTransport,
   UnauthorizedError,
   type CallToolResult,
+  type ClientOptions,
   type FetchLike,
   type JsonSchemaType,
   type JsonSchemaValidator,
@@ -18,9 +21,17 @@ import {
   dropStructuredDuplicates,
   isStructuredContent,
   markMcpTool,
+  MCP_MODERN_PROTOCOL_VERSION,
+  MCP_MODERN_REFUSED_HINT,
+  MCP_MODERN_REQUEST_HEADERS,
+  mcpInputRequiredMessage,
+  mcpProtocolMode,
+  mcpVersionNegotiation,
   outputSchemaNote,
   withStructuredContent,
+  type McpProtocolMode,
   type McpServerInstructions,
+  type McpServerProtocol,
 } from './shared.js'
 
 /**
@@ -55,6 +66,26 @@ export interface McpHttpServerConfig {
   reconnection?: Partial<StreamableHTTPReconnectionOptions>
   /** Give up on this server after this many ms of connect + listing (overrides the option). */
   connectTimeoutMs?: number
+  /**
+   * Which revisions of the protocol this connection may use. Default `'legacy'`:
+   * the 2025 revisions (the `initialize` handshake), exactly what was sent before
+   * this option existed. `'auto'` asks the server first (`server/discover`) and
+   * speaks 2026-07-28 to one that offers it, the 2025 handshake to any other;
+   * `'modern'` is 2026-07-28 only, and a server that does not offer it fails the
+   * connect. Decided once, at connect: a tool call is never retried in another
+   * revision.
+   *
+   * CORS: 2026-07-28 adds the request headers `Mcp-Method` and `Mcp-Name` (and
+   * sends `MCP-Protocol-Version` on every request, the first included). A server
+   * whose `Access-Control-Allow-Headers` does not list them cannot be reached
+   * that way from a page: `'modern'` then fails, and `'auto'` falls back to the
+   * 2025 revisions with a warning that names the headers. See the README, "CORS".
+   *
+   * On 2026-07-28 there is no session; a tool-list change arrives over a
+   * `subscriptions/listen` stream this connector opens (it is not opened again
+   * when it drops), and an `input_required` result (elicitation) fails the call.
+   */
+  protocol?: McpProtocolMode
 }
 
 export interface McpCatalogEntry {
@@ -93,6 +124,13 @@ export interface ConnectedMcp {
    */
   instructions: McpServerInstructions[]
   /**
+   * The protocol revision negotiated with each connected server, in declaration
+   * order: `2025-…` after the `initialize` handshake (always, for a server
+   * without `protocol`), `2026-07-28` when `protocol: 'auto'` or `'modern'`
+   * found a server that offers it. Fixed for the life of the connection.
+   */
+  protocols: McpServerProtocol[]
+  /**
    * Re-list one server's tools and rewrite its entries in `tools`/`catalog`.
    * Both are mutated in place, so anything holding a reference (including a
    * live agent config) sees the new set. Throws if the server isn't connected.
@@ -109,6 +147,8 @@ export interface ConnectMcpOptions {
    * Fires when a server pushes `notifications/tools/list_changed`. Call
    * `refreshServer(name)` from a point where no run is reading `tools` — this
    * connector deliberately does not refresh behind a running agent's back.
+   * On a 2026-07-28 connection (`protocol`) the notice arrives over a
+   * `subscriptions/listen` stream, opened only when this callback is given.
    */
   onToolsChanged?: (server: string) => void
   /**
@@ -121,6 +161,17 @@ export interface ConnectMcpOptions {
 
 /** Hard stop for a server whose pagination never ends (the Node sibling's cap and name). */
 export const MAX_TOOL_LIST_PAGES = 100
+/**
+ * 2026-07-28: how long the `subscriptions/listen` stream may take to be
+ * acknowledged before the connect goes on without tool-list change notices
+ * (the Node sibling's bound and name).
+ */
+export const MCP_LISTEN_ACK_TIMEOUT_MS = 10_000
+
+/** The SDK's typed error with this code (by name too: a second copy of the SDK is another class). */
+const isSdkError = (err: unknown, code: SdkErrorCode): boolean =>
+  (err instanceof SdkError || (err instanceof Error && err.name === 'SdkError')) &&
+  (err as { code?: unknown }).code === code
 
 /**
  * Every tool of a server, following `nextCursor` (up to MAX_TOOL_LIST_PAGES
@@ -271,6 +322,8 @@ interface ServerConnect {
   client?: Client
   /** What the server said in its initialize result ('' when nothing). */
   instructions?: string
+  /** The revision the connection negotiated. */
+  protocol?: Omit<McpServerProtocol, 'server'>
   listed?: McpToolDescriptor[]
   error?: string
   needsAuthorization?: boolean
@@ -431,18 +484,26 @@ const isNetworkLevelFailure = (err: unknown): boolean =>
  * bug that lets OAuth and `initialize` succeed and then kills the connection
  * moments later, looking for all the world like the consent step failed.
  *
+ * With `protocol: 'auto'` or `'modern'` the transport also sends the request
+ * headers of the 2026-07-28 revision, on the very first request. The browser
+ * will not say which header a preflight refused either, so each one is tried on
+ * its own: the ones that do not get through are the ones missing from the
+ * server's `Access-Control-Allow-Headers`, and they are named.
+ *
  * Exported because a UI wants to say this too, not just log it.
  */
 export const diagnoseMcpCors = async (
   url: string,
   fetchFn: FetchLike = globalThis.fetch,
+  opts: { protocol?: McpProtocolMode } = {},
 ): Promise<string | undefined> => {
+  const body = JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'ping' })
   let plain: Response
   try {
     plain = await fetchFn(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'ping' }),
+      body,
     })
   } catch {
     return (
@@ -452,13 +513,51 @@ export const diagnoseMcpCors = async (
       'MCP endpoint, the OAuth endpoints and the /.well-known documents.'
     )
   }
-  const hints = [
-    `a plain request to ${url} succeeded (HTTP ${plain.status}) but the transport's did not, ` +
-      'so the origin is allowed and a request HEADER is being refused. Add ' +
-      'MCP-Protocol-Version (required on every request after initialize) and Last-Event-ID ' +
-      "to the server's Access-Control-Allow-Headers, alongside Content-Type, Authorization " +
-      'and mcp-session-id.',
-  ]
+  const hints: string[] = []
+  const modern = opts.protocol === 'auto' || opts.protocol === 'modern'
+  if (modern) {
+    // One request per header, each asking the preflight for that header alone.
+    // Whatever the server answers is an answer: only a blocked request counts.
+    const refused: string[] = []
+    for (const [header, value] of [
+      ['MCP-Protocol-Version', MCP_MODERN_PROTOCOL_VERSION],
+      [MCP_MODERN_REQUEST_HEADERS[0], 'ping'],
+      [MCP_MODERN_REQUEST_HEADERS[1], 'cors-check'],
+    ] as const) {
+      try {
+        await fetchFn(url, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', [header]: value },
+          body,
+        })
+      } catch {
+        refused.push(header)
+      }
+    }
+    if (refused.length > 0) {
+      hints.push(
+        `a plain request to ${url} succeeded (HTTP ${plain.status}), but one carrying ` +
+          `${refused.join(' / ')} was blocked: the server's Access-Control-Allow-Headers ` +
+          `does not list ${refused.length === 1 ? 'it' : 'them'}. The ${MCP_MODERN_PROTOCOL_VERSION} ` +
+          `revision of the protocol (protocol: '${opts.protocol}') sends MCP-Protocol-Version, ` +
+          `${MCP_MODERN_REQUEST_HEADERS.join(' and ')} on every request: add ` +
+          `${refused.join(', ')} to Access-Control-Allow-Headers, alongside Content-Type and ` +
+          `Authorization (and any Mcp-Param-* header the server's tools declare).`,
+      )
+    }
+  }
+  if (hints.length === 0) {
+    hints.push(
+      `a plain request to ${url} succeeded (HTTP ${plain.status}) but the transport's did not, ` +
+        'so the origin is allowed and a request HEADER is being refused. Add ' +
+        'MCP-Protocol-Version (required on every request after initialize) and Last-Event-ID ' +
+        "to the server's Access-Control-Allow-Headers, alongside Content-Type, Authorization " +
+        'and mcp-session-id.' +
+        (modern
+          ? ` With protocol: '${opts.protocol}', ${MCP_MODERN_REQUEST_HEADERS.join(' and ')} too.`
+          : ''),
+    )
+  }
   // A 401 whose challenge JS cannot read means OAuth discovery cannot start
   // from a browser at all, so say so while we are here.
   if (plain.status === 401 && !plain.headers.get('www-authenticate')) {
@@ -471,6 +570,9 @@ export const diagnoseMcpCors = async (
   return hints.join(' ')
 }
 
+/** Says that `diagnoseMcpCors` found request headers the server's CORS policy refuses. */
+const NAMES_REFUSED_HEADERS = /was blocked: the server's Access-Control-Allow-Headers/
+
 const warnTruncated = (log: NonNullable<ConnectMcpOptions['onLog']>, name: string): void =>
   log(
     'warn',
@@ -482,11 +584,14 @@ const openConnection = async (
   cfg: McpHttpServerConfig,
   opts: ConnectMcpOptions,
   log: NonNullable<ConnectMcpOptions['onLog']>,
+  isClosing: () => boolean,
 ): Promise<ServerConnect> => {
   let client: Client | undefined
   let timedOut = false
   const timeoutMs = cfg.connectTimeoutMs ?? opts.connectTimeoutMs ?? 30_000
-  const attempt = connectAndList(name, cfg, opts, log, (c) => {
+  // What the version probe (`protocol: 'auto' | 'modern'`) ran into.
+  const probe: ProbeState = { blocked: false }
+  const attempt = connectAndList(name, cfg, opts, log, probe, isClosing, (c) => {
     client = c
     // Created after the deadline already passed: nobody will ever use it.
     if (timedOut) void c.close().catch(() => {})
@@ -508,15 +613,28 @@ const openConnection = async (
     if (client) await client.close().catch(() => {})
     const needsAuthorization = err instanceof UnauthorizedError
     let message = err instanceof Error ? err.message : String(err)
+    // `protocol: 'modern'` against a server that did not offer the revision:
+    // the SDK's sentence, plus which option to turn.
+    if (cfg.protocol === 'modern' && isSdkError(err, SdkErrorCode.EraNegotiationFailed)) {
+      message = `${message} - ${MCP_MODERN_REFUSED_HINT}`
+    }
     // Turn "TypeError: Failed to fetch" into the sentence the reader needs.
     // Only on the failure path, so the extra request costs nothing in normal use.
-    if (
-      !needsAuthorization &&
-      !(err instanceof ConnectTimeoutError) &&
-      isNetworkLevelFailure(err)
-    ) {
-      const hint = await diagnoseMcpCors(cfg.url, cfg.fetch).catch(() => undefined)
-      if (hint) message = `${message} - ${hint}`
+    if (!needsAuthorization && !(err instanceof ConnectTimeoutError)) {
+      if (isNetworkLevelFailure(err)) {
+        const hint = await diagnoseMcpCors(cfg.url, cfg.fetch, {
+          protocol: probe.mode,
+        }).catch(() => undefined)
+        if (hint) message = `${message} - ${hint}`
+      } else if (probe.blocked) {
+        // The version probe never reached the server, and what failed
+        // afterwards is another error (a page's SDK reads a blocked probe as
+        // "a 2025 server" and goes on). Said only when a header is the cause.
+        const hint = await diagnoseMcpCors(cfg.url, cfg.fetch, {
+          protocol: probe.mode,
+        }).catch(() => undefined)
+        if (hint && NAMES_REFUSED_HEADERS.test(hint)) message = `${message} - ${hint}`
+      }
     }
     log(
       'error',
@@ -528,13 +646,69 @@ const openConnection = async (
   }
 }
 
+/** What the version probe of one connect ran into (see `openConnection`). */
+interface ProbeState {
+  /** The configured mode, once it was read. */
+  mode?: McpProtocolMode
+  /** A request of the probe was blocked before it reached the server (CORS, or no network). */
+  blocked: boolean
+}
+
+/**
+ * 2026-07-28: ask the server for tool-list change notices. Best effort - a
+ * server that does not announce them, or a stream that cannot be opened, leaves
+ * a connection whose tools still work; `refreshServer` still re-lists.
+ */
+const listenForToolChanges = async (
+  name: string,
+  client: Client,
+  log: NonNullable<ConnectMcpOptions['onLog']>,
+  isClosing: () => boolean,
+): Promise<void> => {
+  if (!client.getServerCapabilities()?.tools?.listChanged) {
+    log('info', `[mcp] ${name}: the server does not announce tool list changes`)
+    return
+  }
+  try {
+    const subscription = await client.listen(
+      { toolsListChanged: true },
+      { timeout: MCP_LISTEN_ACK_TIMEOUT_MS },
+    )
+    // The SDK does not open the stream again, and neither does this connector:
+    // say so, or the silence reads as "nothing changed".
+    void subscription.closed.then((cause) => {
+      if (!isClosing()) {
+        log(
+          'warn',
+          `[mcp] ${name}: the tool list change stream ended (${
+            cause === 'graceful' ? 'closed by the server' : 'dropped'
+          }); changes are not announced until the server is connected again`,
+        )
+      }
+    })
+  } catch (err) {
+    log(
+      'warn',
+      `[mcp] ${name}: could not subscribe to tool list changes - ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    )
+  }
+}
+
 const connectAndList = async (
   name: string,
   cfg: McpHttpServerConfig,
   opts: ConnectMcpOptions,
   log: NonNullable<ConnectMcpOptions['onLog']>,
+  probe: ProbeState,
+  isClosing: () => boolean,
   onClient: (client: Client) => void,
 ): Promise<ServerConnect> => {
+  // Read first: a `protocol` that is none of the three names is a
+  // configuration error, said before anything is sent.
+  const mode = mcpProtocolMode(cfg.protocol, name)
+  probe.mode = mode
   if (cfg.headers && cfg.getHeaders) {
     throw new Error(`MCP server "${name}": specify either headers or getHeaders, not both`)
   }
@@ -571,19 +745,73 @@ const connectAndList = async (
   })
   // Without these, a dropped SSE stream or a transport-level protocol error
   // is swallowed and the agent just stops getting results.
-  transport.onerror = (err) => log('warn', `[mcp] ${name}: transport error - ${err.message}`)
+  // The version probe asks a question a 2025 server answers with an HTTP
+  // error: that answer is the expected "no", not a fault of the connection. A
+  // probe that was BLOCKED is remembered: a page's SDK reads it as "a 2025
+  // server" too, and only this callback saw the difference.
+  let probing = mode !== 'legacy'
+  transport.onerror = (err) => {
+    if (!probing) {
+      log('warn', `[mcp] ${name}: transport error - ${err.message}`)
+      return
+    }
+    if (isNetworkLevelFailure(err)) probe.blocked = true
+    log('info', `[mcp] ${name}: version probe (server/discover) - ${err.message}`)
+  }
   // info, not warn: an ordinary close() ends here too, and a routine
   // teardown logged as a warning trains people to ignore warnings.
   transport.onclose = () => log('info', `[mcp] ${name}: transport closed`)
 
   const enterprise = cfg.authProvider ? asEnterpriseProvider(cfg.authProvider) : undefined
+  // Without `protocol` (or with 'legacy') nothing is added here: the client is
+  // built with exactly the options it always had.
+  const negotiation = mcpVersionNegotiation(mode)
+  const clientOptions: ClientOptions | undefined =
+    enterprise || negotiation
+      ? {
+          // An extension is opt-in: it is declared only by the client that uses it.
+          ...(enterprise ? { capabilities: { extensions: { [enterprise.extension]: {} } } } : {}),
+          ...(negotiation
+            ? {
+                versionNegotiation: negotiation,
+                // 2026-07-28: an `input_required` result is NOT answered and the
+                // call is NOT sent again by the SDK (its default would try
+                // both); it fails the tool call, see `execute`.
+                inputRequired: { autoFulfill: false },
+              }
+            : {}),
+        }
+      : undefined
   const client = new Client(
     { name: opts.clientName ?? 'agent-web', version: opts.clientVersion ?? '0.0.0' },
-    // An extension is opt-in: it is declared only by the client that uses it.
-    enterprise ? { capabilities: { extensions: { [enterprise.extension]: {} } } } : undefined,
+    clientOptions,
   )
   onClient(client)
   await client.connect(transport)
+  probing = false
+  const era = client.getProtocolEra() ?? 'legacy'
+  const version = client.getNegotiatedProtocolVersion() ?? ''
+  if (mode !== 'legacy') {
+    log(
+      'info',
+      `[mcp] ${name}: protocol ${version} (${
+        era === 'modern' ? 'modern: stateless, no session' : 'legacy: the initialize handshake'
+      }; configured '${mode}')`,
+    )
+    // 'auto' on the 2025 revisions although the probe never reached the
+    // server: when a CORS header is why, the server may well speak 2026-07-28.
+    if (era === 'legacy' && probe.blocked) {
+      const hint = await diagnoseMcpCors(cfg.url, cfg.fetch, { protocol: mode }).catch(
+        () => undefined,
+      )
+      log(
+        'warn',
+        `[mcp] ${name}: the version probe (server/discover) was blocked before it reached the server, so the connection uses ${version}${
+          hint && NAMES_REFUSED_HEADERS.test(hint) ? ` - ${hint}` : ''
+        }`,
+      )
+    }
+  }
 
   // Subscribe BEFORE the first list call: a server that mutates its tool set
   // during init would otherwise lose the notification in the window between
@@ -591,11 +819,21 @@ const connectAndList = async (
   if (opts.onToolsChanged) {
     const notify = opts.onToolsChanged
     client.setNotificationHandler('notifications/tools/list_changed', () => notify(name))
+    // 2026-07-28 has no stream a server may write to unasked: the notice above
+    // arrives only on a `subscriptions/listen` stream the client opens. (The
+    // 2025 revisions send it on the GET stream the transport opens by itself.)
+    if (era === 'modern') await listenForToolChanges(name, client, log, isClosing)
   }
 
   const listed = await listAllTools(client, () => warnTruncated(log, name))
   // Read once, here: the text is fixed for the life of this connection.
-  return { name, client, listed, instructions: cleanMcpInstructions(client.getInstructions()) }
+  return {
+    name,
+    client,
+    listed,
+    instructions: cleanMcpInstructions(client.getInstructions()),
+    protocol: { version, era },
+  }
 }
 
 /**
@@ -614,6 +852,8 @@ export const connectMcpHttp = async (
   const results: McpServerResult[] = []
   const instructions: McpServerInstructions[] = []
   const instructionsOf = new Map<string, string>()
+  const protocols: McpServerProtocol[] = []
+  let closing = false
   // server name → the tool keys it currently owns, so a refresh can remove
   // exactly its own entries.
   const mountedKeys = new Map<string, string[]>()
@@ -687,18 +927,32 @@ export const connectMcpHttp = async (
           // `client.request`, not `client.callTool`: the typed verb also checks
           // the result against the tool's outputSchema and throws when it does
           // not fit - taking with it a result that DID arrive. The request is
-          // the same on the wire. (On the 2026-07-28 revision `callTool` also
-          // mirrors arguments into `Mcp-Param-*` headers; this client
-          // negotiates the 2025 one.) A request that fails (transport,
-          // protocol, abort) throws here: there is no result, and the throw is
-          // recorded as a failed call.
-          const res: CallToolResult = await client.request(
-            {
-              method: 'tools/call',
-              params: { name: t.name, arguments: (args ?? {}) as Record<string, unknown> },
-            },
-            options?.abortSignal ? { signal: options.abortSignal } : undefined,
-          )
+          // the same on the wire, in both eras: on 2026-07-28 the transport
+          // derives `Mcp-Method` and `Mcp-Name` from the message itself,
+          // whoever built it. Only the `Mcp-Param-*` headers are the typed
+          // verb's own - a mirror of arguments a tool marked with
+          // `x-mcp-header`, for intermediaries; this client does not send them
+          // (so a server's CORS list needs none of them for this client). A
+          // request that fails (transport, protocol, abort) throws here: there
+          // is no result, and the throw is recorded as a failed call.
+          let res: CallToolResult
+          try {
+            res = await client.request(
+              {
+                method: 'tools/call',
+                params: { name: t.name, arguments: (args ?? {}) as Record<string, unknown> },
+              },
+              options?.abortSignal ? { signal: options.abortSignal } : undefined,
+            )
+          } catch (err) {
+            // 2026-07-28: the server answered `input_required` (it wants the
+            // user asked something, or the call sent again with a state). Not
+            // supported here, and the call is not repeated.
+            if (isSdkError(err, SdkErrorCode.UnsupportedResultType)) {
+              throw new Error(mcpInputRequiredMessage(t.name))
+            }
+            throw err
+          }
           // A result arrived. When it does not follow the tool's outputSchema
           // (no structuredContent, or one that does not match) it is passed on
           // with a note rather than reported as a failure — a tool the model is
@@ -745,7 +999,9 @@ export const connectMcpHttp = async (
   }
 
   const connects = await Promise.all(
-    Object.entries(servers).map(([name, cfg]) => openConnection(name, cfg, opts, log)),
+    Object.entries(servers).map(([name, cfg]) =>
+      openConnection(name, cfg, opts, log, () => closing),
+    ),
   )
 
   for (const server of connects) {
@@ -767,6 +1023,7 @@ export const connectMcpHttp = async (
       instructions.push({ server: server.name, instructions: server.instructions })
       instructionsOf.set(server.name, server.instructions)
     }
+    if (server.protocol) protocols.push({ server: server.name, ...server.protocol })
     mountTools(server.name, server.client, server.listed)
     results.push({ name: server.name, connected: true })
   }
@@ -776,12 +1033,14 @@ export const connectMcpHttp = async (
     catalog,
     results,
     instructions,
+    protocols,
     refreshServer: async (name: string) => {
       const client = clients.get(name)
       if (!client) throw new Error(`MCP server "${name}" is not connected`)
       mountTools(name, client, await listAllTools(client, () => warnTruncated(log, name)))
     },
     close: async () => {
+      closing = true
       await Promise.allSettled([...clients.values()].map((c) => c.close()))
     },
   }

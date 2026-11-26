@@ -199,9 +199,25 @@ behind every decision.
   the `browser` export condition (so it costs a browser bundle nothing), pure JS with no code
   generation (CSP), and the same engine in the Node-run tests as in a page - never
   `/validators/ajv` (`new Function`, and ~295 kB) and never the internal `/_shims`.
-  `versionNegotiation` stays at the SDK's default, `'legacy'`: the 2025 `initialize` handshake,
-  the same wire and the same CORS request headers as before; opting into 2026-07-28 is a separate
-  change (it adds `Mcp-Method` / `Mcp-Name` request headers: README, CORS section). `http.ts`
+  The revision is a per-server opt-in, `McpHttpServerConfig.protocol: 'legacy' | 'auto' |
+  'modern'` (`mcpProtocolMode` / `mcpVersionNegotiation` in `shared.ts` map it to the SDK's
+  `versionNegotiation`: nothing is passed for `'legacy'`, `'auto'`, a pin to 2026-07-28 for
+  `'modern'`). Without the field the client is built with the options it always had: the same
+  wire and the same CORS request headers - `tests/mcp-protocol.test.ts` compares every request
+  (method, headers, body) with `tests/fixtures/mcp-wire-without-protocol.json`, RECORDED before
+  the option existed (`tests/helpers/mcp-wire.ts`; re-record only after a deliberate change of
+  the 2025 wire), and runs each mode against the `legacy` / `dual` / `modern` test servers. On a
+  modern connection: `Mcp-Method` / `Mcp-Name` are set by the transport from the message (so
+  `client.request` is enough; `Mcp-Param-*` is `callTool`'s own and is not sent), tool list
+  changes need `client.listen` (opened at connect when `onToolsChanged` is given; never opened
+  again), `inputRequired.autoFulfill` is off and an `input_required` answer fails the call
+  (elicitation is not implemented). CORS: a page's SDK reads a BLOCKED probe as "a 2025 server"
+  (it decides by `window` + `document`), so `http.ts` remembers a network-level failure seen
+  during the probe (`ProbeState.blocked`) and `diagnoseMcpCors(url, fetch, { protocol })` tries
+  each 2026 header on its own to name the ones the server's `Access-Control-Allow-Headers`
+  lacks; `tests/mcp-protocol-cors.test.ts` plays the browser's preflight against the test
+  server's `cors` probe fault. The negotiated revision is in `ConnectedMcp.protocols`. Docs: README
+  (MCP + CORS), `docs/capabilities.md`, `docs/security.md`. `http.ts`
   deliberately does NOT use the typed verbs: `tools/list` goes page by page through
   `client.request` (`listAllTools`: our page cap `MAX_TOOL_LIST_PAGES` and repeated-cursor guard;
   `client.listTools()` would aggregate, throw past its own cap, skip servers without the tools
@@ -212,8 +228,7 @@ behind every decision.
   sibling's `src/mcp.ts` / `mcp-oauth.ts`: change both. OAuth guards on this boundary - the `iss`
   check (and `iss` handed to the SDK's `auth()`), the refusal of a callback without discovery
   state, the issuer stamp surviving storage, the scope policy - each have a test in
-  `tests/mcp.test.ts` and need a mutation check; `tests/mcp-protocol.test.ts` runs the connector
-  against the test server in `legacy`, `dual` and `modern` mode.
+  `tests/mcp.test.ts` and need a mutation check.
 - `src/webmcp/` — optional `./webmcp` subpath: publish a ToolSet through the browser's WebMCP API
   and use a page's WebMCP tools as one. No dependency; a no-op where the browser has no WebMCP.
 - `src/{parse,prompts,events,config,index}.ts`.
