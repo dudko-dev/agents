@@ -1,11 +1,13 @@
-import { auth, type OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js'
-import type { OAuthDiscoveryState } from '@modelcontextprotocol/sdk/client/auth.js'
-import type {
-  OAuthClientInformationMixed,
-  OAuthClientMetadata,
-  OAuthTokens,
-} from '@modelcontextprotocol/sdk/shared/auth.js'
-import type { FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js'
+import {
+  auth,
+  OAuthError,
+  type FetchLike,
+  type OAuthClientInformationMixed,
+  type OAuthClientMetadata,
+  type OAuthClientProvider,
+  type OAuthDiscoveryState,
+  type OAuthTokens,
+} from '@modelcontextprotocol/client'
 import { createLogger } from '../logger.js'
 import { assertSecureOAuthUrl, VaultOAuthStorage, type McpOAuthStorage } from './oauth.js'
 
@@ -1235,7 +1237,7 @@ export class BrowserEnterpriseOAuthProvider implements OAuthClientProvider {
       throw new EnterpriseOAuthError(
         'discovery',
         `Enterprise MCP authorization: discovery failed (${message})`,
-        oauthCode((err as { errorCode?: unknown })?.errorCode),
+        err instanceof OAuthError ? oauthCode(err.code) : undefined,
       )
     }
   }

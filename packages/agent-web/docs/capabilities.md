@@ -460,13 +460,31 @@ serialized as a text block for older clients. The model gets it **once**:
 Image and other non-text parts pass through as before, and `compaction.maxToolOutputChars` caps
 the result whatever its shape — in native and in prompted tool mode alike.
 
-**A result that breaks its `outputSchema`.** The MCP SDK's client validates `structuredContent`
-against the schema from `tools/list` and throws when it does not match, or when a tool that
-declares a schema returns none. The connector does **not** turn that into a failed call: the call
-ran on the server, and a tool the model is told failed is a tool it calls again — a second write.
-The result is passed on with a note instead (`{ note, structuredContent?, content? }`) and a
-`warn` line goes to `onLog`. A request that really failed (network, protocol, abort) is a failed
-tool call as before — never a crashed run.
+**A result that breaks its `outputSchema`.** `structuredContent` is validated against the schema
+from `tools/list` with the MCP SDK's own browser validator (`@cfworker/json-schema`, the one the
+2.x client uses by default in a browser: no code generation, so it runs under a Content Security
+Policy without `'unsafe-eval'`; JSON Schema 2020-12 unless the schema declares 2019-09, draft-07
+or draft-06 in `$schema`). It may not match, and a tool that declares a schema may return none.
+The connector does **not** turn that into a failed call: the call ran on the server, and a tool
+the model is told failed is a tool it calls again — a second write. The result is passed on with a
+note instead (`{ note, structuredContent?, content? }`) and a `warn` line goes to `onLog`. A
+request that really failed (network, protocol, abort) is a failed tool call as before — never a
+crashed run.
+
+A tool whose `outputSchema` cannot be compiled at all (a `$schema` the validator does not know)
+is refused before anything is sent: `Tool 'x' has an invalid outputSchema: …`; the server's other
+tools are unaffected (the 1.x SDK compiled every schema while listing, and such a server did not
+connect at all). A schema the validator only trips over while validating (a `$ref` that leads
+nowhere) is found after the call ran, so it is a note, not a failure. The Node sibling validates
+with Ajv: the wording of the detail differs, and Ajv refuses a dangling `$ref` up front.
+
+**The client.** The connector runs on the official 2.x SDK, `@modelcontextprotocol/client`, with
+`versionNegotiation` at its default, `'legacy'`: the 2025 `initialize` handshake, the same wire as
+with the 1.x SDK. `tools/list` is read page by page (up to 100 pages; a repeated cursor ends the
+walk, and past the cap a `warn` line says the rest is not mounted), also from a server that did
+not advertise the `tools` capability. A `tools/call` answered with a JSON-RPC error is a failed
+call whose message is the server's own (`error.code` has the number). A server that speaks only
+the 2026-07-28 revision fails to connect with `Unsupported protocol version: 2025-11-25`.
 
 ## MCP servers behind OAuth
 
@@ -498,8 +516,22 @@ new BrowserOAuthProvider({
   `invalidateCredentials('all')` drop all of it; `'discovery'`, `'tokens'`,
   `'client'` and `'verifier'` drop one.
 - **On the way back** `finishMcpOAuth` checks `state`, then the `iss` parameter
-  (RFC 9207, `checkAuthorizationResponseIssuer`), then exchanges the code. See
+  (RFC 9207, `checkAuthorizationResponseIssuer`), then that the discovery state
+  of the flow is still in storage (without it: `Authorization cannot be
+  completed: ... start the authorization again`, and nothing is exchanged), then
+  exchanges the code. See
   [security.md](./security.md#mcp-oauth-the-authorization-response).
+- **The issuer stamp**: the SDK puts an `issuer` field on the registration and
+  the tokens it hands over; they are stored as they are. Values stamped for
+  another authorization server read as absent (a clean new authorization);
+  values with no stamp (older versions) are used and stamped on first use.
+- **`403 insufficient_scope`** fails the tool call with `Insufficient scope:
+  required "<scope>"` and starts no authorization (the transport runs with
+  `onInsufficientScope: 'throw'` for any provider that has a `redirectUrl`).
+  The enterprise provider, which has no human step, asks once for the wider
+  scope and retries once.
+- **A failed save after a refresh** (storage threw) fails the request with that
+  error; it does not turn into a new authorization.
 
 ### Enterprise-managed authorization
 

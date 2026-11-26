@@ -723,7 +723,7 @@ model.
 ## Build & packaging
 
 **tsup** → `dist/` as ESM + CJS + `.d.ts`, four entries: `.` (core), `./mcp`
-(the MCP connector, isolated so `@modelcontextprotocol/sdk` never enters the core
+(the MCP connector, isolated so `@modelcontextprotocol/client` never enters the core
 bundle), `./webmcp` (the WebMCP bridge) and `./sandbox-worker` (the Web Worker side of
 `sandbox`, the only entry that names `quickjs-emscripten`), plus a standalone browser bundle
 `dist/agent-web.js` for a `<script type="module">` tag or a CDN. All model providers, WebLLM, and the MCP SDK are **optional peers**,

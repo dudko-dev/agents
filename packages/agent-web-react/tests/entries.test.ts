@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import test from 'node:test'
 import * as main from '../dist/index.js'
@@ -8,8 +8,9 @@ import * as mcp from '../dist/mcp.js'
 // The bundle-level invariant behind the `./mcp` subpath. `useMcp` reaches the core's
 // `@dudko.dev/agent-web/mcp` with a dynamic import, and a bundler resolves a dynamic import at
 // BUILD time: webpack followed it into the core's mcp.js, whose static imports of the optional
-// `@modelcontextprotocol/sdk` failed the build of hosts that never touched MCP. Nothing in the
-// main entry may mention that path again, whatever it is refactored into.
+// `@modelcontextprotocol/client` (`@modelcontextprotocol/sdk` before the 2.x SDK) failed the build
+// of hosts that never touched MCP. Nothing in the main entry may mention that path again, whatever
+// it is refactored into.
 
 const read = (file: string): string =>
   readFileSync(new URL(`../dist/${file}`, import.meta.url), 'utf8')
@@ -20,6 +21,22 @@ test('main entry (ESM and CJS) never references the core MCP subpath', () => {
       read(file),
       /agent-web\/mcp/,
       `${file} must not mention @dudko.dev/agent-web/mcp — a bundler would follow it into the optional SDK`,
+    )
+  }
+})
+
+test('no entry of this package names the MCP SDK: only the core imports it', () => {
+  // Neither the 2.x package nor the 1.x one, in any entry or chunk: this package reaches the SDK
+  // through the core's `./mcp` alone, so a host installs one copy, next to the core.
+  const files = readdirSync(new URL('../dist/', import.meta.url)).filter((f) =>
+    /\.(js|cjs)$/.test(f),
+  )
+  assert.ok(files.includes('index.js') && files.includes('mcp.js'))
+  for (const file of files) {
+    assert.doesNotMatch(
+      read(file),
+      /(?:from\s*|import\(\s*|require\(\s*)["']@modelcontextprotocol\//,
+      `${file} must not import the MCP SDK`,
     )
   }
 })

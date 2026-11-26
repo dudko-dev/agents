@@ -8,6 +8,7 @@ import {
   type JsonWebKey as NodeJwk,
 } from 'node:crypto'
 import test from 'node:test'
+import { OAuthError } from '@modelcontextprotocol/client'
 import { inspect } from 'node:util'
 import {
   BrowserEnterpriseOAuthProvider,
@@ -571,11 +572,73 @@ test('enterprise: metadata that names another issuer is refused (RFC 8414 3.3)',
   // A hostile MCP server points at its own authorization server, whose metadata
   // claims to be an honest one: the ID-JAG would be minted for the honest
   // server and delivered to the hostile token endpoint.
+  // The 2.x SDK refuses such a document itself, while discovering (1.x took it
+  // as it came, and the provider's own check below was the one that spoke).
   await refusedBeforeAnyCredential(
     { authorizationServer: 'https://evil.example.test', metadataIssuer: AS_URL },
     PUBLIC,
-    /names another issuer/,
+    /Issuer mismatch in authorization server metadata .*expected "https:\/\/evil\.example\.test", received "https:\/\/as\.example\.test"/,
   )
+
+  // The provider's own check still stands behind it: a record of such a
+  // discovery that is already in storage (the SDK reuses what is stored without
+  // reading it again) is refused in the provider's words, before any credential.
+  const world = mockWorld({})
+  const idp = mockIdp()
+  let asked = 0
+  const provider = makeProvider({
+    fetch: idp.fetchFn,
+    getIdToken: () => {
+      asked += 1
+      return ID_TOKEN
+    },
+    ...PUBLIC,
+  })
+  await provider.saveDiscoveryState({
+    authorizationServerUrl: 'https://evil.example.test',
+    authorizationServerMetadata: {
+      issuer: AS_URL,
+      authorization_endpoint: 'https://evil.example.test/authorize',
+      token_endpoint: 'https://evil.example.test/token',
+      response_types_supported: ['code'],
+    },
+    resourceMetadata: { resource: MCP_URL, authorization_servers: ['https://evil.example.test'] },
+  } as never)
+  const err = await rejection(() => provider.authorize({ fetch: world.fetchFn }))
+  assert.equal(err.hop, 'discovery')
+  assert.match(err.message, /names another issuer/)
+  assert.equal(asked, 0, 'no ID token was asked for')
+  assert.equal(idp.calls.length, 0, 'nothing was sent to the IdP')
+  assert.equal(world.state.tokenRequests.length, 0, 'nothing was sent to the authorization server')
+})
+
+test('enterprise: a discovery that fails with an OAuth error keeps its code, and only then', async () => {
+  // The SDK's OAuthError carries the RFC 6749 code in `code` (1.x: `errorCode`).
+  const failing = async (thrown: unknown) => {
+    const idp = mockIdp()
+    const provider = makeProvider({ fetch: idp.fetchFn, ...PUBLIC })
+    const err = await rejection(() =>
+      provider.authorize({
+        fetch: async () => {
+          throw thrown
+        },
+      }),
+    )
+    assert.equal(err.hop, 'discovery')
+    assert.equal(idp.calls.length, 0, 'nothing was sent to the IdP')
+    return err
+  }
+  const oauth = await failing(new OAuthError('temporarily_unavailable', 'try later'))
+  assert.equal(oauth.code, 'temporarily_unavailable')
+  assert.match(oauth.message, /discovery failed \(try later\)/)
+  // Not an OAuth error: whatever it calls a code is not repeated as one.
+  const plain = await failing(Object.assign(new Error('boom'), { code: 'ECONNRESET' }))
+  assert.equal(plain.code, undefined)
+  const legacy = await failing(Object.assign(new Error('boom'), { errorCode: 'server_error' }))
+  assert.equal(legacy.code, undefined)
+  // A code that is not a plain token is not repeated either.
+  const odd = await failing(new OAuthError('not a code\n' as never, 'x'))
+  assert.equal(odd.code, undefined)
 })
 
 test('enterprise: with expectedIssuer, any other authorization server receives nothing', async () => {
