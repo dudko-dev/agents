@@ -12,6 +12,12 @@ name: Live model
 # where upstream drift actually arrives.
 on:
   workflow_call:
+    inputs:
+      ref:
+        description: 'Commit to test (the release passes the one it is about to publish).'
+        type: string
+        required: false
+        default: ''
   workflow_dispatch:
   pull_request:
     branches: [main]
@@ -21,11 +27,11 @@ on:
     # shipped broken and could not be exercised until it was already on main
     # blocking a publish — if you edit the gate, run the gate.
     paths:
-      - 'package.json'
-      - 'package-lock.json'
+      - 'packages/agent/package.json'
+      - 'pnpm-lock.yaml'
       - '.github/workflows/live-model.yml'
-      - 'tests/live-model.test.ts'
-      - 'tests/helpers/**'
+      - 'packages/agent/tests/live-model.test.ts'
+      - 'packages/agent/tests/helpers/**'
 
 # Pinned so a rerun behaves the same. Bump deliberately.
 #
@@ -60,15 +66,19 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: pnpm/action-setup@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: npm
+          cache: pnpm
 
       - name: Install dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
       - name: Cache the model weights
         id: cache
@@ -145,6 +155,7 @@ jobs:
           echo "streamed tool calls are supported"
 
       - name: Run the live-model smoke test
+        working-directory: packages/agent
         # One retry: a small model occasionally wanders, and a single stray run
         # must not block a publish. A second failure is a real signal.
         run: |

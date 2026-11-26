@@ -63,7 +63,14 @@ tool. Do not infer success from "the change looks right".
 
 - Do not push to `main` directly; work on a branch and open a pull request.
 - Versions are per package (`packages/*/package.json`). Do not bump them as part of a feature
-  change — releases are a separate step.
-- CI is `.github/workflows/ci.yml`. The release, Pages, live-model and autoupdate workflows of the
-  old repositories are kept for reference under `.github/_imported/` until they are ported; they do
-  not run from there.
+  change — a release is its own pull request that bumps the version of the package(s) to publish.
+- Workflows: `ci.yml` (checks + browser tests); `release.yml` (after CI passes on `main`, publishes
+  every package whose version is not on npm yet — `.github/scripts/release-plan.mjs` decides — via
+  npm Trusted Publishing, tags `<dir>-v<version>` and creates a GitHub release); `live-model.yml`
+  (the Node agent against a real local model: gates its publish, and runs on PRs that touch its
+  dependencies). Do not edit `release.yml` unless asked: npm's Trusted Publisher setting names
+  that file and the `release` environment.
+- The demo is built and deployed by Cloudflare (Workers Builds, `wrangler.jsonc`), not by a
+  workflow here.
+- The autoupdate and Claude workflows of the old repositories are kept for reference under
+  `.github/_imported/` until they are ported; they do not run from there.
