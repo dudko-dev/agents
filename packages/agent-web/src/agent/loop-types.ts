@@ -1,3 +1,41 @@
+/** Executor models by strength (`config.executorTiers`), weakest first. */
+export type ModelTier = 'light' | 'standard' | 'strong'
+
+/**
+ * What the planner marks a step with when tiers are configured: how hard the step is. It names
+ * the tier the step should run on (low -> light, medium -> standard, high -> strong).
+ */
+export type StepComplexity = 'low' | 'medium' | 'high'
+
+/**
+ * Why a step started on its tier: 'planned' - the planner's complexity named a configured tier;
+ * 'default' - the planner did not mark the step, so it runs on `standard`; 'fallback' - the tier
+ * the planner named is not configured, so the nearest configured one runs it.
+ */
+export type TierReason = 'planned' | 'default' | 'fallback'
+
+/**
+ * Why a step was retried on a stronger tier: the executor reported a blocker; it produced no
+ * text and no successful tool call; it kept calling a tool with arguments that did not parse;
+ * its output was cut by the per-call cap; or its model call failed.
+ */
+export type EscalationReason =
+  'blocked' | 'empty-result' | 'tool-arguments' | 'output-cut' | 'error'
+
+/** One escalation of a step, kept on its result. */
+export interface IStepEscalation {
+  from: ModelTier
+  to: ModelTier
+  reason: EscalationReason
+}
+
+export interface EscalationConfig {
+  /** Retries of ONE step on stronger tiers (each on the next stronger configured tier). Default 1. */
+  maxPerStep?: number
+  /** Escalations in one run, a resumed run included. Default 3. */
+  maxPerRun?: number
+}
+
 /** A single step of a plan. Mirrors the Node sibling's IPlanStep. */
 export interface IPlanStep {
   id: string
@@ -7,6 +45,8 @@ export interface IPlanStep {
   suggestedTools?: string[]
   /** Set by the pipeline when suggestedTools were named but all were unknown. */
   requiresTools?: boolean
+  /** How hard the planner rated the step. Only when `config.executorTiers` is on. */
+  complexity?: StepComplexity
 }
 
 export interface IPlan {
@@ -39,6 +79,13 @@ export interface IStepResult {
   toolCalls: IToolCall[]
   /** True when the executor signalled it could not complete the step ([BLOCKER]). */
   blocked: boolean
+  /**
+   * Only when `config.executorTiers` is on: the tier (and its model id) the step FINISHED on, and
+   * the escalations that led there, in order. `toolCalls` then holds every attempt's calls.
+   */
+  tier?: ModelTier
+  model?: string
+  escalations?: IStepEscalation[]
 }
 
 /**

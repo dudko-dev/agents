@@ -181,7 +181,13 @@ export type PipelineModelConfig = Pick<IAgentConfig, 'model'> &
   Partial<
     Pick<
       IAgentConfig,
-      'providerType' | 'baseURL' | 'apiKey' | 'providerOptions' | 'planner' | 'synthesizer'
+      | 'providerType'
+      | 'baseURL'
+      | 'apiKey'
+      | 'providerOptions'
+      | 'planner'
+      | 'synthesizer'
+      | 'executorTiers'
     >
   >
 
@@ -222,9 +228,11 @@ export const nodeResolver =
   async (node) => {
     let config: IAgentConfig = { ...options.base }
     if (node.model !== undefined) {
-      // Another model: the base's per-stage overrides were written for the base model.
-      const { planner, synthesizer, plannerModel, synthesizerModel, ...rest } = config
-      void [planner, synthesizer, plannerModel, synthesizerModel]
+      // Another model: the base's per-stage overrides - and its executor tiers - were written
+      // for the base model. A registry entry may bring its own.
+      const { planner, synthesizer, plannerModel, synthesizerModel, executorTiers, ...rest } =
+        config
+      void [planner, synthesizer, plannerModel, synthesizerModel, executorTiers]
       config = { ...rest, ...lookup(node, 'model', options.models, node.model) }
     }
     if (node.skills?.length) {

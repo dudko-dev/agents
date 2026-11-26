@@ -152,7 +152,13 @@ export const runRepl = async (): Promise<void> => {
         break
       case 'step.start':
         endLine()
-        console.log(`\n[step ${event.index + 1}] ${event.step.description}`)
+        console.log(
+          `\n[step ${event.index + 1}] ${event.step.description}${event.tier ? ` (${event.tier}: ${event.model})` : ''}`,
+        )
+        break
+      case 'step.escalated':
+        endLine()
+        console.log(`  ^ escalated ${event.from} -> ${event.to} (${event.model}): ${event.reason}`)
         break
       case 'step.reasoning-delta':
       case 'final.reasoning-delta':

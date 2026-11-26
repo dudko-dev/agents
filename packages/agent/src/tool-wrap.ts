@@ -2,6 +2,7 @@ import type { Tool, ToolExecutionOptions, ToolSet } from 'ai'
 import { isReadOnlyTool, type IApprovalController } from './approval.ts'
 import { withToolOutputLimit } from './compaction.ts'
 import { runContext } from './context.ts'
+import { recordWrite, replayOutput, replayedWrite } from './tiers.ts'
 
 export interface IToolWrapDeps {
   approval: IApprovalController
@@ -77,16 +78,36 @@ export const wrapTool = (
       throw err
     }
   }
+  // The step's writes, while the step may be escalated to a stronger tier (else undefined, and
+  // nothing below does anything). A read-only or built-in tool is never held back or recorded.
+  const writes = () => (readOnly || builtIn ? undefined : runContext.getStore()?.state?.stepWrites)
   let execute: unknown
   if (inner) {
     execute = isAsyncGeneratorFunction(inner)
       ? async function* (input: unknown, options: ToolExecutionOptions<unknown>) {
+          // Before the budget and the consent gate: a call that is not made costs neither.
+          const earlier = replayedWrite(writes(), name, input)
+          if (earlier) {
+            yield replayOutput(earlier.output)
+            return
+          }
           await before(input, options)
-          yield* inner(input, options) as AsyncIterable<unknown>
+          let last: unknown
+          for await (const value of inner(input, options) as AsyncIterable<unknown>) {
+            last = value
+            yield value
+          }
+          recordWrite(writes(), name, input, last)
         }
       : async (input: unknown, options: ToolExecutionOptions<unknown>) => {
+          const earlier = replayedWrite(writes(), name, input)
+          if (earlier) {
+            return replayOutput(earlier.output)
+          }
           await before(input, options)
-          return inner(input, options)
+          const output = await inner(input, options)
+          recordWrite(writes(), name, input, output)
+          return output
         }
   }
   const wrapped = withToolOutputLimit(

@@ -30,10 +30,31 @@ import {
   unsupportedAttachment,
   type RunFile,
 } from '../images.js'
-import type { IPlanStep, IUsage } from './loop-types.js'
+import type { IResolvedEscalation } from '../tiers.js'
+import type { IPlanStep, IUsage, ModelTier } from './loop-types.js'
 
 /** The effective tool-selection strategy of a run ('auto' already resolved). */
 export type EffectiveToolStrategy = 'all' | 'plan-narrowed' | 'search'
+
+/** One executor tier of an agent with `config.executorTiers`. */
+export interface ExecutorTier {
+  model: LanguageModel
+  /** The tier's own tool-mode: a local light model is prompted, a cloud strong one native. */
+  mode: ToolCallMode
+  /** Model id, for the events. */
+  id: string
+  /** The window the tier's output cap is a share of (never below the window the run is fitted to). */
+  windowTokens: number
+  /** The tier's per-call output cap (0 = none), by the same rules as `budgets.executor`. */
+  outputCap: number
+}
+
+/** The executor models by tier. `standard` is always there (it is `executorModel`). */
+export interface ExecutorTiers {
+  byTier: Partial<Record<ModelTier, ExecutorTier>>
+  configured: ReadonlySet<ModelTier>
+  escalation: IResolvedEscalation
+}
 
 /** Everything the phase functions (planner/executor/replanner/synthesizer) share. */
 export interface AgentContext {
@@ -41,6 +62,13 @@ export interface AgentContext {
   raw: BrowserAgentConfig
   plannerModel: LanguageModel
   executorModel: LanguageModel
+  /**
+   * Set only when `config.executorTiers` names a light or a strong model: the planner then rates
+   * steps and the executor runs each on its tier. Absent = one executor model, as ever.
+   */
+  tiers?: ExecutorTiers
+  /** The window the executor's output cap was judged against, when it is not the run's (a tier's). */
+  executorWindowTokens?: number
   synthesizerModel: LanguageModel
   /** Tool-mode for the planner/replanner (from the planner model). */
   plannerMode: ToolCallMode
@@ -204,7 +232,13 @@ export const capNotice = (
   stage: ThinkingStage,
   finishReason: string | undefined,
 ): string | undefined =>
-  outputCapNotice(ctx.raw, stage, ctx.config.compaction.contextWindowTokens, finishReason)
+  outputCapNotice(
+    ctx.raw,
+    stage,
+    (stage === 'executor' ? ctx.executorWindowTokens : undefined) ??
+      ctx.config.compaction.contextWindowTokens,
+    finishReason,
+  )
 
 /**
  * A structured stage (planner, replanner) whose JSON was cut by the cap fails with a parse error

@@ -131,6 +131,20 @@ const salvageString = (text: string, field: string): string => {
   return m ? decodeJsonString(m[1]).trim() : ''
 }
 
+/**
+ * A step a model rated by prefixing it: "[high] Refactor the parser". With `config.executorTiers`
+ * the prompted planner (and a revised plan, whose steps are plain strings in both modes) marks
+ * complexity this way: a tag inside the string survives a truncated or half-broken JSON envelope,
+ * where a parallel field would lose its place. A step without a tag is simply unrated.
+ */
+export const splitComplexityTag = (
+  step: string,
+): { description: string; complexity?: 'low' | 'medium' | 'high' } => {
+  const m = /^\s*\[\s*(low|medium|high)\s*\]\s*[:\-–—]?\s*([\s\S]*\S)\s*$/i.exec(step)
+  if (!m) return { description: step }
+  return { description: m[2], complexity: m[1].toLowerCase() as 'low' | 'medium' | 'high' }
+}
+
 // --- planner ---------------------------------------------------------------
 
 export interface PlannerResult {

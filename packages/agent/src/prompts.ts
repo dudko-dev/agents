@@ -6,6 +6,7 @@ import {
   sandboxPromptNote,
 } from './sandbox-engine.ts'
 import { renderActiveSkills, renderSkillsIndex } from './skills.ts'
+import { renderEarlierAttempts, type IEarlierAttempt } from './tiers.ts'
 import { FIND_TOOLS_TOOL, renderSearchCatalog } from './tool-search.ts'
 import type {
   IConversationTurn,
@@ -207,6 +208,13 @@ const PLANNER_SKILLS_ADDENDUM = `
 SKILL SELECTION:
 Skills are packaged instructions for specific kinds of work. Set "skills" to the names of the skills from the SKILLS list below that apply to this request (leave it empty when none does). Their instructions are given to the executor.`
 
+// Only in the prompts of an agent with config.executorTiers: runs without it send what they
+// always did. Run-stable (it depends on the configuration only).
+export const STEP_COMPLEXITY_ADDENDUM = `
+
+STEP COMPLEXITY:
+Steps run on models of different strength. Set "complexity" on every step: "low" - mechanical work (a lookup, one obvious tool call, copying or reformatting data); "medium" - ordinary work (a few tool calls, some judgement); "high" - hard work (multi-part reasoning, analysis, writing or debugging code, weighing conflicting data). When unsure between two, choose the higher.`
+
 export const buildPlannerSystem = (
   mode: PromptCatalogMode,
   maxSteps = DEFAULT_PLAN_STEP_CAP,
@@ -230,6 +238,9 @@ export interface ISystemParts {
   // when no server sent any. Fixed for a run: the runner works on a copy of the agent's context.
   // Planner and executor only - the stages that choose and call tools.
   mcpInstructions?: string
+  // Set when config.executorTiers is on: the planner (and the replanner, for a revised plan)
+  // is told to rate each step.
+  tiers?: boolean
 }
 
 // Third-party text, under its own preamble, after everything the operator wrote. Nothing is added
@@ -274,7 +285,8 @@ export const composePlannerSystem = (
 ): string =>
   withDomainContext(
     buildPlannerSystem(parts.mode, parts.maxSteps) +
-      (parts.skills?.length ? PLANNER_SKILLS_ADDENDUM : ''),
+      (parts.skills?.length ? PLANNER_SKILLS_ADDENDUM : '') +
+      (parts.tiers ? STEP_COMPLEXITY_ADDENDUM : ''),
     parts.domain,
   ) +
   sandboxSection(parts.sandbox, 'planner') +
@@ -380,6 +392,9 @@ export const buildExecutorUserPrompt = (
   history?: IConversationTurn[],
   view?: ITraceView,
   updates?: string[],
+  // The attempts a weaker tier already made at THIS step (escalation); absent otherwise, so a
+  // step that is not escalated sends the prompt it always did.
+  earlier?: IEarlierAttempt[],
 ): string =>
   [
     history?.length ? `Conversation history:\n${renderHistory(history)}\n` : '',
@@ -393,6 +408,7 @@ export const buildExecutorUserPrompt = (
     `CURRENT STEP to execute (id=${step.id}): ${step.description}`,
     `Expected outcome: ${step.expectedOutcome}`,
     step.suggestedTools?.length ? `Suggested tools: ${step.suggestedTools.join(', ')}` : '',
+    earlier?.length ? `\n${renderEarlierAttempts(earlier)}` : '',
     '',
     'Execute this step now. Reply with a concise summary of what you found / did - the system uses your full reply as the step result.',
   ]
@@ -417,7 +433,10 @@ Rules:
 export const composeReplannerSystem = (
   parts: ISystemParts & { mode: PromptCatalogMode; catalog: IToolCatalogEntry[] },
 ): string =>
-  withDomainContext(REPLANNER_SYSTEM, parts.domain) +
+  withDomainContext(
+    REPLANNER_SYSTEM + (parts.tiers ? STEP_COMPLEXITY_ADDENDUM : ''),
+    parts.domain,
+  ) +
   `\n\nAvailable tools (for the revise option):\n${renderCatalogFor(parts.catalog, parts.mode)}` +
   activeSkillsSection(parts.skills, parts.activeSkills)
 

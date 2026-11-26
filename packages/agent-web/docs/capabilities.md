@@ -711,6 +711,101 @@ const researcher = createSubagentTool({
   that changes `systemPrompt`, `skills` or `tools` — the parent cannot hand a
   child more of its own conversation.
 
+## Model tiers and escalation
+
+Most steps of a plan are mechanical and a few are hard. `executorTiers` runs each on a model that
+fits - a local model for the lookups, a cloud one for the reasoning - and `escalation` catches the
+steps the planner rated too low.
+
+```ts
+const agent = await createAgent({
+  model: { providerType: 'anthropic', model: 'claude-sonnet-4-5', credentialRef: 'anthropic' }, // `standard`
+  executorTiers: {
+    light: localModel,                       // a LanguageModel, a spec, or a partial override
+    strong: { model: 'claude-opus-4-5' },    // inherits the base provider and key
+  },
+  // escalation: { maxPerStep: 1, maxPerRun: 3 }, // the defaults once tiers are on; false = off
+})
+```
+
+**Off unless `light` or `strong` is set.** Without tiers nothing changes: the plan schema, the
+prompts and the calls are exactly what they were (`tests/model-tiers.test.ts` compares them, on
+the native and on the prompted path, with a recording made before the feature existed).
+`executorTiers.standard` alone only replaces the executor's model.
+
+**Routing.** With tiers on, the planner rates every step `low`, `medium` or `high` and the
+executor runs it on `light` / `standard` / `strong`. On the native path the rating is an optional
+`complexity` enum in the plan schema. On the prompted path - where a tiny local planner answers
+with a list of strings - it is a tag at the head of each string, `"[high] Rework the query"`: a
+tag inside the string survives the truncated or half-broken JSON the salvage parser is there for,
+where a parallel field would lose its place. A revised plan is a list of strings in both modes, so
+it uses the tag too. The instruction is in the planner's (and the replanner's) system prompt only
+with tiers, so prompts stay run-stable. A step left unrated runs on `standard`.
+
+**Fallback.** A tier you did not configure falls back to the nearest configured one, and of two
+equally near the stronger: with only `strong` configured a `low` step runs on `standard`, not on
+`strong`, and nothing runs on a weaker model than it had to. `step.start` says which tier and
+model the step starts on and why (`tierReason: 'planned' | 'default' | 'fallback'`).
+
+**Each tier is its own model in every respect.** Its tool-mode is chosen per tier (a local light
+model is prompted, a cloud strong one native - an escalation crosses the two modes), and so is how
+much it may write: the executor's output cap for a call is a share of the window of the model
+that makes it.
+
+**The window.** One window governs the run: the smallest among every model in play, tiers
+included (`agent.contextWindowTokens`). A local model's is read from the model; state a cloud
+model's in `compaction.contextWindowTokens`. It has to be the smallest because the step log and
+the transcript are compacted before anyone knows which tier a step - or its escalation - lands
+on, and a prompt that does not fit a local model is refused outright. So a 4k light model keeps
+the prompts of a run small even for the steps the strong model runs; what the strong model may
+*write* still follows its own window (its own when known, else the one you stated).
+
+**Escalation.** When a step fails in a way a stronger model could fix, it is retried on the next
+stronger configured tier before the replanner is consulted: once per step and three times per run
+by default (`maxPerStep`, `maxPerRun`; the run count survives a resume). It is on by default once
+tiers are on - routing easy steps to a light model without it trades quality for cost with no
+safety net: a mis-rated step would fail outright, and the replanner (another paid call) would have
+to plan around a failure that a model you already configured would not have had. `escalation:
+false` turns it off; without tiers it does nothing.
+
+| Escalates (`reason`) | Does not |
+| --- | --- |
+| `blocked` - the executor ended with `[BLOCKER]` | a stop |
+| `empty-result` - no text and no successful tool call | refused credentials (401 / 403) |
+| `tool-arguments` - the same tool got arguments that did not parse twice, and never a good call after | a rate limit (429): that is for retry and backoff |
+| `output-cut` - the output cap cut the answer | a spent budget (`limits`, `maxToolCalls`) |
+| `error` - the model call failed | a tool the user or the consent policy denied; a timeout; attachments the model cannot take; a tool that failed for its own reasons |
+
+What is not escalated is handled as it always was: the step is recorded as blocked and the
+replanner decides.
+
+**Side effects.** An escalated attempt *continues* the step. It is shown, in its user prompt
+(whatever `prompts.executor` you supplied), every tool call the earlier attempt made with its
+arguments and result, and is told the calls that succeeded really happened. That is advice; this
+is the guarantee: a call to a tool that is not read-only, with the same arguments as a call that
+already **succeeded** in an earlier attempt at the step, is not executed again - it gets the
+earlier result back, marked as such, without a consent prompt, without counting against
+`maxToolCalls` or `RunResult.applied`. Read-only tools (`defineTool({ readOnly: true })`, an MCP
+`readOnlyHint`) run again freely, a call that failed runs again, and within one attempt nothing
+is held back. The step's `toolCalls` holds every attempt's calls. The limit of the guarantee: a
+write the stronger model repeats with *different* arguments is a different call - mark tools
+read-only where they are, and keep writes idempotent where you can.
+
+**Events and results.** `step.start` gains `tier`, `model`, `tierReason`; `step.escalated`
+(`step, from, to, model, reason`) fires between a step's start and its completion; a step's result
+gains `tier`, `model` (where it finished) and `escalations`. None of these exist without tiers.
+`agent.models.tiers` holds the tier models.
+
+**Usage and limits.** Every tier's calls are `usage` events of phase `execute`, and count in
+`result.usage`, `agent.usage`, `sessionUsage()` and against `limits` - a failed attempt included.
+
+**Elsewhere.** A checkpoint keeps each remaining step's `complexity`, each finished step's tier
+and the escalation count, so a resumed run routes and caps as the original would have. A
+subagent's config and a pipeline node's are agent configs: tiers pass through (a node that names
+another `model` drops the base's tiers, like its `planner` / `synthesizer`). Attachments are
+judged against the `standard` model. There is no router model: the planner is the only judge of
+a step's complexity.
+
 ## Images, PDFs, files and URLs in — and models that can't take them
 
 ```ts
@@ -1246,11 +1341,12 @@ Subscribe with `onEvent` (per run) or the handler you pass to `createAgent`; ren
 | `plan.step-added` | `step, index` — a step is coherent enough to show; the plan can still change |
 | `plan.created` | `plan` — the canonical plan |
 | `plan.revised` | `plan, reason` — the replanner replaced the remaining steps |
-| `step.start` | `step, index, total` |
+| `step.start` | `step, index, total` - with [model tiers](#model-tiers-and-escalation) also `tier, model, tierReason: 'planned' \| 'default' \| 'fallback'`: the tier the step starts on and why |
+| `step.escalated` | `step, from, to, model, reason: 'blocked' \| 'empty-result' \| 'tool-arguments' \| 'output-cut' \| 'error'` - the step failed on tier `from` and is retried on the stronger tier `to` ([escalation](#model-tiers-and-escalation)) |
 | `step.text-delta` | `step, delta` |
 | `step.reasoning-delta` / `final.reasoning-delta` | `step, delta` / `delta` — the executor's / synthesizer's thoughts ([thinking](#thinking)) |
 | `step.tool-call` / `step.tool-result` | `step, name, input` / `step, name, output, ok` |
-| `step.complete` | `step, result` |
+| `step.complete` | `step, result` - with tiers the result carries `tier`, `model` and `escalations` |
 | `replan.decision` | `mode: 'continue' \| 'revise' \| 'finish', reason, byUser?, failed?` — `byUser` when the replanner ran because the user sent a message; `failed: true` when the replanner call itself failed (its structured attempt and the prompted fallback) and `continue` is the fallback: the run carries on with the plan it has, an `error` event of phase `replan` comes just before, and the messages it was to weigh are weighed at the next boundary |
 | `final.text-delta` | `delta` — the answer, streamed |
 | `final` | `text` — the answer, whole |

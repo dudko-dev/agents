@@ -30,7 +30,8 @@ export const resolveStage = (
   // Legacy single-string shortcuts for the model only (config.plannerModel /
   // config.synthesizerModel). The override block, if present, wins.
   legacyModel: string | undefined,
-  stageName: 'executor' | 'planner' | 'synthesizer',
+  // 'executor' | 'planner' | 'synthesizer' | 'executorTiers.<tier>' - names the config block in errors.
+  stageName: string,
 ): IResolvedStage => {
   const providerType = override?.providerType ?? config.providerType
   const apiKey = override?.apiKey ?? config.apiKey
