@@ -556,7 +556,7 @@ Loading a definition someone else wrote: [docs/security.md](docs/security.md#pip
 | `maxIterations` / `maxStepsPerTask` / `maxRevisions` | 8 / 4 / 2 | loop caps |
 | `chatTimeoutMs` | 120000 | per-call watchdog |
 | `temperature` | provider default | sampling temperature for every stage |
-| `budgets` | — | legacy per-phase output caps; `limits.perCall` wins, and the defaults are shares of the model's window |
+| `budgets` | — | legacy per-phase output caps; `limits.perCall` wins, `0` = no cap, and the defaults are shares of the model's window (none for a phase that thinks) |
 | `clientName` | — | sent as the openai-compatible provider name and the MCP client name |
 | `logLevel` / `logger` | `'warn'` / `console` | verbosity (`'silent' \| 'error' \| 'warn' \| 'info' \| 'debug'`) and the console-like sink the logs go to |
 | `replan` / `synthesize` | `true` | toggle phases |

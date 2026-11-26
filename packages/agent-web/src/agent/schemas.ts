@@ -1,7 +1,7 @@
 import { z } from 'zod'
 
 /**
- * Structured-output schemas for the native path (generateObject). Kept free of
+ * Structured-output schemas for the native path (`generateStructured`). Kept free of
  * `.max()`/`.min()` constraints — some providers reject or mis-handle them in
  * JSON-schema mode; we cap/clean in code instead (see parse.ts normalizeSteps).
  */

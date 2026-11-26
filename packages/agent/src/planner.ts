@@ -1,4 +1,3 @@
-import { streamObject } from 'ai'
 import { z } from 'zod'
 import { stageCallOptions, withCapHint } from './call-options.ts'
 import type { EffectiveToolStrategy, IAgentInternalContext } from './internal.ts'
@@ -8,10 +7,11 @@ import {
   composePlannerSystem,
   type PromptCatalogMode,
 } from './prompts.ts'
+import { streamStructured } from './structured.ts'
 import { resolveToolStrategy } from './tool-search.ts'
 import { ATTR, withSpan } from './tracing.ts'
 import type { IConversationTurn, IPlan, IUsage } from './types.ts'
-import { normalizeUsage, withRetry, withTimeout } from './utils.ts'
+import { normalizeUsage, usageOfError, withRetry, withTimeout } from './utils.ts'
 
 export const PlanStepSchema = z.object({
   id: z.string().min(1).describe('Short stable id, e.g. "s1", "fetch-companies"'),
@@ -98,7 +98,14 @@ export const createInitialPlan = async (
         onRetry: (attempt, err) =>
           ctx.emit({ type: 'retry', phase: 'plan', attempt, error: (err as Error).message }),
       },
-    )
+    ).catch((err) => {
+      // A plan that could not be parsed was paid for all the same.
+      const wasted = usageOfError(err)
+      if (wasted) {
+        ctx.emit({ type: 'usage', phase: 'plan', usage: wasted })
+      }
+      throw err
+    })
 
     ctx.emit({ type: 'usage', phase: 'plan', usage })
     span.setAttribute(ATTR.USAGE_TOTAL_TOKENS, usage.totalTokens)
@@ -165,7 +172,7 @@ const streamPlanOnce = async (
       ...(ctx.mcpInstructions ? { mcpInstructions: ctx.mcpInstructions } : {}),
     }),
   )
-  const result = streamObject({
+  const result = streamStructured({
     model: ctx.plannerModel,
     schema: PlanSchema,
     ...call,
@@ -230,8 +237,8 @@ const streamPlanOnce = async (
       }
     }
   }
-  const [object, rawUsage] = await Promise.all([result.object, result.usage]).catch((err) => {
+  const { object, usage } = await result.final().catch((err) => {
     throw withCapHint(err, ctx.config, 'planner')
   })
-  return { object, usage: normalizeUsage(rawUsage) }
+  return { object, usage: normalizeUsage(usage) }
 }

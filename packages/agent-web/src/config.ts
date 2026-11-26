@@ -16,7 +16,12 @@ import type { LearningConfig } from './learning.js'
 import type { SandboxConfig } from './sandbox/index.js'
 import type { Skill } from './skills.js'
 import type { IEgressPolicy } from './tools/egress.js'
-import type { ThinkingSetting, ThinkingStage } from './thinking.js'
+import {
+  resolveThinking,
+  thinkingFor,
+  type ThinkingSetting,
+  type ThinkingStage,
+} from './thinking.js'
 import type { ToolApprovalConfig } from './tools/approval.js'
 import type { AgentToolSet } from './tools/types.js'
 
@@ -203,7 +208,11 @@ export interface ResolvedConfig {
   maxToolCalls: number
   maxPlanSteps: number
   chatTimeoutMs: number
-  /** Effective per-call output caps (limits.perCall over budgets). */
+  /**
+   * Effective per-call output caps (limits.perCall over budgets, else a share of the window).
+   * `0` = no cap for that stage: the host turned it off, or the stage thinks (see
+   * `stageOutputCap`).
+   */
   budgets: Required<PhaseBudgets> & { compaction: number }
   limits: TokenLimits
   temperature: number | undefined
@@ -230,31 +239,70 @@ const BUDGET_SHARES = {
 const share = (window: number, s: { num: number; den: number; min: number; max: number }) =>
   Math.min(s.max, Math.max(s.min, Math.round((window * s.num) / s.den)))
 
+/** The output cap of one call of a stage, and where it came from. */
+export interface OutputCap {
+  /** The cap in force; undefined = none (the provider's own maximum applies). */
+  tokens?: number
+  /** true when it came from the window, false when the host set it (or turned it off with 0). */
+  derived: boolean
+}
+
+/**
+ * The output cap of one call of `stage` — the same rules as the Node sibling's `stageOutputCap`.
+ * What the host set (`limits.perCall`, then the legacy `budgets`) wins, and `0` is an explicit
+ * "no cap". Otherwise a share of the context window — except for a stage that thinks: on OpenAI
+ * and Gemini the reasoning counts against the cap, so a default sized for the answer alone would
+ * leave a thinking model no room to write it (or to finish a tool call's arguments). A stage that
+ * thinks keeps the provider's own limit unless the host sets one.
+ */
+export const stageOutputCap = (
+  c: BrowserAgentConfig,
+  stage: ThinkingStage,
+  contextWindowTokens: number,
+): OutputCap => {
+  const set = c.limits?.perCall?.[stage] ?? c.budgets?.[stage]
+  if (typeof set === 'number' && Number.isFinite(set)) {
+    return { ...(set > 0 ? { tokens: Math.floor(set) } : {}), derived: false }
+  }
+  const thinking = resolveThinking(thinkingFor(stage, c.thinking, c.stageThinking))
+  if (thinking.reasoning && thinking.reasoning !== 'none') return { derived: false }
+  return { tokens: share(contextWindowTokens, BUDGET_SHARES[stage]), derived: true }
+}
+
+/**
+ * The notice for a call the output cap cut off (`finishReason: 'length'`), else undefined. A
+ * truncated answer is silent otherwise — the model just stops, and a tool call whose arguments
+ * were cut fails to parse — and a default cap makes that a thing a host can hit without ever
+ * having set a limit.
+ */
+export const outputCapNotice = (
+  c: BrowserAgentConfig,
+  stage: ThinkingStage,
+  contextWindowTokens: number,
+  finishReason: string | undefined,
+): string | undefined => {
+  if (finishReason !== 'length') return undefined
+  const cap = stageOutputCap(c, stage, contextWindowTokens)
+  if (!cap.tokens) return undefined
+  return cap.derived
+    ? `[${stage}] the model's output was cut off at ${cap.tokens} tokens, the default cap for this stage (a share of the ${contextWindowTokens}-token window); raise limits.perCall.${stage}, or set it to 0 for no cap`
+    : `[${stage}] the model's output was cut off at limits.perCall.${stage} (${cap.tokens} tokens); raise it`
+}
+
 /**
  * The effective per-call output caps: what the host set (`limits.perCall`, then the legacy
- * `budgets`) wins; every other phase gets its share of the window.
+ * `budgets`) wins; every other phase gets its share of the window, and a stage that thinks gets
+ * none. `0` in the result means "no cap" (see `stageOutputCap`).
  */
 export const resolveBudgets = (
   c: BrowserAgentConfig,
   contextWindowTokens: number,
 ): ResolvedConfig['budgets'] => ({
-  planner:
-    c.limits?.perCall?.planner ??
-    c.budgets?.planner ??
-    share(contextWindowTokens, BUDGET_SHARES.planner),
-  executor:
-    c.limits?.perCall?.executor ??
-    c.budgets?.executor ??
-    share(contextWindowTokens, BUDGET_SHARES.executor),
-  replanner:
-    c.limits?.perCall?.replanner ??
-    c.budgets?.replanner ??
-    share(contextWindowTokens, BUDGET_SHARES.replanner),
+  planner: stageOutputCap(c, 'planner', contextWindowTokens).tokens ?? 0,
+  executor: stageOutputCap(c, 'executor', contextWindowTokens).tokens ?? 0,
+  replanner: stageOutputCap(c, 'replanner', contextWindowTokens).tokens ?? 0,
   // The final answer is the one call whose text the user reads: 400 cut a normal answer short.
-  synthesizer:
-    c.limits?.perCall?.synthesizer ??
-    c.budgets?.synthesizer ??
-    share(contextWindowTokens, BUDGET_SHARES.synthesizer),
+  synthesizer: stageOutputCap(c, 'synthesizer', contextWindowTokens).tokens ?? 0,
   compaction:
     c.limits?.perCall?.compaction ??
     c.compaction?.summaryMaxTokens ??

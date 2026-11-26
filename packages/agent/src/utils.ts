@@ -160,6 +160,35 @@ export const normalizeUsage = (usage: ISdkUsageLike | undefined | null): Require
   }
 }
 
+// What a call that FAILED still cost, or undefined when the error carries no usage. The AI SDK
+// puts the usage on the error it throws when a structured answer cannot be parsed
+// (NoObjectGeneratedError.usage); the tokens were spent all the same. Same name and meaning as
+// the browser sibling's helper.
+export const usageOfError = (err: unknown): Required<IUsage> | undefined => {
+  const u = (err as { usage?: ISdkUsageLike } | null | undefined)?.usage
+  if (!u || typeof u !== 'object') {
+    return undefined
+  }
+  const usage = normalizeUsage(u)
+  return usage.inputTokens || usage.outputTokens || usage.totalTokens ? usage : undefined
+}
+
+// An error no later call can get past: the provider refused the credentials (401 / 403, on the
+// error or anywhere down its `cause` / `lastError` chain). A stage that degrades on failure must
+// not degrade on this one.
+export const isAuthError = (err: unknown, seen: Set<unknown> = new Set()): boolean => {
+  if (!err || typeof err !== 'object' || seen.has(err)) {
+    return false
+  }
+  seen.add(err)
+  const e = err as { statusCode?: number; status?: number; cause?: unknown; lastError?: unknown }
+  const status = e.statusCode ?? e.status
+  if (status === 401 || status === 403) {
+    return true
+  }
+  return isAuthError(e.cause, seen) || isAuthError(e.lastError, seen)
+}
+
 // a + b, field by field (missing optional fields count as 0).
 export const addUsage = (a: IUsage, b: IUsage): Required<IUsage> => ({
   inputTokens: a.inputTokens + b.inputTokens,

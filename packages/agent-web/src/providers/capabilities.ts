@@ -17,7 +17,7 @@ const CLOUD: ReadonlySet<ProviderType> = new Set<ProviderType>([
 /** Whether native tool-calling is reliable enough to be the default for a provider. */
 export const supportsNativeTools = (p: ProviderType): boolean => CLOUD.has(p)
 
-/** Whether native structured output (generateObject) is the default for a provider. */
+/** Whether native structured output (`generateStructured`) is the default for a provider. */
 export const supportsStructuredOutput = (p: ProviderType): boolean => CLOUD.has(p)
 
 /**

@@ -38,7 +38,7 @@ ways of producing one. You give the agent a model in one of two ways:
 
 Because the model is the only seam, "simple text generation", "tool-calling",
 and "structured output" are just thin wrappers over `generateText` /
-`streamText` / `generateObject`, and the planning agent sits on top of the same
+`streamText` (structured output is `generateText` with `Output.object`), and the planning agent sits on top of the same
 primitives.
 
 ## Why AI SDK v7
@@ -122,7 +122,7 @@ to text. So the agent has two strategies over **one** tool shape (an AI SDK
 `ToolSet`):
 
 - **native** — pass the tools straight to `streamText({ tools, stopWhen })`;
-  plan via `generateObject(PlanSchema)`.
+  plan via `generateStructured(PlanSchema)` (`generateText` + `Output.object`).
 - **prompted** — render the tool catalogue into the prompt, let the model reply
   with text, and salvage `{ reply, actions }` JSON with `parse.ts`; each action
   is validated against the tool's own `inputSchema` and dispatched to the same
@@ -228,7 +228,38 @@ would eat a 4k local model's whole window. The per-call output caps
 (`resolveBudgets`) are therefore shares of the window - planner 1/160, executor
 3/320, replanner 1/320, synthesizer 3/128, compaction 1/125 - each with a floor
 and a ceiling, which gives 800 / 1200 / 400 / 3000 / 1024 at the default 128k
-window. A cap the host set (`limits.perCall`, then the legacy `budgets`) wins.
+window. A cap the host set (`limits.perCall`, then the legacy `budgets`) wins, and `0` means
+no cap.
+
+The rules around the shares are the Node sibling's (`stageOutputCap` there and here). A stage
+that **thinks** gets no default cap: on OpenAI and Gemini the reasoning counts against
+`maxOutputTokens`, so 1200 tokens sized for an executor's answer would be spent on thoughts
+before the step wrote anything - or cut a tool call's arguments mid-JSON. And a call the cap
+**cut off** (`finishReason: 'length'`) says so in the log, naming the cap and how to lift it: a
+truncated step is otherwise silent, and a default cap makes it something a host can hit without
+ever having set a limit. Only the share sizes differ between the two packages (the browser ones
+are smaller: a page talks to small windows more often).
+
+## Structured output: `generateText` + `Output.object`
+
+AI SDK v7 deprecates `generateObject` / `streamObject`. `generateStructured` is therefore
+`generateText` with `output: Output.object({ schema })` - the same request on the wire (a JSON
+response format carrying the schema; no tool-based JSON mode). One thing the new call does not
+keep is restored in the helper: when the model returns no text at all, `generateText`'s `.output`
+throws a `NoOutputGeneratedError` that knows neither the usage nor the finish reason, so the
+helper turns it into the `NoObjectGeneratedError` the old call threw. The spend of a failed
+attempt can then still be counted (`usageOfError`) and a cut named (`withCapHint`).
+
+## A replanner that fails does not end the run, and says so
+
+The replanner's structured attempt falls back to a prompted call; when that fails too, the
+decision is `continue` - the steps already done are worth more than a decision nobody could
+make. It used to do so silently (`reason: 'replanner unavailable'`). Now the outcome is marked:
+an `error` event of phase 'replan', then `replan.decision { mode: 'continue', failed: true }`,
+a warning in the log, and the failed attempts' tokens in the usage. An abort is a stop, not a
+failure. Same names as the Node sibling, which stops on refused credentials (401 / 403) where
+this package, fail-soft throughout (a failed step is a blocked step, not a thrown run), carries
+on.
 
 ## Egress: off, and bounded by what a page can enforce
 

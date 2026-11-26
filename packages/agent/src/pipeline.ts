@@ -1,4 +1,4 @@
-import { generateObject, type LanguageModel, type ToolSet } from 'ai'
+import type { LanguageModel, ToolSet } from 'ai'
 import { z } from 'zod'
 import { createAgent, type IAgent } from './agent.ts'
 import { stageCallOptions } from './call-options.ts'
@@ -15,6 +15,7 @@ import {
   type PipelineResult,
 } from './pipeline-engine.ts'
 import { buildModelFromStage, resolveStage } from './provider.ts'
+import { generateStructured } from './structured.ts'
 import type {
   AgentEvent,
   EventHandler,
@@ -23,7 +24,14 @@ import type {
   ISkill,
   IUsage,
 } from './types.ts'
-import { addUsage, normalizeUsage, withRetry, withTimeout } from './utils.ts'
+import {
+  addUsage,
+  emptyUsage,
+  normalizeUsage,
+  usageOfError,
+  withRetry,
+  withTimeout,
+} from './utils.ts'
 
 // A pipeline: a graph of agents with conditions and loops, described in plain JSON. The graph
 // engine (validation, conditions, scheduling) is `pipeline-engine.ts`, the same file as the
@@ -84,7 +92,7 @@ const pickRoute = async (
   try {
     const r = await withRetry(
       () =>
-        generateObject({
+        generateStructured({
           model,
           schema,
           ...stageCallOptions(config, 'replanner', PIPELINE_ROUTER_SYSTEM),
@@ -97,7 +105,7 @@ const pickRoute = async (
   } catch (err) {
     if (signal.aborted) throw err
     // What a failed structured attempt cost still counts.
-    return { usage: normalizeUsage((err as { usage?: never } | null)?.usage) }
+    return { usage: usageOfError(err) ?? emptyUsage() }
   }
 }
 

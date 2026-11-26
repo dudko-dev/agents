@@ -5,7 +5,7 @@ import { parsePlannerResponse } from '../parse.js'
 import type { ToolCallMode } from '../prompts.js'
 import { renderSkillIndex } from '../skills.js'
 import { addUsage, type IPlan, type IUsage } from './loop-types.js'
-import { imageRefusal, promptFor, stageCall, type AgentContext } from './internal.js'
+import { imageRefusal, promptFor, stageCall, withCapHint, type AgentContext } from './internal.js'
 import { PlanSchema } from './schemas.js'
 
 const toSteps = (
@@ -30,7 +30,7 @@ export interface PlanOutcome {
 }
 
 /**
- * Build the initial plan. Native mode uses generateObject(PlanSchema); prompted
+ * Build the initial plan. Native mode uses generateStructured(PlanSchema); prompted
  * mode salvages `{ reply, plan }` from plain text. Native failures (a weak model
  * that can't satisfy the schema) fall back to the prompted parse rather than
  * throwing, so the run degrades gracefully. An empty `steps` list signals the
@@ -60,7 +60,6 @@ export const createPlan = async (
     return {
       ...stageCall(ctx, 'planner', parts.system),
       ...promptFor(ctx, parts.prompt),
-      maxOutputTokens: ctx.config.budgets.planner,
       temperature: ctx.config.temperature,
       abortSignal: ctx.signal,
       timeoutMs: ctx.config.chatTimeoutMs,
@@ -100,9 +99,11 @@ export const createPlan = async (
       const overflow = contextOverflowOf(err, ctx.plannerModel)
       if (overflow) throw overflow
       wasted = usageOfError(err)
-      // Graceful degradation: fall back to the salvage parser instead of failing.
-      ctx.log.warn('planner: native structured output failed, salvaging:', asMessage(err))
-      ctx.emit({ type: 'retry', phase: 'plan', attempt: 1, error: asMessage(err) })
+      // Graceful degradation: fall back to the salvage parser instead of failing. A plan the
+      // output cap cut in half says so, instead of a bare "could not parse the response".
+      const why = asMessage(withCapHint(ctx, 'planner', err))
+      ctx.log.warn('planner: native structured output failed, salvaging:', why)
+      ctx.emit({ type: 'retry', phase: 'plan', attempt: 1, error: why })
     }
   }
 

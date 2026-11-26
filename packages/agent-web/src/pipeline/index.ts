@@ -80,7 +80,8 @@ const pickRoute = async (
   const call = {
     system: PIPELINE_ROUTER_SYSTEM,
     prompt: renderPipelineRoutePrompt(node, text),
-    maxOutputTokens: cfg.budgets.replanner,
+    // 0 = no cap (the host turned it off, or the stage thinks).
+    ...(cfg.budgets.replanner > 0 ? { maxOutputTokens: cfg.budgets.replanner } : {}),
     temperature: cfg.temperature,
     abortSignal: signal,
     timeoutMs: cfg.chatTimeoutMs,

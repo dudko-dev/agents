@@ -87,6 +87,8 @@ export interface ToolLoopResult {
   usage: IUsage
   /** True when `shouldStop` cut the call short. */
   stoppedByBudget?: boolean
+  /** How the LAST model call ended ('stop', 'length' when `maxOutputTokens` cut it off, …). */
+  finishReason?: string
 }
 
 /**
@@ -217,8 +219,18 @@ const runNative = async (model: LanguageModel, opts: ToolLoopOptions): Promise<T
     }
   }
 
-  const [text, usage] = await Promise.all([result.text, result.usage])
-  return { text: text.trim(), toolCalls, usage: normalizeUsage(usage), stoppedByBudget }
+  const [text, usage, finishReason] = await Promise.all([
+    result.text,
+    result.usage,
+    result.finishReason,
+  ])
+  return {
+    text: text.trim(),
+    toolCalls,
+    usage: normalizeUsage(usage),
+    stoppedByBudget,
+    finishReason,
+  }
 }
 
 /** JSON one-liner for a tool input/output; never throws (circular → String). */
@@ -284,6 +296,7 @@ const runPrompted = async (
   let usage = emptyUsage()
   let text = ''
   let stoppedByBudget = false
+  let finishReason: string | undefined
 
   for (let round = 1; round <= maxRounds; round += 1) {
     if (signal?.aborted) break
@@ -299,6 +312,7 @@ const runPrompted = async (
       abortSignal: signal,
     })
     usage = addUsage(usage, normalizeUsage(result.usage))
+    finishReason = result.finishReason
 
     const parsed = parseExecutorResponse(result.text)
     // The LAST round's reply wins — an empty final reply is left empty (the
@@ -348,5 +362,5 @@ const runPrompted = async (
   // otherwise concatenate every round's full reply.
   if (text) opts.callbacks?.onTextDelta?.(text)
 
-  return { text, toolCalls, usage, stoppedByBudget }
+  return { text, toolCalls, usage, stoppedByBudget, finishReason }
 }

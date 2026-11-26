@@ -33,6 +33,18 @@
     WebAssembly memory's maximum, NOT QuickJS's `setMemoryLimit` (which undercounts in this build:
     see the comment at `newBoundedModule`). Computation only here: the Node agent has no workspace.
     Security boundary: every guard has a test in `tests/sandbox*.test.ts` and a mutation check.
+  - `structured.ts` (`generateStructured` / `streamStructured`): structured output for the planner,
+    the replanner and the pipeline's route call, as `generateText` / `streamText` with
+    `Output.object` (AI SDK v7; `generateObject` / `streamObject` are deprecated - do not bring them
+    back). It restores what the old calls guaranteed: a failed attempt is always a
+    `NoObjectGeneratedError` carrying `usage` and `finishReason` (also when the model returned no
+    text), and a provider error of a streamed call is thrown as it is instead of going to
+    `console.error`. `tests/v6-integration.test.ts` pins both. The spend of a failed attempt is
+    emitted as a `usage` event by the stage (`usageOfError` in `utils.ts`).
+  - A replanner failure does not end the run (`runner.ts`): the decision becomes `continue`, the
+    `replan.decision` event carries `failed: true` after an `error` event of phase 'replan'. A stop
+    and refused credentials (`isAuthError`: 401 / 403) still throw. `tests/replan-failure.test.ts`.
+    The browser sibling uses the same names.
   - `call-options.ts` also owns the per-call output caps (`stageOutputCap`): `limits.perCall` wins (0 = no
     cap), otherwise a share of the context window between a floor and a ceiling (`OUTPUT_CAP_SHARES`), and
     none for a stage that thinks (reasoning counts against the cap on OpenAI / Gemini). A call the cap cut
@@ -77,7 +89,7 @@
     the browser sibling's `src/pipeline/engine.ts`, byte for byte: change both, with tests
     (`tests/pipeline-agent.test.ts` compares the two files and the two `tests/pipeline.test.ts`).
     `pipeline.ts` is this package's adapter: a node run by `createAgent`, the route call
-    (`generateObject` on the planner model), `nodeResolver`. A definition is untrusted input: the
+    (`generateStructured` on the planner model), `nodeResolver`. A definition is untrusted input: the
     caps, the `otherwise` rule, the condition input bound and the join deferral each need a test
     and a mutation check.
   - `internal.ts` (`IRunState`: the per-run mutable state shared by the runner, the stages and the tool

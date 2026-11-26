@@ -97,9 +97,24 @@ shares of the **context window** (`compaction.contextWindowTokens`, or a local m
 the default 128k window they are planner 800, executor 1200, replanner 400, **synthesizer 3000**
 (the answer the user reads) and compaction 1024; a 32k window gets 256 / 384 / 192 / 768 / 256, a
 4k one the floors (256 / 384 / 192 / 512 / 256) and a very large one more, up to ceilings of
-2000 / 8192 / 1500 / 8192 / 4096. `resolveBudgets(config, window)` returns them. A thinking model
-spends part of its cap on thoughts, so raise the cap together with `thinking`; the executor's cap
-also bounds what it can write into one tool call (a long file body, say).
+2000 / 8192 / 1500 / 8192 / 4096. `resolveBudgets(config, window)` returns them (`0` = no cap),
+and `stageOutputCap(config, stage, window)` says where one came from.
+
+- **Yours wins.** Any `limits.perCall.<phase>` (then the legacy `budgets.<phase>`) replaces the
+  default, and **`0` means no cap** - the provider's own maximum applies.
+- **A phase that thinks gets no default cap.** On OpenAI and Gemini the reasoning counts against
+  the cap, so a default sized for the answer alone could leave a thinking model no room to write
+  it. With `thinking` (or `stageThinking.<phase>`) on, that phase is sent without
+  `maxOutputTokens` unless you set `perCall` for it yourself.
+- **A call the cap cuts off says so.** The executor and the synthesizer log a warning through
+  `config.logger` (`[executor] the model's output was cut off at 1200 tokens, the default cap for
+  this stage (a share of the 128000-token window); raise limits.perCall.executor, or set it to 0
+  for no cap`); a plan or a replanner decision cut in half carries the same reason in its `retry`
+  event instead of a bare "could not parse the response". `outputCapNotice` is exported.
+- The executor's cap also bounds what it can write into **one tool call** (a long file body,
+  say): raise `perCall.executor` for an agent that writes files.
+
+These are the Node sibling's rules; only the share sizes differ.
 
 ## Usage: what a session has spent
 
@@ -118,7 +133,8 @@ what it used, a resumed run adds only what THIS process spent after the checkpoi
 tokens (charged to its parent run) count once, and so do the manual `agent.compact()` calls.
 That includes a model answer that could not be parsed and was retried (the planner's and the
 replanner's structured attempt, then the prompted fallback): both calls were paid for and both
-are counted. (`useAgent().totalUsage` in the React package is a conversation's total, kept by the
+are counted - also when the fallback fails too and the replanner's decision is the
+[`failed`](#event-reference) `continue`. (`useAgent().totalUsage` in the React package is a conversation's total, kept by the
 UI; this is the core's own counter.)
 
 ## Context management and compaction
@@ -1235,12 +1251,12 @@ Subscribe with `onEvent` (per run) or the handler you pass to `createAgent`; ren
 | `step.reasoning-delta` / `final.reasoning-delta` | `step, delta` / `delta` — the executor's / synthesizer's thoughts ([thinking](#thinking)) |
 | `step.tool-call` / `step.tool-result` | `step, name, input` / `step, name, output, ok` |
 | `step.complete` | `step, result` |
-| `replan.decision` | `mode: 'continue' \| 'revise' \| 'finish', reason, byUser?` — `byUser` when the replanner ran because the user sent a message |
+| `replan.decision` | `mode: 'continue' \| 'revise' \| 'finish', reason, byUser?, failed?` — `byUser` when the replanner ran because the user sent a message; `failed: true` when the replanner call itself failed (its structured attempt and the prompted fallback) and `continue` is the fallback: the run carries on with the plan it has, an `error` event of phase `replan` comes just before, and the messages it was to weigh are weighed at the next boundary |
 | `final.text-delta` | `delta` — the answer, streamed |
 | `final` | `text` — the answer, whole |
 | `retry` | `phase: 'plan' \| 'execute' \| 'replan' \| 'synthesize', attempt, error` |
 | `stopped` | — the run was stopped with `stop()` / an `AbortSignal` |
-| `error` | `phase: 'plan' \| 'execute' \| 'replan' \| 'synthesize' \| 'run', error` |
+| `error` | `phase: 'plan' \| 'execute' \| 'replan' \| 'synthesize' \| 'run', error` — only `run` ends the run; an `execute` error is a blocked step, a `replan` error a replanner that could not decide (the run continues) |
 
 **Budgets, context and cost**
 

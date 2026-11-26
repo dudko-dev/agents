@@ -7,7 +7,7 @@ import { WEB_FETCH_TOOL } from '../tools/egress.js'
 import { renderCatalog } from '../tools/prompted.js'
 import { FIND_TOOLS_NAME } from '../tools/search.js'
 import { BLOCKER, type IPlanStep, type IStepResult, type IUsage } from './loop-types.js'
-import { imageRefusal, promptFor, stageCall, type AgentContext } from './internal.js'
+import { capNotice, imageRefusal, promptFor, stageCall, type AgentContext } from './internal.js'
 
 /**
  * Split the executor's reply into a clean summary and a structural `blocked`
@@ -104,7 +104,6 @@ export const executeStep = async (
     maxSteps: ctx.config.maxStepsPerTask,
     shouldStop: ctx.overBudget,
     ...(ctx.takeRoundUpdates ? { takeUpdates: ctx.takeRoundUpdates } : {}),
-    maxOutputTokens: ctx.config.budgets.executor,
     temperature: ctx.config.temperature,
     abortSignal: ctx.signal,
     timeoutMs: ctx.config.chatTimeoutMs,
@@ -144,6 +143,10 @@ export const executeStep = async (
     )
   })
   ctx.log.debug('executor text:', loop.text)
+  // A step the output cap cut off is silent otherwise: the text just stops, or a tool call's
+  // arguments (a file body) end mid-JSON and the call never happens.
+  const cut = capNotice(ctx, 'executor', loop.finishReason)
+  if (cut) ctx.log.warn(cut)
 
   const { summary, blocked } = splitBlocker(loop.text)
   return {

@@ -1,5 +1,6 @@
 import {
-  generateObject,
+  NoObjectGeneratedError,
+  Output,
   generateText,
   streamText,
   type LanguageModel,
@@ -68,20 +69,67 @@ export const stream = (
     tools: opts.tools,
   })
 
+type TextResult = Awaited<ReturnType<typeof generateText>>
+
+/** What `generateStructured` returns: the validated object and the call's metadata. */
+export interface StructuredResult<OBJECT> {
+  object: OBJECT
+  /** The raw text the object was parsed from. */
+  text: string
+  usage: TextResult['usage']
+  finishReason: TextResult['finishReason']
+  warnings: TextResult['warnings']
+  request: TextResult['request']
+  response: TextResult['response']
+  providerMetadata: TextResult['providerMetadata']
+}
+
 /**
- * Structured output constrained to a Zod schema, via the AI SDK's
- * `generateObject`. Cloud models and WebLLM both support this; tiny local
- * models can be unreliable — the agent's prompted mode is the fallback.
- * Returns the AI SDK result (`.object`, `.usage`).
+ * Structured output constrained to a Zod schema: the AI SDK's `generateText` with
+ * `Output.object` (v7's replacement for the deprecated `generateObject` — the same request, a
+ * JSON response format carrying the schema). Cloud models and WebLLM both support this; tiny
+ * local models can be unreliable — the agent's prompted mode is the fallback.
+ *
+ * Returns `.object` and `.usage` (plus `.text`, `.finishReason`, `.warnings`, `.request`,
+ * `.response`, `.providerMetadata`). An answer that is not the object — unparsable, off the
+ * schema, or no text at all — throws `NoObjectGeneratedError` carrying the `usage` and the
+ * `finishReason` of the attempt, so the spend of a failed attempt can still be counted
+ * (`usageOfError`).
  */
-export const generateStructured = <OBJECT>(
+export const generateStructured = async <OBJECT>(
   model: LanguageModel,
   schema: ZodType<OBJECT>,
   opts: GenerateOptions = {},
-) =>
-  generateObject({
+): Promise<StructuredResult<OBJECT>> => {
+  const result = await generateText({
     model,
-    schema,
+    output: Output.object({ schema }),
     ...callSettings(opts),
     ...promptOf(opts),
   })
+  let object: OBJECT
+  try {
+    object = result.output as OBJECT
+  } catch (err) {
+    // The model stopped without any text (cut off inside its reasoning, a content filter): the
+    // SDK has nothing to parse and throws an error that knows neither the usage nor the reason.
+    throw new NoObjectGeneratedError({
+      message: 'No object generated: the model did not return a response.',
+      cause: err instanceof Error ? err : undefined,
+      text: result.text,
+      response: result.response,
+      usage: result.usage,
+      finishReason: result.finishReason,
+    })
+  }
+  return {
+    object,
+    text: result.text,
+    usage: result.usage,
+    finishReason: result.finishReason,
+    warnings: result.warnings,
+    request: result.request,
+    response: result.response,
+    providerMetadata: result.providerMetadata,
+  }
+}

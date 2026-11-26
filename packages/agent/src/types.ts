@@ -528,6 +528,10 @@ type AgentEventBody =
       mode: 'continue' | 'revise' | 'finish'
       reason: string
       cause: ReplanCause
+      // Set when the replanner call itself failed (unparseable output, a schema mismatch, the
+      // provider down after its retries) and `mode: 'continue'` is the fallback, not the model's
+      // decision. The failure is the `error` event (phase 'replan') just before this one.
+      failed?: true
     }
   | { type: 'final.text-delta'; delta: string }
   | { type: 'final.reasoning-delta'; delta: string }

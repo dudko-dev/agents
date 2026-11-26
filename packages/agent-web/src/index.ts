@@ -142,9 +142,10 @@ export {
 export type { Learning, LearningConfig, SaveSkillInput, SkillStore } from './learning.js'
 
 // ── Config ───────────────────────────────────────────────────────────────────
-export { resolveBudgets, resolveConfig } from './config.js'
+export { outputCapNotice, resolveBudgets, resolveConfig, stageOutputCap } from './config.js'
 export type {
   BrowserAgentConfig,
+  OutputCap,
   ResolvedConfig,
   PhaseBudgets,
   ReplanTrigger,
@@ -211,7 +212,7 @@ export type { AgentWebDBOptions } from './storage/db.js'
 
 // ── Low-level LLM helpers (simple generation, tool loop) ─────────────────────
 export { generate, stream, generateStructured } from './llm/generate.js'
-export type { GenerateOptions } from './llm/generate.js'
+export type { GenerateOptions, StructuredResult } from './llm/generate.js'
 export { runToolLoop } from './llm/tool-loop.js'
 export type { ToolLoopOptions, ToolLoopResult, ToolLoopCallbacks } from './llm/tool-loop.js'
 export { normalizeUsage } from './llm/util.js'

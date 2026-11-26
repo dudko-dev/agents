@@ -368,12 +368,20 @@ test('a plan cut off by its cap is reported with a message that names the cap', 
   })
 })
 
-test('a replanner decision cut off by its cap fails the run with a message that names the cap', async () => {
+test('a replanner decision cut off by its cap is reported with a message that names the cap', async () => {
   const script: Script = (req) =>
     stageOf(req) === 'replanner'
       ? ({ text: '{"mode":"continue","reas', cutOff: true } as IScriptedReply)
       : happy(req)
-  await withRun(script, {}, async ({ run }) => {
-    await assert.rejects(run(), /\[replanner\] .*cut off at 1000 tokens/)
+  await withRun(script, {}, async ({ events, run }) => {
+    // The run survives a decision nobody could read (see tests/replan-failure.test.ts) and
+    // carries on with the plan; the error is what a host sees.
+    await run()
+    const errors = events.filter(
+      (e): e is Extract<AgentEvent, { type: 'error' }> => e.type === 'error',
+    )
+    assert.equal(errors.length, 1)
+    assert.equal(errors[0].phase, 'replan')
+    assert.match(errors[0].error.message, /\[replanner\] .*cut off at 1000 tokens/)
   })
 })

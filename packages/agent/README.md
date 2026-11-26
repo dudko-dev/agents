@@ -109,12 +109,12 @@ Pass an event handler as the second argument to `createAgent`, or per run via `o
 | `step.reasoning-delta` / `final.reasoning-delta` | The executor's / synthesizer's thoughts, when [thinking](#thinking-reasoning) is on and the provider streams them. |
 | `step.tool-call` / `step.tool-result` | A tool was called (`name`, `input`) / returned (`output`, `ok`). |
 | `step.complete` | The step finished (`result`). |
-| `replan.decision` | The replanner's verdict: `mode: 'continue' \| 'revise' \| 'finish'`, `reason`, and `cause: 'last-step' \| 'clean-step' \| 'llm-decision' \| 'user-message'`. |
+| `replan.decision` | The replanner's verdict: `mode: 'continue' \| 'revise' \| 'finish'`, `reason`, and `cause: 'last-step' \| 'clean-step' \| 'llm-decision' \| 'user-message'`. `failed: true` when the replanner call itself failed and `continue` is the fallback (see [When the replanner fails](#when-the-replanner-fails)). |
 | `revisions.exceeded` | The cap on plan revisions (`cap`) was reached; the run goes on to synthesize. |
 | `final.text-delta` | The final answer, streamed. |
 | `final` | The final answer, whole (`text`). |
 | `retry` | A stage failed and is being retried (`phase`, `attempt`, `error`). |
-| `error` | A stage failed for good (`error`, `phase: 'plan' \| 'execute' \| 'replan' \| 'synthesize' \| 'init'`). |
+| `error` | A stage failed for good (`error`, `phase: 'plan' \| 'execute' \| 'replan' \| 'synthesize' \| 'init'`). It ends the run, except for a planner failure (the run answers directly from a one-step fallback plan) and a replanner failure (the run [carries on with the plan it has](#when-the-replanner-fails)). |
 | `log` | A log line (`level`, `message`), the same ones `config.logger` gets. |
 
 **Budgets, context and cost**
@@ -158,6 +158,23 @@ const agent = await createAgent(config, (event) => {
   if (event.type === 'final.text-delta') process.stdout.write(event.delta)
 })
 ```
+
+
+### When the replanner fails
+
+The replanner's decision is a structured call, and it can fail on its own: the model answers with something that is not the decision (prose, JSON off the schema, an answer cut in half by its output cap), or the provider errors and stays down through the retries. That does **not** throw away the steps already done. The run takes "continue" as the decision and goes on with the plan it has — the next step runs, or, when there is none left, the answer is synthesized from what the steps produced.
+
+The failure is visible, not silent:
+
+- an `error` event with `phase: 'replan'` carries the error itself;
+- the `replan.decision` that follows has `mode: 'continue'`, `failed: true` and a `reason` starting with `replanner failed:`;
+- a `log` warning says the same (`[replan] the replanner failed, continuing with the existing plan: …`).
+
+What the failed attempt cost still counts: an answer that could not be parsed was paid for, so its tokens get a `usage` event (`phase: 'replan'`) and are in `result.usage`, `agent.usage` and the run's [limits](#token-limits-and-step-caps) — a budget the failed attempt crosses stops the run at the next step boundary, as any other spend would. (The same holds for a plan that could not be parsed: its tokens are counted before the fallback plan takes over.) Messages sent with [`RunControl.send`](#steering-a-run-that-is-already-going) that the failed call was supposed to weigh stay unweighed, so the replanner is asked again at the next boundary.
+
+Two failures still end the run, because carrying on cannot help: a **stop** (the run's `AbortSignal`), and **credentials the provider refuses** (HTTP 401 / 403 — the next call would be refused too). Both reject `run()` as before, with the snapshot saved as `cancelled` / `failed` and the steps done so far in its `trace`.
+
+The browser sibling `@dudko.dev/agent-web` behaves the same way and uses the same names (`error` with `phase: 'replan'`, `replan.decision.failed`); there the structured attempt is first retried as a plain-text call, and only both failing counts as a failure.
 
 ### Cancellation
 
@@ -417,8 +434,8 @@ The run caps are **soft**: they are checked between steps *and* inside an execut
 
 - **Yours wins.** Any `limits.perCall.<stage>` replaces the default, and **`0` means no cap** (the provider's own maximum applies — what Node did before these defaults existed).
 - **A stage that thinks gets no default cap.** On OpenAI and Gemini the reasoning counts against `max_output_tokens`, so a default sized for the answer alone could leave a thinking model no room to write it. Set `perCall` yourself if you want a cap there (Anthropic adds the thinking budget on top of it).
-- **A call the cap cuts off says so.** The executor and synthesizer emit a `log` warning (`[synthesizer] the model's output was cut off at 4000 tokens, the default cap for this stage …`); a plan or a replanner decision cut in half fails with the same reason in its error instead of a bare "could not parse the response".
-- The browser sibling `@dudko.dev/agent-web` derives its caps the same way, with its own, smaller shares (800 / 1,200 / 400 / 3,000 at 128k).
+- **A call the cap cuts off says so.** The executor and synthesizer emit a `log` warning (`[synthesizer] the model's output was cut off at 4000 tokens, the default cap for this stage …`); a plan or a replanner decision cut in half fails with the same reason in its error instead of a bare "could not parse the response" (the run survives both: see [When the replanner fails](#when-the-replanner-fails)).
+- The browser sibling `@dudko.dev/agent-web` follows the same rules (yours wins and `0` is no cap, none for a stage that thinks, a cut-off call says so), with its own, smaller shares (800 / 1,200 / 400 / 3,000 at 128k).
 
 `maxToolCalls`: once reached, further tool calls in the run fail with `tool-call budget exhausted` (the model sees that as the tool result) and the run moves to synthesis with `budget.exceeded` of kind `'tool-calls'`. Built-in tools (`find_tools`, `load_skill`, `read_skill_file`) do not count.
 

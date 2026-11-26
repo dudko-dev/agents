@@ -18,7 +18,7 @@ import { executeStep } from './executor.ts'
 import { checkLimits, resolveLimits } from './limits.ts'
 import { createInitialPlan, filterPlanSkills, planStepCap } from './planner.ts'
 import { renderTrace, renderTraceSteps } from './prompts.ts'
-import { decideNextAction } from './replanner.ts'
+import { decideNextAction, type ReplanDecision } from './replanner.ts'
 import { activateSkill } from './skills.ts'
 import { synthesizeAnswer } from './synthesizer.ts'
 import { resolveToolStrategy } from './tool-search.ts'
@@ -36,7 +36,7 @@ import type {
   ReplanTrigger,
 } from './types.ts'
 import { ATTR, withSpan } from './tracing.ts'
-import { accumulateUsage, combineSignals, normalizeUsage } from './utils.ts'
+import { accumulateUsage, clipText, combineSignals, isAuthError, normalizeUsage } from './utils.ts'
 
 // The default ('failure') replan trigger fires when:
 //   - the executor explicitly signalled a blocker (via the [BLOCKER] sentinel,
@@ -747,7 +747,10 @@ const runAgentLoopInner = async (
       continue
     }
 
-    let decision
+    let decision: ReplanDecision
+    // The replanner call itself failed (unparseable output, a schema mismatch, the provider down
+    // after its retries): the decision below is a fallback, not the model's.
+    let replanFailed = false
     try {
       await maybeCompactTrace(trace)
       decision = await decideNextAction(
@@ -761,24 +764,43 @@ const runAgentLoopInner = async (
       )
     } catch (err) {
       proxiedCtx.emit({ type: 'error', error: asError(err), phase: 'replan' })
-      await callPersistence(
-        'onRunComplete',
-        buildSnapshot(isAbortError(err) || signal?.aborted ? 'cancelled' : 'failed', {
-          error: (err as Error).message,
-          completedAt: Date.now(),
-        }),
-      )
-      throw err
+      // A stop is a stop, and credentials the provider refuses will not work for the next call
+      // either: those end the run, as before.
+      if (isAbortError(err) || signal?.aborted || isAuthError(err)) {
+        await callPersistence(
+          'onRunComplete',
+          buildSnapshot(isAbortError(err) || signal?.aborted ? 'cancelled' : 'failed', {
+            error: (err as Error).message,
+            completedAt: Date.now(),
+          }),
+        )
+        throw err
+      }
+      // Anything else must not throw away the steps already done: a decision nobody could make
+      // is "carry on with the plan as it is". The run's budgets still apply - the failed
+      // attempt's usage is already counted, and the loop checks them before the next step.
+      const why = clipText(asError(err).message, 300)
+      proxiedCtx.emit({
+        type: 'log',
+        level: 'warn',
+        message: `[replan] the replanner failed, continuing with the existing plan: ${why}`,
+      })
+      replanFailed = true
+      decision = { mode: 'continue', reason: `replanner failed: ${why}` }
     }
     proxiedCtx.emit({
       type: 'replan.decision',
       mode: decision.mode,
       reason: decision.reason,
       cause: byUser ? 'user-message' : 'llm-decision',
+      ...(replanFailed ? { failed: true } : {}),
     })
-    // Weighed, whatever it decided: from here the messages are part of the run's story.
-    for (const u of state.userUpdates) {
-      u.reconciled = true
+    // Weighed, whatever it decided: from here the messages are part of the run's story. A
+    // replanner that failed weighed nothing: the next boundary asks it again.
+    if (!replanFailed) {
+      for (const u of state.userUpdates) {
+        u.reconciled = true
+      }
     }
 
     if (decision.mode === 'finish') {
