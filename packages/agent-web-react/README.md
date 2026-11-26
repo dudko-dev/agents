@@ -38,7 +38,7 @@ app with a single hook and (optionally) a set of pre-styled components:
 [![license](https://img.shields.io/npm/l/@dudko.dev/agent-web-react.svg)](https://www.npmjs.com/package/@dudko.dev/agent-web-react)
 ![GitHub last commit](https://img.shields.io/github/last-commit/dudko-dev/agents.svg)
 
-> **▶︎ [Live demo](https://dudko-dev.github.io/agent-web-react/)** — three agents:
+> **▶︎ [Live demo](https://agent.dudko.dev/demo/)** — three agents:
 > one edits a sticky-notes board, one drives any number of MCP servers (plus a
 > 185-tool mock catalogue to show tool search), and one plays chess against you
 > — your move triggers it, analyst subagents run in Web Workers. Cloud BYOK or

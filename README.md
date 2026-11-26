@@ -8,7 +8,7 @@ running fully in the browser, React bindings for it, and a demo.
 | [`packages/agent`](packages/agent) | [`@dudko.dev/agent`](https://www.npmjs.com/package/@dudko.dev/agent) | Node / server: plan → execute → replan → synthesize over MCP servers, a REPL CLI, persistence and resume, OpenTelemetry. |
 | [`packages/agent-web`](packages/agent-web) | [`@dudko.dev/agent-web`](https://www.npmjs.com/package/@dudko.dev/agent-web) | The same loop in the browser: BYOK cloud providers or local WebGPU models, an encrypted key vault, HTTP MCP. |
 | [`packages/agent-web-react`](packages/agent-web-react) | [`@dudko.dev/agent-web-react`](https://www.npmjs.com/package/@dudko.dev/agent-web-react) | React bindings: the `useAgent` hook, a provider and a drop-in chat. |
-| [`apps/demo`](apps/demo) | — (private) | The Vite demo of the React package ([live](https://dudko-dev.github.io/agent-web-react/)). |
+| [`apps/demo`](apps/demo) | — (private) | The Vite demo of the React package ([live](https://agent.dudko.dev/demo/)). |
 
 Each package keeps its own README, docs and version; they are published to npm independently.
 
