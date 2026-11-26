@@ -327,6 +327,61 @@ is a persistence channel, so it is treated as one.
 - The secret scan is pattern-based: it catches the common key shapes, not an
   arbitrary sensitive string.
 
+## Sandbox (`run_js`)
+
+`sandbox` is off by default. On, the MODEL decides what code runs - and a model that read
+a hostile page or file may have been talked into the code it writes. Treat every program
+as untrusted.
+
+What the guest can reach:
+
+- **JavaScript, and what it was handed.** The code runs in QuickJS compiled to
+  WebAssembly, in its own instance per run. Its only doors to the outside are the
+  functions this package passes in: `console`, timers and - only when the agent has file
+  tools - a module loader and `fs` bound to the virtual file system. There is no
+  `window`, `document`, `fetch`, `XMLHttpRequest`, `WebSocket`, `indexedDB`,
+  `localStorage`, cookie or credential to find: they are not hidden from the guest, they
+  do not exist in its realm. `Function('return this')()` and
+  `constructor.constructor(...)` reach the guest's own global, nothing else.
+- **Values are copied.** Everything that leaves the guest is a string built inside it and
+  parsed again outside (bounded in size and depth); nothing that enters is a host
+  object. Polluting `Object.prototype` in the guest changes the guest.
+- **The workspace, under the file tools' rules.** A guest read or write is served on the
+  agent's side: the path is normalised (nothing above the root exists), only `.js`,
+  `.mjs`, `.json` load as code, files are size-capped, and each call passes the consent
+  gate under the name of the file tool that grants it - no file tool, no operation.
+  This is the same reach `fs_read` / `fs_write` already give the model; in particular a
+  guest that may write can write a `/skills/<name>/SKILL.md` exactly as `fs_write` can.
+
+What stops it:
+
+- **Time.** The engine's interrupt handler ends JavaScript that loops, and the guest
+  cannot catch that. With `sandbox.worker` the worker is terminated at `timeoutMs` + 1 s
+  whatever the guest is doing.
+- **Memory.** The guest's WebAssembly memory has a hard maximum (`memoryLimitBytes`);
+  QuickJS's own accounting is not relied on. Recursion ends in the engine's stack check.
+- **Output.** `stdout` and `result` are cut in the engine and again on the agent's side,
+  which trusts nothing a worker reports.
+- **Consent and budgets.** `run_js` is a write for the gate (`ask-writes` shows the code,
+  `read-only` refuses it) and counts against `maxToolCalls`.
+
+What this does NOT protect against:
+
+- **A bug in the engine or the wasm runtime.** The boundary is the browser's WebAssembly
+  sandbox plus QuickJS. An escape from both lands in a Web Worker of your origin (or, with
+  no `worker`, in the page): same-origin, with IndexedDB - where the vault's ciphertext
+  and its key handle live - within reach. A worker is not a different origin.
+- **The page thread.** Without `sandbox.worker` there is no hard stop: one long native
+  call in the guest freezes the page until it returns. Use a worker.
+- **CPU and battery within the deadline**, up to four runs at once, and whatever the
+  model decides to do with a result.
+- **Side channels.** The guest has `Date.now()`; it has no shared memory with the page
+  and no network to report over, but do not treat it as a place to compute on secrets
+  next to hostile code.
+- **What the code says.** Output is data for the model, like a fetched page: a program
+  can print instructions. And a program that the user approved once is not approved
+  forever - each run is gated.
+
 ## Pipelines: a definition is data
 
 A pipeline definition is meant to be saved, shared and loaded - including one that

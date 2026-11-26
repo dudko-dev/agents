@@ -73,6 +73,17 @@ behind every decision.
   (`generateStructured`, then plain text), `nodeResolver`. A definition is untrusted input (see
   docs/security.md): the caps, the `otherwise` rule, the condition input bound and the join
   deferral each need a test and a mutation check.
+- `src/sandbox/` — `config.sandbox` / the `run_js` tool: the model's code in QuickJS compiled to
+  WebAssembly (optional peer `quickjs-emscripten`). `engine` (limits, the guest's runtime, the
+  module resolver, the worker protocol, what may cross the boundary; pure, no imports) is a COPY of
+  the server's `src/sandbox-engine.ts`, byte for byte — change both (the server's
+  `tests/sandbox-engine.test.ts` compares them and tests the engine's guards). `index` is the tool
+  (a Web Worker from the host's `sandbox.worker` factory, else the page thread; imported by the
+  runner DYNAMICALLY, only when the flag is set — keep it out of `src/index.ts` except for types),
+  `files` binds the guest to the VFS of the mounted file tools (each fs call gated under that
+  tool's name), `worker` is the `./sandbox-worker` entry — the only file that names the peer.
+  Security boundary: every guard has a test (`tests/sandbox.test.ts` here, the engine's in the
+  server package) and a mutation check.
 - `src/subagent/` — `tool` (createSubagentTool), `worker` (serveSubagentWorker),
   `protocol` (postMessage shapes).
 - `src/{thinking,limits,caching,skills,images}.ts` — see docs/capabilities.md.
@@ -106,7 +117,7 @@ behind every decision.
 ```bash
 pnpm nx typecheck @dudko.dev/agent-web     # tsc --noEmit
 pnpm nx format:check @dudko.dev/agent-web  # prettier
-pnpm nx build @dudko.dev/agent-web         # tsup → dist (ESM + CJS + d.ts; entries: ., ./mcp, ./webmcp; + dist/agent-web.js)
+pnpm nx build @dudko.dev/agent-web         # tsup → dist (ESM + CJS + d.ts; entries: ., ./mcp, ./webmcp, ./sandbox-worker; + dist/agent-web.js)
 pnpm nx test @dudko.dev/agent-web          # node --test tests/*.test.ts (nx builds first: tests import dist)
 ```
 

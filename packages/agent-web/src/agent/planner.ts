@@ -55,6 +55,7 @@ export const createPlan = async (
       history: ctx.history,
       skills: skillIndex,
       searchMode: ctx.strategy === 'search',
+      ...(ctx.sandbox ? { sandbox: ctx.sandbox.planner } : {}),
     })
     return {
       ...stageCall(ctx, 'planner', parts.system),

@@ -718,6 +718,45 @@ It is a *knowledge* feature and nothing else:
 
 Every save emits `skill.learned` (`name`, `description`, `update`, `chars`, `sources`), every forget `skill.forgotten`. CLI: `AGENT_LEARNING=on`, `AGENT_LEARNING_DIR=<dir>`; in the REPL `/skills` lists skills (the agent's own marked) and `/forget <name>` deletes one.
 
+## Running code: the sandbox
+
+Ask a model to "run it on the test data" and, with nothing to run it in, it writes the code and *describes* an output. Switch on `sandbox` and the run is a real tool call whose output you can see:
+
+```ts
+// npm install quickjs-emscripten   (an optional peer: only needed with `sandbox`)
+const agent = await createAgent({
+  ...config,
+  sandbox: true,
+  // or: sandbox: { timeoutMs: 5000, memoryLimitBytes: 32 * 1024 * 1024, maxOutputChars: 8000, maxCodeChars: 100_000 }
+})
+// CLI: AGENT_SANDBOX=on, AGENT_SANDBOX_TIMEOUT_MS, AGENT_SANDBOX_MEMORY_MB
+```
+
+That registers one tool, `run_js({ code })`, which returns `{ ok, stdout, result?, error?, truncated, durationMs }`:
+
+- `stdout` — everything `console.log / info / warn / error` printed, in order (`warn` and `error` lines are prefixed).
+- `result` — the value of the **last expression** of the program (a returned promise is awaited; for a program written as an ES module, its `default` export), copied out as JSON-like data: functions, symbols and cycles become strings, depth and size are bounded.
+- `error` — `{ name, message, stack }` when the program threw, ran out of time or memory. The stack has the guest's frames only. A failing program is a **result**, not a failed tool call, so the model reads the error and fixes its code.
+
+**Off by default.** Without the flag the tool does not exist, nothing is added to the prompts, the engine is never loaded and no thread is started. With it, the planner, executor and synthesizer are told — in the run-stable system prompt — what `run_js` is and that code is never reported as run unless it was.
+
+**What the guest is.** The code runs in [QuickJS](https://bellard.org/quickjs/) compiled to WebAssembly ([`quickjs-emscripten`](https://github.com/justjake/quickjs-emscripten), MIT) — *not* in Node's own engine and not in `node:vm`, which shares the process's heap and is documented as not being a security mechanism. The guest has standard JavaScript (ES2023, top-level `await`, `setTimeout` / `setInterval` bounded by the run) and nothing else: no `process`, no `require` of host modules, no `import` of anything, no `fetch`, no file system, no environment. In this package the sandbox **computes only** — the Node agent has no workspace to bind (the browser sibling binds its virtual file system).
+
+**What bounds it.**
+
+| | Default | At most | How |
+| --- | --- | --- | --- |
+| `timeoutMs` | 5000 | 60000 | QuickJS's interrupt handler stops JavaScript that loops (and a guest cannot catch it). A single long native call cannot be interrupted, so every run is in its own **worker thread**, which is **terminated** at `timeoutMs` + 1 s. The agent's thread is never blocked. |
+| `memoryLimitBytes` | 32 MiB | 256 MiB | The whole WebAssembly memory of the guest's engine instance (the engine's own 16 MiB minimum included) has this as its hard maximum, enforced by the wasm runtime. Allocation past it fails *inside the guest* as `out of memory`. |
+| `maxOutputChars` | 8000 | 100000 | `stdout` and `result` together; cut in the engine and again on the agent's side. `truncated: true` says so. |
+| `maxCodeChars` | 100000 | 1000000 | A longer program is refused before anything starts. |
+
+Each run gets a fresh engine instance in a fresh worker (nothing is shared between runs, and a run after a killed one is unaffected); at most four run at once, the rest wait. The worker is given an empty environment.
+
+**Gates.** `run_js` is an ordinary tool: it is in `listTools()` and the tool search, it counts against `maxToolCalls`, its output is capped like any other, and for [tool approval](#tool-approval-and-autopilot) it is a **write** — `ask-writes` shows the user the code before each run, `read-only` refuses it. A UI sees it as the usual `step.tool-call` / `step.tool-result` events; there is no separate event.
+
+**What it does not protect against.** A bug in the WebAssembly runtime or in QuickJS itself (the guest is confined by the wasm sandbox, not by a second process: for hostile multi-tenant code, run the agent in a container too); timing side channels; and the CPU a run may burn within its deadline, times four. The installed peer is checked when the agent is created: without `quickjs-emscripten`, `createAgent` throws and names the package.
+
 ## Pipelines
 
 A pipeline is a graph of agents: each node is an agent with its own role, model and tools, each
@@ -893,6 +932,7 @@ Consent is the host's job ([tool approval](#tool-approval-and-autopilot)) — th
 | `baseURL` | Required for `openai-compatible` (point at your self-hosted server) and `azure` (point at your deployment URL). Optional for the rest. |
 | `apiKey` | Required by the type, but **ignored** for `google-vertex` (which authenticates via Google ADC). |
 | `providerOptions` | Escape hatch for provider-specific factory options. Spread into the SDK's `create*()` call after `baseURL` / `apiKey`, so anything documented for the underlying SDK works: e.g. `{ apiVersion, resourceName }` for Azure, `{ region, accessKeyId, secretAccessKey }` for Bedrock, `{ project, location, googleAuthOptions }` for Vertex, `{ accountId }` (or `{ binding }` inside a Worker) for Cloudflare. Per-stage override blocks have their own `providerOptions`; if absent, the top-level value is used. |
+| `sandbox` | Off by default. `true` or `{ timeoutMs, memoryLimitBytes, maxOutputChars, maxCodeChars }` gives the model `run_js`: JavaScript it wrote runs in QuickJS/WebAssembly inside a worker thread that is killed at the deadline. Needs the optional peer `quickjs-emscripten`. See [Running code](#running-code-the-sandbox). |
 | `model` | Default model for every stage (executor / planner / synthesizer) when no per-stage override is set. |
 | `planner` / `synthesizer` | Optional per-stage override blocks: `{ providerType?, baseURL?, apiKey?, model? }`. Use these to mix providers (e.g. Gemini planner, Anthropic synthesizer). Cross-provider overrides MUST set their own `apiKey`. |
 | `plannerModel` / `synthesizerModel` | **Deprecated** model-only shortcuts. Equivalent to `planner: { model }` / `synthesizer: { model }`. The override block, if present, wins. |
@@ -1012,7 +1052,7 @@ dd-agent --env-file=.env
 
 `--env-file=<path>` is loaded via Node's built-in `process.loadEnvFile`, so no `dotenv` dependency is needed. Without the flag the CLI reads the ambient process env. `-h` / `--help` prints the supported flags and the in-REPL slash commands (`/status`, `/usage`, `/tools`, `/history`, `/reset`, `/compact`, `/autopilot`, `/approval <mode>`, `/reconnect`, `/skills`, `/forget <name>`, `/agents`, `/stop [n]`, `/exit` — `/quit` does the same).
 
-The newer features are env-driven too: `AGENT_THINKING` (`off | minimal | low | medium | high | xhigh | <budget tokens>`), `AGENT_MAX_INPUT_TOKENS` / `AGENT_MAX_OUTPUT_TOKENS` / `AGENT_MAX_REASONING_TOKENS` / `AGENT_MAX_TOTAL_TOKENS`, `AGENT_MAX_TOOL_CALLS`, `AGENT_PER_CALL_TOKENS` (JSON `{"executor":16000,"synthesizer":0}` — per-stage output caps, `0` = no cap, see [Token limits](#token-limits-and-step-caps)), `AGENT_TOOL_APPROVAL` (`autopilot | ask-writes | ask-all | read-only`), `AGENT_TOOL_RULES` (JSON `{ "<tool or glob*>": "allow" | "ask" | "deny" }`, beats the mode — e.g. `{"github__delete_*":"deny"}`), `AGENT_EGRESS` (`on | off`; with `AGENT_EGRESS_ALLOW`, `AGENT_EGRESS_DENY`, `AGENT_EGRESS_PROTOCOLS`, `AGENT_EGRESS_ALLOW_PRIVATE` — see [Egress](#egress-what-the-model-may-fetch)), `AGENT_SKILLS_DIR`, `AGENT_LEARNING` (`on | off`; `AGENT_LEARNING_DIR` keeps the lessons across sessions — see [Learning](#learning-lessons-that-outlive-the-task)), `AGENT_TOOL_SELECTION_STRATEGY` (`auto | all | plan-narrowed | search`), `AGENT_CONTEXT_WINDOW_TOKENS`, `AGENT_COMPACTION_THRESHOLD` (percent of the window where auto-compaction starts, default 85) and `AGENT_COMPACTION=off`. The REPL prints the model's thoughts dimmed, auto-compacts its history with the same settings, and — when the approval mode asks — prompts `allow? [y]es / [n]o / [a]lways` right in the terminal; `/autopilot` toggles between autopilot and the last asking mode.
+The newer features are env-driven too: `AGENT_THINKING` (`off | minimal | low | medium | high | xhigh | <budget tokens>`), `AGENT_MAX_INPUT_TOKENS` / `AGENT_MAX_OUTPUT_TOKENS` / `AGENT_MAX_REASONING_TOKENS` / `AGENT_MAX_TOTAL_TOKENS`, `AGENT_MAX_TOOL_CALLS`, `AGENT_PER_CALL_TOKENS` (JSON `{"executor":16000,"synthesizer":0}` — per-stage output caps, `0` = no cap, see [Token limits](#token-limits-and-step-caps)), `AGENT_TOOL_APPROVAL` (`autopilot | ask-writes | ask-all | read-only`), `AGENT_TOOL_RULES` (JSON `{ "<tool or glob*>": "allow" | "ask" | "deny" }`, beats the mode — e.g. `{"github__delete_*":"deny"}`), `AGENT_EGRESS` (`on | off`; with `AGENT_EGRESS_ALLOW`, `AGENT_EGRESS_DENY`, `AGENT_EGRESS_PROTOCOLS`, `AGENT_EGRESS_ALLOW_PRIVATE` — see [Egress](#egress-what-the-model-may-fetch)), `AGENT_SANDBOX` (`on | off`; with `AGENT_SANDBOX_TIMEOUT_MS`, `AGENT_SANDBOX_MEMORY_MB` — see [Running code](#running-code-the-sandbox)), `AGENT_SKILLS_DIR`, `AGENT_LEARNING` (`on | off`; `AGENT_LEARNING_DIR` keeps the lessons across sessions — see [Learning](#learning-lessons-that-outlive-the-task)), `AGENT_TOOL_SELECTION_STRATEGY` (`auto | all | plan-narrowed | search`), `AGENT_CONTEXT_WINDOW_TOKENS`, `AGENT_COMPACTION_THRESHOLD` (percent of the window where auto-compaction starts, default 85) and `AGENT_COMPACTION=off`. The REPL prints the model's thoughts dimmed, auto-compacts its history with the same settings, and — when the approval mode asks — prompts `allow? [y]es / [n]o / [a]lways` right in the terminal; `/autopilot` toggles between autopilot and the last asking mode.
 
 **Talking to the agent while it works.** The REPL keeps reading while a run goes. Text you type then is said to the running agent (it sees it at its next boundary and the replanner re-checks the plan — see [Steering a run](#steering-a-run-that-is-already-going)): the REPL prints `[you->agent] queued` and then `delivered (round|step|final)`, and the message enters the history as a user turn. A message that arrives while the answer is being written is sent as the next prompt (`[follow-up]`). After Ctrl-C nothing is sent behind your back: what the agent never saw is listed as `[not delivered]`. While a run goes, `/agents` lists the running subagents and `/stop <n>` (or an id prefix, or just `/stop` when one runs) stops one — the run goes on; the other REPL commands work between runs. Each subagent's own steps and tool calls are logged as `[name id] ...` lines, so parallel ones can be told apart.
 

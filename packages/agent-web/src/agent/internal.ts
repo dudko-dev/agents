@@ -69,6 +69,11 @@ export interface AgentContext {
    * still wrapped and gated like any other tool).
    */
   learning?: { nudge: boolean; tools: string[] }
+  /**
+   * Set when `config.sandbox` is on and `run_js` is mounted: the sentences the stage prompts
+   * carry (what the tool is, and that code is never reported as run without it).
+   */
+  sandbox?: { planner: string; executor: string; synthesizer: string }
   /** Tools find_tools activated during this run (search mode). */
   discovered?: () => string[]
   /** Built-in tool names (find_tools, skill tools) — always callable. */

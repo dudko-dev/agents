@@ -457,7 +457,7 @@ thinking level, limits or system prompt. Give `persistence` a store
 last checkpoint with `run('', { resumeFromRunId })` — the planner does not run again and
 no finished step is repeated. `createRunControl()` steers a run that is going: `send()`
 puts a message in front of the model at the next boundary (the replanner re-checks the plan
-against it), `stopSubagent(id)` stops one subagent. `egress` (off by default) gives the model one safe `web_fetch` tool with allow / deny lists. `learning` (off by default) lets the agent write down what it figured out as skills of its own — in memory, or in the file system across sessions. Details, defaults and events:
+against it), `stopSubagent(id)` stops one subagent. `egress` (off by default) gives the model one safe `web_fetch` tool with allow / deny lists. `sandbox` (off by default) gives the model `run_js`: the code it wrote runs in QuickJS-in-WebAssembly inside a Web Worker that is killed at the deadline, so "I ran it" is a tool call you can see. `learning` (off by default) lets the agent write down what it figured out as skills of its own — in memory, or in the file system across sessions. Details, defaults and events:
 **[docs/capabilities.md](docs/capabilities.md)**.
 
 ## Pipelines: a graph of agents
@@ -530,6 +530,7 @@ Loading a definition someone else wrote: [docs/security.md](docs/security.md#pip
 | `toolApproval` | autopilot | consent policy: `{ mode, rules, onRequest, timeoutMs }`; `agent.setToolApprovalMode()` |
 | `skills` | — | SKILL.md bundles (`defineSkill` / `parseSkillMarkdown` / `loadSkillFromUrl`) |
 | `egress` | off | what the **model** may fetch (`web_fetch`): `true` = any public host over https, or `{ allow, deny, protocols, allowPrivateNetwork, fetch, ... }`; a browser can't pin DNS, so prefer an `allow` list — see [Egress](docs/capabilities.md#egress-what-the-model-may-fetch) |
+| `sandbox` | off | the model may **run JavaScript it wrote** (`run_js`) and read the real output: `true`, or `{ worker, timeoutMs, memoryLimitBytes, maxOutputChars, maxCodeChars, files, engine }`. QuickJS in WebAssembly (optional peer `quickjs-emscripten`), in a Web Worker you supply (`@dudko.dev/agent-web/sandbox-worker`) that is killed at the deadline; with `createFileTools` the guest can import / require workspace files and use `fs` — see [Running code](docs/capabilities.md#running-code-the-sandbox) |
 | `learning` | off | the agent writes down lessons as skills (`save_skill` / `forget_skill`): `true` = this session, `{ store: new VfsSkillStore(vfs) }` = across sessions — see [Learning](docs/capabilities.md#learning-lessons-that-outlive-the-task) |
 | `thinking` / `stageThinking` | provider default | `true`, a level (`'low'`…`'xhigh'`, `'none'`), or `{ level, budgetTokens, includeThoughts }` |
 | `limits` | — | run caps `maxInputTokens` / `maxOutputTokens` / `maxReasoningTokens` / `maxTotalTokens` + `perCall` output caps |

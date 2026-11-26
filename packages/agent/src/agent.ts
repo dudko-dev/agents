@@ -7,6 +7,7 @@ import { connectMcpServers, filterTools } from './mcp.ts'
 import { buildModelFromStage, resolveStage } from './provider.ts'
 import { runAgentLoop } from './runner.ts'
 import { createLearning } from './learning.ts'
+import { createSandboxTools, RUN_JS_TOOL } from './sandbox.ts'
 import { createSkillTools, validateSkills } from './skills.ts'
 import { createEgressTools } from './web-fetch.ts'
 import { createFindToolsTool, FIND_TOOLS_TOOL } from './tool-search.ts'
@@ -169,8 +170,12 @@ export const createAgent = async (
   )
   // What config.egress switches on (web_fetch). A tool of the same name in config.tools wins.
   const egressTools = createEgressTools(config.egress)
+  // What config.sandbox switches on (run_js). Off = nothing is created: no tool, no engine, no worker.
+  const sandboxTools = createSandboxTools(config.sandbox)
   const nativeTools: ToolSet | undefined =
-    egressTools || learning ? { ...egressTools, ...learning?.tools, ...config.tools } : config.tools
+    egressTools || learning || sandboxTools
+      ? { ...egressTools, ...sandboxTools, ...learning?.tools, ...config.tools }
+      : config.tools
   // find_tools exists whenever the strategy can resolve to 'search'.
   const strategy = config.toolSelectionStrategy ?? 'auto'
   const searchPossible = strategy === 'search' || strategy === 'auto'
@@ -397,6 +402,16 @@ export const createAgent = async (
       : {}),
     approval,
   }
+  // The prompts mention run_js only while it is really the sandbox's tool (not filtered out, not
+  // replaced by a host tool of the same name).
+  const syncSandbox = (): void => {
+    if (sandboxTools && config.tools?.[RUN_JS_TOOL] === undefined && ctx.tools[RUN_JS_TOOL]) {
+      ctx.sandbox = { files: false }
+    } else {
+      delete ctx.sandbox
+    }
+  }
+  syncSandbox()
   // Read through ctx so find_tools always searches the live catalogue
   // (refresh / reconnect replace ctx.toolCatalog).
   catalogRef = () => ctx.toolCatalog
@@ -595,6 +610,7 @@ export const createAgent = async (
         Object.assign(ctx.tools, fresh.tools)
         ctx.toolCatalog = toEntries(fresh.catalog)
         syncFindTools()
+        syncSandbox()
         connected = fresh
         // Close old connections only after the new ones are wired up so a
         // failed reconnect doesn't leave the agent without tools.

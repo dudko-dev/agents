@@ -13,6 +13,7 @@ import type { ModelInput, StageInput } from './providers/types.js'
 import type { Prompts } from './prompts.js'
 import type { CredentialStore } from './secrets/store.js'
 import type { LearningConfig } from './learning.js'
+import type { SandboxConfig } from './sandbox/index.js'
 import type { Skill } from './skills.js'
 import type { IEgressPolicy } from './tools/egress.js'
 import type { ThinkingSetting, ThinkingStage } from './thinking.js'
@@ -71,6 +72,17 @@ export interface BrowserAgentConfig {
    * or tools you pass yourself - those are your configuration, not the model's.
    */
   egress?: boolean | IEgressPolicy
+  /**
+   * Let the agent RUN JavaScript it wrote (the `run_js` tool) and read the output. Off unless
+   * set: with it off the tool does not exist and the engine is never loaded. `true` = the
+   * defaults, on the page's thread; an object sets the limits and - recommended - a `worker`
+   * factory, so the guest runs in a Web Worker that is terminated at the deadline. The guest
+   * runs in QuickJS compiled to WebAssembly (the optional peer `quickjs-emscripten`): no network,
+   * no DOM, no page globals. When the agent has file tools (`createFileTools`) the guest can
+   * import / require workspace files and use `fs` through the same file system and the same
+   * consent rules (`files: false` switches that off). A run is a write for tool approval.
+   */
+  sandbox?: boolean | SandboxConfig
   /** Host tools the executor may call (an AI SDK ToolSet; use defineTool). */
   tools?: AgentToolSet
   /** Whitelist: only these tool names from `tools` are mounted (default: all). */

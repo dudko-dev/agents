@@ -29,6 +29,7 @@ export const synthesizeAnswer = async (
     findings,
     activeSkills: active.length ? renderActiveSkills(active) : undefined,
     updates: ctx.userUpdates?.(),
+    ...(ctx.sandbox ? { sandbox: ctx.sandbox.synthesizer } : {}),
   })
   const result = stream(ctx.synthesizerModel, {
     ...stageCall(ctx, 'synthesizer', parts.system),

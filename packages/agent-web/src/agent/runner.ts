@@ -297,13 +297,30 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
     : undefined
   // Read live: a lesson written mid-run is a skill the planner may pick and load_skill may load.
   const hasSkill = (name: string): boolean => skills.some((s) => s.name === name)
-  const baseTools: AgentToolSet = filterTools(
+  const hostTools: AgentToolSet = filterTools(
     // What `egress` switches on (web_fetch) and the notebook's tools; a tool of the same name in
     // `tools` wins.
     { ...createEgressTools(config.egress), ...learning?.tools, ...config.tools },
     config.availableTools,
     config.excludedTools,
   )
+  // What `sandbox` switches on (run_js). Its module - and with it the engine - is loaded only
+  // here, so an agent without the flag carries none of it. The file tools that are really
+  // mounted are what binds the guest to the workspace.
+  const sandbox = config.sandbox
+    ? (await import('../sandbox/index.js')).createSandbox(
+        config.sandbox === true ? {} : config.sandbox,
+        hostTools,
+        (m) => log.warn(m),
+      )
+    : undefined
+  const baseTools: AgentToolSet = sandbox
+    ? { ...filterTools(sandbox.tools, config.availableTools, config.excludedTools), ...hostTools }
+    : hostTools
+  // The prompts mention run_js only while it is the sandbox's own tool (not filtered out, not
+  // replaced by a host tool of the same name).
+  const sandboxNotes =
+    sandbox && baseTools.run_js === sandbox.tools.run_js ? sandbox.notes : undefined
 
   const catalog = toolCatalogOf(baseTools)
   // 'auto' searches instead of listing once the catalogue is long, or once its
@@ -614,6 +631,7 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
             },
           }
         : {}),
+      ...(sandboxNotes ? { sandbox: sandboxNotes } : {}),
       discovered: () => discovered,
       builtinTools,
       toolHint,

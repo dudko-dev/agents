@@ -15,6 +15,7 @@ import type {
   ToolPermission,
 } from '../index.ts'
 import { DirSkillStore } from '../learning.ts'
+import type { ISandboxConfig } from '../sandbox.ts'
 
 const PROVIDERS: readonly ProviderType[] = [
   'openai',
@@ -97,6 +98,7 @@ export const loadConfig = (): IAgentConfig => {
     toolApproval: parseApproval(process.env.AGENT_TOOL_APPROVAL, process.env.AGENT_TOOL_RULES),
     compaction: parseCompaction(),
     egress: parseEgress(),
+    sandbox: parseSandbox(),
     learning: parseLearning(),
     llmTimeoutMs: parseOptionalInt(process.env.AGENT_LLM_TIMEOUT_MS),
     llmMaxRetries: parseOptionalInt(process.env.AGENT_LLM_MAX_RETRIES),
@@ -245,6 +247,35 @@ const parseApproval = (
     return undefined
   }
   return { ...(v ? { mode: v as ToolApprovalMode } : {}), ...(rules ? { rules } : {}) }
+}
+
+// AGENT_SANDBOX=on lets the model run JavaScript it wrote (the run_js tool); off (the default)
+// means the tool does not exist. AGENT_SANDBOX_TIMEOUT_MS / AGENT_SANDBOX_MEMORY_MB set the limits
+// of one run. Setting them while AGENT_SANDBOX is off is an error, not a silent no-op.
+export const parseSandbox = (env: NodeJS.ProcessEnv = process.env): ISandboxConfig | undefined => {
+  const raw = env.AGENT_SANDBOX?.trim().toLowerCase()
+  const on = raw !== undefined && ['on', 'true', '1', 'yes'].includes(raw)
+  if (raw && !on && !['off', 'false', '0', 'no'].includes(raw)) {
+    throw new Error(`AGENT_SANDBOX must be on | off, got: ${env.AGENT_SANDBOX}`)
+  }
+  const timeoutMs = parseOptionalInt(env.AGENT_SANDBOX_TIMEOUT_MS)
+  const memoryMb = parseOptionalInt(env.AGENT_SANDBOX_MEMORY_MB)
+  if (!on) {
+    const stray = [
+      timeoutMs !== undefined && 'AGENT_SANDBOX_TIMEOUT_MS',
+      memoryMb !== undefined && 'AGENT_SANDBOX_MEMORY_MB',
+    ].filter(Boolean)
+    if (stray.length) {
+      throw new Error(
+        `${stray.join(', ')} set but AGENT_SANDBOX is off - set AGENT_SANDBOX=on to use it`,
+      )
+    }
+    return undefined
+  }
+  return {
+    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+    ...(memoryMb !== undefined ? { memoryLimitBytes: memoryMb * 1024 * 1024 } : {}),
+  }
 }
 
 // AGENT_EGRESS=on lets the model read the web (the web_fetch tool); off (the default) means no

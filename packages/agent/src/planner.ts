@@ -161,6 +161,7 @@ const streamPlanOnce = async (
       maxSteps: planStepCap(ctx),
       domain: ctx.config.systemPrompt,
       skills: ctx.skills,
+      ...(ctx.sandbox ? { sandbox: ctx.sandbox } : {}),
     }),
   )
   const result = streamObject({

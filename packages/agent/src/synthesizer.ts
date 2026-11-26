@@ -45,6 +45,7 @@ const streamOnce = async (
       domain: ctx.config.systemPrompt,
       skills: ctx.skills,
       activeSkills: ctx.run?.activeSkills,
+      ...(ctx.sandbox ? { sandbox: ctx.sandbox } : {}),
     }),
   )
   const view = ctx.run

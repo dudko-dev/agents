@@ -1,5 +1,10 @@
 import { isSummaryTurn } from './compaction.ts'
 import { SAVE_SKILL_TOOL } from './learning.ts'
+import {
+  SANDBOX_PLANNER_NOTE,
+  SANDBOX_SYNTHESIZER_NOTE,
+  sandboxPromptNote,
+} from './sandbox-engine.ts'
 import { renderActiveSkills, renderSkillsIndex } from './skills.ts'
 import { FIND_TOOLS_TOOL, renderSearchCatalog } from './tool-search.ts'
 import type {
@@ -218,7 +223,25 @@ export interface ISystemParts {
   domain?: string
   skills?: ISkill[]
   activeSkills?: string[]
+  // Set when config.sandbox is on (run_js is callable). Run-stable: it depends on the agent's
+  // configuration only, so the cached prefix does not move.
+  sandbox?: { files: boolean }
 }
+
+// Only in the prompts of an agent with config.sandbox: runs without it send what they always did.
+const sandboxSection = (
+  sandbox: { files: boolean } | undefined,
+  stage: 'planner' | 'executor' | 'synthesizer',
+): string =>
+  !sandbox
+    ? ''
+    : `\n\nRUNNING CODE:\n${
+        stage === 'planner'
+          ? SANDBOX_PLANNER_NOTE
+          : stage === 'synthesizer'
+            ? SANDBOX_SYNTHESIZER_NOTE
+            : sandboxPromptNote(sandbox.files)
+      }`
 
 const skillsIndexSection = (skills: ISkill[] | undefined): string =>
   skills?.length ? `\n\nSKILLS:\n${renderSkillsIndex(skills)}` : ''
@@ -246,6 +269,7 @@ export const composePlannerSystem = (
       (parts.skills?.length ? PLANNER_SKILLS_ADDENDUM : ''),
     parts.domain,
   ) +
+  sandboxSection(parts.sandbox, 'planner') +
   skillsIndexSection(parts.skills) +
   `\n\nAvailable tools:\n${renderCatalogFor(parts.catalog, parts.mode)}`
 
@@ -303,6 +327,7 @@ export const composeExecutorSystem = (
     ? `${EXECUTOR_SEARCH_NOTE}${parts.toolCount ? ` The catalogue has ${parts.toolCount} tools.` : ''}`
     : '') +
   (parts.learning ? learningNote(parts.learning.fetch) : '') +
+  sandboxSection(parts.sandbox, 'executor') +
   activeSkillsSection(parts.skills, parts.activeSkills)
 
 const quoted = (text: string): string => text.trim().replace(/\n/g, '\n  ')
@@ -422,6 +447,7 @@ Rules:
 
 export const composeSynthesizerSystem = (parts: ISystemParts): string =>
   withDomainContext(SYNTHESIZER_SYSTEM, parts.domain) +
+  sandboxSection(parts.sandbox, 'synthesizer') +
   activeSkillsSection(parts.skills, parts.activeSkills)
 
 export const buildSynthesizerUserPrompt = (
