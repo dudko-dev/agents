@@ -132,7 +132,7 @@ Pass an event handler as the second argument to `createAgent`, or per run via `o
 | `skill.activated` | A skill became active (`by: 'plan' \| 'tool'`). |
 | `tools.discovered` | `find_tools` activated tools (`query`, `names`). |
 | `tool.approval-requested` / `tool.approval-resolved` | The approval gate asked / decided (`automatic` for rule, mode and timeout denials). |
-| `egress.request` | A `web_fetch` request, allowed or refused by the [egress policy](#egress-what-the-model-may-fetch) (`url` is origin and path only, `allowed`, `status?`, `reason?`). |
+| `egress.request` | A `web_fetch` request (or `web_search`'s call to its [search API](#search-finding-the-page-to-fetch)), allowed or refused by the [egress policy](#egress-what-the-model-may-fetch) (`url` is origin and path only, `allowed`, `status?`, `reason?`). |
 | `skill.learned` / `skill.forgotten` | The agent wrote, rewrote (`update`) or removed a lesson — see [Learning](#learning-lessons-that-outlive-the-task) (`name`, and for a lesson `description`, `chars`, `sources`). |
 
 **Subagents and steering**
@@ -739,6 +739,48 @@ Approval: an open-internet `web_fetch` is a way to leak data through the URL, so
 
 What it is not: a sandbox for what a fetched *page says* — that stays data the model reads, which is why the result is flagged untrusted. And it does not govern the provider's own calls, or the MCP servers and tools you configure — those are your configuration, not the model's. A subagent has its own `egress` (none unless you set it). The browser sibling cannot pin DNS; see `@dudko.dev/agent-web`.
 
+## Search: finding the page to fetch
+
+`web_fetch` reads a page the model already knows the address of. `search` is its companion: one tool, `web_search({ query, maxResults?, freshness? })`, that returns a short list of `{ title, url, snippet, date? }`. **Off by default**, and the library ships **no key and no engine**: you name a hosted search API, or pass a function.
+
+```ts
+const agent = await createAgent({
+  // ...
+  search: { provider: 'brave', apiKey: process.env.BRAVE_API_KEY! }, // or 'tavily'
+  // search: { provider: 'searxng', baseURL: 'https://search.example.com' }, // your own instance, no key
+  // search: { engine: async (query, { maxResults, freshness, signal }) => myIndex.search(query) },
+  egress: { allow: ['docs.example.com', '*.github.com'] }, // optional: web_fetch, and the filter below
+})
+// CLI: AGENT_SEARCH=brave AGENT_SEARCH_API_KEY=... (or AGENT_SEARCH=searxng AGENT_SEARCH_BASE_URL=...)
+```
+
+| `search` field | |
+|---|---|
+| `provider` | A built-in adapter, one HTTP call each: `'brave'` ([Brave Search API](https://api-dashboard.search.brave.com/app/documentation/web-search/get-started): `GET /res/v1/web/search`, key in `X-Subscription-Token`), `'tavily'` ([Tavily Search](https://docs.tavily.com/documentation/api-reference/endpoint/search): `POST /search`, `Authorization: Bearer`), `'searxng'` (a [SearXNG](https://docs.searxng.org/dev/search_api.html) instance of yours: `GET /search?format=json`, no key - its `settings.yml` must list `json` under `search.formats`, or it answers 403). |
+| `apiKey` | The key of `brave` / `tavily`. Sent in a header to that API only. |
+| `baseURL` | Required for `searxng` (the instance). For the others it replaces the public endpoint with a gateway of yours (the key is then optional). No credentials, query or fragment in it. |
+| `engine` | Instead of `provider`: your own `(query, { maxResults, freshness, signal }) => Promise<{ title, url, snippet, date? }[]>`. Its requests are yours, like a tool you pass; its results get the same cleaning, caps and filter. |
+| `maxResults` | Results per call when the model does not say. Default 5, never more than 10. |
+| `allowPrivateNetwork` | Let the **search API itself** be on a private or loopback address (a SearXNG on your network). It widens nothing else. Default `false`. |
+| `timeoutMs` | Whole request to the search API. Default 15 s. |
+| `readOnly` | How the approval gate sees a search. Default `true`; `false` makes it ask like a write. |
+
+**How it relates to `egress`.** They are independent switches, and neither loosens the other:
+
+- **The adapter's own request is pinned.** It goes through `createSafeFetch` under a policy of its own (`searchEgressPolicy`), not the model's: the allow list is exactly the search API's host, with its scheme and port; no redirect is followed; the answer is capped at 1 MB and 15 s; private and metadata addresses are refused as everywhere (DNS pinned). So you never add the search API to `egress.allow` - and the tool cannot be steered to any other host. From `egress` it inherits only what narrows or is plumbing: the `deny` list (deny still wins), `ca` and `lookup`.
+- **Results are filtered by the model's egress policy.** With `egress` set, a result whose URL `web_fetch` would refuse (not on the allow list, on the deny list, plain http, an IP in a private range, an odd port) is left out - title and snippet too - and counted in `filtered`. The model is not handed links it cannot open, and a search is not a way to read text from hosts you did not allow.
+- **`search` works without `egress`.** Then there is no `web_fetch`: the model gets the snippets as leads (the tool's description says so) and nothing is filtered, because there is no list to filter by. The search API's host does not become fetchable either way.
+
+**Results are untrusted third-party text.** Whatever the API (or your function) returns, only `title`, `url`, `snippet` and `date` survive; a result needs a valid `http(s)` URL without credentials; every field is a single line with control, zero-width and bidirectional-override characters and highlight markup removed, capped (title 200, snippet 500, URL 2000 characters; 6000 for one call in total; a query 400). The result carries `untrusted: true`, and the tool's description tells the model that snippets are facts to weigh, never instructions, and to read the page with `web_fetch` before relying on it.
+
+**The key** lives in your config (or the CLI's `AGENT_SEARCH_API_KEY`) and goes into one request header. It is never in a URL, an event, a log line, an error or a tool result: an API error is reported by status only (the body may echo what was sent), and any error text is redacted before it is thrown.
+
+**Approval.** `web_fetch` is read-only only when the policy names the hosts, because an open GET can carry data anywhere. A search reaches exactly one host and you named it, so by the same rule it is **read-only** (`ask-writes` and `read-only` let it run). That host still *sees the query*: a model that was talked into it could put private data into one. If queries must not leave unreviewed, set `search: { ..., readOnly: false }` (it then asks like a write) or a rule: `toolApproval: { rules: { web_search: 'ask' } }`. It is an ordinary tool otherwise: `maxToolCalls`, the tool-output cap, `excludedTools` and tool search all apply, and a tool of your own named `web_search` wins.
+
+**Events.** The adapter's request emits the same `egress.request` as `web_fetch` (`url` is the API's origin and path - never the query string; `allowed`, `status` / `reason`). The query itself is in the ordinary `tool.call` event. A function `engine` makes its own requests and emits none.
+
+What it is not: the providers' server-side search tools (Anthropic, OpenAI, Google). Those run inside the provider's API call, outside this policy; they are not wired here.
+
 ## Learning: lessons that outlive the task
 
 Switch on `learning` and the agent keeps a notebook. When it hits a problem and finds the way around it — a tool error it resolved, a wrong assumption it corrected, a procedure it had to look up — it writes the lesson down with `save_skill`, and the lesson **is a [skill](#skills)**: it shows up in the planner's `SKILLS:` index right away (even for the next step of the same run) and loads with `load_skill` like any other. Nothing new to learn on the reading side.
@@ -1101,7 +1143,7 @@ dd-agent --env-file=.env
 
 `--env-file=<path>` is loaded via Node's built-in `process.loadEnvFile`, so no `dotenv` dependency is needed. Without the flag the CLI reads the ambient process env. `-h` / `--help` prints the supported flags and the in-REPL slash commands (`/status`, `/usage`, `/tools`, `/history`, `/reset`, `/compact`, `/autopilot`, `/approval <mode>`, `/reconnect`, `/skills`, `/forget <name>`, `/agents`, `/stop [n]`, `/exit` — `/quit` does the same).
 
-The newer features are env-driven too: `AGENT_THINKING` (`off | minimal | low | medium | high | xhigh | <budget tokens>`), `AGENT_MAX_INPUT_TOKENS` / `AGENT_MAX_OUTPUT_TOKENS` / `AGENT_MAX_REASONING_TOKENS` / `AGENT_MAX_TOTAL_TOKENS`, `AGENT_MAX_TOOL_CALLS`, `AGENT_PER_CALL_TOKENS` (JSON `{"executor":16000,"synthesizer":0}` — per-stage output caps, `0` = no cap, see [Token limits](#token-limits-and-step-caps)), `AGENT_TOOL_APPROVAL` (`autopilot | ask-writes | ask-all | read-only`), `AGENT_TOOL_RULES` (JSON `{ "<tool or glob*>": "allow" | "ask" | "deny" }`, beats the mode — e.g. `{"github__delete_*":"deny"}`), `AGENT_EGRESS` (`on | off`; with `AGENT_EGRESS_ALLOW`, `AGENT_EGRESS_DENY`, `AGENT_EGRESS_PROTOCOLS`, `AGENT_EGRESS_ALLOW_PRIVATE` — see [Egress](#egress-what-the-model-may-fetch)), `AGENT_SANDBOX` (`on | off`; with `AGENT_SANDBOX_TIMEOUT_MS`, `AGENT_SANDBOX_MEMORY_MB` — see [Running code](#running-code-the-sandbox)), `AGENT_SKILLS_DIR`, `AGENT_LEARNING` (`on | off`; `AGENT_LEARNING_DIR` keeps the lessons across sessions — see [Learning](#learning-lessons-that-outlive-the-task)), `AGENT_TOOL_SELECTION_STRATEGY` (`auto | all | plan-narrowed | search`), `AGENT_CONTEXT_WINDOW_TOKENS`, `AGENT_COMPACTION_THRESHOLD` (percent of the window where auto-compaction starts, default 85) and `AGENT_COMPACTION=off`. The REPL prints the model's thoughts dimmed, auto-compacts its history with the same settings, and — when the approval mode asks — prompts `allow? [y]es / [n]o / [a]lways` right in the terminal; `/autopilot` toggles between autopilot and the last asking mode.
+The newer features are env-driven too: `AGENT_THINKING` (`off | minimal | low | medium | high | xhigh | <budget tokens>`), `AGENT_MAX_INPUT_TOKENS` / `AGENT_MAX_OUTPUT_TOKENS` / `AGENT_MAX_REASONING_TOKENS` / `AGENT_MAX_TOTAL_TOKENS`, `AGENT_MAX_TOOL_CALLS`, `AGENT_PER_CALL_TOKENS` (JSON `{"executor":16000,"synthesizer":0}` — per-stage output caps, `0` = no cap, see [Token limits](#token-limits-and-step-caps)), `AGENT_TOOL_APPROVAL` (`autopilot | ask-writes | ask-all | read-only`), `AGENT_TOOL_RULES` (JSON `{ "<tool or glob*>": "allow" | "ask" | "deny" }`, beats the mode — e.g. `{"github__delete_*":"deny"}`), `AGENT_EGRESS` (`on | off`; with `AGENT_EGRESS_ALLOW`, `AGENT_EGRESS_DENY`, `AGENT_EGRESS_PROTOCOLS`, `AGENT_EGRESS_ALLOW_PRIVATE` — see [Egress](#egress-what-the-model-may-fetch)), `AGENT_SEARCH` (`brave | tavily | searxng | off`; with `AGENT_SEARCH_API_KEY`, `AGENT_SEARCH_BASE_URL`, `AGENT_SEARCH_MAX_RESULTS`, `AGENT_SEARCH_ALLOW_PRIVATE` — see [Search](#search-finding-the-page-to-fetch)), `AGENT_SANDBOX` (`on | off`; with `AGENT_SANDBOX_TIMEOUT_MS`, `AGENT_SANDBOX_MEMORY_MB` — see [Running code](#running-code-the-sandbox)), `AGENT_SKILLS_DIR`, `AGENT_LEARNING` (`on | off`; `AGENT_LEARNING_DIR` keeps the lessons across sessions — see [Learning](#learning-lessons-that-outlive-the-task)), `AGENT_TOOL_SELECTION_STRATEGY` (`auto | all | plan-narrowed | search`), `AGENT_CONTEXT_WINDOW_TOKENS`, `AGENT_COMPACTION_THRESHOLD` (percent of the window where auto-compaction starts, default 85) and `AGENT_COMPACTION=off`. The REPL prints the model's thoughts dimmed, auto-compacts its history with the same settings, and — when the approval mode asks — prompts `allow? [y]es / [n]o / [a]lways` right in the terminal; `/autopilot` toggles between autopilot and the last asking mode.
 
 **Talking to the agent while it works.** The REPL keeps reading while a run goes. Text you type then is said to the running agent (it sees it at its next boundary and the replanner re-checks the plan — see [Steering a run](#steering-a-run-that-is-already-going)): the REPL prints `[you->agent] queued` and then `delivered (round|step|final)`, and the message enters the history as a user turn. A message that arrives while the answer is being written is sent as the next prompt (`[follow-up]`). After Ctrl-C nothing is sent behind your back: what the agent never saw is listed as `[not delivered]`. While a run goes, `/agents` lists the running subagents and `/stop <n>` (or an id prefix, or just `/stop` when one runs) stops one — the run goes on; the other REPL commands work between runs. Each subagent's own steps and tool calls are logged as `[name id] ...` lines, so parallel ones can be told apart.
 

@@ -239,6 +239,33 @@ export type {
   IResolvedEgressPolicy,
   IWebFetchOptions,
 } from './tools/egress.js'
+// Search: the web_search tool (a hosted search API through the guarded fetch, or the host's function).
+export { createWebSearchTool, createSearchTools, searchEgressPolicy } from './tools/web-search.js'
+export type { ISearchConfig, IWebSearchOptions } from './tools/web-search.js'
+export {
+  buildSearchRequest,
+  parseSearchResponse,
+  sanitizeSearchResults,
+  SEARCH_API_BASE_URL,
+  SEARCH_DEFAULT_MAX_RESULTS,
+  SEARCH_MAX_QUERY_CHARS,
+  SEARCH_MAX_RESULTS,
+  SEARCH_MAX_SNIPPET_CHARS,
+  SEARCH_MAX_TITLE_CHARS,
+  SEARCH_MAX_TOTAL_CHARS,
+  SEARCH_MAX_URL_CHARS,
+  SEARCH_PROVIDERS,
+  WEB_SEARCH_TOOL,
+} from './tools/web-search-shared.js'
+export type {
+  ISanitizedSearch,
+  ISearchOptions,
+  ISearchRequest,
+  ISearchResult,
+  SearchEngine,
+  SearchFreshness,
+  SearchProvider,
+} from './tools/web-search-shared.js'
 export { renderCatalog, dispatch } from './tools/prompted.js'
 export { selectToolMode } from './tools/mode.js'
 export { promptHintOf } from './tools/types.js'

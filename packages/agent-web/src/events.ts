@@ -103,8 +103,8 @@ type AgentEventBody =
   /** `stopped` is set when the user stopped this subagent (`RunControl.stopSubagent`), as opposed to it failing. */
   | { type: 'subagent.error'; id: string; name: string; error: string; stopped?: boolean }
   /**
-   * A request of the `web_fetch` tool, allowed or refused by the egress policy. `url` is origin and
-   * path only (a query string can carry a secret).
+   * A request of the `web_fetch` tool, or of `web_search` to its search API, allowed or refused
+   * by the egress policy. `url` is origin and path only (a query string can carry a secret).
    */
   | { type: 'egress.request'; url: string; allowed: boolean; status?: number; reason?: string }
   /** A message sent with `RunControl.send` is waiting for the next boundary. */

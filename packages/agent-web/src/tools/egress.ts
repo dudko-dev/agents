@@ -577,6 +577,8 @@ export const createGuardedFetch = (policy: IEgressPolicy = {}): GuardedFetch => 
         cache: 'no-store',
         mode: 'cors',
         ...(init.headers ? { headers: init.headers } : {}),
+        // Only a policy that allows a method with a body (not the default GET) gets here with one.
+        ...(init.body != null ? { body: init.body } : {}),
       })
     } catch (err) {
       if (timeout.aborted && !init.signal?.aborted) {

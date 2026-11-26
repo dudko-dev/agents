@@ -223,9 +223,9 @@ user step, on the word of the company's identity provider (IdP).
 
 # Egress and learning: the threat model
 
-The vault above is about a key at rest. The two features below are about what the
-**model** can be talked into doing, because both put model-chosen content in
-front of the model again later. They are off by default; this is what turning
+The vault above is about a key at rest. The features below (egress, search,
+learning) are about what the **model** can be talked into doing, because each puts
+content the model chose, or a third party wrote, in front of the model. They are off by default; this is what turning
 them on does and does not protect.
 
 ## Egress (`web_fetch`)
@@ -280,6 +280,44 @@ Turned on, the model gets one tool: a GET that returns text.
    the only configuration with full SSRF protection.
 3. Keep the consent mode on `ask-writes` or stricter when egress is open.
 4. Never put a secret where the model can read it and `web_fetch` can send it.
+
+## Search (`web_search`)
+
+Without `search` in the config there is no tool. Turned on, the model can send a query to one
+search service and read a short list of results.
+
+**The threats**
+
+- **Prompt injection through a title or a snippet.** A page can be written so that its search
+  snippet reads "ignore your instructions...". Results are reduced to `title`, `url`, `snippet`,
+  `date`; each is one line with control, zero-width and bidirectional-override characters
+  removed, capped (and the whole list capped); the result is flagged `untrusted: true` and the
+  tool's description frames it as facts, never instructions. A mitigation, not a guarantee.
+- **A query is data leaving.** Whatever the model puts into a query reaches the search service
+  (and, with SearXNG, the engines behind it). The destination is one host the operator chose -
+  which is why a search is read-only for consent, like an allow-listed `web_fetch` - but an
+  injected model could still put something private into a query. If that matters, set
+  `search.readOnly: false` or a `web_search: 'ask'` rule, or use an instance you run.
+- **The key.** A key in a page is readable by the page's user: use the user's own key (BYOK,
+  `credentialRef` into the encrypted vault) or a gateway that holds yours (`baseURL`). It is never
+  written into the config (an inline `apiKey` is refused), never put into a URL, and never
+  reaches an event, a log line, an error or a tool result - API errors are reported by status
+  only and error text is redacted.
+- **Using the tool to get around `egress`.** The adapter's request is pinned to the search API's
+  host, scheme and port, follows no redirect, sends no cookies or referrer and is bounded in size
+  and time; the host's `deny` list still wins. Results that `web_fetch` would refuse are dropped
+  with their snippets, so a search does not read text from hosts outside the allow list.
+- **SSRF through a search API on a private address.** Refused unless `search.allowPrivateNetwork`
+  is set (meant for a SearXNG on your network); metadata addresses stay refused. As with
+  `web_fetch`, a page cannot pin DNS: a public-looking name that resolves inward is invisible.
+
+**What a browser limits**
+
+- Only an API that allows cross-origin requests can be called from a page. Tavily does; Brave
+  does not (use a gateway); SearXNG only when you configure it. See
+  [capabilities.md](./capabilities.md#search-finding-the-page-to-fetch).
+- An `engine` function is host code: its requests are outside this policy, like any tool you pass.
+  Its *results* still go through the same cleaning and filtering.
 
 ## Learning (`save_skill`)
 

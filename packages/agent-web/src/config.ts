@@ -16,6 +16,7 @@ import type { LearningConfig } from './learning.js'
 import type { SandboxConfig } from './sandbox/index.js'
 import type { Skill } from './skills.js'
 import type { IEgressPolicy } from './tools/egress.js'
+import type { ISearchConfig } from './tools/web-search.js'
 import {
   resolveThinking,
   thinkingFor,
@@ -77,6 +78,16 @@ export interface BrowserAgentConfig {
    * or tools you pass yourself - those are your configuration, not the model's.
    */
   egress?: boolean | IEgressPolicy
+  /**
+   * Let the model SEARCH the web (the `web_search` tool: a short list of title / url / snippet).
+   * Off unless set. The library ships no key: name a hosted search API (`provider` +
+   * `credentialRef` - the key stays in `credentials`, never here - or a SearXNG `baseURL`) or
+   * pass a function (`engine`). The adapter's request reaches that API's host only, through the
+   * guarded fetch; with `egress` set, results the model could not fetch are left out. Works
+   * without `egress` (then there is no `web_fetch` to open a link). The API must allow
+   * cross-origin calls from a page - see `ISearchConfig`.
+   */
+  search?: ISearchConfig
   /**
    * Let the agent RUN JavaScript it wrote (the `run_js` tool) and read the output. Off unless
    * set: with it off the tool does not exist and the engine is never loaded. `true` = the

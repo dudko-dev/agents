@@ -36,6 +36,7 @@ import {
 } from '../tools/approval.js'
 import { createLearning } from '../learning.js'
 import { createEgressTools } from '../tools/egress.js'
+import { createSearchTools } from '../tools/web-search.js'
 import { selectToolMode } from '../tools/mode.js'
 import { renderCatalog } from '../tools/prompted.js'
 import {
@@ -301,7 +302,13 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
   const hostTools: AgentToolSet = filterTools(
     // What `egress` switches on (web_fetch) and the notebook's tools; a tool of the same name in
     // `tools` wins.
-    { ...createEgressTools(config.egress), ...learning?.tools, ...config.tools },
+    {
+      ...createEgressTools(config.egress),
+      // What `search` switches on (web_search): its own request is pinned to the search API.
+      ...createSearchTools(config.search, config.egress, config.credentials),
+      ...learning?.tools,
+      ...config.tools,
+    },
     config.availableTools,
     config.excludedTools,
   )
