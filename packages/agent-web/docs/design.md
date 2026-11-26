@@ -451,9 +451,8 @@ and four decisions shape it.
 
 **No key and no third-party search API ship with the library.** A search API costs money and
 has terms; the host passes one as a function (`engine`), and the docs carry recipes for Tavily,
-Brave and SearXNG. Adapters for those three were built in for one release and then moved out:
-each is a dozen lines a host can own, while inside the library each was an API to track, a key
-format to know and a CORS answer to keep re-checking. What stays shared with the Node sibling is
+Brave and SearXNG. Each is a dozen lines a host can own, while inside the library each would be
+an API to track, a key format to know and a CORS answer to keep re-checking. What stays shared with the Node sibling is
 everything a host should *not* have to write - the caps, the cleaning, the egress filter, the
 key redaction - in `web-search-shared.ts`, a byte-for-byte copy of the Node file.
 
