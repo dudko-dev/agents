@@ -107,6 +107,24 @@ behind every decision.
   recorded before the feature existed (`UPDATE_GOLDEN=1` rewrites it after a deliberate prompt or
   schema change). The smallest window among all models, tiers included, governs a run; a tier's
   tool-mode and output cap are its own. Every guard has a test there and a mutation check.
+- `src/decision.ts` — `config.decisionModel` / `config.decision`: a decision model answers a closed
+  question with an option and a probability instead of writing text. The interface
+  (`IDecisionModel.decide`), the guard `askDecisionModel` (below `confidenceThreshold`, default 0.8,
+  on an error, a timeout, an answer that is not an option or a confidence that is not a probability
+  the ordinary model call runs UNCHANGED), the `decision` event, the usage record (`decisionCalls`:
+  a call is not a token) and `decisionModelFromAiSdk` (the AI SDK's experimental
+  `experimental_decide`). Imports only `ai`; a COPY of the server's `src/decision.ts`, byte for
+  byte - change both (the server's `tests/decision.test.ts` compares them and tests the guard case
+  by case). `src/decision-provider.ts` is this package's own: a spec of a hosted decision API a
+  page can call (`google` only: CORS decides, see docs/capabilities.md), the key from the
+  `CredentialStore` (`credentialRef`; an inline `apiKey` is refused), the request through the
+  guarded fetch under `decisionEgressPolicy` (the API's host only, POST, no redirect); the optional
+  peer is imported with a variable specifier, like the registry's. Asked at two points:
+  `decideReplanWithDecisionModel` (`agent/replanner.ts`) and `pickRouteWithDecisionModel`
+  (`pipeline/index.ts`; the engine is not involved). NEVER a security control: not consulted for
+  approval, egress or the sandbox. OFF without `decisionModel`: the golden calls of
+  `tests/model-tiers.test.ts` must pass untouched. Every guard has a test in
+  `tests/decision.test.ts` and a mutation check; no test calls a real API.
 - `src/subagent/` — `tool` (createSubagentTool), `worker` (serveSubagentWorker),
   `protocol` (postMessage shapes).
 - `src/{thinking,limits,caching,skills,images}.ts` — see docs/capabilities.md.

@@ -114,6 +114,22 @@
     requests with `tests/fixtures/requests-without-tiers.json`, recorded before the feature existed
     (`UPDATE_GOLDEN=1` rewrites it after a deliberate prompt or schema change). Every guard has a
     test there and a mutation check.
+  - `decision.ts` (`config.decisionModel` / `config.decision`: a decision model answers a closed
+    question with an option and a probability instead of writing text. The interface
+    (`IDecisionModel.decide`), the guard `askDecisionModel` - below `confidenceThreshold` (default
+    0.8), on an error, a timeout, an answer that is not an option or a confidence that is not a
+    probability the ordinary model call runs UNCHANGED - the `decision` event, the usage record
+    (`decisionCalls`: a call is not a token) and `decisionModelFromAiSdk`, the adapter over the AI
+    SDK's experimental `experimental_decide` (Gemini Decision 1 via `@ai-sdk/google`, TypeSafe's
+    Jev via `@ai-sdk/typesafe-ai`). Imports only `ai`; a COPY of the browser sibling's
+    `src/decision.ts`, byte for byte: change both (`tests/decision.test.ts` compares them). Asked
+    at two points: `decideWithDecisionModel` in `replanner.ts` (continue / finish; `revise` hands
+    over to the replanner; not asked when the user's message forced the replan) and
+    `pickRouteWithDecisionModel` in `pipeline.ts` (the engine is not involved). NEVER a security
+    control: it is not consulted for approval, egress or the sandbox, and a test says so. OFF
+    without `decisionModel`: the golden requests of `tests/model-tiers.test.ts` must pass
+    untouched. Every guard has a test in `tests/decision.test.ts` and a mutation check; the vendor
+    adapter is tested against a local imitation of the documented response, never a real API.
   - `internal.ts` (`IRunState`: the per-run mutable state shared by the runner, the stages and the tool
     wrappers) + `context.ts` (`runContext`, the AsyncLocalStorage that carries run id, emit and state
     into tools). Neither is public API.
