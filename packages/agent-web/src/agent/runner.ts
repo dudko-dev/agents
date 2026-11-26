@@ -37,6 +37,7 @@ import {
 import { createLearning } from '../learning.js'
 import { createEgressTools } from '../tools/egress.js'
 import { createSearchTools } from '../tools/web-search.js'
+import { createMedia } from '../tools/media.js'
 import { selectToolMode } from '../tools/mode.js'
 import { renderCatalog } from '../tools/prompted.js'
 import {
@@ -69,7 +70,9 @@ import {
 } from './loop-types.js'
 import { resolveResume, type RunSnapshot, type RunStatus } from './persistence.js'
 import { createPlan, type PlanOutcome } from './planner.js'
-import { decideReplan } from './replanner.js'
+import type { IDecisionModel } from '../decision.js'
+import { resolveDecisionModel } from '../decision-provider.js'
+import { decideReplan, decideReplanWithDecisionModel } from './replanner.js'
 import { synthesizeAnswer } from './synthesizer.js'
 import { createLogger } from '../logger.js'
 import { splitComplexityTag } from '../parse.js'
@@ -229,6 +232,8 @@ export interface Agent {
     pdf: boolean | undefined
     files: boolean | undefined
   }
+  /** `config.decisionModel`, resolved (a spec built into a model). Absent when the feature is off. */
+  readonly decisionModel?: IDecisionModel
   /** The resolved models, for hosts that want to reuse them (e.g. warm-up). */
   readonly models: {
     planner: LanguageModel
@@ -319,6 +324,9 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
         }
       : undefined
 
+  // Off unless set. A spec is resolved here: the key from `credentials`, the request pinned to
+  // the API's host.
+  const decisionModel = await resolveDecisionModel(config.decisionModel, config.credentials)
   const plannerMode = selectToolMode(plannerModel, cfg.toolMode)
   const executorMode = selectToolMode(executorModel, cfg.toolMode)
   // The window every run must fit: the configured one, capped by the smallest
@@ -388,6 +396,15 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
     : undefined
   // Read live: a lesson written mid-run is a skill the planner may pick and load_skill may load.
   const hasSkill = (name: string): boolean => skills.some((s) => s.name === name)
+  // What `media` switches on (generate_image / generate_speech / transcribe_audio): only the
+  // tools whose model is configured, nothing at all without one.
+  const media = await createMedia({
+    media: config.media,
+    base: config.model,
+    credentials: config.credentials,
+    clientName: cfg.clientName,
+    tools: config.tools,
+  })
   const hostTools: AgentToolSet = filterTools(
     // What `egress` switches on (web_fetch) and the notebook's tools; a tool of the same name in
     // `tools` wins.
@@ -395,6 +412,7 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
       ...createEgressTools(config.egress),
       // What `search` switches on (web_search): its own request is pinned to the search API.
       ...createSearchTools(config.search, config.egress, config.credentials),
+      ...media?.tools,
       ...learning?.tools,
       // What `subagents.dynamic` switches on. A helper has it only below the depth limit.
       ...(dynamicSubagents && (!seed || seed.maySpawn)
@@ -558,7 +576,7 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
       }
     }
     // A resumed run is the SAME run: its goal, session and id come from the checkpoint.
-    const text = (resumed?.goal ?? goal).trim()
+    let text = (resumed?.goal ?? goal).trim()
     const sessionId = resumed?.sessionId ?? opts.sessionId ?? cfg.sessionId
     const runId = resumed?.runId ?? newRunId()
     const startedAt = resumed?.startedAt ?? Date.now()
@@ -666,7 +684,8 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
         emit,
         step: () => currentStep,
         signal: opts.signal,
-        addUsage: (u) => bumpUsage(u, 'subagent'),
+        addUsage: (u, phase) => bumpUsage(u, phase ?? 'subagent'),
+        usage: () => usage,
         countCall,
         maxToolOutputChars: cfg.compaction.maxToolOutputChars,
         control: port ?? seed?.control,
@@ -715,7 +734,34 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
     })
     // From here a `send` is announced as it comes (and anything sent earlier, now).
     port?.attach(emit)
-    const images = [...(opts.images ?? []), ...(opts.files ?? [])]
+    let images = [...(opts.images ?? []), ...(opts.files ?? [])]
+    // Audio the user attached is transcribed once, here, and travels as text from now on (a
+    // resumed run's saved goal already carries it); the other attachments go on as before.
+    if (media?.transcribes && !resumed && images.length) {
+      try {
+        const heard = await media.attach(text, images, {
+          emit,
+          signal: opts.signal,
+          addUsage: (u) => bumpUsage(u, 'media'),
+          usage: () => usage,
+          runId,
+        })
+        text = heard.goal
+        images = heard.rest
+      } catch (err) {
+        if (isAborted()) {
+          emit({ type: 'stopped' })
+          result.stopped = true
+          return result
+        }
+        // A file that cannot be transcribed ends the run with a message a user can act on.
+        const message = errMessage(err)
+        log.warn(message)
+        emit({ type: 'error', phase: 'run', error: message })
+        result.final = message
+        return result
+      }
+    }
     const refused = images.map(attachmentKind).find((kind) => accepts[kind] === false)
     if (refused) {
       // Fail before spending a single token, with a message a user can act on.
@@ -776,6 +822,7 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
       executorModel,
       ...(tiers ? { tiers } : {}),
       synthesizerModel,
+      ...(decisionModel ? { decisionModel } : {}),
       plannerMode,
       executorMode,
       tools,
@@ -1182,14 +1229,27 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
                 log.warn('replanAfter predicate threw — using the failure rule', err),
             })))
         if (wantReplan && !isAborted()) {
-          const decision = await decideReplan(
-            ctx,
-            text,
-            done,
-            remaining.map((s) => s.description),
-            fresh,
-          )
-          bumpUsage(decision.usage, 'replan')
+          // A message from the user is weighed by the replanner itself: what the user wants now
+          // is not a closed question.
+          const quick = byUser
+            ? undefined
+            : await decideReplanWithDecisionModel(
+                ctx,
+                text,
+                done,
+                remaining.map((s) => s.description),
+                (u) => bumpUsage(u, 'decision'),
+              )
+          const decision =
+            quick ??
+            (await decideReplan(
+              ctx,
+              text,
+              done,
+              remaining.map((s) => s.description),
+              fresh,
+            ))
+          if (!quick) bumpUsage(decision.usage, 'replan')
           // A replanner that could not be asked (both attempts failed) is not a reason to drop
           // the steps already done: the run carries on with the plan as it is, and says so.
           if (decision.failed) {
@@ -1202,6 +1262,7 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
             reason: decision.reason,
             ...(byUser ? { byUser: true } : {}),
             ...(decision.failed ? { failed: true } : {}),
+            ...(decision.confidence !== undefined ? { confidence: decision.confidence } : {}),
           })
           // Weighed, whatever it decided: from here the messages are part of the run's story.
           // A replanner that failed weighed nothing: the next boundary asks it again.
@@ -1404,5 +1465,6 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
       synthesizer: synthesizerModel,
       ...(tierModels ? { tiers: tierModels } : {}),
     },
+    ...(decisionModel ? { decisionModel } : {}),
   }
 }

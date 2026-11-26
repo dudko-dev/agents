@@ -1,8 +1,11 @@
+import { readFile } from 'node:fs/promises'
+import { basename } from 'node:path'
 import { stdin as input, stdout as output } from 'node:process'
 import { createInterface } from 'node:readline/promises'
 import type {
   AgentEvent,
   IConversationTurn,
+  IRunFile,
   IToolApprovalRequest,
   IUsage,
   RunControl,
@@ -41,8 +44,23 @@ const formatJson = (v: unknown): string => {
 }
 
 // "1234 tokens (in=1000 out=234 reasoning=50 cached=800)" - what the session has spent.
+// Media calls are not tokens: they are shown beside them, in their own units.
+const describeMedia = (u: IUsage): string =>
+  u.mediaCalls
+    ? ` media=${u.mediaCalls} call(s) (images=${u.imagesGenerated ?? 0} speech-chars=${u.speechCharacters ?? 0} transcribed-sec=${Math.round(u.transcriptionSeconds ?? 0)})`
+    : ''
+
 const describeSpent = (u: IUsage): string =>
-  `${u.totalTokens} tokens (in=${u.inputTokens} out=${u.outputTokens}${u.reasoningTokens ? ` reasoning=${u.reasoningTokens}` : ''}${u.cachedInputTokens ? ` cached=${u.cachedInputTokens}` : ''}${u.cacheWriteTokens ? ` cache-write=${u.cacheWriteTokens}` : ''}) this session`
+  `${u.totalTokens} tokens (in=${u.inputTokens} out=${u.outputTokens}${u.reasoningTokens ? ` reasoning=${u.reasoningTokens}` : ''}${u.cachedInputTokens ? ` cached=${u.cachedInputTokens}` : ''}${u.cacheWriteTokens ? ` cache-write=${u.cacheWriteTokens}` : ''})${describeMedia(u)} this session`
+
+// "/audio <file> [question]": the file to attach and what to ask about it.
+export const parseAudioCommand = (line: string): { file: string; text: string } | undefined => {
+  const m = /^\/audio\s+(?:"([^"]+)"|(\S+))\s*([\s\S]*)$/.exec(line)
+  if (!m) {
+    return undefined
+  }
+  return { file: m[1] ?? m[2], text: m[3].trim() || 'Here is an audio file. What does it say?' }
+}
 
 const describeThinking = (t: ThinkingSetting | undefined): string => {
   if (t === undefined || t === false) {
@@ -91,7 +109,7 @@ export const runRepl = async (): Promise<void> => {
   )
   console.log(`[mcp]     servers=${mcpNames.length ? mcpNames.join(', ') : '(none)'}`)
   console.log(
-    '[hint]    commands: /status, /usage, /tools, /history, /reset, /compact, /autopilot, /approval <mode>, /reconnect, /exit\n',
+    '[hint]    commands: /status, /usage, /tools, /history, /audio <file>, /reset, /compact, /autopilot, /approval <mode>, /reconnect, /exit\n',
   )
 
   // Which stream (if any) currently owns the output line.
@@ -262,6 +280,18 @@ export const runRepl = async (): Promise<void> => {
           endLine()
           console.log(`[replan]  ${event.mode} (${event.cause}): ${event.reason}`)
         }
+        break
+      case 'media.generated':
+        endLine()
+        console.log(
+          `[media]   ${event.kind} saved: ${event.path} (${event.mediaType}, ${event.bytes} bytes)`,
+        )
+        break
+      case 'media.transcribed':
+        endLine()
+        console.log(
+          `[media]   transcribed ${event.name}${event.durationInSeconds ? ` (${Math.round(event.durationInSeconds)}s)` : ''}: ${truncate(event.text, 160)}`,
+        )
         break
       case 'usage':
         // Per-run total surfaces in [meta] via result.usage. We do not
@@ -616,6 +646,25 @@ export const runRepl = async (): Promise<void> => {
         continue
       }
 
+      // /audio <file> [question]: the file goes with the run and is transcribed there.
+      let files: IRunFile[] | undefined
+      if (prompt === '/audio' || prompt.startsWith('/audio ')) {
+        const audio = parseAudioCommand(prompt)
+        if (!audio) {
+          console.log(
+            '[audio]   usage: /audio <file> [question]  (needs AGENT_TRANSCRIPTION_MODEL)',
+          )
+          continue
+        }
+        try {
+          files = [{ data: new Uint8Array(await readFile(audio.file)), name: basename(audio.file) }]
+        } catch (err) {
+          console.error('[error] cannot read the audio file:', (err as Error).message)
+          continue
+        }
+        prompt = audio.text
+      }
+
       streaming = 'none'
       runController = new AbortController()
       control = createRunControl()
@@ -625,6 +674,7 @@ export const runRepl = async (): Promise<void> => {
         const result = await agent.run({
           input: prompt,
           history,
+          ...(files ? { files } : {}),
           signal: runController.signal,
           control,
         })
@@ -648,7 +698,7 @@ export const runRepl = async (): Promise<void> => {
         trimHistory(history)
         const u = result.usage
         console.log(
-          `[meta]    iterations=${result.iterations} steps=${result.trace.length} tokens=${u.totalTokens} (in=${u.inputTokens} out=${u.outputTokens}${u.reasoningTokens ? ` reasoning=${u.reasoningTokens}` : ''}${u.cachedInputTokens ? ` cached=${u.cachedInputTokens}` : ''}) session=${agent.usage.totalTokens}`,
+          `[meta]    iterations=${result.iterations} steps=${result.trace.length} tokens=${u.totalTokens} (in=${u.inputTokens} out=${u.outputTokens}${u.reasoningTokens ? ` reasoning=${u.reasoningTokens}` : ''}${u.cachedInputTokens ? ` cached=${u.cachedInputTokens}` : ''})${describeMedia(u)} session=${agent.usage.totalTokens}`,
         )
       } catch (err) {
         endLine()

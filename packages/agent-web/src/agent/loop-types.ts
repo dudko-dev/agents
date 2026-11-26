@@ -1,3 +1,5 @@
+import { addMediaUsage } from '../tools/media-shared.js'
+
 /** Executor models by strength (`config.executorTiers`), weakest first. */
 export type ModelTier = 'light' | 'standard' | 'strong'
 
@@ -64,6 +66,20 @@ export interface IUsage {
   cachedInputTokens?: number
   /** Input tokens written to the provider's prompt cache. */
   cacheWriteTokens?: number
+  /**
+   * What the media models (`config.media`) were asked for - calls (failed ones included), images
+   * written, characters sent to the speech model, seconds of audio transcribed. Not tokens and
+   * not part of the counts above. Absent until a media model is called (see `IMediaUsage`).
+   */
+  mediaCalls?: number
+  imagesGenerated?: number
+  speechCharacters?: number
+  transcriptionSeconds?: number
+  /**
+   * Calls made to `config.decisionModel`. A call is not a token: what the API billed for it (when
+   * it says) is in the token fields, the number of calls is here. Absent when zero.
+   */
+  decisionCalls?: number
 }
 
 export interface IToolCall {
@@ -111,4 +127,8 @@ export const addUsage = (a: IUsage, b: IUsage): IUsage => ({
   reasoningTokens: (a.reasoningTokens ?? 0) + (b.reasoningTokens ?? 0),
   cachedInputTokens: (a.cachedInputTokens ?? 0) + (b.cachedInputTokens ?? 0),
   cacheWriteTokens: (a.cacheWriteTokens ?? 0) + (b.cacheWriteTokens ?? 0),
+  ...addMediaUsage(a, b),
+  ...((a.decisionCalls ?? 0) + (b.decisionCalls ?? 0) > 0
+    ? { decisionCalls: (a.decisionCalls ?? 0) + (b.decisionCalls ?? 0) }
+    : {}),
 })

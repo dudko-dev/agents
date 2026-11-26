@@ -1,4 +1,8 @@
+import { addMediaUsage, type IMediaUsage } from './media-shared.ts'
 import type { IUsage } from './types.ts'
+
+// IUsage with every token detail filled in. The media fields stay optional: they exist only
+// once a media model was called.
 
 export interface IRetryOptions {
   maxRetries: number
@@ -116,8 +120,16 @@ export const redactHeaders = (
   return out
 }
 
+// Every token detail filled in. `decisionCalls` stays optional: it is absent unless a decision
+// model was called, so a run without one reports exactly what it always did.
+export type IFilledUsage = Required<Omit<IUsage, 'decisionCalls' | keyof IMediaUsage>> &
+  Pick<IUsage, 'decisionCalls'> &
+  Partial<IMediaUsage>
+// The same record under the name the media code uses.
+export type IFullUsage = IFilledUsage
+
 // A zeroed usage record with every optional detail filled in.
-export const emptyUsage = (): Required<IUsage> => ({
+export const emptyUsage = (): IFilledUsage => ({
   inputTokens: 0,
   outputTokens: 0,
   totalTokens: 0,
@@ -135,15 +147,22 @@ export interface ISdkUsageLike {
   totalTokens?: number
   inputTokenDetails?: { cacheReadTokens?: number; cacheWriteTokens?: number }
   outputTokenDetails?: { reasoningTokens?: number }
+  // Carried by a checkpoint's IUsage: calls to `config.decisionModel`.
+  decisionCalls?: number
   // Pre-v6 flat fields, still produced by some wrappers.
   reasoningTokens?: number
   cachedInputTokens?: number
+  // Ours, not the SDK's: carried over when a saved IUsage is normalised (a resumed run).
+  mediaCalls?: number
+  imagesGenerated?: number
+  speechCharacters?: number
+  transcriptionSeconds?: number
 }
 
 const n = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0)
 
 // AI SDK usage -> IUsage with every detail field filled (0 when unknown).
-export const normalizeUsage = (usage: ISdkUsageLike | undefined | null): Required<IUsage> => {
+export const normalizeUsage = (usage: ISdkUsageLike | undefined | null): IFilledUsage => {
   if (!usage) {
     return emptyUsage()
   }
@@ -157,6 +176,8 @@ export const normalizeUsage = (usage: ISdkUsageLike | undefined | null): Require
     reasoningTokens: n(usage.outputTokenDetails?.reasoningTokens ?? usage.reasoningTokens),
     cachedInputTokens: n(usage.inputTokenDetails?.cacheReadTokens ?? usage.cachedInputTokens),
     cacheWriteTokens: n(usage.inputTokenDetails?.cacheWriteTokens),
+    ...addMediaUsage(usage, undefined),
+    ...(n(usage.decisionCalls) > 0 ? { decisionCalls: n(usage.decisionCalls) } : {}),
   }
 }
 
@@ -164,7 +185,7 @@ export const normalizeUsage = (usage: ISdkUsageLike | undefined | null): Require
 // puts the usage on the error it throws when a structured answer cannot be parsed
 // (NoObjectGeneratedError.usage); the tokens were spent all the same. Same name and meaning as
 // the browser sibling's helper.
-export const usageOfError = (err: unknown): Required<IUsage> | undefined => {
+export const usageOfError = (err: unknown): IFilledUsage | undefined => {
   const u = (err as { usage?: ISdkUsageLike } | null | undefined)?.usage
   if (!u || typeof u !== 'object') {
     return undefined
@@ -190,13 +211,17 @@ export const isAuthError = (err: unknown, seen: Set<unknown> = new Set()): boole
 }
 
 // a + b, field by field (missing optional fields count as 0).
-export const addUsage = (a: IUsage, b: IUsage): Required<IUsage> => ({
+export const addUsage = (a: IUsage, b: IUsage): IFilledUsage => ({
   inputTokens: a.inputTokens + b.inputTokens,
   outputTokens: a.outputTokens + b.outputTokens,
   totalTokens: a.totalTokens + b.totalTokens,
   reasoningTokens: (a.reasoningTokens ?? 0) + (b.reasoningTokens ?? 0),
   cachedInputTokens: (a.cachedInputTokens ?? 0) + (b.cachedInputTokens ?? 0),
   cacheWriteTokens: (a.cacheWriteTokens ?? 0) + (b.cacheWriteTokens ?? 0),
+  ...addMediaUsage(a, b),
+  ...((a.decisionCalls ?? 0) + (b.decisionCalls ?? 0) > 0
+    ? { decisionCalls: (a.decisionCalls ?? 0) + (b.decisionCalls ?? 0) }
+    : {}),
 })
 
 // Add b into a, in place (the run accumulator is shared by reference).

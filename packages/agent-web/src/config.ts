@@ -18,6 +18,9 @@ import type { ISubagentsConfig } from './subagent/dynamic-shared.js'
 import type { Skill } from './skills.js'
 import type { IEgressPolicy } from './tools/egress.js'
 import type { ISearchConfig } from './tools/web-search.js'
+import type { IMediaConfig } from './tools/media.js'
+import type { IDecisionConfig, IDecisionModel } from './decision.js'
+import type { IDecisionModelSpec } from './decision-provider.js'
 import {
   resolveThinking,
   thinkingFor,
@@ -110,6 +113,31 @@ export interface BrowserAgentConfig {
    * cross-origin calls from a page - see `ISearchConfig`.
    */
   search?: ISearchConfig
+  /**
+   * Image generation, speech and transcription, each as a tool that exists only when its model
+   * is set: `imageModel` -> `generate_image`, `speechModel` -> `generate_speech`,
+   * `transcriptionModel` -> audio attachments transcribed once (the model reads the text) and,
+   * with a file system, `transcribe_audio`. Off unless set. Generated files are written to the
+   * virtual file system (`media.files`, else the one of the mounted file tools) and the model
+   * gets a path, never the bytes. Each call is a write for tool approval, counts in
+   * `usage.mediaCalls`, and a run may make `media.maxCalls` of them (default 8). Prompts, spoken text
+   * and audio leave for the provider of that model; a key is named by `credentialRef`, never
+   * written here. See `IMediaConfig`.
+   */
+  media?: IMediaConfig
+  /**
+   * A decision model: a small, fast model that answers a closed question with one option and a
+   * probability instead of writing text. Off unless set. Where it is confident it replaces the
+   * replanner's continue / finish call and a pipeline node's route call; below
+   * `decision.confidenceThreshold`, on an error, a timeout or an answer that is not an option,
+   * the ordinary model call runs exactly as without it. Never consulted for tool approval or
+   * egress. Either an object with `decide` (yours), or a spec of a hosted decision API a page
+   * can call (`{ providerType: 'google', model: 'gemini-decision-1', credentialRef }` - the key
+   * stays in `credentials`, never here).
+   */
+  decisionModel?: IDecisionModel | IDecisionModelSpec
+  /** The threshold (default 0.8), the timeout (default 5000 ms) and which questions it is asked. */
+  decision?: IDecisionConfig
   /**
    * Let the agent RUN JavaScript it wrote (the `run_js` tool) and read the output. Off unless
    * set: with it off the tool does not exist and the engine is never loaded. `true` = the

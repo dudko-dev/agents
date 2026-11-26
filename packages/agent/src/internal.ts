@@ -2,6 +2,7 @@ import type { LanguageModel, ToolSet } from 'ai'
 import type { IApprovalController } from './approval.ts'
 import type { RunControlPort } from './control.ts'
 import type { ISpawnReservation } from './subagent-dynamic-shared.ts'
+import type { IMedia } from './media.ts'
 import type { IResolvedEscalation, IStepWrites } from './tiers.ts'
 import type {
   EventHandler,
@@ -124,6 +125,9 @@ export interface IAgentInternalContext {
   // reads its own copy of this context, so the text cannot change under a run.
   mcpInstructions?: string
   approval?: IApprovalController
+  // Set when config.media names a model: its tools are among `tools`; the runner uses it to
+  // transcribe a run's audio attachments.
+  media?: IMedia
   // Per-run state; set by the runner on its per-run copy of the context.
   run?: IRunState
   // Take what the user said since the last boundary, for delivery INSIDE a step (between

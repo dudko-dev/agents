@@ -18,7 +18,7 @@ import { executeStepAttempt } from './executor.ts'
 import { checkLimits, resolveLimits } from './limits.ts'
 import { createInitialPlan, filterPlanSkills, planStepCap } from './planner.ts'
 import { renderTrace, renderTraceSteps } from './prompts.ts'
-import { decideNextAction, type ReplanDecision } from './replanner.ts'
+import { decideNextAction, decideWithDecisionModel, type ReplanDecision } from './replanner.ts'
 import { activateSkill } from './skills.ts'
 import { synthesizeAnswer } from './synthesizer.ts'
 import {
@@ -45,6 +45,7 @@ import type {
   ReplanTrigger,
 } from './types.ts'
 import { ATTR, withSpan } from './tracing.ts'
+import { attachRunFiles } from './media.ts'
 import { accumulateUsage, clipText, combineSignals, isAuthError, normalizeUsage } from './utils.ts'
 
 // The default ('failure') replan trigger fires when:
@@ -281,7 +282,7 @@ const runAgentLoopInner = async (
   // be silently mixing two different requests in the same trace.
   // History follows the same rule for symmetry - the original run's history
   // is what shaped the saved trace, so we keep it. Documented in README.
-  const input = resumed?.input ?? options.input
+  let input = resumed?.input ?? options.input
   let history: IConversationTurn[] | undefined = resumed?.history
     ? [...resumed.history]
     : options.history
@@ -338,6 +339,11 @@ const runAgentLoopInner = async (
   if (store) {
     store.emit = proxiedCtx.emit
     store.state = state
+  }
+  // Audio the user attached is transcribed once, here, and travels as text from now on (a
+  // resumed run's saved input already carries it). Refused when there is no transcription model.
+  if (!resumed && options.files?.length) {
+    input = await attachRunFiles(ctx.media, input, options.files, signal)
   }
   // From here a `send` is announced as it comes (and anything sent earlier, now).
   port?.attach(proxiedCtx.emit)
@@ -872,17 +878,27 @@ const runAgentLoopInner = async (
     // The replanner call itself failed (unparseable output, a schema mismatch, the provider down
     // after its retries): the decision below is a fallback, not the model's.
     let replanFailed = false
+    // Set when `config.decisionModel` made the decision: the replanner was not called.
+    let decidedConfidence: number | undefined
     try {
       await maybeCompactTrace(trace)
-      decision = await decideNextAction(
-        input,
-        currentPlan,
-        trace,
-        nextStep,
-        proxiedCtx,
-        signal,
-        freshUpdates,
-      )
+      // A message from the user is weighed by the replanner itself: what the user wants now is
+      // not a closed question.
+      const quick = byUser
+        ? undefined
+        : await decideWithDecisionModel(input, currentPlan, trace, nextStep, proxiedCtx, signal)
+      decidedConfidence = quick?.confidence
+      decision =
+        quick?.decision ??
+        (await decideNextAction(
+          input,
+          currentPlan,
+          trace,
+          nextStep,
+          proxiedCtx,
+          signal,
+          freshUpdates,
+        ))
     } catch (err) {
       proxiedCtx.emit({ type: 'error', error: asError(err), phase: 'replan' })
       // A stop is a stop, and credentials the provider refuses will not work for the next call
@@ -913,8 +929,13 @@ const runAgentLoopInner = async (
       type: 'replan.decision',
       mode: decision.mode,
       reason: decision.reason,
-      cause: byUser ? 'user-message' : 'llm-decision',
+      cause: byUser
+        ? 'user-message'
+        : decidedConfidence !== undefined
+          ? 'decision-model'
+          : 'llm-decision',
       ...(replanFailed ? { failed: true } : {}),
+      ...(decidedConfidence !== undefined ? { confidence: decidedConfidence } : {}),
     })
     // Weighed, whatever it decided: from here the messages are part of the run's story. A
     // replanner that failed weighed nothing: the next boundary asks it again.

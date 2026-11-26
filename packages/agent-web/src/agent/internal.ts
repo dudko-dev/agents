@@ -1,3 +1,4 @@
+import type { IDecisionModel } from '../decision.js'
 import {
   NoObjectGeneratedError,
   type LanguageModel,
@@ -70,6 +71,8 @@ export interface AgentContext {
   /** The window the executor's output cap was judged against, when it is not the run's (a tier's). */
   executorWindowTokens?: number
   synthesizerModel: LanguageModel
+  /** `config.decisionModel`, resolved. Absent = the feature is off. */
+  decisionModel?: IDecisionModel
   /** Tool-mode for the planner/replanner (from the planner model). */
   plannerMode: ToolCallMode
   /** Tool-mode for the executor (from the executor model). */

@@ -2,10 +2,12 @@ import type { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.
 import type { FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js'
 import type { ToolSet } from 'ai'
 import type { RunControl } from './control.ts'
+import type { IDecisionConfig, IDecisionEvent, IDecisionModel } from './decision.ts'
 import type { PipelineEvent } from './pipeline-engine.ts'
 import type { IEgressPolicy } from './safe-fetch.ts'
 import type { ISearchConfig } from './web-search.ts'
 import type { ISandboxConfig } from './sandbox-engine.ts'
+import type { IMediaConfig, IRunFile } from './media.ts'
 import type { ISubagentsConfig } from './subagent-dynamic-shared.ts'
 
 export type ProviderType =
@@ -384,6 +386,15 @@ export interface IAgentConfig {
   // host only, through createSafeFetch; with `egress` set, results the model could not fetch are
   // left out. Works without `egress` (then there is no web_fetch to open a link). See ISearchConfig.
   search?: ISearchConfig
+  // A decision model: a small, fast model that answers a closed question with one option and a
+  // probability instead of writing text (see decision.ts). Off unless set. Where it is confident
+  // it replaces the replanner's continue / finish call and a pipeline node's route call; below
+  // `decision.confidenceThreshold`, on an error, a timeout or an answer that is not an option,
+  // the ordinary model call runs exactly as without it. Never consulted for tool approval or
+  // egress.
+  decisionModel?: IDecisionModel
+  // The threshold (default 0.8), the timeout (default 5000 ms) and which questions it is asked.
+  decision?: IDecisionConfig
   // Let the agent keep a notebook: it writes lessons it learned (problem -> what worked) as skills,
   // visible in the SKILLS index and loadable for the rest of the session. `true` = in memory (as
   // long as the agent lives); give a store to keep them (DirSkillStore). Saving is a write for
@@ -397,6 +408,15 @@ export interface IAgentConfig {
   // network, no files, no process and no host modules. A run is a write for tool approval.
   // See src/sandbox.ts.
   sandbox?: boolean | ISandboxConfig
+  // Image generation, speech and transcription, each as a tool that exists only when its model
+  // is set: `imageModel` -> generate_image, `speechModel` -> generate_speech,
+  // `transcriptionModel` -> transcribe_audio and audio attachments (`run({ files })`, transcribed
+  // once; the model reads the text). Off unless set. Generated files are written under the run's
+  // directory (or `media.dir`) and the model gets a path, never the bytes. Each call is a write
+  // for tool approval, counts in `usage.mediaCalls`, and a run may make `media.maxCalls` of them
+  // (default 8). Prompts, spoken text and audio leave for the provider of that model. See
+  // src/media.ts.
+  media?: IMediaConfig
   // Subagents the MODEL starts itself. `dynamic: true` (or an object of limits) mounts the
   // spawn_subagent tool: the model gives a sub-task, an optional role and optionally a subset of
   // its own tools by name; a helper agent runs the normal loop on it and its answer is the tool
@@ -529,6 +549,16 @@ export interface IUsage {
   cachedInputTokens?: number
   // Input tokens written to the provider's prompt cache.
   cacheWriteTokens?: number
+  // What the media models (config.media) were asked for - calls (failed ones included), images
+  // written, characters sent to the speech model, seconds of audio transcribed. Not tokens and
+  // not part of the counts above. Absent until a media model is called (see IMediaUsage).
+  mediaCalls?: number
+  imagesGenerated?: number
+  speechCharacters?: number
+  transcriptionSeconds?: number
+  // Calls made to `config.decisionModel`. A call is not a token: what the API billed for it
+  // (when it says) is in the token fields, the number of calls is here. Absent when zero.
+  decisionCalls?: number
 }
 
 export interface IPlanStep {
@@ -575,12 +605,25 @@ export type ReplanTrigger =
 
 // 'user-message': the replanner ran because the user sent a message mid-run (RunControl.send),
 // not because a step failed or the replan trigger fired.
-export type ReplanCause = 'last-step' | 'clean-step' | 'llm-decision' | 'user-message'
+// 'decision-model': `config.decisionModel` decided, and the replanner was not called.
+export type ReplanCause =
+  'last-step' | 'clean-step' | 'llm-decision' | 'user-message' | 'decision-model'
 
 // Phase of a `usage` event. 'compact' is a compaction summary call;
 // 'subagent' is usage a subagent tool spent (it counts against this run's
 // limits like any other).
-export type UsagePhase = 'plan' | 'execute' | 'replan' | 'synthesize' | 'compact' | 'subagent'
+export type UsagePhase =
+  | 'plan'
+  | 'execute'
+  | 'replan'
+  | 'synthesize'
+  | 'compact'
+  | 'subagent'
+  // A call to `config.decisionModel` (usage.decisionCalls, plus the tokens its API reported).
+  | 'decision'
+  // A call to an image / speech / transcription model (config.media): its `usage` carries the
+  // media fields and zero tokens.
+  | 'media'
 
 type AgentEventBody =
   | { type: 'plan.thought-delta'; delta: string }
@@ -626,7 +669,12 @@ type AgentEventBody =
       // provider down after its retries) and `mode: 'continue'` is the fallback, not the model's
       // decision. The failure is the `error` event (phase 'replan') just before this one.
       failed?: true
+      // Set with cause 'decision-model': the probability the decision model gave its choice.
+      confidence?: number
     }
+  // `config.decisionModel` was asked a question: its answer was used (`accepted`), or the
+  // ordinary model call ran and `reason` says why.
+  | IDecisionEvent
   | { type: 'final.text-delta'; delta: string }
   | { type: 'final.reasoning-delta'; delta: string }
   | { type: 'final'; text: string }
@@ -723,6 +771,28 @@ type AgentEventBody =
       sources: string[]
     }
   | { type: 'skill.forgotten'; name: string }
+  // A media tool (config.media) wrote a file: `path` is where (absolute), `mediaType` what its
+  // bytes are, `bytes` its size. The bytes themselves are in the file, never in an event.
+  | {
+      type: 'media.generated'
+      kind: 'image' | 'speech'
+      path: string
+      mediaType: string
+      bytes: number
+      model: string
+      step?: IPlanStep
+    }
+  // An audio file was transcribed: one the user attached to the run ('attachment') or one the
+  // model asked about ('tool'). `text` is what the model reads of it (cleaned and capped).
+  | {
+      type: 'media.transcribed'
+      source: 'attachment' | 'tool'
+      name: string
+      text: string
+      language?: string
+      durationInSeconds?: number
+      model: string
+    }
   | { type: 'revisions.exceeded'; cap: number }
   | { type: 'error'; error: Error; phase: 'plan' | 'execute' | 'replan' | 'synthesize' | 'init' }
   // A pipeline's own events (createPipeline): the run, each node visit, each edge decision.
@@ -753,6 +823,10 @@ export interface IAgentRunOptions {
   // original prompt).
   input: string
   history?: IConversationTurn[]
+  // Audio the user attached (needs config.media.transcriptionModel; anything else is refused):
+  // each file is transcribed once and its text is put under the input, marked as the content of
+  // the user's file. Ignored on resume (the saved input already carries the transcripts).
+  files?: IRunFile[]
   signal?: AbortSignal
   onEvent?: EventHandler
   onStepStart?: (info: IStepStartInfo) => void

@@ -1463,6 +1463,36 @@ test('inherits: web_fetch under the SAME egress policy - a host the parent canno
   assert.match(firstResult(none), /you do not have the tool\(s\) "web_fetch"/)
 })
 
+test("inherits: media - the caller's media tools or none; `media` is not the helper's own to switch on", async () => {
+  const { VirtualFileSystem } = await import('../dist/index.js')
+  const { mockImageModel } = await import('./helpers/media-models.ts')
+  const image = mockImageModel()
+  const media = { imageModel: image.model, files: new VirtualFileSystem({ memory: true }) }
+  // Not named: a helper has no media tool, although the parent's config has a media model.
+  const bare = await rig(
+    { root: { exec: callsThen(spawn({ task: '[[A]] think', tools: [] })) } },
+    {
+      media,
+    },
+  )
+  await bare.go()
+  assert.deepEqual(bare.by('A', 'executor')[0].tools, [])
+  // The default (read-only) subset does not include a tool that spends money and writes a file.
+  const byDefault = await rig(
+    { root: { exec: callsThen(spawn({ task: '[[A]] look' })) } },
+    { media },
+  )
+  await byDefault.go()
+  assert.ok(!byDefault.by('A', 'executor')[0].tools.includes('generate_image'))
+  // Named: it is the caller's tool.
+  const named = await rig(
+    { root: { exec: callsThen(spawn({ task: '[[A]] draw', tools: ['generate_image'] })) } },
+    { media },
+  )
+  await named.go()
+  assert.deepEqual(named.by('A', 'executor')[0].tools, ['generate_image'])
+})
+
 test('inherits: run_js - the same sandbox, with its note, when the helper is given it', async () => {
   const r = await rig(
     {

@@ -232,11 +232,25 @@ export const createDynamicSubagentTool = (deps: DynamicSubagentDeps): AgentTool 
           egress: _egress,
           search: _search,
           sandbox: _sandbox,
+          // Like egress, search and the sandbox: a helper has the caller's media tools (when it
+          // is given them) or none. Left in, the helper's agent would mount its own from the
+          // config - tools it was not given, that spend money and write files.
+          media: _media,
           availableTools: _available,
           skills: _skills,
           ...inherited
         } = deps.config
-        void [_memory, _session, _persistence, _learning, _egress, _search, _sandbox, _available]
+        void [
+          _memory,
+          _session,
+          _persistence,
+          _learning,
+          _egress,
+          _search,
+          _sandbox,
+          _media,
+          _available,
+        ]
         void _skills
         const skills = deps.skills()
         const sandboxNotes = deps.sandboxNotes()

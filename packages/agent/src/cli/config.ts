@@ -18,6 +18,7 @@ import { DirSkillStore } from '../learning.ts'
 import type { ISandboxConfig } from '../sandbox.ts'
 import type { ISubagentsConfig } from '../subagent-dynamic-shared.ts'
 import type { ISearchConfig } from '../web-search.ts'
+import type { IMediaConfig } from '../media.ts'
 import { SEARCH_MAX_RESULTS, SEARCH_PROVIDERS } from '../web-search-shared.ts'
 
 const PROVIDERS: readonly ProviderType[] = [
@@ -104,6 +105,7 @@ export const loadConfig = (): IAgentConfig => {
     egress: parseEgress(),
     search: parseSearch(),
     sandbox: parseSandbox(),
+    media: parseMedia(),
     subagents: parseSubagents(),
     learning: parseLearning(),
     llmTimeoutMs: parseOptionalInt(process.env.AGENT_LLM_TIMEOUT_MS),
@@ -475,6 +477,54 @@ export const parseSearch = (env: NodeJS.ProcessEnv = process.env): ISearchConfig
     ...(baseURL ? { baseURL } : {}),
     ...(maxResults ? { maxResults } : {}),
     ...(priv && ['on', 'true', '1', 'yes'].includes(priv) ? { allowPrivateNetwork: true } : {}),
+  }
+}
+
+// AGENT_IMAGE_MODEL / AGENT_SPEECH_MODEL / AGENT_TRANSCRIPTION_MODEL: a model id each; each one
+// mounts its tool (generate_image / generate_speech / transcribe_audio; the last also lets
+// /audio attach a file). They run on the main provider unless AGENT_MEDIA_PROVIDER_TYPE /
+// AGENT_MEDIA_API_KEY / AGENT_MEDIA_BASE_URL / AGENT_MEDIA_PROVIDER_OPTIONS name another (one
+// block for the three). AGENT_MEDIA_DIR is where generated files are kept (default
+// ./agent-media), AGENT_MEDIA_MAX_CALLS the media calls one run may make, AGENT_SPEECH_VOICE the
+// default voice. Setting any of those without a model is an error, not a silent no-op.
+export const MEDIA_DEFAULT_DIR = './agent-media'
+export const parseMedia = (env: NodeJS.ProcessEnv = process.env): IMediaConfig | undefined => {
+  const image = env.AGENT_IMAGE_MODEL?.trim()
+  const speech = env.AGENT_SPEECH_MODEL?.trim()
+  const transcription = env.AGENT_TRANSCRIPTION_MODEL?.trim()
+  const block = parseStageOverride('AGENT_MEDIA', env)
+  const dir = env.AGENT_MEDIA_DIR?.trim()
+  const maxRaw = env.AGENT_MEDIA_MAX_CALLS?.trim()
+  const voice = env.AGENT_SPEECH_VOICE?.trim()
+  if (!image && !speech && !transcription) {
+    const stray = [
+      block && 'AGENT_MEDIA_PROVIDER_TYPE / _BASE_URL / _API_KEY / _PROVIDER_OPTIONS',
+      dir && 'AGENT_MEDIA_DIR',
+      maxRaw && 'AGENT_MEDIA_MAX_CALLS',
+      voice && 'AGENT_SPEECH_VOICE',
+    ].filter(Boolean)
+    if (stray.length) {
+      throw new Error(
+        `${stray.join(', ')} set but no media model is - set AGENT_IMAGE_MODEL, AGENT_SPEECH_MODEL or AGENT_TRANSCRIPTION_MODEL`,
+      )
+    }
+    return undefined
+  }
+  if (voice && !speech) {
+    throw new Error('AGENT_SPEECH_VOICE set but AGENT_SPEECH_MODEL is not')
+  }
+  const maxCalls = maxRaw ? Number(maxRaw) : undefined
+  if (maxCalls !== undefined && !(Number.isInteger(maxCalls) && maxCalls >= 0)) {
+    throw new Error(`AGENT_MEDIA_MAX_CALLS must be a whole number (0 = no cap), got: ${maxRaw}`)
+  }
+  const spec = (model: string) => ({ ...block, model })
+  return {
+    ...(image ? { imageModel: spec(image) } : {}),
+    ...(speech ? { speechModel: spec(speech) } : {}),
+    ...(transcription ? { transcriptionModel: spec(transcription) } : {}),
+    dir: dir || MEDIA_DEFAULT_DIR,
+    ...(maxCalls !== undefined ? { maxCalls } : {}),
+    ...(voice ? { voice } : {}),
   }
 }
 

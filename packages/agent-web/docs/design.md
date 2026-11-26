@@ -368,6 +368,40 @@ contract is the existing one for a step in flight: it runs again. Within one pro
 escalation guard does better, and is used: a spawn that *finished* in an earlier attempt at
 the step is answered from its result.
 
+## Decision models: a fast path with the old path underneath
+
+Some model calls in the loop do not need text: "continue or finish?", "which route?". Decision
+models (TypeSafe's Jev, Google's Gemini Decision 1) answer such a question with an option and a
+probability for a fraction of the latency and price. `decisionModel` uses one there.
+
+- **Our own small interface, `decide(question) -> { choice, confidence }`.** One question per
+  call, options with descriptions, an optional context. The vendors' APIs take many questions of
+  several types per request; the agent has one closed question at a time, and an interface this
+  small is what a host can implement in ten lines over anything (a gateway, a local classifier).
+- **No HTTP client of ours.** The AI SDK ships `experimental_decide` and provider decision models
+  (`@ai-sdk/google`, `@ai-sdk/typesafe-ai`); `decisionModelFromAiSdk` adapts them. That keeps the
+  model the only seam. The price: the AI SDK API is experimental, so the adapter is thin and the
+  interface is ours - if theirs changes, one function changes.
+- **Confidence is the probability of the chosen option**, taken from the API's distribution. Not
+  a vendor's separate "confidence" statistic (TypeSafe's is a different formula), and not a
+  language model's self-reported number: a model that returns no distribution gets 0 and is never
+  used. That is also why there is no "cheap LLM as a decision model" adapter: its confidence would
+  be a guess, and a threshold on a guess protects nothing.
+- **The fallback is the code that was already there.** `askDecisionModel` turns everything that
+  is not a confident, valid answer into "not accepted", and the caller then makes the ordinary
+  call - not a copy of it. Off, and on-but-rejected, send the same requests as before
+  (`tests/decision.test.ts`, and the golden requests of `tests/model-tiers.test.ts`).
+- **`revise` is an option the model cannot be given.** The replanner's third answer needs a plan.
+  The question still offers it, so the decision model can say "neither of the cheap answers":
+  that hands over to the replanner (`needs-model`).
+- **A call is not a token.** `usage.decisionCalls` counts calls; the token fields carry only what
+  the API reported. Nothing is estimated.
+- **In the page, a spec, not a client.** `{ providerType: 'google', ... }` resolves like a model
+  spec (key from the `CredentialStore`), but its request is pinned to the API's host by the
+  guarded fetch, as `web_search`'s is. Only an API whose CORS lets a page in gets a spec.
+- **Never a gate.** See security.md. `src/decision.ts` is a byte-for-byte copy of the Node
+  sibling's; `src/decision-provider.ts` is this package's own.
+
 ## Structured output: `generateText` + `Output.object`
 
 AI SDK v7 deprecates `generateObject` / `streamObject`. `generateStructured` is therefore
@@ -448,6 +482,67 @@ Results are third-party text like a fetched page: reduced to four fields, each o
 of invisible characters, capped per field and in total, flagged `untrusted`. The provider-native
 search tools (server-side, inside the model call) are a different mechanism with none of these
 controls and are left for a separate change.
+
+## Media: three models, one object, bytes that stay out of the context
+
+Image generation, speech and transcription are tools a model may call, and one input path
+(attached audio). The decisions:
+
+**The AI SDK's own model interfaces are the seam.** `generateImage`, `generateSpeech` and
+`transcribe` take an `ImageModel`, a `SpeechModel` and a `TranscriptionModel` (stable names in
+`ai` v7). The agent accepts those objects directly, or a spec the existing registry resolves:
+`buildMediaModelFromSpec` builds the same provider factory as for a language model - same
+package, same key from the `CredentialStore`, same `baseURL` and headers - and asks it for
+`imageModel(id)` / `speechModel(id)` / `transcriptionModel(id)`, the names every `ProviderV4`
+carries. No provider-specific code, and no new dependency.
+
+**One `media` object, not three top-level fields.** The three models share a budget
+(`maxCalls`), a timeout, a destination (`files`, `folder`) and a threat model; `egress`,
+`search` and `sandbox` are each one object for the same reason. Inside it the names are the
+plain ones - `imageModel`, `speechModel`, `transcriptionModel` - and each mounts its tool only
+when set, so a host pays (in prompt tokens for a tool definition, and in attack surface) only
+for the modality it configured. The golden-request fixture guards that "off" is byte-for-byte
+the old behaviour.
+
+**The bytes go to the virtual file system; the model gets a path.** A megabyte of base64 in a
+tool result would overflow a small window at once and be re-sent on every later call. The file
+system is already the workspace the user sees. When there is none, `createAgent` refuses an
+image or speech model instead of falling back to "bytes in an event": one place for a file, one
+code path, and an event that stays small enough to cross a worker boundary or sit in a
+checkpoint. `media.generated` names the path, and `vfs.readDataUrl(path)` is the picture.
+
+**The type of a file is what its bytes are.** A provider's declared media type is a claim; the
+signature is a fact. `sniffMediaType` knows a short list (four image formats, seven audio
+containers) and everything else is refused - including SVG, which a page would execute.
+
+**Usage is counted in its own units.** An image is not tokens. Four optional numbers on `IUsage`
+(`mediaCalls`, `imagesGenerated`, `speechCharacters`, `transcriptionSeconds`) ride on the same
+`usage` events, phase `'media'`, with zero tokens. They are flat numbers, not a nested object,
+on purpose: every place that sums a usage field by field - the pipeline engine, a host's own
+reducer - then carries them without knowing they exist. So `agent.usage`, `sessionUsage`, a
+checkpoint and a subagent's charge to its parent all carry them for free, and the token limits
+are not distorted. Tokens some
+image models report for themselves are deliberately not added to `totalTokens`: they are priced
+differently, and a cap meant for the language model would start counting pictures.
+
+**A cap on calls, per run, with a small default.** A model in a loop can ask for a picture
+forty times. `media.maxCalls` (8) is checked against the media calls in the run's usage - which
+a resumed run inherits from its checkpoint - plus the calls in flight, so parallel tool calls
+of one model step cannot pass together. Past it the tool fails with a message that tells the
+model to stop; the run goes on (other tools are not affected), which is why this is not a
+`budget.exceeded` stop. A failed call counts and is not retried by the SDK (`maxRetries: 0`).
+
+**Transcription is an input path first.** The point of the transcription model is that a
+text-only model can work with a voice memo, so attached audio is transcribed once, before
+planning, and replaced by a fenced, labelled block under the goal - every stage then sees the
+same text, memory and checkpoints keep it, and no stage gets the audio. It is on by default
+when the model is set (`transcribeAttachments: false` for a model that listens itself). The
+tool, `transcribe_audio`, is the same call on a file of the workspace. No duration cap exists
+because none can be enforced before the call; the size cap can.
+
+The pure part (caps, the sniffer, names, the budget, the transcript wrapper, the descriptions)
+is `tools/media-shared.ts`, a byte-for-byte copy of the Node sibling's file. The Node agent
+writes to its per-run directory instead of a virtual file system; everything else is the same.
 
 ## Learning: a notebook, knowledge never policy
 

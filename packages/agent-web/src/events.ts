@@ -7,13 +7,19 @@ import type {
   ModelTier,
   TierReason,
 } from './agent/loop-types.js'
+import type { IDecisionEvent } from './decision.js'
 import type { LimitKind } from './limits.js'
 import type { PipelineEvent } from './pipeline/engine.js'
 
 export type ReplanMode = 'continue' | 'revise' | 'finish'
 export type Phase = 'plan' | 'execute' | 'replan' | 'synthesize'
-/** Phases a `usage` event can be charged to: the four stages plus compaction and subagents. */
-export type UsagePhase = Phase | 'compact' | 'subagent'
+/**
+ * Phases a `usage` event can be charged to: the four stages plus compaction and subagents;
+ * `decision` - a call to `config.decisionModel` (`usage.decisionCalls`, plus the tokens its API
+ * reported); and 'media' - a call to an image / speech / transcription model (`config.media`),
+ * whose `usage` carries the media fields and zero tokens.
+ */
+export type UsagePhase = Phase | 'compact' | 'subagent' | 'decision' | 'media'
 
 /**
  * Everything the agent does is streamed as a typed event so any UI (or none)
@@ -73,9 +79,22 @@ type AgentEventBody =
    * `byUser`: the replanner ran because the user sent a message (`RunControl.send`), not because a
    * step failed. `failed`: the replanner call itself failed (unparsable output, the provider
    * down) and `mode: 'continue'` is the fallback, not the model's decision — the failure is the
-   * `error` event (phase 'replan') just before this one.
+   * `error` event (phase 'replan') just before this one. `confidence`: `config.decisionModel`
+   * made this decision (the replanner was not called) - the probability it gave its choice.
    */
-  | { type: 'replan.decision'; mode: ReplanMode; reason: string; byUser?: boolean; failed?: true }
+  | {
+      type: 'replan.decision'
+      mode: ReplanMode
+      reason: string
+      byUser?: boolean
+      failed?: true
+      confidence?: number
+    }
+  /**
+   * `config.decisionModel` was asked a question: its answer was used (`accepted`), or the
+   * ordinary model call ran and `reason` says why.
+   */
+  | IDecisionEvent
   | { type: 'final.text-delta'; delta: string }
   /** The synthesizer's streamed thoughts. */
   | { type: 'final.reasoning-delta'; delta: string }
@@ -107,6 +126,33 @@ type AgentEventBody =
     }
   /** A lesson was deleted (by the agent's forget_skill, or the host's forgetSkill). */
   | { type: 'skill.forgotten'; name: string }
+  /**
+   * A media tool (`config.media`) wrote a file to the virtual file system: `path` is where (read
+   * it with `vfs.readDataUrl(path)` to show the picture or play the audio), `mediaType` what its
+   * bytes are, `bytes` its size. The bytes themselves are never in an event.
+   */
+  | {
+      type: 'media.generated'
+      kind: 'image' | 'speech'
+      path: string
+      mediaType: string
+      bytes: number
+      model: string
+      step?: IPlanStep
+    }
+  /**
+   * An audio file was transcribed: one the user attached to the run ('attachment') or one the
+   * model asked about ('tool'). `text` is what the model reads of it (cleaned and capped).
+   */
+  | {
+      type: 'media.transcribed'
+      source: 'attachment' | 'tool'
+      name: string
+      text: string
+      language?: string
+      durationInSeconds?: number
+      model: string
+    }
   /** find_tools activated more tools (large-catalogue search mode). */
   | { type: 'tools.discovered'; step?: IPlanStep; query: string; names: string[] }
   /** A tool call is waiting for the user's consent (see `toolApproval`). */
