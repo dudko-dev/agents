@@ -40,6 +40,8 @@ export interface DemoSettings {
   egress: boolean
   /** Comma-separated hosts (`host`, `*.sub.host`) `web_fetch` may reach; empty = any public https host. */
   egressAllow: string
+  /** The model may run JavaScript it wrote (`run_js`), in a QuickJS sandbox inside a Web Worker. */
+  sandbox: boolean
   // ── chat UI (props of <AgentChat>) ──
   showToolCalls: boolean
   showUsage: boolean
@@ -67,6 +69,7 @@ export const DEFAULT_SETTINGS: DemoSettings = {
   learning: false,
   egress: false,
   egressAllow: 'en.wikipedia.org, api.github.com',
+  sandbox: false,
   showToolCalls: true,
   showUsage: true,
   history: true,
@@ -141,6 +144,7 @@ export const useSettingsConfig = (s: DemoSettings, modelWindow: number | undefin
     learning: s.learning,
     egress: s.egress,
     egressAllow: s.egressAllow,
+    sandbox: s.sandbox,
   }
   const rebuildKey = JSON.stringify(baked)
   const config = useMemo<Partial<BrowserAgentConfig>>(
@@ -164,6 +168,16 @@ export const useSettingsConfig = (s: DemoSettings, modelWindow: number | undefin
       // Web access: only the listed hosts (empty list = any public https host). A browser can
       // not pin DNS, so the list is the real protection - see the egress docs.
       ...(s.egress ? { egress: { allow: parseHosts(s.egressAllow) } } : {}),
+      // Running code: QuickJS-in-WebAssembly in a Web Worker of its own per run, killed at the
+      // deadline. The engine and its .wasm are in the worker's chunk, fetched on the first run.
+      ...(s.sandbox
+        ? {
+            sandbox: {
+              worker: () =>
+                new Worker(new URL('./sandbox.worker.ts', import.meta.url), { type: 'module' }),
+            },
+          }
+        : {}),
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [rebuildKey],
