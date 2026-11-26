@@ -327,7 +327,8 @@ tokens inside an element with class `awr-theme`.
 | `lessonsOf` | the agent's own skills (`agent.listLearnedSkills()`) as `LessonView[]` - what the hook seeds the notebook with |
 | `useVirtualFiles` | a live listing of a `VirtualFileSystem` + upload / remove / read |
 | `useSpeechToText` | Web Speech API: `{ supported, listening, interim, start, stop, toggle }` |
-| `useMcpServers` | several MCP servers, merged tools — import from `@dudko.dev/agent-web-react/mcp` |
+| `useMcp` / `useMcpServers` | one or several MCP servers, merged tools — import from `@dudko.dev/agent-web-react/mcp`. Options: `clientName`, `clientMetadataUrl` (a client ID metadata document, CIMD, used as the OAuth `client_id` where the authorization server supports it; per server through `oauth.clientMetadataUrl`), `onLog` — see the README |
+| `mcpOAuthProviderOptions` | the options the MCP hooks hand the core's OAuth provider for one server (pure; same subpath) |
 | `agentStateReducer` | the pure event → UI reducer |
 | `useAgentContext` / `useOptionalAgentContext` | the controller of the enclosing `<AgentProvider>` (the first throws outside one, the second returns `undefined`) |
 | `useLabels` / `mergeLabels` / `defaultLabels` | the labels in effect, merged over a base, and the English defaults ([below](#label-reference)) |
