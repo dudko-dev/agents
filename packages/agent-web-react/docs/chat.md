@@ -175,6 +175,44 @@ Labels: `placeholderBusy`, `steer`, `noAttachmentsWhileBusy`, `queuedWaiting`, `
 `undelivered`, `sendUndelivered`, `discardUndelivered`, `stopSubagent`, `subagentStopped`.
 A replan caused by a message has `replan.byUser === true`.
 
+## Model tiers, escalation and a replanner that failed
+
+With `executorTiers` in the agent's config (core: a `light` and / or a `strong` executor model next
+to the agent's own) each step runs on the model the planner rated it for, and a step that fails in
+a way a stronger model could fix is retried on the next stronger one. The UI follows it:
+
+- **A step** carries a quiet badge with its tier and model id (the badge's tooltip says why the
+  step started there: planned, the default, or a fallback).
+- **An escalation** is a line under the step - "Escalated: light → strong (reported a blocker)" -
+  with what the failed attempt had written folded beneath it. The step's own text is the current
+  attempt's only: the two are never joined.
+- **Tool calls** of the attempt that was escalated stay in the step (they happened, and the
+  stronger model continues from them), dimmed and tagged "attempt 1". A write the stronger model
+  repeated and the core did not run a second time is tagged "not run again".
+- **The summary** of the turn counts the escalations ("2 steps · 3 tool calls · 1 escalation").
+
+Without tiers the core sends none of this and the UI is exactly what it was. `showTiers={false}`
+(chat / message list / step list / tool call row) hides all of it.
+
+**A replanner that failed** (the provider was down, or its answer did not parse) does not fail the
+run: the core carries on with the plan it has. The step it ran after shows a warning -
+"Replanning failed, continuing with the plan" (the provider's error is its tooltip) - and nothing
+is put in `error`. `showReplanFailed={false}` (chat / message list / step list) hides it.
+
+```ts
+step.tier // 'light' | 'standard' | 'strong' - where the step is now (undefined: tiers off)
+step.model // that tier's model id
+step.tierReason // 'planned' | 'default' | 'fallback' - why it STARTED where it did
+step.escalations // [{ from, to, reason, model?, text? }] - text: what the failed attempt wrote
+step.toolCalls[i].attempt // 1, 2, … on a call of an escalated attempt; none on the current one
+step.toolCalls[i].replayed // true: not run again, answered from the earlier attempt
+step.replanFailed // the replanner's error, when the call after this step failed
+agent.replan // { mode, reason, byUser?, failed?, error? }
+```
+
+Labels: `tierNames`, `tierReasons`, `escalationReasons`, `escalated`, `escalatedAttemptText`,
+`escalations`, `attemptTag`, `replayed`, `replayedTitle`, `replanFailed`.
+
 ## The agent's notebook, and what it fetched
 
 With `learning` in the agent's config (core: `learning: true`, or `{ store: new VfsSkillStore(files) }`
@@ -327,7 +365,7 @@ tokens inside an element with class `awr-theme`.
 | `lessonsOf` | the agent's own skills (`agent.listLearnedSkills()`) as `LessonView[]` - what the hook seeds the notebook with |
 | `useVirtualFiles` | a live listing of a `VirtualFileSystem` + upload / remove / read |
 | `useSpeechToText` | Web Speech API: `{ supported, listening, interim, start, stop, toggle }` |
-| `useMcp` / `useMcpServers` | one or several MCP servers, merged tools — import from `@dudko.dev/agent-web-react/mcp`. Options: `clientName`, `clientMetadataUrl` (a client ID metadata document, CIMD, used as the OAuth `client_id` where the authorization server supports it; per server through `oauth.clientMetadataUrl`), `onLog` — see the README |
+| `useMcp` / `useMcpServers` | one or several MCP servers, merged tools — import from `@dudko.dev/agent-web-react/mcp`. `instructions` (on `useMcp`, and on each of `useMcpServers().servers`) is what the server told the agent in its handshake - third-party text that goes into the agent's prompt: show it to the user as the server's words. Options: `clientName`, `clientMetadataUrl` (a client ID metadata document, CIMD, used as the OAuth `client_id` where the authorization server supports it; per server through `oauth.clientMetadataUrl`), `onLog` — see the README |
 | `mcpOAuthProviderOptions` | the options the MCP hooks hand the core's OAuth provider for one server (pure; same subpath) |
 | `agentStateReducer` | the pure event → UI reducer |
 | `useAgentContext` / `useOptionalAgentContext` | the controller of the enclosing `<AgentProvider>` (the first throws outside one, the second returns `undefined`) |
@@ -345,6 +383,11 @@ component or `<AgentLabelsProvider>`); whatever you leave out falls back to `def
   `totalUsage`, `showHistory`, `showFiles`, `close`, `steps` *(fn: n)*, `toolCalls` *(fn: n)*,
   `subagents` *(fn: n)*, `skillsUsed` *(fn: names)*, `answerThoughts`, `stepThoughts`, `usageTitle`,
   `attachments`, `planned`, `replanned` *(fn: mode, reason)*, `failed`, `toolCostTitle`.
+- **Model tiers:** `tierNames` *(map by tier: `light` / `standard` / `strong`)*, `tierReasons` *(map by
+  `planned` / `default` / `fallback`)*, `escalationReasons` *(map by `blocked` / `empty-result` /
+  `tool-arguments` / `output-cut` / `error`)*, `escalated` *(fn: from, to, reason)*,
+  `escalatedAttemptText`, `escalations` *(fn: n)*, `attemptTag` *(fn: n)*, `replayed`, `replayedTitle`,
+  `replanFailed`.
 - **Notebook and fetches:** `learnedNow` *(fn: names)*, `fetches` *(fn: n)*, `fetchRefused` *(fn: reason)*,
   `notebookTitle`, `notebookEmpty`, `notebookForget`, `notebookRevision` *(fn: n)*, `notebookFrom`.
 - **Composer:** `placeholder`, `listening`, `message`, `dropHint`, `attach`, `attachTitle`, `commands`,

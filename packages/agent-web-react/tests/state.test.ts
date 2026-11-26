@@ -577,3 +577,263 @@ test('egress.request: what the model fetched, and what was refused, goes on the 
   assert.deepEqual(next.fetches, [])
   assert.equal(next.messages.find((m) => m.fetches)?.fetches?.length, 2)
 })
+
+// ── model tiers and escalation ────────────────────────────────────────────────
+
+const runOneStep = (withTiers: boolean): AgentUiState => {
+  let s = createInitialAgentState()
+  s = event(s, { type: 'run.start', goal: 'add a note' })
+  s = event(s, {
+    type: 'step.start',
+    step,
+    index: 1,
+    total: 1,
+    ...(withTiers
+      ? { tier: 'light' as const, model: 'small-1', tierReason: 'planned' as const }
+      : {}),
+  })
+  s = event(s, { type: 'step.text-delta', step, delta: 'Adding it.' })
+  s = event(s, { type: 'step.tool-call', step, name: 'add_note', input: { text: 'hi' } })
+  s = event(s, { type: 'step.tool-result', step, name: 'add_note', output: { id: 1 }, ok: true })
+  return event(s, {
+    type: 'step.complete',
+    step,
+    result: {
+      step,
+      summary: 'added',
+      blocked: false,
+      toolCalls: [{ name: 'add_note', input: { text: 'hi' }, output: { id: 1 }, ok: true }],
+      ...(withTiers ? { tier: 'light' as const, model: 'small-1' } : {}),
+    },
+  })
+}
+
+test('tiers off: the step view and its tool calls have exactly the keys they always had', () => {
+  const s = runOneStep(false)
+  assert.deepEqual(Object.keys(s.steps[0]).sort(), [
+    'blocked',
+    'id',
+    'index',
+    'reasoning',
+    'status',
+    'step',
+    'summary',
+    'text',
+    'toolCalls',
+    'total',
+  ])
+  assert.deepEqual(Object.keys(s.steps[0].toolCalls[0]).sort(), [
+    'input',
+    'inputTokens',
+    'name',
+    'ok',
+    'output',
+    'outputTokens',
+    'status',
+  ])
+  assert.equal(s.replan, undefined)
+  // And the turn's copy is the same object: nothing tier-shaped is added on the way.
+  assert.equal(s.messages[1].steps, s.steps)
+})
+
+test('step.start with tiers: the step carries its tier, model and why it started there', () => {
+  const s = runOneStep(true)
+  assert.equal(s.steps[0].tier, 'light')
+  assert.equal(s.steps[0].model, 'small-1')
+  assert.equal(s.steps[0].tierReason, 'planned')
+  assert.equal(s.steps[0].escalations, undefined)
+  assert.equal(s.steps[0].toolCalls[0].attempt, undefined)
+})
+
+test('an escalated step does not glue the failed attempt’s text to the next attempt’s', () => {
+  let s = createInitialAgentState()
+  s = event(s, { type: 'run.start', goal: 'file the report' })
+  s = event(s, {
+    type: 'step.start',
+    step,
+    index: 1,
+    total: 1,
+    tier: 'light',
+    model: 'small-1',
+    tierReason: 'planned',
+  })
+  s = event(s, { type: 'step.reasoning-delta', step, delta: 'hmm' })
+  s = event(s, { type: 'step.text-delta', step, delta: 'I cannot ' })
+  s = event(s, { type: 'step.text-delta', step, delta: 'do this.' })
+  s = event(s, { type: 'step.tool-call', step, name: 'save', input: { n: 1 } })
+  s = event(s, { type: 'step.tool-result', step, name: 'save', output: 'saved', ok: true })
+
+  s = event(s, {
+    type: 'step.escalated',
+    step,
+    from: 'light',
+    to: 'strong',
+    model: 'big-1',
+    reason: 'blocked',
+  })
+  const mid = s.steps[0]
+  assert.equal(mid.text, '', 'the live text starts over')
+  assert.equal(mid.reasoning, '')
+  assert.equal(mid.status, 'running')
+  assert.equal(mid.tier, 'strong', 'the step is on the stronger tier now')
+  assert.equal(mid.model, 'big-1')
+  assert.equal(mid.tierReason, 'planned', 'why it STARTED where it did is kept')
+  assert.deepEqual(mid.escalations, [
+    { from: 'light', to: 'strong', reason: 'blocked', model: 'big-1', text: 'I cannot do this.' },
+  ])
+  // The earlier attempt's call happened: it stays, marked as that attempt's.
+  assert.equal(mid.toolCalls.length, 1)
+  assert.equal(mid.toolCalls[0].attempt, 1)
+
+  s = event(s, { type: 'step.text-delta', step, delta: 'Filed.' })
+  assert.equal(s.steps[0].text, 'Filed.')
+
+  // The stronger model repeats the write (the core answers it from the first attempt) and
+  // makes one call of its own.
+  const replay =
+    '[not run again: this exact call already succeeded in an earlier attempt at this step, and its effect is in place. Its result then:] saved'
+  s = event(s, { type: 'step.tool-call', step, name: 'save', input: { n: 1 } })
+  s = event(s, { type: 'step.tool-result', step, name: 'save', output: replay, ok: true })
+  s = event(s, { type: 'step.tool-call', step, name: 'send', input: {} })
+  s = event(s, { type: 'step.tool-result', step, name: 'send', output: 'sent', ok: true })
+  assert.deepEqual(
+    s.steps[0].toolCalls.map((c) => [c.name, c.attempt, c.replayed]),
+    [
+      ['save', 1, undefined],
+      ['save', undefined, true],
+      ['send', undefined, undefined],
+    ],
+  )
+
+  s = event(s, {
+    type: 'step.complete',
+    step,
+    result: {
+      step,
+      summary: 'Filed.',
+      blocked: false,
+      // Every attempt's calls, in order - what the core reports.
+      toolCalls: [
+        { name: 'save', input: { n: 1 }, output: 'saved', ok: true },
+        { name: 'save', input: { n: 1 }, output: replay, ok: true },
+        { name: 'send', input: {}, output: 'sent', ok: true },
+      ],
+      tier: 'strong',
+      model: 'big-1',
+      escalations: [{ from: 'light', to: 'strong', reason: 'blocked' }],
+    },
+  })
+  const done = s.steps[0]
+  assert.equal(done.status, 'done')
+  assert.equal(done.text, 'Filed.')
+  assert.equal(done.tier, 'strong')
+  assert.deepEqual(
+    done.toolCalls.map((c) => [c.name, c.attempt, c.replayed]),
+    [
+      ['save', 1, undefined],
+      ['save', undefined, true],
+      ['send', undefined, undefined],
+    ],
+  )
+  assert.deepEqual(done.escalations, [
+    { from: 'light', to: 'strong', reason: 'blocked', model: 'big-1', text: 'I cannot do this.' },
+  ])
+  // The turn keeps it after the run.
+  assert.equal(s.messages[1].steps?.[0].escalations?.length, 1)
+})
+
+test('escalations known only from the result (a resumed or replayed view) are still listed', () => {
+  let s = createInitialAgentState()
+  s = event(s, { type: 'run.start', goal: 'x' })
+  s = event(s, { type: 'step.start', step, index: 1, total: 1, tier: 'light', model: 'small-1' })
+  s = event(s, {
+    type: 'step.complete',
+    step,
+    result: {
+      step,
+      summary: 'ok',
+      blocked: false,
+      toolCalls: [],
+      tier: 'standard',
+      model: 'mid-1',
+      escalations: [{ from: 'light', to: 'standard', reason: 'error' }],
+    },
+  })
+  assert.equal(s.steps[0].tier, 'standard')
+  assert.deepEqual(s.steps[0].escalations, [{ from: 'light', to: 'standard', reason: 'error' }])
+})
+
+test('two escalations of one step number their attempts 1 and 2', () => {
+  let s = createInitialAgentState()
+  s = event(s, { type: 'run.start', goal: 'x' })
+  s = event(s, { type: 'step.start', step, index: 1, total: 1, tier: 'light', model: 'a' })
+  s = event(s, { type: 'step.tool-call', step, name: 't', input: 1 })
+  s = event(s, { type: 'step.tool-result', step, name: 't', output: 'e', ok: false })
+  s = event(s, {
+    type: 'step.escalated',
+    step,
+    from: 'light',
+    to: 'standard',
+    model: 'b',
+    reason: 'tool-arguments',
+  })
+  s = event(s, { type: 'step.tool-call', step, name: 't', input: 2 })
+  s = event(s, { type: 'step.tool-result', step, name: 't', output: 'e', ok: false })
+  s = event(s, {
+    type: 'step.escalated',
+    step,
+    from: 'standard',
+    to: 'strong',
+    model: 'c',
+    reason: 'empty-result',
+  })
+  assert.deepEqual(
+    s.steps[0].toolCalls.map((c) => c.attempt),
+    [1, 2],
+  )
+  assert.equal(s.steps[0].escalations?.length, 2)
+  assert.equal(s.steps[0].escalations?.[0].text, undefined, 'an attempt that wrote nothing')
+  assert.equal(s.steps[0].model, 'c')
+})
+
+// ── a replanner that failed ───────────────────────────────────────────────────
+
+test('a replanner failure is a warning on the step, not an error of the run', () => {
+  let s = runOneStep(false)
+  s = event(s, { type: 'error', phase: 'replan', error: 'provider down' })
+  assert.equal(s.error, undefined, 'the run did not fail')
+  s = event(s, {
+    type: 'replan.decision',
+    mode: 'continue',
+    reason: 'replanner failed',
+    failed: true,
+  })
+  assert.equal(s.error, undefined)
+  assert.deepEqual(s.replan, {
+    mode: 'continue',
+    reason: 'replanner failed',
+    failed: true,
+    error: 'provider down',
+  })
+  assert.equal(s.steps[0].replanFailed, 'provider down')
+  assert.equal(s.steps[0].blocked, false)
+  assert.equal(s.messages[1].steps?.[0].replanFailed, 'provider down')
+  assert.equal(s.messages[1].error, undefined)
+  assert.equal(s.messages[1].pending, true, 'the run goes on')
+
+  // The next real decision is not marked.
+  s = event(s, { type: 'replan.decision', mode: 'continue', reason: 'fine' })
+  assert.deepEqual(s.replan, { mode: 'continue', reason: 'fine' })
+})
+
+test('other errors are shown as before: a step error stays in `error`, a run error ends the turn', () => {
+  let s = runOneStep(false)
+  s = event(s, { type: 'error', phase: 'execute', error: 'quota' })
+  assert.equal(s.error, 'quota')
+  assert.equal(s.messages[1].pending, true)
+  s = event(s, { type: 'error', phase: 'run', error: 'boom' })
+  assert.equal(s.error, 'boom')
+  assert.equal(s.messages[1].error, true)
+  assert.equal(s.messages[1].content, 'Error: boom')
+  assert.equal(s.messages[1].pending, false)
+})

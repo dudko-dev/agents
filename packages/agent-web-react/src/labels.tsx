@@ -1,6 +1,11 @@
 import { createContext, useContext, useMemo } from 'react'
 import type { ReactNode } from 'react'
-import type { ToolApprovalMode } from '@dudko.dev/agent-web'
+import type {
+  EscalationReason,
+  ModelTier,
+  TierReason,
+  ToolApprovalMode,
+} from '@dudko.dev/agent-web'
 import { defaultNoticeTexts, type NoticeTexts } from './composer.js'
 import type { AgentStatus } from './types.js'
 
@@ -138,6 +143,27 @@ export interface AgentLabels {
   // ── steps / tool calls ─────────────────────────────────────────────────────
   failed: string
   toolCostTitle: string
+
+  // ── model tiers and escalation ─────────────────────────────────────────────
+  /** The tier badge on a step. */
+  tierNames: Record<ModelTier, string>
+  /** The badge's tooltip: why the step started on its tier. */
+  tierReasons: Record<TierReason, string>
+  /** Why a step was retried on a stronger model. */
+  escalationReasons: Record<EscalationReason, string>
+  /** "Escalated: light → strong (reported a blocker)" - the names and the reason are already labels. */
+  escalated: (from: string, to: string, reason: string) => string
+  /** Opens what the failed attempt had written. */
+  escalatedAttemptText: string
+  /** "1 escalation" in the activity summary. */
+  escalations: (n: number) => string
+  /** On a tool call made by an attempt that was escalated. */
+  attemptTag: (n: number) => string
+  /** On a write the core did not run a second time (it succeeded in an earlier attempt). */
+  replayed: string
+  replayedTitle: string
+  /** The replanner call failed; the run went on with the plan it had. */
+  replanFailed: string
 }
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`
@@ -285,13 +311,43 @@ export const defaultLabels: AgentLabels = {
   failed: 'failed',
   toolCostTitle:
     "Estimated tokens of the arguments and of the result fed back to the model (chars / 4), and the call's duration",
+
+  tierNames: { light: 'light', standard: 'standard', strong: 'strong' },
+  tierReasons: {
+    planned: 'The planner rated this step for this model tier',
+    default: 'The planner did not rate this step: it runs on the standard model',
+    fallback: 'The tier the planner asked for is not configured: the nearest one runs the step',
+  },
+  escalationReasons: {
+    blocked: 'reported a blocker',
+    'empty-result': 'produced no result',
+    'tool-arguments': 'kept sending tool arguments that did not parse',
+    'output-cut': 'output was cut off',
+    error: 'the model call failed',
+  },
+  escalated: (from, to, reason) => `Escalated: ${from} → ${to} (${reason})`,
+  escalatedAttemptText: 'What the earlier attempt wrote',
+  escalations: (n) => plural(n, 'escalation', 'escalations'),
+  attemptTag: (n) => `attempt ${n}`,
+  replayed: 'not run again',
+  replayedTitle:
+    'This exact call already succeeded in an earlier attempt at the step: it was not run a second time, the model got the earlier result',
+  replanFailed: 'Replanning failed, continuing with the plan',
 }
 
 /** Overrides: any label, with the nested groups merged key by key. */
 export type AgentLabelsOverride = Partial<
   Omit<
     AgentLabels,
-    'status' | 'modes' | 'commandGroups' | 'commandDescriptions' | 'thinkingLevels' | 'notices'
+    | 'status'
+    | 'modes'
+    | 'commandGroups'
+    | 'commandDescriptions'
+    | 'thinkingLevels'
+    | 'notices'
+    | 'tierNames'
+    | 'tierReasons'
+    | 'escalationReasons'
   >
 > & {
   status?: Partial<AgentLabels['status']>
@@ -300,6 +356,9 @@ export type AgentLabelsOverride = Partial<
   commandDescriptions?: Partial<AgentLabels['commandDescriptions']>
   thinkingLevels?: Partial<AgentLabels['thinkingLevels']>
   notices?: Partial<AgentLabels['notices']>
+  tierNames?: Partial<AgentLabels['tierNames']>
+  tierReasons?: Partial<AgentLabels['tierReasons']>
+  escalationReasons?: Partial<AgentLabels['escalationReasons']>
 }
 
 const NESTED = [
@@ -309,6 +368,9 @@ const NESTED = [
   'commandDescriptions',
   'thinkingLevels',
   'noteAt',
+  'tierNames',
+  'tierReasons',
+  'escalationReasons',
 ] as const
 
 /** `base` with `over` applied (nested groups merged, not replaced). */

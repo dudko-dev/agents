@@ -151,6 +151,16 @@ export const McpPanel = ({
               />
             )}
             {s.error && <p className="settings__warn">{s.error}</p>}
+            {s.status === 'connected' && s.instructions && (
+              <details className="mcp__instructions">
+                <summary className="mcp__tools-toggle">Instructions sent by this server</summary>
+                <p className="settings__note">
+                  Text written by <strong>{s.name}</strong>, not by this app. The agent reads it as
+                  part of its prompt whenever this server’s tools are in use.
+                </p>
+                <pre className="mcp__instructions-text">{s.instructions}</pre>
+              </details>
+            )}
             {s.catalog.length > 0 && (
               <details
                 open={open[s.name] ?? false}

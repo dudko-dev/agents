@@ -5,6 +5,7 @@ import type { ApprovalView, StepView, SubagentView, ToolCallView, UserNoteView }
 import { formatDuration, formatTokens, imagesInOutput, previewValue } from './format.js'
 import {
   AlertIcon,
+  ArrowUpIcon,
   BotIcon,
   BrainIcon,
   CheckIcon,
@@ -21,11 +22,21 @@ export type RenderToolCall = (call: ToolCallView, fallback: ReactNode) => ReactN
 export interface ToolCallRowProps {
   call: ToolCallView
   showUsage?: boolean
+  /**
+   * Mark a call of an escalated attempt ("attempt 1") and a write that was not run a second
+   * time (default true). Nothing shows without model tiers.
+   */
+  showTiers?: boolean
   labels?: AgentLabelsOverride
 }
 
 /** One tool call: name, arguments, status — and optionally its cost and any images it returned. */
-export const ToolCallRow = ({ call, showUsage = true, labels }: ToolCallRowProps) => {
+export const ToolCallRow = ({
+  call,
+  showUsage = true,
+  showTiers = true,
+  labels,
+}: ToolCallRowProps) => {
   const L = useLabels(labels)
   const state = call.status === 'calling' ? 'calling' : call.ok === false ? 'failed' : 'ok'
   const images = call.ok === false ? [] : imagesInOutput(call.output).slice(0, 4)
@@ -37,7 +48,9 @@ export const ToolCallRow = ({ call, showUsage = true, labels }: ToolCallRowProps
     .filter(Boolean)
     .join(' · ')
   return (
-    <li className={`awr-tool awr-tool--${state}`}>
+    <li
+      className={`awr-tool awr-tool--${state}${showTiers && call.attempt !== undefined ? ' awr-tool--earlier' : ''}`}
+    >
       <div className="awr-tool__row">
         <ToolIcon size={13} className="awr-tool__icon" />
         <code className="awr-tool__name">{call.name}</code>
@@ -47,6 +60,14 @@ export const ToolCallRow = ({ call, showUsage = true, labels }: ToolCallRowProps
         {call.status === 'calling' && <SpinnerIcon size={12} className="awr-tool__spin" />}
         {call.status === 'done' && call.ok === false && (
           <span className="awr-tool__badge">{L.failed}</span>
+        )}
+        {showTiers && call.replayed && (
+          <span className="awr-tool__tag" title={L.replayedTitle}>
+            {L.replayed}
+          </span>
+        )}
+        {showTiers && call.attempt !== undefined && (
+          <span className="awr-tool__tag">{L.attemptTag(call.attempt)}</span>
         )}
         {showUsage && cost && (
           <span className="awr-tool__cost" title={L.toolCostTitle}>
@@ -151,6 +172,8 @@ interface StepItemProps {
   showToolCalls: boolean
   showUsage: boolean
   showThoughts: boolean
+  showTiers: boolean
+  showReplanFailed: boolean
   renderToolCall?: RenderToolCall
   L: AgentLabels
 }
@@ -164,6 +187,8 @@ const StepItem = ({
   showToolCalls,
   showUsage,
   showThoughts,
+  showTiers,
+  showReplanFailed,
   renderToolCall,
   L,
 }: StepItemProps) => (
@@ -183,6 +208,34 @@ const StepItem = ({
       </span>
       <span className="awr-step__desc">{step.step.description}</span>
     </div>
+    {showTiers && step.tier && (
+      <div className="awr-step__meta">
+        <span
+          className={`awr-step__tier awr-step__tier--${step.tier}`}
+          title={step.tierReason ? L.tierReasons[step.tierReason] : undefined}
+        >
+          {L.tierNames[step.tier]}
+        </span>
+        {step.model && <span className="awr-step__model">{step.model}</span>}
+      </div>
+    )}
+    {showTiers &&
+      step.escalations?.map((e, i) => (
+        <div key={i} className="awr-step__escalated">
+          <p className="awr-step__escalated-line">
+            <ArrowUpIcon size={12} />
+            <span>
+              {L.escalated(L.tierNames[e.from], L.tierNames[e.to], L.escalationReasons[e.reason])}
+            </span>
+          </p>
+          {e.text?.trim() && (
+            <details className="awr-step__attempt">
+              <summary>{L.escalatedAttemptText}</summary>
+              <p className="awr-step__text">{e.text.trim()}</p>
+            </details>
+          )}
+        </div>
+      ))}
     {showThoughts && step.reasoning.trim() && (
       <details className="awr-thought" open={step.status === 'running' && !step.text}>
         <summary>
@@ -195,7 +248,9 @@ const StepItem = ({
     {showToolCalls && step.toolCalls.length > 0 && (
       <ul className="awr-step__tools">
         {step.toolCalls.map((call, i) => {
-          const row = <ToolCallRow key={i} call={call} showUsage={showUsage} />
+          const row = (
+            <ToolCallRow key={i} call={call} showUsage={showUsage} showTiers={showTiers} />
+          )
           return renderToolCall ? <Fragment key={i}>{renderToolCall(call, row)}</Fragment> : row
         })}
       </ul>
@@ -226,6 +281,11 @@ const StepItem = ({
       </ul>
     )}
     {step.blocked && step.summary && <p className="awr-step__blocked">{step.summary}</p>}
+    {showReplanFailed && step.replanFailed && (
+      <p className="awr-step__warn" title={step.replanFailed}>
+        <AlertIcon size={12} /> {L.replanFailed}
+      </p>
+    )}
   </li>
 )
 
@@ -247,6 +307,13 @@ export interface StepListProps {
   showUsage?: boolean
   /** Show each step's thoughts when the model thinks (default true). */
   showThoughts?: boolean
+  /**
+   * Model tiers: the tier / model badge on a step, its "escalated: light → strong" line and the
+   * marks on the earlier attempt's tool calls (default true; nothing shows when tiers are off).
+   */
+  showTiers?: boolean
+  /** The "replanning failed, continuing with the plan" warning under a step (default true). */
+  showReplanFailed?: boolean
   /** Render tool calls yourself (gets the built-in row as `fallback`). */
   renderToolCall?: RenderToolCall
   labels?: AgentLabelsOverride
@@ -267,6 +334,8 @@ export const StepList = ({
   showToolCalls = true,
   showUsage = true,
   showThoughts = true,
+  showTiers = true,
+  showReplanFailed = true,
   renderToolCall,
   labels,
   className,
@@ -290,6 +359,8 @@ export const StepList = ({
           showToolCalls={showToolCalls}
           showUsage={showUsage}
           showThoughts={showThoughts}
+          showTiers={showTiers}
+          showReplanFailed={showReplanFailed}
           renderToolCall={renderToolCall}
           L={L}
         />

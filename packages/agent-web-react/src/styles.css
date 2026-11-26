@@ -295,6 +295,70 @@
   margin: 0 0 0 24px;
   color: var(--awr-danger);
 }
+.awr-step__warn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 0 24px;
+  color: var(--awr-warn);
+  font-size: 13px;
+}
+.awr-activity > .awr-step__warn {
+  margin-left: 0;
+}
+/* Model tiers: the tier a step runs on, and its escalations. */
+.awr-step__meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 24px;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--awr-muted);
+}
+.awr-step__tier {
+  flex: none;
+  border: 1px solid var(--awr-border);
+  border-radius: 999px;
+  padding: 0 6px;
+  line-height: 16px;
+}
+.awr-step__tier--strong {
+  border-color: var(--awr-accent);
+  color: var(--awr-accent);
+}
+.awr-step__model {
+  font-family: var(--awr-mono);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.awr-step__escalated {
+  margin-left: 24px;
+  font-size: 13px;
+}
+.awr-step__escalated-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0;
+  color: var(--awr-warn);
+}
+.awr-step__escalated-line svg {
+  flex: none;
+  margin-top: 3px;
+}
+.awr-step__attempt {
+  color: var(--awr-muted);
+  font-size: 12px;
+}
+.awr-step__attempt summary {
+  cursor: pointer;
+}
+.awr-step__attempt .awr-step__text {
+  margin: 2px 0 0 12px;
+}
 .awr-step__tools {
   list-style: none;
   margin: 2px 0 0 24px;
@@ -339,6 +403,18 @@
 .awr-tool--failed .awr-tool__name {
   border-color: var(--awr-danger);
   color: var(--awr-danger);
+}
+.awr-tool--earlier {
+  opacity: 0.7;
+}
+.awr-tool__tag {
+  flex: none;
+  font-size: 11px;
+  color: var(--awr-muted);
+  border: 1px solid var(--awr-border);
+  border-radius: 999px;
+  padding: 0 6px;
+  white-space: nowrap;
 }
 .awr-tool__badge {
   color: var(--awr-danger);

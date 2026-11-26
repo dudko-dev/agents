@@ -79,6 +79,13 @@ export interface AgentChatProps {
   showNotes?: boolean
   /** The lessons the agent wrote down during an answer, and the pages it fetched (default true). */
   showLearned?: boolean
+  /**
+   * Model tiers (`executorTiers`): the tier / model badge on a step, the "escalated" line and
+   * the escalation count (default true; nothing shows when tiers are off).
+   */
+  showTiers?: boolean
+  /** The "replanning failed, continuing with the plan" warning (default true). */
+  showReplanFailed?: boolean
   /** A stop button on each running subagent (default true). */
   stoppableSubagents?: boolean
   /** Conversation total in the header (default true). */
@@ -179,6 +186,8 @@ const AgentChatInner = ({
   showThoughts = true,
   showNotes = true,
   showLearned = true,
+  showTiers = true,
+  showReplanFailed = true,
   stoppableSubagents = true,
   showTotalUsage = true,
   showStatus = true,
@@ -271,8 +280,11 @@ const AgentChatInner = ({
 
   const loading = agent.modelLoad && agent.modelLoad.progress < 1
   const showReplan = agent.replan && agent.replan.mode !== 'continue'
+  // A replanner that failed before any step exists has no step to hang its warning on.
+  const replanFailedEarly =
+    showReplanFailed && agent.replan?.failed === true && agent.steps.length === 0
   const liveExtra =
-    agent.planThought.trim() || showReplan ? (
+    agent.planThought.trim() || showReplan || replanFailedEarly ? (
       <>
         {agent.planThought.trim() && (
           <details className="awr-activity__plan">
@@ -284,6 +296,11 @@ const AgentChatInner = ({
           <div className="awr-activity__replan">
             {L.replanned(agent.replan!.mode, agent.replan!.reason)}
           </div>
+        )}
+        {replanFailedEarly && (
+          <p className="awr-step__warn" title={agent.replan!.error}>
+            <AlertIcon size={12} /> {L.replanFailed}
+          </p>
         )}
       </>
     ) : undefined
@@ -391,6 +408,8 @@ const AgentChatInner = ({
             showThoughts={showThoughts}
             showNotes={showNotes}
             showLearned={showLearned}
+            showTiers={showTiers}
+            showReplanFailed={showReplanFailed}
             onStopSubagent={stoppableSubagents ? agent.stopSubagent : undefined}
             activityOpen={activityOpen}
             liveExtra={liveExtra}
