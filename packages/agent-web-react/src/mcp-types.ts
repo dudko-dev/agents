@@ -4,7 +4,7 @@ import type { AgentToolSet } from '@dudko.dev/agent-web'
  * Structural types for the core's OPTIONAL `@dudko.dev/agent-web/mcp` subpath.
  *
  * The subpath is loaded with a dynamic import and typed here rather than
- * imported, for two reasons: it drags in `@modelcontextprotocol/sdk` (an
+ * imported, for two reasons: it drags in `@modelcontextprotocol/client` (an
  * optional peer of the core, which apps without MCP must not have to install),
  * and the OAuth half only exists in newer cores while this package supports
  * `@dudko.dev/agent-web >= 0.0.6`. `useMcp` feature-detects at runtime and
@@ -95,7 +95,9 @@ export interface McpModule {
   finishMcpOAuth?: (provider: BrowserOAuthProvider, callback: McpOAuthCallback) => Promise<void>
   /**
    * The SDK's error class, re-exported by the core so an authorization failure
-   * can be recognised by identity. Absent on cores older than 0.0.12.
+   * can be recognised by identity (`@modelcontextprotocol/client` on a core on
+   * the 2.x MCP SDK, `@modelcontextprotocol/sdk` before). Absent on cores older
+   * than 0.0.12.
    */
   UnauthorizedError?: new (message?: string) => Error
 }

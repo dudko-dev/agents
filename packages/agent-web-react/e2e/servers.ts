@@ -13,6 +13,15 @@ import { z } from 'zod'
  * invisible to script unless the server exposes it. Serving these headers here
  * is what makes the test a check of the documented deployment requirement
  * rather than a check of a convenient fiction.
+ *
+ * The server is the 1.x SDK's on purpose (`@modelcontextprotocol/sdk`, a dev
+ * dependency of this package kept for this file alone): the browser client
+ * under test is the 2.x one (`@modelcontextprotocol/client`, through the core),
+ * and what has to keep working is a 2025-revision server that was deployed
+ * before the client changed. The request headers allowed below are the ones the
+ * README lists; the 2.x client in its default (legacy) negotiation sends
+ * nothing else. When the core opts into the 2026-07-28 revision, `mcp-method`
+ * and `mcp-name` (and `mcp-param-*`) join this list.
  */
 
 export interface ILocalServers {

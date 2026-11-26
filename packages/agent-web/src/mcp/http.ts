@@ -1,19 +1,16 @@
 import {
   auth,
-  UnauthorizedError,
-  type OAuthClientProvider,
-} from '@modelcontextprotocol/sdk/client/auth.js'
-import { Client } from '@modelcontextprotocol/sdk/client/index.js'
-import {
+  Client,
   StreamableHTTPClientTransport,
-  type StreamableHTTPReconnectionOptions,
-} from '@modelcontextprotocol/sdk/client/streamableHttp.js'
-import type { FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js'
-import {
-  CallToolResultSchema,
-  ToolListChangedNotificationSchema,
+  UnauthorizedError,
   type CallToolResult,
-} from '@modelcontextprotocol/sdk/types.js'
+  type FetchLike,
+  type JsonSchemaType,
+  type JsonSchemaValidator,
+  type OAuthClientProvider,
+  type StreamableHTTPReconnectionOptions,
+} from '@modelcontextprotocol/client'
+import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/client/validators/cf-worker'
 import { dynamicTool, jsonSchema, type ToolSet } from 'ai'
 import { assertSecureOAuthUrl } from './oauth.js'
 import {
@@ -30,7 +27,7 @@ import {
  * A remote MCP server reached over StreamableHTTP. Browsers can ONLY speak the
  * HTTP transport — stdio (child processes) is Node-only and intentionally
  * unsupported here. This connector lives behind the `@dudko.dev/agent-web/mcp`
- * subpath so `@modelcontextprotocol/sdk` never enters the core bundle.
+ * subpath so `@modelcontextprotocol/client` never enters the core bundle.
  *
  * Three ways to authenticate, in ascending order of capability:
  *   1. `headers` — a static token you already hold.
@@ -122,22 +119,40 @@ export interface ConnectMcpOptions {
   connectTimeoutMs?: number
 }
 
-// Hard stop for a server whose pagination never ends (cursor loops).
-const MAX_LIST_PAGES = 100
+/** Hard stop for a server whose pagination never ends (the Node sibling's cap and name). */
+export const MAX_TOOL_LIST_PAGES = 100
 
 /**
- * List every tool of a server, following `nextCursor`. Servers with hundreds
- * of tools paginate; reading only the first page silently drops the rest.
+ * Every tool of a server, following `nextCursor` (up to MAX_TOOL_LIST_PAGES
+ * pages; a repeated cursor ends the walk). Servers with hundreds of tools
+ * paginate; reading only the first page silently drops the rest.
+ *
+ * Page by page through `client.request`, not `client.listTools()`: called
+ * without a cursor, the typed verb of the 2.x SDK walks every page itself,
+ * throws past its own page cap, answers without asking when the server did not
+ * advertise the tools capability, and fills the cache that switches on the
+ * SDK's output-schema check in `callTool` (which this module does itself, see
+ * `outputSchemaViolation`). The raw request does none of that.
  */
-const listAllTools = async (client: Client): Promise<McpToolDescriptor[]> => {
+export const listAllTools = async (
+  client: Pick<Client, 'request'>,
+  onTruncated?: () => void,
+): Promise<McpToolDescriptor[]> => {
   const all: McpToolDescriptor[] = []
   let cursor: string | undefined
-  for (let page = 0; page < MAX_LIST_PAGES; page += 1) {
-    const res = await client.listTools(cursor ? { cursor } : undefined)
+  const seen = new Set<string>()
+  for (let page = 0; page < MAX_TOOL_LIST_PAGES; page += 1) {
+    const res = await client.request({
+      method: 'tools/list',
+      params: cursor ? { cursor } : undefined,
+    })
     all.push(...(res.tools as McpToolDescriptor[]))
-    cursor = res.nextCursor
-    if (!cursor) break
+    const next = typeof res.nextCursor === 'string' && res.nextCursor ? res.nextCursor : undefined
+    if (!next || seen.has(next)) return all
+    seen.add(next)
+    cursor = next
   }
+  onTruncated?.()
   return all
 }
 
@@ -212,25 +227,44 @@ interface McpToolDescriptor {
   name: string
   description?: string
   inputSchema: unknown
+  outputSchema?: unknown
   annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean; title?: string }
 }
 
+/** The longest compile error repeated in a refusal (the SDK clips at the same length). */
+const OUTPUT_SCHEMA_ERROR_MAX_CHARS = 200
+
 /**
- * A result schema that hands every result it accepts to `onResult` first.
+ * Why a tool result does not follow the `outputSchema` its tool declared, or
+ * `undefined` when it does. The rule and the wording are those of the SDK's
+ * `Client.callTool`: a tool with an output schema must answer with
+ * `structuredContent`, and that value must validate. An `isError` result is
+ * not checked.
  *
- * `Client.callTool` validates `structuredContent` against the tool's
- * `outputSchema` AFTER the response was received and parsed, and throws when
- * it does not fit — taking the result with it. Reading the result here, where
- * the protocol layer parses it, is what lets a caller tell that throw (a
- * result exists) from a failed request (none does) and still use the result.
+ * The check is made here, on a result that was received, instead of inside
+ * `callTool`, which throws on a violation and takes the result with it: the
+ * call RAN on the server, so its result goes to the model with a note.
+ *
+ * The Node package carries the same function; change both.
  */
-const capturingResultSchema = (
-  onResult: (result: CallToolResult) => void,
-): typeof CallToolResultSchema =>
-  CallToolResultSchema.refine((result) => {
-    onResult(result as CallToolResult)
-    return true
-  }) as typeof CallToolResultSchema
+export const outputSchemaViolation = (
+  toolName: string,
+  result: Pick<CallToolResult, 'structuredContent' | 'isError'>,
+  validate: JsonSchemaValidator<unknown>,
+): string | undefined => {
+  if (result.isError === true) return undefined
+  if (result.structuredContent === undefined) {
+    return `Tool ${toolName} has an output schema but did not return structured content`
+  }
+  try {
+    const checked = validate(result.structuredContent)
+    return checked.valid
+      ? undefined
+      : `Structured content does not match the tool's output schema: ${checked.errorMessage}`
+  } catch (err) {
+    return `Failed to validate structured content: ${err instanceof Error ? err.message : String(err)}`
+  }
+}
 
 interface ServerConnect {
   name: string
@@ -291,13 +325,21 @@ const refreshOnly = (p: OAuthClientProvider): OAuthClientProvider => ({
   get clientMetadata() {
     return p.clientMetadata
   },
-  clientInformation: () => p.clientInformation(),
+  get clientMetadataUrl() {
+    return p.clientMetadataUrl
+  },
+  // The second argument is the authorization server the SDK resolved: a
+  // provider that keeps credentials per issuer reads and writes by it.
+  clientInformation: (ctx) => p.clientInformation(ctx),
   saveClientInformation: p.saveClientInformation?.bind(p),
-  tokens: () => p.tokens(),
-  saveTokens: (t) => p.saveTokens(t),
+  tokens: (ctx) => p.tokens(ctx),
+  saveTokens: (t, ctx) => p.saveTokens(t, ctx),
   invalidateCredentials: p.invalidateCredentials?.bind(p),
   addClientAuthentication: p.addClientAuthentication?.bind(p),
   validateResourceURL: p.validateResourceURL?.bind(p),
+  // What a refresh request is made of, when the provider says so.
+  scopeForRefresh: p.scopeForRefresh?.bind(p),
+  dpop: p.dpop?.bind(p),
   codeVerifier: () => p.codeVerifier(),
   state: () => {
     throw new RefreshOnlyAbort()
@@ -429,6 +471,12 @@ export const diagnoseMcpCors = async (
   return hints.join(' ')
 }
 
+const warnTruncated = (log: NonNullable<ConnectMcpOptions['onLog']>, name: string): void =>
+  log(
+    'warn',
+    `[mcp] ${name}: tools/list still paginating after ${MAX_TOOL_LIST_PAGES} pages; the rest of the tools are not mounted`,
+  )
+
 const openConnection = async (
   name: string,
   cfg: McpHttpServerConfig,
@@ -504,6 +552,15 @@ const connectAndList = async (
   const transport = new StreamableHTTPClientTransport(new URL(cfg.url), {
     requestInit: headers ? { headers } : undefined,
     authProvider: cfg.authProvider,
+    // A 403 `insufficient_scope` in the middle of a session. A provider
+    // without a human step (no `redirectUrl`: the enterprise one) may ask
+    // again for the wider scope, once per request - the SDK's cap. One WITH a
+    // human step - in a browser nearly all of them - never does: the SDK would
+    // skip the refresh and start a new authorization from inside a tool call,
+    // replacing the stored state and PKCE verifier each time the model tried
+    // the tool again. The call fails with the scope the server asked for, and
+    // the host decides. The Node sibling's rule.
+    onInsufficientScope: cfg.authProvider?.redirectUrl ? 'throw' : 'reauthorize',
     // The enterprise provider reports a refused grant itself: a short typed
     // error for the caller, the server's words (redacted) to the log.
     fetch:
@@ -533,10 +590,10 @@ const connectAndList = async (
   // connect() and listTools().
   if (opts.onToolsChanged) {
     const notify = opts.onToolsChanged
-    client.setNotificationHandler(ToolListChangedNotificationSchema, () => notify(name))
+    client.setNotificationHandler('notifications/tools/list_changed', () => notify(name))
   }
 
-  const listed = await listAllTools(client)
+  const listed = await listAllTools(client, () => warnTruncated(log, name))
   // Read once, here: the text is fixed for the life of this connection.
   return { name, client, listed, instructions: cleanMcpInstructions(client.getInstructions()) }
 }
@@ -577,6 +634,10 @@ export const connectMcpHttp = async (
       if (catalog[i].server === name) catalog.splice(i, 1)
     }
     const keys: string[] = []
+    // The SDK's own validator, the one its browser build uses by default
+    // (@cfworker/json-schema: no code generation, so it runs under a CSP without
+    // 'unsafe-eval'; dialect by `$schema`). One per mount, compiled lazily.
+    let schemaValidator: CfWorkerJsonSchemaValidator | undefined
 
     let mounted = 0
     for (const t of listed) {
@@ -598,39 +659,57 @@ export const connectMcpHttp = async (
       }
       const description = t.description ?? ''
       const readOnly = t.annotations?.readOnlyHint === true
+      // Compiled on the first call, as the SDK does, and once per mount.
+      let outputValidator: JsonSchemaValidator<unknown> | undefined
+      const outputValidatorOf = (): JsonSchemaValidator<unknown> | undefined => {
+        if (!t.outputSchema || outputValidator) return outputValidator
+        try {
+          schemaValidator ??= new CfWorkerJsonSchemaValidator()
+          outputValidator = schemaValidator.getValidator(t.outputSchema as JsonSchemaType)
+        } catch (err) {
+          // Before anything is sent, so nothing ran on the server: a schema
+          // that cannot be compiled is refused as the SDK refuses it, and never
+          // silently skipped.
+          const reason = (err instanceof Error ? err.message : String(err)).slice(
+            0,
+            OUTPUT_SCHEMA_ERROR_MAX_CHARS,
+          )
+          throw new Error(`Tool '${t.name}' has an invalid outputSchema: ${reason}`)
+        }
+        return outputValidator
+      }
       tools[key] = dynamicTool({
         description,
         inputSchema: jsonSchema(t.inputSchema as Parameters<typeof jsonSchema>[0]),
         execute: async (args, options) => {
-          let res: CallToolResult
-          // Set when the SDK refused a result that had arrived (see below).
+          // Throws before anything is sent when the schema cannot be compiled.
+          const validate = outputValidatorOf()
+          // `client.request`, not `client.callTool`: the typed verb also checks
+          // the result against the tool's outputSchema and throws when it does
+          // not fit - taking with it a result that DID arrive. The request is
+          // the same on the wire. (On the 2026-07-28 revision `callTool` also
+          // mirrors arguments into `Mcp-Param-*` headers; this client
+          // negotiates the 2025 one.) A request that fails (transport,
+          // protocol, abort) throws here: there is no result, and the throw is
+          // recorded as a failed call.
+          const res: CallToolResult = await client.request(
+            {
+              method: 'tools/call',
+              params: { name: t.name, arguments: (args ?? {}) as Record<string, unknown> },
+            },
+            options?.abortSignal ? { signal: options.abortSignal } : undefined,
+          )
+          // A result arrived. When it does not follow the tool's outputSchema
+          // (no structuredContent, or one that does not match) it is passed on
+          // with a note rather than reported as a failure — a tool the model is
+          // told failed is a tool it calls again, and this one may write.
           let schemaNote: string | undefined
-          let received: CallToolResult | undefined
-          try {
-            res = (await client.callTool(
-              { name: t.name, arguments: (args ?? {}) as Record<string, unknown> },
-              capturingResultSchema((r) => {
-                received = r
-              }),
-              options?.abortSignal ? { signal: options.abortSignal } : undefined,
-            )) as CallToolResult
-          } catch (err) {
-            // The request itself failed (transport, protocol, abort): there is
-            // no result, and the throw is recorded as a failed call.
-            if (!received) throw err
-            // A result arrived and the SDK client threw afterwards: the only
-            // thing it does there is check structuredContent against the
-            // tool's outputSchema (missing, or not matching). The call RAN on
-            // the server, so the result is passed on with a note rather than
-            // reported as a failure — a tool the model is told failed is a
-            // tool it calls again, and this one may write.
-            res = received
-            schemaNote = outputSchemaNote(t.name, err)
+          const violation = validate && outputSchemaViolation(t.name, res, validate)
+          if (violation) {
+            schemaNote = outputSchemaNote(t.name, violation)
             log(
               'warn',
-              `[mcp] ${key}: result does not follow the declared outputSchema - ${
-                err instanceof Error ? err.message : String(err)
-              }; passed on with a note`,
+              `[mcp] ${key}: result does not follow the declared outputSchema - ${violation}; passed on with a note`,
             )
           }
           // An MCP failure is a NORMAL response with isError set — surface it
@@ -700,7 +779,7 @@ export const connectMcpHttp = async (
     refreshServer: async (name: string) => {
       const client = clients.get(name)
       if (!client) throw new Error(`MCP server "${name}" is not connected`)
-      mountTools(name, client, await listAllTools(client))
+      mountTools(name, client, await listAllTools(client, () => warnTruncated(log, name)))
     },
     close: async () => {
       await Promise.allSettled([...clients.values()].map((c) => c.close()))

@@ -56,9 +56,9 @@ importers:
       '@mlc-ai/web-llm':
         specifier: ^0.2.89
         version: 0.2.89
-      '@modelcontextprotocol/sdk':
-        specifier: ^1.32.2
-        version: 1.32.2(zod@4.6.7)
+      '@modelcontextprotocol/client':
+        specifier: ^2.4.0
+        version: 2.4.0
       '@openrouter/ai-sdk-provider':
         specifier: ^3.1.0
         version: 3.1.0(ai@7.0.183(zod@4.6.7))(zod@4.6.7)
@@ -240,9 +240,9 @@ importers:
       '@mlc-ai/web-llm':
         specifier: ^0.2.89
         version: 0.2.89
-      '@modelcontextprotocol/sdk':
-        specifier: ^1.32.2
-        version: 1.32.2(zod@4.6.7)
+      '@modelcontextprotocol/client':
+        specifier: ^2.4.0
+        version: 2.4.0
       '@types/node':
         specifier: ^22.9.0
         version: 22.20.7

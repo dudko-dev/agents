@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createRequire } from 'node:module'
 import test from 'node:test'
 import {
   claimOAuthCallback,
@@ -117,9 +118,11 @@ test('claimOAuthCallback: a code can only be claimed once', () => {
   assert.equal(claimOAuthCallback({ code: 'another', state: 'st' }), true)
 })
 
-// The SDK's UnauthorizedError never assigns `this.name`, so it reads as
-// "Error" — a name check silently never fires, which is how the mid-session
-// re-authorization prompt shipped as dead code.
+// The 1.x SDK's UnauthorizedError never assigned `this.name`, so it read as
+// "Error" — a name check silently never fired, which is how the mid-session
+// re-authorization prompt shipped as dead code. The first three tests are that
+// era's (a class of its own stands in for the SDK's); the ones after them use
+// the real class of the 2.x SDK, as the core's `./mcp` hands it over.
 
 test('isUnauthorizedError: matches the core-exported class by identity', () => {
   class UnauthorizedError extends Error {}
@@ -141,6 +144,157 @@ test('isUnauthorizedError: a tool whose own error mentions "unauthorized" is not
   assert.equal(isUnauthorizedError(new Error('unauthorized: quota exceeded')), false)
   assert.equal(isUnauthorizedError('not an error'), false)
   assert.equal(isUnauthorizedError(undefined), false)
+})
+
+// The hook gets the class from a dynamic `import('@dudko.dev/agent-web/mcp')`
+// and the error from a tool call made deep inside the core: the two must still
+// meet when they crossed that boundary, and when the page holds two copies of
+// the SDK (the CommonJS build below is a second copy with classes of its own).
+
+const coreMcp = async () =>
+  (await import('@dudko.dev/agent-web/mcp')) as unknown as {
+    UnauthorizedError: new (message?: string) => Error
+    connectMcpHttp: (
+      servers: Record<string, unknown>,
+      opts?: unknown,
+    ) => Promise<{
+      results: { connected: boolean; needsAuthorization?: boolean }[]
+      tools: Record<string, unknown>
+      close: () => Promise<void>
+    }>
+  }
+
+/** The SDK the core resolves to, loaded a second time as CommonJS. */
+const secondSdkCopy = () =>
+  createRequire(import.meta.resolve('@dudko.dev/agent-web/mcp'))(
+    '@modelcontextprotocol/client',
+  ) as {
+    UnauthorizedError: new (message?: string) => Error
+    InsufficientScopeError: new (init: { requiredScope?: string }) => Error
+    ProtocolError: new (code: number, message: string) => Error
+  }
+
+test('isUnauthorizedError: the 2.x class from the core module, by identity and by name', async () => {
+  const mod = await coreMcp()
+  const err = new mod.UnauthorizedError()
+  assert.equal(err.name, 'UnauthorizedError')
+  assert.equal(isUnauthorizedError(err, mod as never), true)
+  // Without the module too (a host that only has the error in hand).
+  assert.equal(isUnauthorizedError(err), true)
+  // A minified host bundle renames the class; the name the SDK sets is a string.
+  const Renamed = { e: class extends mod.UnauthorizedError {} }.e
+  assert.notEqual(Renamed.name, 'UnauthorizedError')
+  assert.equal(isUnauthorizedError(new Renamed(), mod as never), true)
+  assert.equal(isUnauthorizedError(new Renamed()), true)
+})
+
+test('isUnauthorizedError: a class with no name to go by is recognised by identity alone', () => {
+  // The 1.x class in a minified bundle: `name` reads "Error" and the class is
+  // called something else. Only the class the core module hands over tells.
+  const Minified = { e: class extends Error {} }.e
+  const err = new Minified('Unauthorized')
+  assert.equal(err.name, 'Error')
+  assert.notEqual(Minified.name, 'UnauthorizedError')
+  assert.equal(isUnauthorizedError(err, { UnauthorizedError: Minified } as never), true)
+  assert.equal(isUnauthorizedError(err), false)
+  assert.equal(
+    isUnauthorizedError(err, { UnauthorizedError: class extends Error {} } as never),
+    false,
+  )
+})
+
+test('isUnauthorizedError: an error made by another copy of the SDK is still recognised', async () => {
+  const mod = await coreMcp()
+  const other = secondSdkCopy()
+  assert.notEqual(other.UnauthorizedError, mod.UnauthorizedError, 'two copies, two classes')
+  const foreign = new other.UnauthorizedError('Unauthorized')
+  assert.equal(isUnauthorizedError(foreign, mod as never), true)
+  assert.equal(isUnauthorizedError(new mod.UnauthorizedError(), other as never), true)
+})
+
+test('isUnauthorizedError: other SDK errors and look-alike messages are not an authorization failure', async () => {
+  const mod = await coreMcp()
+  const other = secondSdkCopy()
+  // What a tool call fails with on a 403 `insufficient_scope`: authorizing
+  // again with the same scope would not help, so the panel must not ask.
+  const scope = new other.InsufficientScopeError({ requiredScope: 'mcp:admin' })
+  assert.equal(isUnauthorizedError(scope, mod as never), false)
+  assert.equal(
+    isUnauthorizedError(new other.ProtocolError(-32602, 'Unauthorized'), mod as never),
+    false,
+  )
+  assert.equal(isUnauthorizedError(new Error('Unauthorized'), mod as never), false)
+  assert.equal(isUnauthorizedError(new TypeError('UnauthorizedError'), mod as never), false)
+})
+
+test('isUnauthorizedError: the error a real tool call fails with, once the token is refused', async () => {
+  // End to end through the core, as the hook meets it: a connected server whose
+  // token stops working mid-session and cannot be renewed. The error is thrown
+  // inside the SDK's transport and comes out of the tool's `execute`.
+  const mod = await coreMcp()
+  let revoked = false
+  let redirects = 0
+  const fetchFn = async (url: string | URL, init: RequestInit = {}): Promise<Response> => {
+    const json = (body: unknown, status = 200) =>
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { 'content-type': 'application/json' },
+      })
+    if (String(url).includes('/.well-known/')) return new Response('not found', { status: 404 })
+    if (init.method === 'GET') return new Response(null, { status: 405 })
+    if (revoked) return json({ error: 'invalid_token' }, 401)
+    const msg = JSON.parse(String(init.body)) as { id?: number; method: string; params?: never }
+    if (msg.id === undefined) return new Response(null, { status: 202 })
+    const result =
+      msg.method === 'initialize'
+        ? {
+            protocolVersion: (msg.params as { protocolVersion: string }).protocolVersion,
+            capabilities: { tools: {} },
+            serverInfo: { name: 'mock', version: '1' },
+          }
+        : msg.method === 'tools/list'
+          ? { tools: [{ name: 'echo', inputSchema: { type: 'object' } }] }
+          : { content: [{ type: 'text', text: 'ok' }] }
+    return json({ jsonrpc: '2.0', id: msg.id, result })
+  }
+  const provider = {
+    get redirectUrl() {
+      return 'https://app.example.test/callback'
+    },
+    get clientMetadata() {
+      return { redirect_uris: ['https://app.example.test/callback'] }
+    },
+    clientInformation: () => ({ client_id: 'known' }),
+    tokens: () => ({ access_token: 'access-1', token_type: 'Bearer' }),
+    saveTokens: () => {},
+    saveCodeVerifier: () => {},
+    codeVerifier: () => 'v',
+    redirectToAuthorization: () => {
+      redirects += 1
+    },
+  }
+  const mcp = await mod.connectMcpHttp({
+    docs: { url: 'https://mcp.example.test/mcp', authProvider: provider, fetch: fetchFn },
+  })
+  assert.equal(mcp.results[0].connected, true)
+  const call = () =>
+    (mcp.tools.docs__echo as { execute: (a: unknown, o: unknown) => Promise<unknown> }).execute(
+      {},
+      {},
+    )
+  assert.equal(await call(), 'ok')
+
+  revoked = true
+  // What the hook's tool wrapper catches (`watchAuthorization`).
+  const err = await call().then(
+    () => undefined,
+    (e: unknown) => e,
+  )
+  assert.ok(err instanceof Error)
+  assert.equal(isUnauthorizedError(err, mod as never), true)
+  assert.equal(isUnauthorizedError(err), true, 'by name too, without the module')
+  assert.equal(redirects, 1)
+  await mcp.close()
 })
 
 test('readCallbackParams: carries iss (RFC 9207) for the core to check', () => {

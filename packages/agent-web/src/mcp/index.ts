@@ -1,9 +1,10 @@
 export { connectMcpHttp, diagnoseMcpCors, flattenContent } from './http.js'
-// Re-exported so a host can identify an authorization failure by identity.
-// The SDK's class does not set `name`, so `err.name === 'UnauthorizedError'`
-// is always false — string sniffing is not an option, and a host that only
-// depends on this package has no other handle on the class.
-export { UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js'
+// Re-exported so a host that only depends on this package can identify an
+// authorization failure: `err instanceof UnauthorizedError`. The 2.x SDK's
+// class is branded, so the check also holds for an error made by ANOTHER copy
+// of the SDK (two bundles, or the ESM and the CJS build on one page), and it
+// sets `name` to 'UnauthorizedError' (the 1.x class did neither).
+export { UnauthorizedError } from '@modelcontextprotocol/client'
 export {
   MCP_INSTRUCTIONS_MAX_CHARS_PER_SERVER,
   MCP_INSTRUCTIONS_MAX_CHARS_TOTAL,

@@ -59,8 +59,8 @@ imported):
 npm install @ai-sdk/openai        # or @ai-sdk/anthropic, @ai-sdk/google, @ai-sdk/xai, @ai-sdk/deepseek, @ai-sdk/openai-compatible
 # local WebGPU models
 npm install @browser-ai/web-llm @mlc-ai/web-llm
-# optional: HTTP MCP
-npm install @modelcontextprotocol/sdk
+# optional: HTTP MCP (the official 2.x client SDK; see "Upgrading to the 2.x MCP SDK")
+npm install @modelcontextprotocol/client
 ```
 
 ### CDN / standalone bundle (no build step)
@@ -212,6 +212,14 @@ Browsers can only speak the **HTTP (StreamableHTTP)** transport — stdio MCP is
 Node-only. The connector lives in the `./mcp` subpath so the MCP SDK never
 enters your core bundle.
 
+The MCP client is the official 2.x SDK, **`@modelcontextprotocol/client`** (an
+optional peer: install it when you import `./mcp`; `@modelcontextprotocol/sdk`
+1.x is no longer used — [what to change](#upgrading-to-the-2x-mcp-sdk)). It
+negotiates the 2025 protocol revisions with the unchanged `initialize`
+handshake, so servers see the same requests and the same headers as before. A
+server that speaks **only** the 2026-07-28 revision fails to connect, at once,
+with `Unsupported protocol version: 2025-11-25` in `results[].error`.
+
 Pass several servers at once — they connect concurrently, each with its own
 deadline (`connectTimeoutMs`, default 30 s), every page of a paginated
 `tools/list` is read, and tools a server marks `readOnlyHint` are treated as
@@ -227,6 +235,13 @@ its `outputSchema` is passed on with a note instead of failing the call. See
 the instructions are a prompt-injection surface
 ([docs/security.md](docs/security.md#mcp-server-instructions-third-party-text-in-a-system-prompt)) —
 `mcpInstructions: false` switches them off.
+
+A tool the server refuses with a JSON-RPC error (what a 2.x server answers for
+an unknown tool, `-32602`) is a failed call like an `isError` result; its
+message is the server's own, without the `MCP error <code>: ` prefix the 1.x
+SDK added — read `error.code` for the number. A paginated `tools/list` is
+followed for up to 100 pages (a repeated cursor ends the walk; past the cap a
+`warn` line says the rest is not mounted).
 
 `connectMcpHttp` returns `{ tools, catalog, results, instructions, refreshServer, close }`.
 `tools` and `catalog` are mutated **in place** by `refreshServer(name)`, so an
@@ -288,6 +303,41 @@ on `provider.authorizationUrl` and the app decides when to use it.
   (local development). Change any field through `clientMetadata`.
 - `provider.reset()` forgets tokens, registration and discovery - use it when a
   server moved to another authorization server.
+- **Discovery is stored** next to the tokens (the authorization server and its
+  metadata), so later calls skip it and the issuer check has something to
+  compare with. A code is exchanged only when that record is still there: a
+  flow whose discovery state is gone (started by a version that did not keep
+  it, or storage was cleared in between) is refused by `finishMcpOAuth` with
+  `Authorization cannot be completed: ... start the authorization again`.
+  Tokens already in storage are not touched; send the user to authorize again
+  and the new redirect completes.
+- **Credentials belong to the authorization server that issued them.** The
+  registration and the tokens are stored with an `issuer` stamp and are never
+  presented to another authorization server: stamped for a different one, they
+  are read as absent and a new authorization is asked for. Storage written
+  before the stamp existed keeps working — its values are used as they are and
+  stamped on first use (the SDK says so once on the console). A custom
+  `McpOAuthStorage` only has to return what it was given.
+- **A token endpoint must be https** (or loopback). The SDK refuses to send a
+  code or a refresh token to a plain-http token endpoint; the error names it,
+  and no new authorization is started in its place.
+- **The metadata must be the server's own.** Authorization server metadata
+  whose `issuer` is not the URL it was fetched for is refused by the SDK
+  (RFC 8414 section 3.3): the connect fails with the two issuers named, and
+  nothing is registered. The 1.x SDK accepted such a document.
+- **`403 insufficient_scope`.** When the server answers a request with `403` and
+  `WWW-Authenticate: Bearer error="insufficient_scope"`, the tool call fails
+  with `Insufficient scope: required "<scope>"` (the SDK's
+  `InsufficientScopeError`, with `requiredScope`; it is **not** an
+  `UnauthorizedError`). No authorization is started from inside a run: a new
+  authorization URL in the middle of a tool call would replace the state and
+  PKCE verifier of the one the user may have open. Ask for the scope up front
+  (`scope`), or authorize again with it. A provider **without** a human step
+  (no `redirectUrl`: the enterprise one below) asks once for the wider scope
+  and retries the request once.
+- **A refresh whose result cannot be saved is an error**, not a new
+  authorization: when storage throws while saving refreshed tokens (a full
+  quota, a broken vault), the connect or the tool call fails with that error.
 
 ### Enterprise-managed authorization (ID-JAG)
 
@@ -378,6 +428,17 @@ Access-Control-Allow-Headers:  Content-Type, Authorization, mcp-session-id,
                                MCP-Protocol-Version, Last-Event-ID
 Access-Control-Expose-Headers: mcp-session-id, WWW-Authenticate
 ```
+
+Nothing changed here with the 2.x MCP SDK: recorded on the wire against a raw
+HTTP server, the old and the new client send the same requests with the same
+headers (`Accept`, `Content-Type`, then `mcp-session-id` and
+`MCP-Protocol-Version` after `initialize`, `Authorization` and `Last-Event-ID`
+when they apply), and the browser tests run against a server with exactly this
+list. **Later:** when this package opts into the 2026-07-28 protocol revision,
+requests will also carry `Mcp-Method` and `Mcp-Name` (and `Mcp-Param-*` for
+tool arguments a server asks to mirror) — a server that wants to keep working
+with browser clients then should add those to `Access-Control-Allow-Headers`
+now.
 
 Each line earns its place:
 
@@ -572,6 +633,60 @@ Loading a definition someone else wrote: [docs/security.md](docs/security.md#pip
 | `replan` / `synthesize` | `true` | toggle phases |
 | `replanAfter` | `'failure'` | replan trigger: `'failure'` \| `'always'` \| `(stepResult) => boolean \| Promise<boolean>` |
 | `compressAfterChars` | 12000 | legacy: summarize old history past this size (when `compaction` is unset) |
+
+## Upgrading to the 2.x MCP SDK
+
+The `./mcp` subpath moved from `@modelcontextprotocol/sdk` 1.x to the official
+2.x client, `@modelcontextprotocol/client`, in one step. **The optional peer
+dependency is renamed — that is the breaking change.** Nothing changes on the
+wire, and nothing changes if you never import `@dudko.dev/agent-web/mcp`.
+
+If you do import it:
+
+1. **Install the new package, remove the old one.**
+   `npm uninstall @modelcontextprotocol/sdk && npm install @modelcontextprotocol/client`
+   (`^2.4.0`). With only the old package installed, a bundler cannot resolve
+   `@modelcontextprotocol/client` and the build fails. The new SDK needs
+   `zod ^4.2` (this package already depends on zod 4) and declares Node >= 20
+   for tooling.
+2. **Import SDK types from the new package.** `McpHttpServerConfig.authProvider`
+   is the `OAuthClientProvider` of `@modelcontextprotocol/client`, `fetch` its
+   `FetchLike`, `reconnection` its `StreamableHTTPReconnectionOptions`. Change
+   `@modelcontextprotocol/sdk/client/auth.js`, `.../shared/auth.js`,
+   `.../shared/transport.js` and `.../client/streamableHttp.js` to
+   `@modelcontextprotocol/client`; the member names are the same. A provider
+   that is only structurally an `OAuthClientProvider` (no import) keeps
+   compiling, and a plain `fetch`-shaped function is still a `FetchLike`. If you
+   only use `BrowserOAuthProvider` / `createEnterpriseOAuthProvider`, there is
+   nothing to change in code.
+3. **Errors.** `UnauthorizedError` (re-exported from `./mcp`) is the new
+   package's class: an `instanceof` against a class imported from the 1.x
+   package no longer matches. It now sets `name` to `'UnauthorizedError'`, and
+   `instanceof` holds across two copies of the SDK. Other classes: `ProtocolError`
+   (was `McpError`), `SdkError` / `SdkHttpError` (was `StreamableHTTPError`; the
+   HTTP status is `.status`). Messages lost the `MCP error <code>: ` prefix.
+4. **Your own `OAuthClientProvider`.** `tokens`, `saveTokens`,
+   `clientInformation` and `saveClientInformation` get an optional last argument
+   `ctx: { issuer }`; ignore it if you keep one credential set. The objects
+   handed to the two `save*` methods carry an `issuer` field: store and return
+   them **verbatim**. `invalidateCredentials` is called with `'client'` and then
+   `'tokens'` on an `invalid_client` (it was `'all'`). When the provider
+   implements `saveDiscoveryState`, `discoveryState()` must still return it when
+   the code comes back, or the exchange is refused. A `saveTokens` that throws
+   after a refresh now fails the request instead of starting a new
+   authorization.
+5. **Stored tokens need no migration.** What `BrowserOAuthProvider` wrote
+   before (no `issuer` stamp) loads as it is and is stamped on first use. One
+   thing does not carry over: an authorization that was *started* before the
+   upgrade and comes back after it, if that version stored no discovery state —
+   `finishMcpOAuth` refuses it and the user authorizes again.
+6. **Behaviour that is new on purpose** (each in the sections above): a
+   `tools/call` answered with a JSON-RPC error keeps the server's message
+   verbatim; an `outputSchema` that cannot be compiled fails only that tool's
+   calls, where it used to fail the whole server at connect; a
+   `403 insufficient_scope` fails the call instead of starting an
+   authorization; a server that speaks only 2026-07-28 is refused with a clear
+   error.
 
 ## Docs
 

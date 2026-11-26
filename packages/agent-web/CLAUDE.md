@@ -30,7 +30,7 @@ behind every decision.
   IndexedDB; API keys never inlined into config. BYOK only — shared keys go
   through a proxy/gateway (see docs/security.md).
 - **Optional peers, imported dynamically.** `@ai-sdk/*`, `@browser-ai/*`,
-  `@modelcontextprotocol/sdk`, `@mlc-ai/web-llm` — external in the bundle so
+  `@modelcontextprotocol/client`, `@mlc-ai/web-llm` — external in the bundle so
   hosts install and code-split only what they use. `ai`, `zod`, `idb` are deps.
 - Tracks **AI SDK v7**, in step with `@browser-ai/*` v3 which peers `ai@^7`.
   (This was pinned to v6 while `@browser-ai/web-llm` still peered `ai@^6`.)
@@ -190,6 +190,30 @@ behind every decision.
   for byte — change both (the server's `tests/mcp-shared.test.ts` compares them and tests every
   cap and guard; each needs a mutation check). The section is appended in `stageCall`
   (`agent/internal.ts`) for the planner and the executor only, from text fixed in `createAgent`.
+  A result that breaks its tool's `outputSchema` is passed on with a note, never thrown
+  (`outputSchemaViolation` in `http.ts`).
+- The MCP client is the official 2.x SDK, `@modelcontextprotocol/client` (the optional peer of
+  `./mcp`; `@modelcontextprotocol/sdk` 1.x is gone from this package - the test servers and the
+  React package's e2e servers keep it, as real 1.x SERVERS). The JSON Schema validator is imported
+  from its `/validators/cf-worker` subpath: the engine the SDK's root entry already bundles under
+  the `browser` export condition (so it costs a browser bundle nothing), pure JS with no code
+  generation (CSP), and the same engine in the Node-run tests as in a page - never
+  `/validators/ajv` (`new Function`, and ~295 kB) and never the internal `/_shims`.
+  `versionNegotiation` stays at the SDK's default, `'legacy'`: the 2025 `initialize` handshake,
+  the same wire and the same CORS request headers as before; opting into 2026-07-28 is a separate
+  change (it adds `Mcp-Method` / `Mcp-Name` request headers: README, CORS section). `http.ts`
+  deliberately does NOT use the typed verbs: `tools/list` goes page by page through
+  `client.request` (`listAllTools`: our page cap `MAX_TOOL_LIST_PAGES` and repeated-cursor guard;
+  `client.listTools()` would aggregate, throw past its own cap, skip servers without the tools
+  capability and switch on the SDK's output check), and `tools/call` through `client.request` too
+  (`client.callTool` throws on a result that breaks the `outputSchema` and takes the result with
+  it). A 403 `insufficient_scope` never starts an interactive authorization
+  (`onInsufficientScope: 'throw'` for a provider with a `redirectUrl`). All of it mirrors the Node
+  sibling's `src/mcp.ts` / `mcp-oauth.ts`: change both. OAuth guards on this boundary - the `iss`
+  check (and `iss` handed to the SDK's `auth()`), the refusal of a callback without discovery
+  state, the issuer stamp surviving storage, the scope policy - each have a test in
+  `tests/mcp.test.ts` and need a mutation check; `tests/mcp-protocol.test.ts` runs the connector
+  against the test server in `legacy`, `dual` and `modern` mode.
 - `src/webmcp/` — optional `./webmcp` subpath: publish a ToolSet through the browser's WebMCP API
   and use a page's WebMCP tools as one. No dependency; a no-op where the browser has no WebMCP.
 - `src/{parse,prompts,events,config,index}.ts`.
