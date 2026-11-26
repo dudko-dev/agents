@@ -1,0 +1,41 @@
+/* Starlight themed with the site tokens (tokens.css), so the docs and the landing page match. */
+:root {
+  --sl-font: var(--font-sans);
+  --sl-font-mono: var(--font-mono);
+  --sl-color-accent-low: #0b2a45;
+  --sl-color-accent: #2f9fe0;
+  --sl-color-accent-high: #bfe3f9;
+  --sl-color-white: #ffffff;
+  --sl-color-gray-1: #e8ecf3;
+  --sl-color-gray-2: #c3ccda;
+  --sl-color-gray-3: #9aa6b8;
+  --sl-color-gray-4: #556178;
+  --sl-color-gray-5: #2a3650;
+  --sl-color-gray-6: #111827;
+  --sl-color-black: #04070e;
+}
+/* The site is dark only: the theme picker is hidden and a stored "light" choice is ignored
+   (Starlight sets data-theme from localStorage before paint; the same values answer it). */
+:root[data-theme='light'] {
+  --sl-color-accent-low: #0b2a45;
+  --sl-color-accent: #2f9fe0;
+  --sl-color-accent-high: #bfe3f9;
+  --sl-color-white: #ffffff;
+  --sl-color-gray-1: #e8ecf3;
+  --sl-color-gray-2: #c3ccda;
+  --sl-color-gray-3: #9aa6b8;
+  --sl-color-gray-4: #556178;
+  --sl-color-gray-5: #2a3650;
+  --sl-color-gray-6: #111827;
+  --sl-color-gray-7: #0b101a;
+  --sl-color-black: #04070e;
+  color-scheme: dark;
+}
+starlight-theme-select {
+  display: none;
+}
+/* Wide reference tables (events, config) scroll inside the page instead of pushing it wider. */
+.sl-markdown-content table {
+  display: block;
+  overflow-x: auto;
+}

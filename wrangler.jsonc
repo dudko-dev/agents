@@ -1,12 +1,15 @@
-// Cloudflare Workers (static assets) for https://agent.dudko.dev: `pnpm nx build demo` writes the
-// site into apps/demo/dist - the demo under /demo/ and a `_redirects` file that sends the root
-// there. The build runs on Cloudflare (Workers Builds); there is no Worker script, only files.
+// Cloudflare Workers (static assets) for https://agent.dudko.dev: `pnpm nx build site` builds the
+// libraries, the demo and the site, and writes everything into apps/site/dist - the landing page
+// and the docs at the root, the demo under /demo/. The build runs on Cloudflare (Workers Builds);
+// there is no Worker script, only files.
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "agents",
   "compatibility_date": "2026-11-01",
   "assets": {
-    "directory": "./apps/demo/dist"
+    "directory": "./apps/site/dist",
+    // An unknown path answers 404 with the site's own 404 page, not a soft 200.
+    "not_found_handling": "404-page"
   },
   // Pull requests get a preview: Workers Builds runs `npx wrangler preview` for them, and that
   // command refuses to run without this block (it may stay empty).

@@ -13,6 +13,7 @@ running fully in the browser, React bindings for it, and a demo.
 | [`packages/agent-web`](packages/agent-web) | [`@dudko.dev/agent-web`](https://www.npmjs.com/package/@dudko.dev/agent-web)<br>[![npm](https://img.shields.io/npm/v/@dudko.dev/agent-web.svg)](https://www.npmjs.com/package/@dudko.dev/agent-web) [![downloads](https://img.shields.io/npm/dy/@dudko.dev/agent-web.svg)](https://www.npmjs.com/package/@dudko.dev/agent-web) | The same loop in the browser: BYOK cloud providers or local WebGPU models, an encrypted key vault, HTTP MCP. |
 | [`packages/agent-web-react`](packages/agent-web-react) | [`@dudko.dev/agent-web-react`](https://www.npmjs.com/package/@dudko.dev/agent-web-react)<br>[![npm](https://img.shields.io/npm/v/@dudko.dev/agent-web-react.svg)](https://www.npmjs.com/package/@dudko.dev/agent-web-react) [![downloads](https://img.shields.io/npm/dy/@dudko.dev/agent-web-react.svg)](https://www.npmjs.com/package/@dudko.dev/agent-web-react) | React bindings: the `useAgent` hook, a provider and a drop-in chat. |
 | [`apps/demo`](apps/demo) | — (private) | The Vite demo of the React package ([live](https://agent.dudko.dev/demo/)). |
+| [`apps/site`](apps/site) | — (private) | [agent.dudko.dev](https://agent.dudko.dev): the landing page and the docs, generated from the packages' READMEs and `docs/`. |
 
 Each package keeps its own README, docs and version; they are published to npm independently.
 
@@ -32,6 +33,8 @@ pnpm test:e2e              # the browser tests (Playwright over the built demo)
 pnpm nx test @dudko.dev/agent-web          # one target of one package
 pnpm nx run-many -t build -p demo          # the demo and everything it needs
 pnpm --filter demo dev                     # the demo's dev server (build the library first)
+pnpm nx build site                         # the whole site: landing page, docs and the demo
+pnpm --filter site dev                     # the site's dev server
 pnpm --filter @dudko.dev/agent start       # the Node agent's REPL from source
 ```
 

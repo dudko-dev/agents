@@ -33,6 +33,7 @@ import { buildCloudModel } from './cloud'
 import { engineFor } from './local-engines'
 import { RU_LABELS } from './i18n'
 import { Markdown } from './markdown'
+import markUrl from './mark.svg'
 import {
   enabledSkillsFor,
   useDemoSettings,
@@ -383,7 +384,8 @@ export const App = () => {
     showToolCalls: settings.showToolCalls,
     showUsage: settings.showUsage,
     showTotalUsage: settings.showUsage,
-    theme: settings.theme,
+    // The site is dark only, and so is the demo.
+    theme: 'dark',
     labels: ru ? RU_LABELS : undefined,
     files: settings.filesPanel ? workspace : undefined,
     // Answers are Markdown — render them (any renderer plugs in here).
@@ -412,17 +414,34 @@ export const App = () => {
   return (
     <div className="app">
       <header className="app__header">
-        <div className="app__brand">
-          <span className="app__logo">🤖</span>
-          <div>
-            <h1 className="app__title">agent-web-react</h1>
-            <p className="app__subtitle">
-              An in-browser LLM agent that plans, calls tools, thinks, asks for consent, delegates
-              to sub-agents in Web Workers — and plays chess.
-            </p>
-          </div>
-        </div>
-        <nav className="app__links">
+        <a className="app__brand" href="/" aria-label="dudko.dev agents: home">
+          <img className="app__logo" src={markUrl} alt="" width="28" height="28" />
+          <span className="app__name">agents</span>
+          <span className="app__badge">demo</span>
+        </a>
+
+        <nav className="app__tabs" role="tablist" aria-label="Demo">
+          {(
+            [
+              ['notes', 'Sticky notes'],
+              ['mcp', 'MCP servers'],
+              ['chess', 'Chess vs agent'],
+            ] as [View, string][]
+          ).map(([v, label]) => (
+            <button
+              key={v}
+              role="tab"
+              aria-selected={view === v}
+              className={`app__tab${view === v ? ' is-active' : ''}`}
+              onClick={() => setView(v)}
+            >
+              {label}
+            </button>
+          ))}
+        </nav>
+
+        <nav className="app__links" aria-label="Project">
+          <a href="/docs/">Docs</a>
           <a href="https://github.com/dudko-dev/agents" target="_blank" rel="noreferrer">
             GitHub
           </a>
@@ -436,25 +455,10 @@ export const App = () => {
         </nav>
       </header>
 
-      <nav className="app__tabs" role="tablist">
-        {(
-          [
-            ['notes', 'Sticky notes'],
-            ['mcp', 'MCP servers'],
-            ['chess', 'Chess vs agent'],
-          ] as [View, string][]
-        ).map(([v, label]) => (
-          <button
-            key={v}
-            role="tab"
-            aria-selected={view === v}
-            className={`app__tab${view === v ? ' is-active' : ''}`}
-            onClick={() => setView(v)}
-          >
-            {label}
-          </button>
-        ))}
-      </nav>
+      <h1 className="app__sr">
+        Live demo: an in-browser LLM agent that plans, calls tools, thinks, asks for consent,
+        delegates to sub-agents in Web Workers and plays chess
+      </h1>
 
       <main className={`app__main app__main--${view}`}>
         <section className="app__left">

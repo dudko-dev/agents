@@ -119,7 +119,8 @@ const withStack = async (
 
 const executorRequests = (llm: ILocalOpenAI) =>
   llm.requests.filter((r) => stageOf(r) === 'executor')
-const local = (port: number) => `http://127.0.0.1:${port}/secret?key=abc`
+// Not hex: an event carries random ids, and a three-letter hex value would turn up in one by chance.
+const local = (port: number) => `http://127.0.0.1:${port}/secret?key=zq-secret-zq`
 
 test('egress off (the default): the model is not even offered a way to fetch', async () => {
   await withStack(local, async ({ llm, srv, open }) => {
@@ -148,7 +149,7 @@ test('egress on with defaults: the model asks for localhost and is refused - the
     assert.ok(e?.type === 'egress.request')
     assert.equal(e.allowed, false)
     assert.ok(
-      !JSON.stringify(events.filter((x) => x.type === 'egress.request')).includes('abc'),
+      !JSON.stringify(events.filter((x) => x.type === 'egress.request')).includes('zq-secret'),
       'no query string in the log',
     )
     // The run went on: the model was told, and answered.

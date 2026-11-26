@@ -1,0 +1,79 @@
+/*
+ * Design tokens of agent.dudko.dev. One source for the landing page and the documentation.
+ *
+ * Brand: the agents mark (drawn in the manner of the dudko.dev one: a triangle outline, here in
+ * three parts around a core - the stages of a run) and the dudko.dev blue (#036ac2 on light, #2f9fe0 on dark) over the site's
+ * near-black (#04070e). Radius, type roles and the status colours continue the tokens of the
+ * chat components (`--awr-*` in @dudko.dev/agent-web-react/styles.css), so the live widget and
+ * the demo look like one product.
+ */
+:root {
+  /* colour: one theme, dark, like dudko.dev */
+  --c-bg: #04070e;
+  --c-surface: #0b101a;
+  --c-surface-2: #111827;
+  --c-border: #1c2536;
+  --c-border-strong: #2a3650;
+  --c-text: #e8ecf3;
+  --c-text-muted: #9aa6b8;
+  --c-text-faint: #8693a8;
+  --c-accent: #2f9fe0;
+  --c-accent-strong: #5bb7ee;
+  --c-on-accent: #04121f;
+  --c-accent-soft: rgb(47 159 224 / 0.12);
+  --c-ok: #4ade80;
+  --c-warn: #fbbf24;
+  --c-danger: #f87171;
+  --c-focus: #8fd0f7;
+  --c-code-bg: #080c15;
+
+  /* type */
+  --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.25rem;
+  --text-2xl: 1.5rem;
+  --text-3xl: 1.875rem;
+  --text-4xl: 2.25rem;
+  --text-5xl: 3rem;
+  --text-6xl: 3.75rem;
+  --leading-tight: 1.1;
+  --leading-snug: 1.3;
+  --leading-normal: 1.6;
+
+  /* space */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-10: 2.5rem;
+  --space-12: 3rem;
+  --space-16: 4rem;
+  --space-20: 5rem;
+  --space-24: 6rem;
+
+  /* shape */
+  --radius-sm: 6px;
+  --radius-md: 12px;
+  --radius-lg: 20px;
+  --radius-pill: 999px;
+  --shadow-lift: 0 24px 60px -30px rgb(0 0 0 / 0.8);
+
+  /* layout */
+  --w-page: 72rem;
+  --w-prose: 42.5rem;
+
+  /* motion: the signature is "a step settles into place" - a short rise that eases out hard */
+  --ease-settle: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur-fast: 200ms;
+  --dur-base: 500ms;
+  --dur-reveal: 700ms;
+  --rise: var(--space-8);
+
+  color-scheme: dark;
+}
