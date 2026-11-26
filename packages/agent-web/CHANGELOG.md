@@ -1,3 +1,17 @@
+# 0.0.39 / 2026-11-26
+
+### :tada: Enhancements
+- Model tiers: `executorTiers` (`light` / `standard` / `strong`) - the planner rates a step and the executor runs it on that tier's model; `escalation` retries a failed step on the next stronger tier (new event `step.escalated`)
+- `web_search`: `config.search` with Brave, Tavily and SearXNG adapters or your own engine; results filtered by the egress policy and treated as untrusted text
+- `decisionModel`: a decision model answers the replanner's continue / finish and a pipeline route, with a confidence threshold and fallback to the ordinary call (new event `decision`)
+- Media: `config.media` - `generate_image`, `generate_speech`, `transcribe_audio` and transcription of audio attachments; files are written to the workspace, never sent to the model as bytes (events `media.generated`, `media.transcribed`)
+- Dynamic subagents: `subagents: { dynamic }` - the model starts a helper (`spawn_subagent`) with a subset of its own tools, under depth, count and budget limits; `subagent.start` carries `parentId` and `depth`
+- MCP: a server's `instructions` reach the planner and executor as third-party notes (`mcpInstructions`); `structuredContent` is handled and a result that breaks its `outputSchema` is passed on with a note instead of lost
+- Per-call output caps follow the Node rules: `limits.perCall.<stage>: 0` means no cap, a thinking stage has no default cap, a cut answer is reported
+- A replanner failure is reported (`error` with phase `replan`, `replan.decision.failed`) instead of degrading silently
+- `generateStructured` returns a plain typed object (`StructuredResult`) instead of the SDK's `GenerateObjectResult`
+- The guarded fetch forwards a request body
+
 # 0.0.38 / 2026-11-26
 
 ### :tada: Enhancements

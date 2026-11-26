@@ -1,3 +1,13 @@
+# 0.0.28 / 2026-11-26
+
+### :tada: Enhancements
+- Model tiers and escalation on a step (tier pill, "Escalated: light -> strong", attempts no longer glued together); `showTiers`
+- The subagent tree (`SubagentTree`, `subagentTree()`): static subagents and dynamic helpers in one tree, with status, usage and Stop; a helper's approval request now reaches the prompt and names the helper
+- Generated images and audio in the assistant turn, transcripts as a collapsed block (`GeneratedMedia`, `TranscriptBlock`); media and decision calls in the usage sum and `UsageBadge`
+- Decision-model notes on a step; a readable `web_search` row; a replanner failure as a warning instead of an error
+- `useMcp` / `useMcpServers` expose the server's `instructions`
+- Peer `@dudko.dev/agent-web` is now `>=0.0.39`
+
 # 0.0.27 / 2026-11-26
 
 ### :tada: Enhancements
