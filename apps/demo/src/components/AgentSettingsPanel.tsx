@@ -599,7 +599,7 @@ export const AgentSettingsPanel = ({
         </div>
         <div className="agentset__grid">
           <label className="settings__field">
-            <span className="settings__label">Labels</span>
+            <span className="settings__label">Chat language</span>
             <select
               className="settings__select"
               value={settings.lang}
