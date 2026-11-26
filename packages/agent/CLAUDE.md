@@ -44,6 +44,15 @@
     MCP connections, reconnect, paginated `tools/list`) + `mcp-oauth.ts` (OAuth 2.1 / DCR provider,
     file-backed tokens), `tracing.ts` (OpenTelemetry spans, a no-op without an SDK), `utils.ts`
     (retry / timeout / usage helpers).
+  - `pipeline-engine.ts` + `pipeline.ts` (`createPipeline`: a graph of agents with conditions and
+    loops, described in plain JSON). The engine (definition types, `validatePipeline`, the conditions
+    with the non-backtracking `matches` matcher, the wave scheduler; pure, no imports) is a COPY of
+    the browser sibling's `src/pipeline/engine.ts`, byte for byte: change both, with tests
+    (`tests/pipeline-agent.test.ts` compares the two files and the two `tests/pipeline.test.ts`).
+    `pipeline.ts` is this package's adapter: a node run by `createAgent`, the route call
+    (`generateObject` on the planner model), `nodeResolver`. A definition is untrusted input: the
+    caps, the `otherwise` rule, the condition input bound and the join deferral each need a test
+    and a mutation check.
   - `internal.ts` (`IRunState`: the per-run mutable state shared by the runner, the stages and the tool
     wrappers) + `context.ts` (`runContext`, the AsyncLocalStorage that carries run id, emit and state
     into tools). Neither is public API.

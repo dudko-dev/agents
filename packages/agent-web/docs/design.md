@@ -90,6 +90,9 @@ src/
 ├── subagent/            tool.ts (createSubagentTool), worker.ts (serveSubagentWorker), protocol.ts
 ├── tools/egress.ts      `egress` / `web_fetch`: the model's one way to make a request
 ├── learning.ts          `learning`: save_skill / forget_skill, the skill stores, the secret scan
+├── pipeline/            `createPipeline`: a graph of agents described in JSON
+│   ├── engine.ts        validation, conditions, the scheduler - pure, a COPY of the Node sibling's
+│   └── index.ts         the adapter (a node = createAgent + a route call), nodeResolver
 ├── context-window.ts    the model's real window; compaction, tool search and caps sized to it
 ├── thinking.ts limits.ts caching.ts skills.ts images.ts   — see docs/capabilities.md
 ├── llm/context-editing.ts  stale tool results → stubs inside one step's tool loop
@@ -263,6 +266,64 @@ exists: it appears in the planner's `SKILLS:` index at once and loads with
 - **Its tools stay callable** under `plan-narrowed` and `search` tool selection,
   or a notebook would silently stop working on large catalogues.
 - **Off by default**: no extra tools and not a word more in the prompts.
+
+## Pipelines: waves, a join rule, caps
+
+`createPipeline` runs a graph of agents described in JSON (`src/pipeline/`). The
+engine - validation, conditions, scheduling - is one file with no imports,
+`pipeline/engine.ts`, and it is the same file, byte for byte, as the Node
+sibling's `pipeline-engine.ts` (a test there compares them): a definition must run
+the same in both. Only the adapter that runs a node with `createAgent` differs.
+
+- **A definition holds names, the host holds the things.** The definition will be
+  edited on a canvas, saved and shared, so it has no code, no model objects and no
+  secrets; `resolveNode` maps names to config. It is also why a node's `settings`
+  are passed on and never applied.
+- **Waves, not a queue of callbacks.** Everything activated runs concurrently,
+  then the edges are evaluated, then the next wave starts. A run is then a list of
+  waves - easy to draw, easy to reason about, and deterministic for a given set of
+  outputs, which a "start a node the moment an edge fires" scheduler is not.
+- **The join rule is about reachability, not about counting edges.** "Wait for all
+  incoming edges" deadlocks as soon as one of them is conditional and does not
+  fire, and it has no meaning inside a loop. Instead a `join: 'all'` node waits
+  while something still activated can reach it through the graph: a fan-in waits
+  for the slower branch however long it is, and stops waiting the moment that
+  branch dies out. When everything activated waits for something else (a cycle),
+  nothing would ever start, so all of it starts. Reachability ignores conditions
+  on purpose: it can only make a node wait a wave longer, never deadlock it.
+  The known limit is a fan-in inside a loop: the join and a slower branch that
+  leads to it reach each other through the cycle, so they wait for each other,
+  both run, and the join fires without that branch. `join: 'any'`, or a loop
+  drawn around the whole fan-out / fan-in, is the way out.
+- **Every edge has an id.** A UI lights edges up from events, so an edge must be
+  nameable even when the author gave it no id: it gets `e<position>`, the
+  normalised definition is what `pipeline.definition` returns, and
+  `pipeline.edge` carries the id and the source node's visit. An activation a
+  cap refuses is an event too (`pipeline.node.skipped`), or an edge would light
+  up towards a node that never starts.
+- **One agent per node, one conversation per node.** A node keeps its agent for
+  the pipeline's life, so with `memory` it remembers its earlier visits; the
+  resolver gives each node its own session (`<sessionId>:<node id>`), because
+  nodes built from one base config would otherwise write into one transcript.
+- **Caps instead of cycle detection.** A review loop is the point of the feature,
+  so a cycle is a warning, not an error. `maxNodeVisits` (3) bounds a loop,
+  `maxRuns` (25) bounds the run; hitting one drops that activation and the run ends
+  normally with `stoppedBy`, because the three drafts already written are worth
+  more than an exception. The defaults are small on purpose - a run is paid for.
+- **`matches` does not use `RegExp`.** The brief case against it: a regex engine
+  that backtracks cannot be given a timeout, and capping the input does not help
+  (an exponential pattern needs thirty characters). So a pattern is compiled to a
+  small program and simulated as a set of states (a Pike VM): linear in the input,
+  no captures needed for a yes/no. It costs a subset of the syntax
+  (no backreferences, no lookaround) and ~300 lines; it buys a definition that can
+  be loaded from anywhere.
+- **A route is a second, small call** to the node's planner model, structured
+  output first and plain text as the fallback, rather than a marker the node must
+  remember to print: the node's answer stays clean, and an answer that is not a
+  label is simply no route (the `otherwise` edge is there for it).
+- **Abort follows the package's agent**: here `run` resolves with
+  `stoppedBy: 'aborted'` (as `agent.run` resolves with `stopped`); on the server
+  it rejects with an `AbortError`. A failed node rejects in both.
 
 ## Secrets
 

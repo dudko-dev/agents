@@ -215,3 +215,47 @@ is a persistence channel, so it is treated as one.
   notebook (the demo and React package show it) if the agent reads untrusted pages.
 - The secret scan is pattern-based: it catches the common key shapes, not an
   arbitrary sensitive string.
+
+## Pipelines: a definition is data
+
+A pipeline definition is meant to be saved, shared and loaded - including one that
+somebody else wrote. So it is treated as untrusted input.
+
+**What is enforced**
+
+- **No code.** A definition is JSON: ids, texts, names, conditions. Nothing in it is
+  evaluated. Conditions are a closed set (`always`, `contains`, `matches`, `route`,
+  `otherwise`).
+- **Names, not things.** A node says `model: 'smart'`, `tools: ['files']`,
+  `mcpServers: ['docs']`. The host's resolver (`nodeResolver`, or your own
+  `resolveNode`) decides what a name maps to, and a name it did not register fails
+  the node. A foreign definition cannot reach a model, a key, a tool or an MCP
+  server the host did not put in the registry.
+- **`settings` are not applied.** `node.settings` is handed to the host's
+  `configure` and to nothing else. Do not spread it into the agent config: that
+  would let a definition turn consent off or open `egress`. Read the fields you
+  mean to allow, and bound them.
+- **A pattern cannot hang the page.** `matches` is not run by `RegExp` (a
+  backtracking engine has no timeout; `(a+)+$` on thirty characters freezes a
+  tab). It is compiled to a matcher that cannot backtrack: time grows with
+  (input length) x (pattern size), and both are capped - 50,000 characters of an
+  output, a 500-character pattern, 1000 compiled steps. Backreferences and
+  lookaround, the constructs that need backtracking, are refused at validation;
+  flags are limited to `imsu`.
+- **Loops are bounded**: `maxNodeVisits` (default 3, at most 100) per node and
+  `maxRuns` (default 25, at most 1000) per run; a definition has at most 200 nodes
+  and 1000 edges.
+
+**What is not**
+
+- **Cost.** 1000 runs of an agent is a lot of tokens. The caps bound a run, they do
+  not make it cheap: set each node's own `limits` in the resolver, and show the
+  user what a definition will run before running it.
+- **Instructions are prompts.** `node.instructions` goes into the agent's system
+  prompt, so a foreign definition speaks to your models with the authority of a
+  system prompt. It cannot widen what the agent *can* do (tools, egress and
+  consent are the host's), but within that it steers. Keep consent on
+  `ask-writes` or stricter for definitions you did not write.
+- **Text flows between nodes.** One node's output is the next node's input: an
+  injection that lands in one node travels on. The usual rules apply to every
+  node.

@@ -14,6 +14,43 @@ export { decideReplan } from './agent/replanner.js'
 export { synthesizeAnswer } from './agent/synthesizer.js'
 export type { AgentContext, EffectiveToolStrategy } from './agent/internal.js'
 
+// ── Pipelines: a graph of agents with conditions and loops, in plain JSON ────
+export { createPipeline, nodeResolver } from './pipeline/index.js'
+export type {
+  NodeResolverOptions,
+  Pipeline,
+  PipelineOptions,
+  PipelineRunOptions,
+} from './pipeline/index.js'
+export {
+  normalizePipeline,
+  PIPELINE_LIMITS,
+  PipelineNodeError,
+  PipelineValidationError,
+  renderPipelineNodeInput,
+  testPipelineCondition,
+  validatePipeline,
+} from './pipeline/engine.js'
+export type {
+  PipelineCondition,
+  PipelineDefinition,
+  PipelineEdge,
+  PipelineEvent,
+  PipelineIssue,
+  PipelineNode,
+  PipelineNodeContext,
+  PipelineNodeInput,
+  PipelineNodeOutput,
+  PipelineNodeRunner,
+  PipelineNodeSource,
+  PipelineResult,
+  PipelineRoute,
+  PipelineStop,
+  PipelineTraceEntry,
+  PipelineUsage,
+  PipelineValidation,
+} from './pipeline/engine.js'
+
 // ── Subagents (in-process or Web Worker) ─────────────────────────────────────
 export { createSubagentTool } from './subagent/tool.js'
 export type { SubagentProfile, SubagentToolOptions, SubagentWorkerConfig } from './subagent/tool.js'
