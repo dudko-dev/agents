@@ -285,6 +285,7 @@ const runOnce = async (
       toolCount: ctx.toolCatalog.length,
       ...(ctx.learning?.nudge ? { learning: { fetch: Boolean(ctx.tools[WEB_FETCH_TOOL]) } } : {}),
       ...(ctx.sandbox ? { sandbox: ctx.sandbox } : {}),
+      ...(ctx.subagents ? { subagents: ctx.subagents } : {}),
       ...(ctx.mcpInstructions ? { mcpInstructions: ctx.mcpInstructions } : {}),
     }),
   )

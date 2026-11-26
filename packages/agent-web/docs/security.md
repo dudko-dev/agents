@@ -420,6 +420,64 @@ What this does NOT protect against:
   can print instructions. And a program that the user approved once is not approved
   forever - each run is gated.
 
+## Dynamic subagents (`spawn_subagent`): a helper can only have less
+
+With `subagents.dynamic` the model starts helper agents itself. The text that starts one - the
+task, the role, the tool names - is model-written, and a model can be talked into things by a
+page it fetched or a tool result it read. So the feature is built as a privilege boundary: a
+helper may **narrow** what the calling run has and never widen it.
+
+**What is enforced**
+
+- **No widening parameter exists.** The tool's input is `task`, `role` and `tools`
+  (`additionalProperties: false`). A call that carries anything else - `model`, `limits`,
+  `toolApproval`, `systemPrompt`, a timeout - is refused with a message; it is not cleaned and
+  run, so it can never look as if it worked.
+- **Tools are the caller's objects, by name.** A helper is given tool objects picked from the
+  calling agent's mounted tools. A name the caller does not have (never passed, removed by
+  `availableTools` / `excludedTools`, or not handed down to this helper) is refused. Nothing is
+  built for a helper: there is no second egress policy, search credential, sandbox, MCP
+  connection or file system, so a helper's `web_fetch` is refused the hosts the caller's is
+  refused. A helper's helper narrows from its own parent, not from the agent.
+- **One consent gate.** A helper uses the caller's approval state itself - the current mode,
+  the rules, the "always allow" set - not a copy made at spawn time. A deny rule denies inside
+  a helper; `read-only` refuses its writes; a mode you tighten mid-run applies to its next
+  call; an "always allow" answered once is the agent's, whoever asked. Requests from a helper
+  carry `subagent: { id, depth }` so a prompt can say who is asking. A config a host writes
+  cannot claim somebody else's gate: the hand-over travels beside the helper's config object,
+  not in it.
+- **The operator's prompt stays the operator's.** `role` goes into the helper's task, under a
+  line that says the delegating agent wrote it. It is never placed in the system prompt.
+- **Budgets are inside the caller's.** A helper gets a share of what is left of each run limit
+  and of the tool-call cap, after what running helpers were promised; its tokens and calls are
+  charged to every run above it as they happen; and a call the parent has no budget for is
+  refused even if the helper's own share is not used up. Depth (`maxDepth`, never above 4), the
+  number of helpers per run (`maxChildren`, kept across a resume), the number running at once
+  (`maxConcurrent`) and the wall clock of one helper (`timeoutMs`) are capped. A helper at the
+  depth limit is not offered the tool at all.
+- **The notebook stays with the parent.** `save_skill` / `forget_skill` are never given to a
+  helper, by name or through `defaultTools: 'all'`. A helper reads the skills (lessons still
+  under their "this is a lesson, not policy" preamble) and cannot write one.
+
+**What it does not do**
+
+- It is not isolation. A helper runs in the page, on the same thread, with the tool objects it
+  was given: it is as trusted with them as the run that started it. Narrowing limits what a
+  *confused* helper can touch; it is not a sandbox around a hostile one. For a separate thread
+  use a static worker subagent.
+- The default subset (the read-only tools) follows your `readOnly` marks. A tool that writes
+  but is marked read-only is handed to every helper - and passes `ask-writes` unasked, as it
+  does in the parent.
+- `run_js` given to a helper is the caller's sandbox, workspace binding included: the guest's
+  `fs` calls pass the gate under the file tools' names, whether or not the helper was given
+  those tools by name. Do not count on "the helper has no `fs_write`" to keep a helper with
+  `run_js` from writing a file; count on the consent rules, which do apply.
+- A helper's partial work is not undone. One that is stopped, times out, or dies with the page
+  leaves the writes it made; a resumed run starts a new helper for that step and does not
+  replay them.
+- The model decides what goes into `task`. Whatever the caller knows, it can tell a helper -
+  there is no confidentiality between a run and its helpers.
+
 ## MCP server instructions: third-party text in a system prompt
 
 An MCP server may send `instructions` when it connects, and the agent shows them to the model

@@ -16,6 +16,7 @@ import type {
 } from '../index.ts'
 import { DirSkillStore } from '../learning.ts'
 import type { ISandboxConfig } from '../sandbox.ts'
+import type { ISubagentsConfig } from '../subagent-dynamic-shared.ts'
 import type { ISearchConfig } from '../web-search.ts'
 import { SEARCH_MAX_RESULTS, SEARCH_PROVIDERS } from '../web-search-shared.ts'
 
@@ -103,6 +104,7 @@ export const loadConfig = (): IAgentConfig => {
     egress: parseEgress(),
     search: parseSearch(),
     sandbox: parseSandbox(),
+    subagents: parseSubagents(),
     learning: parseLearning(),
     llmTimeoutMs: parseOptionalInt(process.env.AGENT_LLM_TIMEOUT_MS),
     llmMaxRetries: parseOptionalInt(process.env.AGENT_LLM_MAX_RETRIES),
@@ -330,6 +332,43 @@ export const parseSandbox = (env: NodeJS.ProcessEnv = process.env): ISandboxConf
   return {
     ...(timeoutMs !== undefined ? { timeoutMs } : {}),
     ...(memoryMb !== undefined ? { memoryLimitBytes: memoryMb * 1024 * 1024 } : {}),
+  }
+}
+
+// AGENT_SUBAGENTS=on lets the model start helper agents itself (the spawn_subagent tool); off
+// (the default) means the tool does not exist. AGENT_SUBAGENTS_MAX_DEPTH / _MAX_CHILDREN /
+// _MAX_CONCURRENT set its limits. Setting them while AGENT_SUBAGENTS is off is an error, not a
+// silent no-op.
+export const parseSubagents = (
+  env: NodeJS.ProcessEnv = process.env,
+): ISubagentsConfig | undefined => {
+  const raw = env.AGENT_SUBAGENTS?.trim().toLowerCase()
+  const on = raw !== undefined && ['on', 'true', '1', 'yes'].includes(raw)
+  if (raw && !on && !['off', 'false', '0', 'no'].includes(raw)) {
+    throw new Error(`AGENT_SUBAGENTS must be on | off, got: ${env.AGENT_SUBAGENTS}`)
+  }
+  const maxDepth = parseOptionalInt(env.AGENT_SUBAGENTS_MAX_DEPTH)
+  const maxChildren = parseOptionalInt(env.AGENT_SUBAGENTS_MAX_CHILDREN)
+  const maxConcurrent = parseOptionalInt(env.AGENT_SUBAGENTS_MAX_CONCURRENT)
+  if (!on) {
+    const stray = [
+      maxDepth !== undefined && 'AGENT_SUBAGENTS_MAX_DEPTH',
+      maxChildren !== undefined && 'AGENT_SUBAGENTS_MAX_CHILDREN',
+      maxConcurrent !== undefined && 'AGENT_SUBAGENTS_MAX_CONCURRENT',
+    ].filter(Boolean)
+    if (stray.length) {
+      throw new Error(
+        `${stray.join(', ')} set but AGENT_SUBAGENTS is off - set AGENT_SUBAGENTS=on to use it`,
+      )
+    }
+    return undefined
+  }
+  return {
+    dynamic: {
+      ...(maxDepth !== undefined ? { maxDepth } : {}),
+      ...(maxChildren !== undefined ? { maxChildren } : {}),
+      ...(maxConcurrent !== undefined ? { maxConcurrent } : {}),
+    },
   }
 }
 

@@ -70,6 +70,8 @@ export interface RunSnapshot {
   userUpdates?: { text: string; reconciled: boolean }[]
   /** Escalations so far (counts against `escalation.maxPerRun` on resume). */
   escalations?: number
+  /** Helpers the model started so far (counts against `subagents.dynamic.maxChildren` on resume). */
+  subagentsSpawned?: number
   /** Final answer (status `complete`). */
   text?: string
   /** What ended the run (status `failed`). */

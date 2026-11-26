@@ -1,5 +1,7 @@
 import type { LanguageModel, ToolSet } from 'ai'
 import type { IApprovalController } from './approval.ts'
+import type { RunControlPort } from './control.ts'
+import type { ISpawnReservation } from './subagent-dynamic-shared.ts'
 import type { IResolvedEscalation, IStepWrites } from './tiers.ts'
 import type {
   EventHandler,
@@ -12,6 +14,31 @@ import type {
 
 // The effective (resolved) tool selection strategy of a run.
 export type EffectiveToolStrategy = 'all' | 'plan-narrowed' | 'search'
+
+// Where a run stands among the helpers the model starts (config.subagents.dynamic). The run the
+// host started has depth 0 and no id; a helper's run carries what it was narrowed to.
+export interface ISpawnScope {
+  // The helper's id (its subagent.start event); absent for the host's run.
+  id?: string
+  depth: number
+  // The state of the run the host started: the per-run count of helpers lives there.
+  root: IRunState
+  // This run's helpers that are running: what each may still spend of this run's budgets.
+  running: ISpawnReservation[]
+  // At most maxConcurrent helpers of this run at once.
+  acquire: (signal?: AbortSignal) => Promise<() => void>
+  // A helper's own run only: its tools (a subset of its parent's), their catalogue, its config
+  // (the parent's, with its share of the budgets) and the run that started it.
+  tools?: ToolSet
+  catalog?: IToolCatalogEntry[]
+  config?: IAgentConfig
+  parent?: IRunState
+  // Its counted tool calls so far (kept by the tool wrapper): what is left of its share is not
+  // the parent's to promise to another helper.
+  toolCalls?: number
+  // The control of the run the host started: helpers at any depth register there.
+  control?: RunControlPort
+}
 
 // Mutable state of ONE run, shared between the runner, the stages and the
 // tool wrappers (reached from inside a tool through the run context).
@@ -41,6 +68,11 @@ export interface IRunState {
   // The writes of the step in flight, set only while that step may be escalated: the tool wrapper
   // records them and hands an earlier attempt's result back instead of writing twice (tiers.ts).
   stepWrites?: IStepWrites
+  // Helpers the model started in this run, its helpers' helpers included (maxChildren). Counted
+  // on the state of the run the host started.
+  subagentsSpawned?: number
+  // Set once the run starts a helper, and from the start on a helper's own run.
+  spawn?: ISpawnScope
 }
 
 // The executor models by tier, when config.executorTiers is on. `standard` is always there (it
@@ -81,6 +113,11 @@ export interface IAgentInternalContext {
   // Set when config.sandbox is on and run_js is among the tools: the stage prompts say what it
   // is and that code is never reported as run without it.
   sandbox?: { files: boolean }
+  // Set while spawn_subagent is among the tools (config.subagents.dynamic): the planner's and the
+  // executor's prompts say when a helper is worth it.
+  subagents?: { dynamic: true }
+  // On the context of a helper's run only: handed to its run state by the runner.
+  spawn?: ISpawnScope
   // The rendered instructions of the connected MCP servers whose tools are mounted (the planner's
   // and the executor's system prompts carry it); absent when none sent any or
   // config.mcpInstructions is false. Replaced only between runs (refresh / reconnect), and a run

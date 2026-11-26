@@ -461,7 +461,10 @@ needs. Subagents are tools too — `createSubagentTool({ config })` runs a child
 agent in-process, `createSubagentTool({ worker, workerConfig })` isolates it in a
 Web Worker served by `serveSubagentWorker()`. Add `profiles` and the parent model
 chooses, per call, between named variants of the same subagent — another model,
-thinking level, limits or system prompt. Give `persistence` a store
+thinking level, limits or system prompt. With `subagents: { dynamic: true }` the model
+starts helpers itself (`spawn_subagent`): a sub-task, an optional role and a subset of its own
+tools — a helper can only have less than the run that starts it, and its spend counts against
+that run's limits. Give `persistence` a store
 (`new IndexedDBRunStore()`) and a run interrupted by a reload or a crash resumes from its
 last checkpoint with `run('', { resumeFromRunId })` — the planner does not run again and
 no finished step is repeated. `createRunControl()` steers a run that is going: `send()`
@@ -542,6 +545,7 @@ Loading a definition someone else wrote: [docs/security.md](docs/security.md#pip
 | `skills` | — | SKILL.md bundles (`defineSkill` / `parseSkillMarkdown` / `loadSkillFromUrl`) |
 | `egress` | off | what the **model** may fetch (`web_fetch`): `true` = any public host over https, or `{ allow, deny, protocols, allowPrivateNetwork, fetch, ... }`; a browser can't pin DNS, so prefer an `allow` list — see [Egress](docs/capabilities.md#egress-what-the-model-may-fetch) |
 | `search` | off | the model may **search the web** (`web_search`: a short list of title / url / snippet): `{ provider: 'tavily' \| 'brave' \| 'searxng', credentialRef, baseURL, maxResults, allowPrivateNetwork, readOnly, fetch }` or `{ engine: fn }`. No key ships with the library and none is written in the config (`credentialRef` names it in `credentials`); the request reaches only the search API; with `egress`, results the model could not fetch are left out. Brave needs a gateway from a page (no CORS) — see [Search](docs/capabilities.md#search-finding-the-page-to-fetch) |
+| `subagents` | off | the **model** may start helper agents itself (`spawn_subagent`): `{ dynamic: true }`, or `{ dynamic: { maxDepth, maxChildren, maxConcurrent, budgetShare, minTokens, timeoutMs, defaultTools } }`. A helper gets a subset of the caller's tools by name (read-only ones by default), a share of what is left of its budgets, the same models and the same consent gate — it can only have less than the run that starts it. See [docs/capabilities.md](docs/capabilities.md#dynamic-subagents-helpers-the-model-starts-itself) |
 | `sandbox` | off | the model may **run JavaScript it wrote** (`run_js`) and read the real output: `true`, or `{ worker, timeoutMs, memoryLimitBytes, maxOutputChars, maxCodeChars, files, engine }`. QuickJS in WebAssembly (optional peer `quickjs-emscripten`), in a Web Worker you supply (`@dudko.dev/agent-web/sandbox-worker`) that is killed at the deadline; with `createFileTools` the guest can import / require workspace files and use `fs` — see [Running code](docs/capabilities.md#running-code-the-sandbox) |
 | `learning` | off | the agent writes down lessons as skills (`save_skill` / `forget_skill`): `true` = this session, `{ store: new VfsSkillStore(vfs) }` = across sessions — see [Learning](docs/capabilities.md#learning-lessons-that-outlive-the-task) |
 | `thinking` / `stageThinking` | provider default | `true`, a level (`'low'`…`'xhigh'`, `'none'`), or `{ level, budgetTokens, includeThoughts }` |

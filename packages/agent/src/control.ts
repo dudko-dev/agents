@@ -25,6 +25,13 @@ export interface SubagentInfo {
   /** The profile the parent chose for this call, when it chose one. */
   profile?: string
   startedAt: number
+  /** The subagent that started it; absent when the run itself did. */
+  parentId?: string
+  /** 1 for the run's own subagents, 2 for theirs, ... (set for helpers the model started). */
+  depth?: number
+  /** Set for a helper the model started with spawn_subagent: the role it was given, if any. */
+  dynamic?: true
+  role?: string
 }
 
 export interface RunControl {

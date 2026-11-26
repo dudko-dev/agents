@@ -9,6 +9,7 @@ import type { CredentialStore } from '../secrets/store.js'
 import { isReadOnlyTool } from '../tools/approval.js'
 import type { AgentTool } from '../tools/types.js'
 import { toolRunContextOf } from '../tools/wrap.js'
+import { adoptSubagentEvent } from './dynamic-shared.js'
 import {
   safePost,
   toCloneable,
@@ -410,6 +411,10 @@ export const createSubagentTool = (opts: SubagentToolOptions): AgentTool => {
         name: opts.name,
         task,
         ...(profile ? { profile: profileName } : {}),
+        // The tree: called by this run (a subagent this event passes through on its way up
+        // replaces the parent with its own id and adds a level - see adoptSubagentEvent).
+        ...(runCtx?.runId ? { parentId: runCtx.runId } : {}),
+        depth: 1,
       })
       // Listed in the run's control from here, so the host can stop THIS child on its own.
       const unregister = runCtx?.control?.registerSubagent(
@@ -426,8 +431,14 @@ export const createSubagentTool = (opts: SubagentToolOptions): AgentTool => {
         },
       )
       try {
+        // A subagent the child started is one level deeper from here, and this child is its parent.
         const forward = (event: AgentEvent) =>
-          emit({ type: 'subagent.event', id, name: opts.name, event })
+          emit({
+            type: 'subagent.event',
+            id,
+            name: opts.name,
+            event: adoptSubagentEvent(event, id),
+          })
         const hostTools = gatedHostTools(runCtx?.approve)
         const run = opts.worker ? runInWorker : runInProcess
         const out = await run(task, controller.signal, forward, hostTools, profile).catch(

@@ -7,6 +7,7 @@ import { renderSkillIndex } from '../skills.js'
 import { addUsage, type IPlan, type IUsage, type StepComplexity } from './loop-types.js'
 import { imageRefusal, promptFor, stageCall, withCapHint, type AgentContext } from './internal.js'
 import { PlanSchema, TieredPlanSchema } from './schemas.js'
+import { SPAWN_PLANNER_NOTE } from '../subagent/dynamic-shared.js'
 
 const toSteps = (
   raw: {
@@ -63,6 +64,7 @@ export const createPlan = async (
       skills: skillIndex,
       searchMode: ctx.strategy === 'search',
       ...(ctx.sandbox ? { sandbox: ctx.sandbox.planner } : {}),
+      ...(ctx.subagents ? { subagents: SPAWN_PLANNER_NOTE } : {}),
       ...(ctx.tiers ? { tiers: true } : {}),
     })
     return {

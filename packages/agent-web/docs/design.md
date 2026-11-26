@@ -298,6 +298,76 @@ call budget (a call that is not made costs neither) and it is scoped to the step
 attempt, and across steps, a model may repeat a call as it always could. It cannot recognise a
 write repeated with different arguments; that is what the prompt and read-only marks are for.
 
+## Dynamic subagents: a helper is derived, never configured
+
+**Why a switch under `subagents`, and static ones stay tools.** A static subagent is a tool the
+host builds (`createSubagentTool`) and passes in `tools`: nothing about the agent changes, so it
+needs no config field. A helper the model starts is a behaviour of the agent itself - a
+built-in tool, a prompt note, limits - which is what a config field is for. `subagents` is the
+namespace; `dynamic` is the one thing in it, so a later mode does not need a third name. The
+same field and the same tool name (`spawn_subagent`) as the Node sibling.
+
+**Why a helper is built from the caller's pieces.** The obvious design - take the model's
+arguments, make a config, call `createAgent` - makes "a helper may only have less" a rule
+someone has to enforce on every field, forever. Here there is nothing to enforce it on: a
+helper's agent is assembled from the calling agent's resolved model objects, its approval
+state (the object, not a copy), its skills, and tool objects picked from its mounted tools by
+name. `egress`, `search`, `sandbox`, `learning`, `memory` and `persistence` are left out of the
+helper's config altogether, so it cannot build a second fetcher or a second notebook: it has
+the caller's `web_fetch` or none. The hand-over (approval state, depth, the parent's counters)
+travels in a `WeakMap` keyed by the helper's config object, so no config a host writes can
+carry one. The pure rules - input validation, narrowing, the budget share, the caps, the texts
+- are `subagent/dynamic-shared.ts`, the same file byte for byte as the Node package's
+(`subagent-dynamic-shared.ts`); only the assembly differs (Node nests a run of its loop over a
+derived context, because its tools are wrapped once per agent and read the run from
+AsyncLocalStorage; here tools are wrapped per run, so a helper is a small agent of its own).
+
+**Why the default is the read-only tools.** With no `tools` the choice is between "everything
+the parent has" and something smaller. What the tool is *for* - independent look-ups, long
+reading - needs reads. A model that wants a helper to write has to say so, tool by tool, and
+that list is in the `subagent.start` event for the host to see. `defaultTools: 'all'` is there
+for hosts that prefer the other trade. Either way every call a helper makes passes the same
+gate, so the default is about how much a confused helper can touch, not about consent.
+
+**Why a share of what is left, with promises counted.** A fixed per-helper budget is wrong at
+both ends: too much for a run that is nearly spent, too little for one that has barely begun.
+`budgetShare` of the remainder scales with the run. "Remainder" subtracts what running helpers
+were promised and have not used, or three helpers started in one turn would each be promised
+half of the same tokens. The share is a cap *inside* the parent's - usage is charged upward as
+it arrives, and a tool call is counted on every run above the helper before it executes - so
+the parent's limit is the hard one and the share only decides how a parent's budget is split.
+Iterations are not a resource (they are a loop guard), so a helper gets that share of the
+*cap*, and they are not charged back. There is no run-level wall clock to share, hence a
+plain `timeoutMs`.
+
+**Why in-process only.** A worker subagent works by rebuilding the child on the other side
+from a serializable config (`workerConfig`, a `resolveModel`). A helper is defined by what
+cannot cross: live tool objects, a loaded model, the consent state the user is answering
+through. Proxying every tool and every consent request over `postMessage` would re-create the
+static worker subagent with more moving parts; a helper that is given a static worker
+subagent's tool can call it.
+
+**Why the notebook is withheld.** The parent *could* write a lesson, so "only narrow" would
+allow passing `save_skill` down. It is refused anyway: a lesson is "this problem, this fix,
+it worked", and a helper sees a fragment of the task and never learns whether its answer was
+used. It reports; the run that owns the outcome writes.
+
+**Why one tree convention.** Subagent events already travel in an envelope
+(`subagent.event { id, event }`), and pipelines tag a node's events with `nodeId` / `visit` on
+the outermost event. Rather than a third scheme, `subagent.start` gained `parentId` and
+`depth`, and the rule that fills them lives where events are forwarded
+(`adoptSubagentEvent`): a start is born with depth 1 and its run's id, and each subagent it
+passes through adds a level - the first one also puts itself in as the parent. That needs no
+shared state between a parent and a child, so it is right for a static subagent in a worker
+too, and static and dynamic subagents are nodes of one tree.
+
+**Why a lost helper is not replayed.** A run is checkpointed at step boundaries; a helper lives
+inside one step and has no checkpoint. Replaying its writes on resume would need a durable log
+of every helper's calls keyed by a task the model may word differently next time. The honest
+contract is the existing one for a step in flight: it runs again. Within one process the
+escalation guard does better, and is used: a spawn that *finished* in an earlier attempt at
+the step is answered from its result.
+
 ## Structured output: `generateText` + `Output.object`
 
 AI SDK v7 deprecates `generateObject` / `streamObject`. `generateStructured` is therefore

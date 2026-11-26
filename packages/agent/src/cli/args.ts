@@ -65,6 +65,10 @@ Optional env vars (see env.example for the full list):
   AGENT_SANDBOX               on lets the model run JavaScript it wrote (run_js; needs quickjs-emscripten)
   AGENT_SANDBOX_TIMEOUT_MS    time limit of one run (default 5000, at most 60000)
   AGENT_SANDBOX_MEMORY_MB     heap of one run in MiB (default 32, at most 256)
+  AGENT_SUBAGENTS             on lets the model start helper agents itself (spawn_subagent); off (default)
+  AGENT_SUBAGENTS_MAX_DEPTH   how deep helpers may nest (default 1: helpers start none; at most 4)
+  AGENT_SUBAGENTS_MAX_CHILDREN    helpers one run may start in all (default 8)
+  AGENT_SUBAGENTS_MAX_CONCURRENT  helpers of one parent running at once (default 3)
   AGENT_CONTEXT_WINDOW_TOKENS model window (default 128000)
   AGENT_COMPACTION_THRESHOLD  percent of the window at which auto-compaction starts (default 85)
   AGENT_COMPACTION            off disables automatic compaction

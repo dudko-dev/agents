@@ -11,6 +11,7 @@ import {
 } from './approval.js'
 import { recordWrite, replayOutput, replayedWrite, type IStepWrites } from '../tiers.js'
 import { promptHintOf } from './types.js'
+import type { SpawnRun } from '../subagent/dynamic.js'
 
 /**
  * What a tool's `execute` can reach of the run that called it, passed as
@@ -35,6 +36,8 @@ export interface ToolRunContext {
   runId?: string
   /** Pages web_fetch read in this run (origin + path), kept as provenance for any lesson the run writes. */
   fetched?: string[]
+  /** Internal - what the built-in `spawn_subagent` tool reads of the run (`subagents.dynamic`). */
+  spawn?: SpawnRun
 }
 
 /** Read the run context the agent passes to a tool's execute (undefined outside a run). */
@@ -105,6 +108,10 @@ export interface WrapToolsOptions {
    * step is not executed again - the call gets the earlier result back (see `tiers.ts`).
    */
   stepWrites?: () => IStepWrites | undefined
+  /** The run's place among the helpers the model starts, handed to tools through their run context. */
+  spawn?: SpawnRun
+  /** Set on a helper's own run: every consent request it makes carries it. */
+  subagent?: { id: string; depth: number }
 }
 
 const isAsyncIterable = (v: unknown): v is AsyncIterable<unknown> =>
@@ -143,7 +150,13 @@ export const wrapToolsForRun = (tools: ToolSet, o: WrapToolsOptions): ToolSet =>
   const gate = (toolName: string, input: unknown, readOnly: boolean, signal?: AbortSignal) =>
     gateToolCall(
       o.approval,
-      { toolName, input, readOnly, step: o.step() },
+      {
+        toolName,
+        input,
+        readOnly,
+        step: o.step(),
+        ...(o.subagent ? { subagent: o.subagent } : {}),
+      },
       {
         requested: (req) =>
           o.emit({
@@ -153,6 +166,7 @@ export const wrapToolsForRun = (tools: ToolSet, o: WrapToolsOptions): ToolSet =>
             input: req.input,
             readOnly: req.readOnly,
             step: req.step,
+            ...(req.subagent ? { subagent: req.subagent } : {}),
           }),
         resolved: (r) => o.emit({ type: 'tool.approval-resolved', ...r }),
       },
@@ -184,6 +198,7 @@ export const wrapToolsForRun = (tools: ToolSet, o: WrapToolsOptions): ToolSet =>
             ...(o.control ? { control: o.control } : {}),
             ...(o.runId ? { runId: o.runId } : {}),
             ...(o.fetched ? { fetched: o.fetched } : {}),
+            ...(o.spawn ? { spawn: o.spawn } : {}),
           }
           return execute.call(t, input, { ...(options as object), agentRun })
         }

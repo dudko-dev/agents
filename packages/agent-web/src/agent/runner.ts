@@ -96,6 +96,8 @@ import {
   type RunImage,
 } from '../images.js'
 import { supportsImages, supportsPdf } from '../providers/capabilities.js'
+import { createDynamicSubagentTool, createSpawnRun, spawnSeedOf } from '../subagent/dynamic.js'
+import { resolveDynamicSubagents, SPAWN_SUBAGENT_TOOL } from '../subagent/dynamic-shared.js'
 
 export interface RunOptions {
   onEvent?: AgentEventHandler
@@ -279,6 +281,10 @@ const FINDINGS_BUDGET = 6_000
  */
 export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> => {
   const cfg = resolveConfig(config)
+  // What `subagents.dynamic` switches on (spawn_subagent), and - when this agent IS a helper the
+  // model started - what it takes over from the run that started it.
+  const dynamicSubagents = resolveDynamicSubagents(config.subagents)
+  const seed = spawnSeedOf(config)
   // Build the executor once; a stage without an override reuses it instead of
   // constructing a second identical model (for web-llm that would mean loading
   // the same weights into the GPU again).
@@ -390,6 +396,31 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
       // What `search` switches on (web_search): its own request is pinned to the search API.
       ...createSearchTools(config.search, config.egress, config.credentials),
       ...learning?.tools,
+      // What `subagents.dynamic` switches on. A helper has it only below the depth limit.
+      ...(dynamicSubagents && (!seed || seed.maySpawn)
+        ? {
+            [SPAWN_SUBAGENT_TOOL]: createDynamicSubagentTool({
+              settings: dynamicSubagents,
+              config,
+              limits: cfg,
+              tools: () => baseTools,
+              implicit: () => [...builtinTools],
+              models: {
+                executor: executorModel,
+                planner: plannerModel,
+                synthesizer: synthesizerModel,
+                ...(tierModels ? { tiers: tierModels } : {}),
+              },
+              approval: () => approval,
+              skills: () => skills,
+              sandboxNotes: () => sandboxNotes,
+              // Only if this agent's own spawn_subagent is the built-in one (not filtered out,
+              // not replaced by a host tool of that name): a helper cannot have what it lacks.
+              mayNest: () => spawnBuiltIn,
+              createAgent,
+            }),
+          }
+        : {}),
       ...config.tools,
     },
     config.availableTools,
@@ -411,7 +442,17 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
   // The prompts mention run_js only while it is the sandbox's own tool (not filtered out, not
   // replaced by a host tool of the same name).
   const sandboxNotes =
-    sandbox && baseTools.run_js === sandbox.tools.run_js ? sandbox.notes : undefined
+    sandbox && baseTools.run_js === sandbox.tools.run_js
+      ? sandbox.notes
+      : // A helper given the caller's run_js carries the caller's notes about it.
+        seed?.sandboxNotes && baseTools.run_js
+        ? seed.sandboxNotes
+        : undefined
+  // The prompts name spawn_subagent only while it is the built-in tool.
+  const spawnBuiltIn =
+    Boolean(dynamicSubagents) &&
+    config.tools?.[SPAWN_SUBAGENT_TOOL] === undefined &&
+    baseTools[SPAWN_SUBAGENT_TOOL] !== undefined
 
   // What the connected MCP servers said about using their tools, for the planner's and the
   // executor's system prompts. Read from the mounted tools (each MCP tool carries its server), once:
@@ -485,7 +526,8 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
     pdf: config.inputs?.pdf ?? (textOnly ? false : supportsPdf(executorModel)),
     file: config.inputs?.files ?? (textOnly ? false : undefined),
   }
-  const approval = createApprovalState(config.toolApproval)
+  // A helper the model started shares the caller's consent state itself: one gate for the tree.
+  const approval = seed?.approval ?? createApprovalState(config.toolApproval)
   log.info(
     `agent ready — ${catalog.length} tool(s) (${strategy}, ~${toolTokens || '?'} tokens), window ${cfg.compaction.contextWindowTokens}${modelWindow ? ' (the model’s)' : ''}, skills: [${skills.map((s) => s.name).join(', ') || 'none'}], planner mode: ${plannerMode}, executor mode: ${executorMode}, approval: ${approval.mode}`,
   )
@@ -576,6 +618,25 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
     let escalationCount = resumed?.escalations ?? 0
     let stepWrites: IStepWrites | undefined
     const counter = createCallCounter(cfg.maxToolCalls, resumed?.toolCalls)
+    // A helper's call also counts on the run that started it, all the way up: it cannot make a
+    // call its parent has no budget left for.
+    const countCall = seed
+      ? (): void => {
+          if (counter.exhausted) counter.count()
+          seed.countParent()
+          counter.count()
+        }
+      : counter.count
+    const spawnRun =
+      dynamicSubagents || seed
+        ? createSpawnRun(dynamicSubagents, seed, {
+            ...(resumed?.subagentsSpawned ? { spawned: resumed.subagentsSpawned } : {}),
+            usage: () => usage,
+            toolCalls: () => counter.calls,
+            countCall,
+            stepWrites: () => stepWrites,
+          })
+        : undefined
     const builtins: ToolSet = {}
     if (skills.length || learning) {
       Object.assign(
@@ -606,9 +667,11 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
         step: () => currentStep,
         signal: opts.signal,
         addUsage: (u) => bumpUsage(u, 'subagent'),
-        countCall: counter.count,
+        countCall,
         maxToolOutputChars: cfg.compaction.maxToolOutputChars,
-        control: port,
+        control: port ?? seed?.control,
+        ...(spawnRun ? { spawn: spawnRun } : {}),
+        ...(seed ? { subagent: seed.subagent } : {}),
         runId,
         fetched,
         stepWrites: () => stepWrites,
@@ -736,6 +799,7 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
           }
         : {}),
       ...(sandboxNotes ? { sandbox: sandboxNotes } : {}),
+      ...(spawnBuiltIn ? { subagents: true as const } : {}),
       ...(mcpInstructions ? { mcpInstructions } : {}),
       discovered: () => discovered,
       builtinTools,
@@ -847,6 +911,9 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
         attachments: images.length,
         ...(userUpdates.length ? { userUpdates: userUpdates.map((u) => ({ ...u })) } : {}),
         ...(escalationCount ? { escalations: escalationCount } : {}),
+        ...(spawnRun && !seed && spawnRun.root.spawned
+          ? { subagentsSpawned: spawnRun.root.spawned }
+          : {}),
         ...extra,
       })
       const persist = async (

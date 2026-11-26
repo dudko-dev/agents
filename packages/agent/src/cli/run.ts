@@ -332,7 +332,7 @@ export const runRepl = async (): Promise<void> => {
       endLine()
       const answer = (
         await rl.question(
-          `[approve] ${req.toolName} ${formatJson(req.input)}${req.readOnly ? ' (read-only)' : ''}\n          allow? [y]es / [n]o / [a]lways: `,
+          `[approve] ${req.subagent ? `helper ${shortId(req.subagent.id)} wants: ` : ''}${req.toolName} ${formatJson(req.input)}${req.readOnly ? ' (read-only)' : ''}\n          allow? [y]es / [n]o / [a]lways: `,
           runController ? { signal: runController.signal } : {},
         )
       )

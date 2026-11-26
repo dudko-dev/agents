@@ -117,6 +117,8 @@ type AgentEventBody =
       input: unknown
       readOnly: boolean
       step?: IPlanStep
+      /** Set when a helper the model started is asking (see `ToolApprovalRequest.subagent`). */
+      subagent?: { id: string; depth: number }
     }
   /** A consent decision: from the user, or `automatic` (policy denial). */
   | {
@@ -127,13 +129,41 @@ type AgentEventBody =
       reason?: string
       automatic: boolean
     }
-  /** `profile` is set when the parent chose one of the subagent's named profiles for this call. */
-  | { type: 'subagent.start'; id: string; name: string; task: string; profile?: string }
+  /**
+   * `profile` is set when the parent chose one of the subagent's named profiles for this call.
+   * The tree: `parentId` is the id of the subagent that made the call, or the `runId` of the run
+   * when the run itself made it; `depth` is 1 for the run's own subagents, 2 for theirs, ...
+   * `dynamic` marks a helper the model started with `spawn_subagent` (`subagents.dynamic`):
+   * `role` is what the model wrote for it, `tools` the tool names it was given.
+   */
+  | {
+      type: 'subagent.start'
+      id: string
+      name: string
+      task: string
+      profile?: string
+      parentId?: string
+      depth?: number
+      dynamic?: true
+      role?: string
+      tools?: string[]
+    }
   /** An event of a running subagent, forwarded verbatim. */
   | { type: 'subagent.event'; id: string; name: string; event: AgentEvent }
   | { type: 'subagent.complete'; id: string; name: string; text: string; usage: IUsage }
-  /** `stopped` is set when the user stopped this subagent (`RunControl.stopSubagent`), as opposed to it failing. */
-  | { type: 'subagent.error'; id: string; name: string; error: string; stopped?: boolean }
+  /**
+   * `stopped` is set when the user stopped this subagent (`RunControl.stopSubagent`), as opposed
+   * to it failing. `usage`: what a dynamic helper had spent when it failed (already charged to
+   * the parent).
+   */
+  | {
+      type: 'subagent.error'
+      id: string
+      name: string
+      error: string
+      stopped?: boolean
+      usage?: IUsage
+    }
   /**
    * A request of the `web_fetch` tool, or of `web_search` to its search API, allowed or refused
    * by the egress policy. `url` is origin and path only (a query string can carry a secret).

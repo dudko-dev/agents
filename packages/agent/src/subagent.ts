@@ -6,6 +6,7 @@ import { z } from 'zod'
 import { createAgent } from './agent.ts'
 import { isReadOnlyTool, markReadOnly } from './approval.ts'
 import { runContext } from './context.ts'
+import { adoptSubagentEvent } from './subagent-dynamic-shared.ts'
 import type { AgentEvent, EventHandler, IAgentConfig, IUsage } from './types.ts'
 import { clipText, emptyUsage, errorMessage, normalizeUsage } from './utils.ts'
 
@@ -502,7 +503,13 @@ export const createSubagentTool = (opts: ISubagentToolOptions): Tool => {
           const usage = normalizeUsage(event.usage)
           emit({ type: 'usage', phase: 'subagent', usage })
         }
-        emit({ type: 'subagent.event', id, name, event: slimEvent(event) })
+        // A subagent the child started is one level deeper from here, and this child is its parent.
+        emit({
+          type: 'subagent.event',
+          id,
+          name,
+          event: slimEvent(adoptSubagentEvent(event, id)),
+        })
       }
       try {
         emit({
@@ -511,9 +518,13 @@ export const createSubagentTool = (opts: ISubagentToolOptions): Tool => {
           name,
           task,
           ...(profile ? { profile: profileName } : {}),
+          // The tree: called by this run (a subagent this event passes through on its way up
+          // replaces the parent with its own id and adds a level - see adoptSubagentEvent).
+          ...(store?.runId ? { parentId: store.runId } : {}),
+          depth: 1,
         })
         // Listed in the run's control from here, so the host can stop THIS child on its own.
-        unregister = store?.control?.registerSubagent(
+        unregister = (store?.control ?? store?.state?.spawn?.control)?.registerSubagent(
           {
             id,
             name,
