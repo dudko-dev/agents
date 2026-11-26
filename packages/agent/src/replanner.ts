@@ -1,12 +1,12 @@
-import { generateObject } from 'ai'
 import { z } from 'zod'
 import { stageCallOptions, withCapHint } from './call-options.ts'
 import type { IAgentInternalContext } from './internal.ts'
 import { PlanSchema, catalogModeFor, effectiveToolStrategy } from './planner.ts'
 import { buildReplannerUserPrompt, composeReplannerSystem } from './prompts.ts'
+import { generateStructured } from './structured.ts'
 import { ATTR, withSpan } from './tracing.ts'
 import type { IPlan, IPlanStep, IStepResult, IUsage } from './types.ts'
-import { normalizeUsage, withRetry, withTimeout } from './utils.ts'
+import { normalizeUsage, usageOfError, withRetry, withTimeout } from './utils.ts'
 
 export const DecisionSchema = z.discriminatedUnion('mode', [
   z.object({
@@ -56,7 +56,7 @@ export const decideNextAction = async (
             activeSkills: ctx.run?.activeSkills,
           }),
         )
-        const r = await generateObject({
+        const r = await generateStructured({
           model: ctx.plannerModel,
           schema: DecisionSchema,
           ...call,
@@ -82,7 +82,15 @@ export const decideNextAction = async (
         onRetry: (attempt, err) =>
           ctx.emit({ type: 'retry', phase: 'replan', attempt, error: (err as Error).message }),
       },
-    )
+    ).catch((err) => {
+      // A decision that could not be parsed was paid for all the same: it counts in the run's
+      // usage (and against its limits) whatever the runner does with the failure.
+      const wasted = usageOfError(err)
+      if (wasted) {
+        ctx.emit({ type: 'usage', phase: 'replan', usage: wasted })
+      }
+      throw err
+    })
 
     ctx.emit({ type: 'usage', phase: 'replan', usage })
     span.setAttribute(ATTR.REPLAN_MODE, object.mode)

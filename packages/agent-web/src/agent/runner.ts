@@ -903,14 +903,22 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
             fresh,
           )
           bumpUsage(decision.usage, 'replan')
+          // A replanner that could not be asked (both attempts failed) is not a reason to drop
+          // the steps already done: the run carries on with the plan as it is, and says so.
+          if (decision.failed) {
+            log.warn('replanner failed — continuing with the existing plan:', decision.error)
+            emit({ type: 'error', phase: 'replan', error: decision.error ?? decision.reason })
+          }
           emit({
             type: 'replan.decision',
             mode: decision.decision,
             reason: decision.reason,
             ...(byUser ? { byUser: true } : {}),
+            ...(decision.failed ? { failed: true } : {}),
           })
           // Weighed, whatever it decided: from here the messages are part of the run's story.
-          for (const u of userUpdates) u.reconciled = true
+          // A replanner that failed weighed nothing: the next boundary asks it again.
+          if (!decision.failed) for (const u of userUpdates) u.reconciled = true
           if (decision.decision === 'finish') break
           if (decision.decision === 'revise' && decision.plan.length > 0) {
             if (!byUser) revisions += 1

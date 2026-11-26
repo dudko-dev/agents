@@ -37,8 +37,13 @@ type AgentEventBody =
   | { type: 'step.tool-call'; step: IPlanStep; name: string; input: unknown }
   | { type: 'step.tool-result'; step: IPlanStep; name: string; output: unknown; ok: boolean }
   | { type: 'step.complete'; step: IPlanStep; result: IStepResult }
-  /** `byUser`: the replanner ran because the user sent a message (`RunControl.send`), not because a step failed. */
-  | { type: 'replan.decision'; mode: ReplanMode; reason: string; byUser?: boolean }
+  /**
+   * `byUser`: the replanner ran because the user sent a message (`RunControl.send`), not because a
+   * step failed. `failed`: the replanner call itself failed (unparsable output, the provider
+   * down) and `mode: 'continue'` is the fallback, not the model's decision — the failure is the
+   * `error` event (phase 'replan') just before this one.
+   */
+  | { type: 'replan.decision'; mode: ReplanMode; reason: string; byUser?: boolean; failed?: true }
   | { type: 'final.text-delta'; delta: string }
   /** The synthesizer's streamed thoughts. */
   | { type: 'final.reasoning-delta'; delta: string }

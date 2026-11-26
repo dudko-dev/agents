@@ -7,6 +7,8 @@ export interface Reply {
   reasoning?: string
   toolCalls?: { name: string; args: unknown }[]
   usage?: { input?: number; output?: number; reasoning?: number; cacheRead?: number }
+  /** Finish as a model cut off by its output cap does (`finishReason: 'length'`). */
+  cutOff?: boolean
 }
 
 /** A readable view of one model call, for routing and assertions. */
@@ -69,6 +71,9 @@ const usageOf = (r: Reply) => {
   }
 }
 
+const finishOf = (r: Reply): string =>
+  r.toolCalls?.length ? 'tool-calls' : r.cutOff ? 'length' : 'stop'
+
 let callSeq = 0
 
 /**
@@ -100,7 +105,7 @@ export const scriptedModel = (route: (info: CallInfo) => Reply) => {
       }
       return {
         content,
-        finishReason: { unified: r.toolCalls?.length ? 'tool-calls' : 'stop', raw: undefined },
+        finishReason: { unified: finishOf(r), raw: undefined },
         usage: usageOf(r),
         warnings: [],
       }
@@ -134,7 +139,7 @@ export const scriptedModel = (route: (info: CallInfo) => Reply) => {
       }
       chunks.push({
         type: 'finish',
-        finishReason: { unified: r.toolCalls?.length ? 'tool-calls' : 'stop', raw: undefined },
+        finishReason: { unified: finishOf(r), raw: undefined },
         usage: usageOf(r),
       })
       return { stream: simulateReadableStream({ chunks }) }

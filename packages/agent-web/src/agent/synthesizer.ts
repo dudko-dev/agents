@@ -4,7 +4,7 @@ import { normalizeUsage } from '../llm/util.js'
 import { looksLikeJson, parsePlainText } from '../parse.js'
 import { renderActiveSkills } from '../skills.js'
 import type { IUsage } from './loop-types.js'
-import { imageRefusal, promptFor, stageCall, type AgentContext } from './internal.js'
+import { capNotice, imageRefusal, promptFor, stageCall, type AgentContext } from './internal.js'
 
 /**
  * Write the final natural-language answer of the run, streaming it as
@@ -34,7 +34,6 @@ export const synthesizeAnswer = async (
   const result = stream(ctx.synthesizerModel, {
     ...stageCall(ctx, 'synthesizer', parts.system),
     ...promptFor(ctx, parts.prompt),
-    maxOutputTokens: ctx.config.budgets.synthesizer,
     temperature: ctx.config.temperature,
     abortSignal: ctx.signal,
     timeoutMs: ctx.config.chatTimeoutMs,
@@ -75,9 +74,13 @@ export const synthesizeAnswer = async (
     }
   }
 
+  const [usage, finishReason] = await Promise.all([result.usage, result.finishReason])
+  // An answer the output cap cut off just stops mid-sentence: say why.
+  const cut = capNotice(ctx, 'synthesizer', finishReason)
+  if (cut) ctx.log.warn(cut)
   const clean = parsePlainText(text)
   return {
     text: clean || 'Done — the changes have been applied.',
-    usage: normalizeUsage(await result.usage),
+    usage: normalizeUsage(usage),
   }
 }

@@ -35,6 +35,12 @@ export interface IScriptedReply {
   cutOff?: boolean
   /** Hold the answer this long (a slow model, to act mid-run). */
   delayMs?: number
+  /**
+   * Answer with this HTTP status and an OpenAI-shaped error body instead of a completion (a
+   * provider that is down, or that refuses the key). Sent with `retry-after-ms: 1`, so the
+   * SDK's own retries of a 5xx / 429 do not slow a test down.
+   */
+  status?: number
   /** Usage to report instead of the default 10 in / 5 out. */
   usage?: { prompt?: number; completion?: number; cached?: number; reasoning?: number }
 }
@@ -196,6 +202,15 @@ export const startLocalOpenAI = async (script: Script): Promise<ILocalOpenAI> =>
       requests.push(parsed)
       const reply = script(parsed)
       const answer = (): void => {
+        if (reply.status) {
+          res.writeHead(reply.status, { 'content-type': 'application/json', 'retry-after-ms': '1' })
+          res.end(
+            JSON.stringify({
+              error: { message: reply.text ?? `scripted ${reply.status}`, type: 'scripted_error' },
+            }),
+          )
+          return
+        }
         if (parsed.stream) {
           res.writeHead(200, {
             'content-type': 'text/event-stream',

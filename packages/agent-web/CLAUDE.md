@@ -44,7 +44,9 @@ behind every decision.
 - `src/secrets/` — `crypto` (AES-GCM key), `vault` (IndexedDBVault),
   `store` (CredentialStore).
 - `src/storage/db.ts` — the single IndexedDB owner (keys/secrets/sessions).
-- `src/llm/` — `generate`/`stream`/`generateStructured`, `tool-loop`, `context-editing`
+- `src/llm/` — `generate`/`stream`/`generateStructured` (`generateText` with `Output.object`: AI
+  SDK v7 deprecates `generateObject` / `streamObject`, do not bring them back; the helper keeps a
+  failed attempt a `NoObjectGeneratedError` with `usage` and `finishReason`), `tool-loop`, `context-editing`
   (stale tool results → stubs inside one step), `util` (`clip`, prompt helpers,
   `usageOfError`: the spend of a failed structured attempt still counts).
 - `src/tools/` — `define`, `prompted` (catalog + dispatch), `mode`, `types`.
@@ -91,7 +93,11 @@ behind every decision.
 - Compaction (`memory/compress.ts`, `context-window.ts`) is judged on prompt + transcript + step log together
   against `thresholdRatio` (0.85) of the window; `estimateTokens` is calibrated high on Claude's tokenizer
   (1.1-1.4x real, never below): keep it that way. `agent.usage` / `sessionUsage` count from the usage as it
-  arrives (`charge`), not at the end of a run; per-call output caps default to shares of the window.
+  arrives (`charge`), not at the end of a run; per-call output caps default to shares of the window
+  (`stageOutputCap` in `config.ts`, the Node sibling's rules: the host's value wins, 0 = no cap, none for a
+  stage that thinks, a cut-off call is reported with `outputCapNotice`; only the share sizes differ). A
+  replanner that fails both attempts degrades to `continue` and says so (`replan.decision.failed`, an
+  `error` event of phase 'replan'): same names as the Node sibling, `tests/replan-failure.test.ts`.
 - `src/context-window.ts` — the model's real window (read from WebLLM models),
   compaction sized to it, tool search by definition size, the clear
   `ContextWindowExceededError`.

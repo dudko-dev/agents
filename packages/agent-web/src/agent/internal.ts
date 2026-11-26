@@ -1,6 +1,11 @@
-import type { LanguageModel, ModelMessage, SystemModelMessage } from 'ai'
+import {
+  NoObjectGeneratedError,
+  type LanguageModel,
+  type ModelMessage,
+  type SystemModelMessage,
+} from 'ai'
 import { cachedInstructions, cachingProviderOptions, type ResolvedCaching } from '../caching.js'
-import type { BrowserAgentConfig, ResolvedConfig } from '../config.js'
+import { outputCapNotice, type BrowserAgentConfig, type ResolvedConfig } from '../config.js'
 import type { AgentEvent } from '../events.js'
 import type { StoredMessage } from '../memory/store.js'
 import type { Prompts, ToolCallMode } from '../prompts.js'
@@ -148,12 +153,15 @@ export interface StageCallOptions {
   system: string | SystemModelMessage
   reasoning?: ThinkingLevel
   providerOptions?: ProviderOptionsMap
+  /** The stage's per-call output cap; absent = no cap (turned off, or the stage thinks). */
+  maxOutputTokens?: number
 }
 
 /**
  * The per-stage call settings: the host systemPrompt + the phase system prompt
  * (as a cacheable message when prompt caching is on), the stage's thinking
- * level, and the merged provider options (thinking, caching).
+ * level, the merged provider options (thinking, caching), and the stage's per-call
+ * output cap (`config.budgets`, where 0 means none).
  */
 export const stageCall = (
   ctx: AgentContext,
@@ -171,5 +179,29 @@ export const stageCall = (
     system: cachedInstructions(system, caching),
     ...(thinking.reasoning ? { reasoning: thinking.reasoning } : {}),
     ...(providerOptions ? { providerOptions } : {}),
+    ...(ctx.config.budgets[stage] > 0 ? { maxOutputTokens: ctx.config.budgets[stage] } : {}),
   }
+}
+
+/**
+ * The notice for a call of `stage` that its output cap cut off (`finishReason: 'length'`), else
+ * undefined. Judged against the window the run really uses, like the caps themselves.
+ */
+export const capNotice = (
+  ctx: AgentContext,
+  stage: ThinkingStage,
+  finishReason: string | undefined,
+): string | undefined =>
+  outputCapNotice(ctx.raw, stage, ctx.config.compaction.contextWindowTokens, finishReason)
+
+/**
+ * A structured stage (planner, replanner) whose JSON was cut by the cap fails with a parse error
+ * that says nothing about why: add the reason to the message and hand the same error back.
+ */
+export const withCapHint = (ctx: AgentContext, stage: ThinkingStage, err: unknown): unknown => {
+  if (NoObjectGeneratedError.isInstance(err)) {
+    const notice = capNotice(ctx, stage, err.finishReason)
+    if (notice) err.message = `${err.message} - ${notice}`
+  }
+  return err
 }
