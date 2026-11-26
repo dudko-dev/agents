@@ -920,6 +920,9 @@ read-only where they are, and keep writes idempotent where you can.
 **Events and results.** `step.start` gains `tier`, `model`, `tierReason`; `step.escalated`
 (`step, from, to, model, reason`) fires between a step's start and its completion; a step's result
 gains `tier`, `model` (where it finished) and `escalations`. None of these exist without tiers.
+A call that was answered from an earlier attempt instead of being executed has the earlier result
+under a fixed note as its `output`; `isReplayedToolOutput(output)` (exported, with the note itself
+as `REPLAY_NOTE`) tells a UI which calls those are.
 `agent.models.tiers` holds the tier models.
 
 **Usage and limits.** Every tier's calls are `usage` events of phase `execute`, and count in

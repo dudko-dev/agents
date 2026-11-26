@@ -1,5 +1,7 @@
 import type {
   AgentEvent,
+  DecisionFallbackReason,
+  DecisionPoint,
   EscalationReason,
   IPlan,
   IPlanStep,
@@ -67,6 +69,10 @@ export interface ChatMessage {
   learned?: string[]
   /** Assistant turn: what the model fetched from the web during the run. */
   fetches?: FetchView[]
+  /** Assistant turn: the images and audio the run generated (`config.media`); absent when none. */
+  media?: MediaView[]
+  /** Assistant turn: the audio the run transcribed (`config.media`); absent when none. */
+  transcripts?: TranscriptView[]
   /** Assistant turn ended with an error. */
   error?: boolean
 }
@@ -137,6 +143,53 @@ export interface FetchView {
   reason?: string
 }
 
+/**
+ * A file a media tool wrote (a `media.generated` event). The bytes are in the virtual file system
+ * at `path` - never in the state.
+ */
+export interface MediaView {
+  kind: 'image' | 'speech'
+  path: string
+  mediaType: string
+  /** Size of the file. */
+  bytes: number
+  /** The media model that made it. */
+  model: string
+  /** The step whose tool call made it, when the event named one. */
+  stepId?: string
+}
+
+/**
+ * An audio file that was transcribed (a `media.transcribed` event): one the user attached
+ * (`attachment`) or one the model asked about (`tool`). `text` is the content of that file -
+ * third-party text, never instructions.
+ */
+export interface TranscriptView {
+  source: 'attachment' | 'tool'
+  /** The file's name. */
+  name: string
+  text: string
+  language?: string
+  durationInSeconds?: number
+  model: string
+}
+
+/**
+ * One question put to `config.decisionModel` (a `decision` event): its answer was used
+ * (`accepted`), or the ordinary model call ran and `reason` says why.
+ */
+export interface DecisionView {
+  point: DecisionPoint
+  accepted: boolean
+  choice?: string
+  /** The probability the decision model gave its choice, 0..1. */
+  confidence?: number
+  threshold: number
+  reason?: DecisionFallbackReason
+  durationMs: number
+  model?: string
+}
+
 /** A tool call waiting for (or decided by) the user's consent. */
 export interface ApprovalView {
   id: string
@@ -145,6 +198,11 @@ export interface ApprovalView {
   readOnly: boolean
   /** The step the call belongs to, when known. */
   stepId?: string
+  /**
+   * Set when a helper the model started is asking, not the run itself: its id (a node of
+   * `subagents`), its depth, and - when its `subagent.start` was seen - its name and role.
+   */
+  subagent?: { id: string; depth: number; name?: string; role?: string }
   status: 'pending' | 'approved' | 'denied'
   reason?: string
   /** Decided by policy (rule / read-only mode), not by a person. */
@@ -171,11 +229,37 @@ export interface UserNoteView {
   stepId?: string
 }
 
-/** A delegated task running in a subagent (in-process or a Web Worker). */
+/**
+ * A delegated task running in a subagent: one the host defined (`createSubagentTool`, in-process
+ * or a Web Worker) or a helper the model started (`spawn_subagent`). Each is a NODE OF A TREE:
+ * `parentId` / `depth` say where, and {@link subagentTree} nests the flat list.
+ */
 export interface SubagentView {
   id: string
+  /** The subagent's name (`spawn_subagent` for a helper the model started). */
   name: string
+  /** Empty when only its events were seen (its `subagent.start` never arrived). */
   task: string
+  /**
+   * The subagent that started this one; absent for the run's own subagents (depth 1). A parent
+   * that is not in the list (its start was never seen) leaves the node at the top of the tree.
+   */
+  parentId?: string
+  /** 1 for the run's own subagents, 2 for theirs, ... */
+  depth: number
+  /** A helper the model started itself (`subagents.dynamic`). */
+  dynamic?: true
+  /** What the model wrote for a helper it started. Model-written text. */
+  role?: string
+  /** The tool names a helper was given. */
+  tools?: string[]
+  /** The model and tier its latest step ran on - known only when the child uses model tiers. */
+  model?: string
+  tier?: ModelTier
+  /** When it started (ms epoch; set when the hook stamps events). */
+  startedAt?: number
+  /** How long it ran, once it ended. */
+  durationMs?: number
   /** `stopped`: the user stopped this subagent; the run went on without it. */
   status: 'running' | 'done' | 'error' | 'stopped'
   /** The profile the parent model chose for this delegation, when there are profiles. */
@@ -190,8 +274,17 @@ export interface SubagentView {
   toolCalls: number
   /** The child's answer (streamed, then final). */
   text: string
+  /**
+   * Tokens spent under this node, its own subagents included: counted live from its `usage`
+   * events, then replaced by the total its end reports.
+   */
   usage: IUsage
   error?: string
+}
+
+/** A {@link SubagentView} with the subagents it started (see {@link subagentTree}). */
+export interface SubagentNode extends SubagentView {
+  children: SubagentNode[]
 }
 
 /** One compaction of the context (a `context.compacted` event). */
@@ -234,6 +327,10 @@ export interface StepView {
    * with the plan it had. A warning, not a failed step.
    */
   replanFailed?: string
+  /** What `config.decisionModel` was asked after this step; absent without a decision model. */
+  decisions?: DecisionView[]
+  /** The files this step's media tools wrote (also in the turn's `media`); absent when none. */
+  media?: MediaView[]
 }
 
 /** WebLLM weight-download / engine-init progress (model.load events). */
@@ -253,6 +350,8 @@ export interface ReplanState {
    */
   failed?: true
   error?: string
+  /** `config.decisionModel` made this decision: the probability it gave its choice. */
+  confidence?: number
 }
 
 /**
@@ -277,7 +376,10 @@ export interface AgentUiState {
   finalReasoning: string
   /** Tool calls that asked for consent in this run, pending first-come. */
   approvals: ApprovalView[]
-  /** Subagent delegations of this run. */
+  /**
+   * Subagent delegations of this run - static subagents and the helpers the model started, at
+   * every depth, in the order they started. A tree: see `SubagentView.parentId` / `subagentTree`.
+   */
   subagents: SubagentView[]
   /** Messages sent while the run goes that have not yet been shown to the model. */
   queued: QueuedMessageView[]
@@ -301,6 +403,15 @@ export interface AgentUiState {
   learnedNow: string[]
   /** What the model fetched from the web in this run (`config.egress`). */
   fetches: FetchView[]
+  /** Images and audio generated in this run (`config.media`). Absent until the first one. */
+  media?: MediaView[]
+  /** Audio transcribed in this run (`config.media`). Absent until the first one. */
+  transcripts?: TranscriptView[]
+  /**
+   * Questions put to `config.decisionModel` before any step existed (a decision that follows a
+   * step is on that step). Absent until the first one.
+   */
+  decisions?: DecisionView[]
   /** Tools activated by find_tools in this run. */
   discoveredTools: string[]
   /** Compactions in this run. */
