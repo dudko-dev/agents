@@ -1,5 +1,6 @@
 import {
   auth,
+  OAuthError,
   type FetchLike,
   type OAuthClientInformationMixed,
   type OAuthClientMetadata,
@@ -1226,7 +1227,7 @@ export class NodeEnterpriseOAuthProvider implements OAuthClientProvider {
       throw new EnterpriseOAuthError(
         'discovery',
         `Enterprise MCP authorization: discovery failed (${message})`,
-        oauthCode((err as { errorCode?: unknown })?.errorCode),
+        err instanceof OAuthError ? oauthCode(err.code) : undefined,
       )
     }
   }

@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs'
 import test from 'node:test'
 
 // These tests guard against the day an upstream dep (ai, @ai-sdk/*,
-// @modelcontextprotocol/sdk) drops its CJS fallback and our dual-format
+// @modelcontextprotocol/client) drops its CJS fallback and our dual-format
 // promise quietly breaks. Skipped when dist/ has not been built yet so
 // `npm test` works on a clean checkout.
 const HAS_CJS = existsSync('./dist/index.cjs')

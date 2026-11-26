@@ -253,7 +253,8 @@ const assertClientMetadataUrl = (url: string, label = 'MCP OAuth'): void => {
  *   `authorization_response_iss_parameter_supported: true`;
  * - no stored discovery state (a store written by an older version): `iss` is
  *   compared with the issuer stamped on the stored client information, and with
- *   nothing to compare against the response is accepted.
+ *   nothing to compare against the response is accepted. ({@link finishMcpOAuth}
+ *   does not exchange a code in that case: see there.)
  *
  * The browser package carries the same function; change both.
  */
@@ -262,9 +263,9 @@ export const checkAuthorizationResponseIssuer = (
   discoveryState: OAuthDiscoveryState | undefined,
   clientIssuer?: string,
 ): void => {
-  // The flag is not in the SDK's types. It is kept for a document served as
-  // `oauth-authorization-server` (a loose schema); the SDK drops it from one
-  // served only as `openid-configuration`, and then only a present `iss` is checked.
+  // Read as it is stored, not through the SDK's type: only a literal `true` is
+  // a promise (the SDK's schema keeps the flag for both metadata documents and
+  // turns anything that is not a boolean into "absent").
   const metadata = discoveryState?.authorizationServerMetadata as
     { issuer?: string; authorization_response_iss_parameter_supported?: unknown } | undefined
   const expected = discoveryState
@@ -434,9 +435,11 @@ export class NodeOAuthProvider implements OAuthClientProvider {
 
   /**
    * Called by the SDK when the server rejects what we hold: `'tokens'` on an
-   * `invalid_grant` (dead refresh token), `'all'` on an `invalid_client` (the
-   * AS forgot our dynamic registration). `'client'`, `'verifier'` and
-   * `'discovery'` are in its type and handled the same way: one key each.
+   * `invalid_grant` (dead refresh token); `'client'` and then `'tokens'` on an
+   * `invalid_client` (the AS forgot our dynamic registration) - what discovery
+   * found is kept on purpose, the SDK checks the next callback against it.
+   * `'verifier'` and `'discovery'` are in its type and handled the same way:
+   * one key each. `'all'` is what {@link reset} asks for.
    */
   async invalidateCredentials(
     scope: 'all' | 'client' | 'tokens' | 'verifier' | 'discovery',
@@ -499,6 +502,12 @@ export const beginMcpOAuth = async (
  * issuer (RFC 9207, {@link checkAuthorizationResponseIssuer}), exchanges the
  * code with the stored PKCE verifier and persists the tokens. Throws unless the
  * exchange fully succeeded.
+ *
+ * A flow whose discovery state is not in the store any more (started by a
+ * version that did not keep it, or cleared in between) is not completed: the
+ * code is bound to the authorization server the operator was sent to, and
+ * without the record of which one that was the SDK refuses the exchange.
+ * Start again with {@link beginMcpOAuth}; stored tokens are not touched.
  */
 export const finishMcpOAuth = async (
   provider: NodeOAuthProvider,
@@ -510,11 +519,18 @@ export const finishMcpOAuth = async (
   }
   // Before the exchange: a code that came from another authorization server
   // must never reach this one's token endpoint.
+  const discovery = await provider.discoveryState()
   checkAuthorizationResponseIssuer(
     callback.iss,
-    await provider.discoveryState(),
+    discovery,
     (await provider.clientInformation())?.issuer,
   )
+  if (!discovery) {
+    // The SDK's own gate, said in our words: it throws on this inside `auth()`.
+    throw new Error(
+      'Authorization cannot be completed: the record of which authorization server it was started with is not in the store (started by an older version, or cleared in between); start the authorization again',
+    )
+  }
   const result = await auth(provider, {
     serverUrl: provider.serverUrl,
     authorizationCode: callback.code,

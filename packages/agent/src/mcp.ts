@@ -234,13 +234,21 @@ const refreshOnly = (p: OAuthClientProvider): OAuthClientProvider => ({
   get clientMetadata() {
     return p.clientMetadata
   },
-  clientInformation: () => p.clientInformation(),
+  get clientMetadataUrl() {
+    return p.clientMetadataUrl
+  },
+  // The second argument is the authorization server the SDK resolved: a
+  // provider that keeps credentials per issuer reads and writes by it.
+  clientInformation: (ctx) => p.clientInformation(ctx),
   saveClientInformation: p.saveClientInformation?.bind(p),
-  tokens: () => p.tokens(),
-  saveTokens: (t) => p.saveTokens(t),
+  tokens: (ctx) => p.tokens(ctx),
+  saveTokens: (t, ctx) => p.saveTokens(t, ctx),
   invalidateCredentials: p.invalidateCredentials?.bind(p),
   addClientAuthentication: p.addClientAuthentication?.bind(p),
   validateResourceURL: p.validateResourceURL?.bind(p),
+  // What a refresh request is made of, when the provider says so.
+  scopeForRefresh: p.scopeForRefresh?.bind(p),
+  dpop: p.dpop?.bind(p),
   codeVerifier: () => p.codeVerifier(),
   state: () => {
     throw new RefreshOnlyAbort()
@@ -701,6 +709,15 @@ export const connectMcpServers = async (
           // it on a 401 and retries the request - the one thing a static
           // header can never do.
           authProvider: cfg.authProvider,
+          // A 403 `insufficient_scope` in the middle of a session. A provider
+          // without a human step (no `redirectUrl`: the enterprise one, client
+          // credentials) may ask again for the wider scope, once per request -
+          // the SDK's cap. One WITH a human step never does: the SDK would
+          // skip the refresh and start a new authorization from inside a tool
+          // call, replacing the stored state and PKCE verifier each time the
+          // model tried the tool again. The call fails with the scope the
+          // server asked for, and the host decides.
+          onInsufficientScope: cfg.authProvider?.redirectUrl ? 'throw' : 'reauthorize',
           // The enterprise provider reports a refused grant itself: a short
           // typed error for the caller, the server's words (redacted) to the log.
           fetch:
