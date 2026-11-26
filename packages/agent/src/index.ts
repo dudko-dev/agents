@@ -90,6 +90,43 @@ export { createWebFetchTool, createEgressTools, htmlToText, WEB_FETCH_TOOL } fro
 // Steer a run while it goes: send a message, stop one subagent.
 export { createRunControl } from './control.ts'
 export type { RunControl, SubagentInfo } from './control.ts'
+// Pipelines: a graph of agents with conditions and loops, described in plain JSON.
+export { createPipeline, nodeResolver } from './pipeline.ts'
+export type {
+  NodeResolverOptions,
+  Pipeline,
+  PipelineModelConfig,
+  PipelineOptions,
+  PipelineRunOptions,
+} from './pipeline.ts'
+export {
+  normalizePipeline,
+  PIPELINE_LIMITS,
+  PipelineNodeError,
+  PipelineValidationError,
+  renderPipelineNodeInput,
+  testPipelineCondition,
+  validatePipeline,
+} from './pipeline-engine.ts'
+export type {
+  PipelineCondition,
+  PipelineDefinition,
+  PipelineEdge,
+  PipelineEvent,
+  PipelineIssue,
+  PipelineNode,
+  PipelineNodeContext,
+  PipelineNodeInput,
+  PipelineNodeOutput,
+  PipelineNodeRunner,
+  PipelineNodeSource,
+  PipelineResult,
+  PipelineRoute,
+  PipelineStop,
+  PipelineTraceEntry,
+  PipelineUsage,
+  PipelineValidation,
+} from './pipeline-engine.ts'
 export { createSubagentTool } from './subagent.ts'
 export type { ISubagentProfile, ISubagentToolOptions, SubagentIsolation } from './subagent.ts'
 

@@ -1,5 +1,6 @@
 import type { IPlan, IPlanStep, IStepResult, IUsage } from './agent/loop-types.js'
 import type { LimitKind } from './limits.js'
+import type { PipelineEvent } from './pipeline/engine.js'
 
 export type ReplanMode = 'continue' | 'revise' | 'finish'
 export type Phase = 'plan' | 'execute' | 'replan' | 'synthesize'
@@ -13,7 +14,7 @@ export type UsagePhase = Phase | 'compact' | 'subagent'
  * event taxonomy (no persistence/otel events), plus `model.load` for WebLLM
  * weight-download progress.
  */
-export type AgentEvent =
+type AgentEventBody =
   /**
    * `runId` names the run for `persistence` / `resumeFromRunId`. `resumed` is set when it
    * continues a checkpointed run: the steps already done and the ones still to come.
@@ -112,5 +113,13 @@ export type AgentEvent =
   | { type: 'message.delivered'; id: string; text: string; at: 'round' | 'step' | 'final' }
   | { type: 'stopped' }
   | { type: 'error'; phase: Phase | 'run'; error: string }
+  /** A pipeline's own events (`createPipeline`): the run, each node visit, each edge decision. */
+  | PipelineEvent
+
+/**
+ * `nodeId` / `visit` are set on the events a pipeline forwards from a node's agent (and on the
+ * `pipeline.node.*` events themselves).
+ */
+export type AgentEvent = AgentEventBody & { nodeId?: string; visit?: number }
 
 export type AgentEventHandler = (event: AgentEvent) => void

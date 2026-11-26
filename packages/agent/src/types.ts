@@ -2,6 +2,7 @@ import type { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.
 import type { FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js'
 import type { ToolSet } from 'ai'
 import type { RunControl } from './control.ts'
+import type { PipelineEvent } from './pipeline-engine.ts'
 import type { IEgressPolicy } from './safe-fetch.ts'
 
 export type ProviderType =
@@ -586,10 +587,14 @@ type AgentEventBody =
   | { type: 'skill.forgotten'; name: string }
   | { type: 'revisions.exceeded'; cap: number }
   | { type: 'error'; error: Error; phase: 'plan' | 'execute' | 'replan' | 'synthesize' | 'init' }
+  // A pipeline's own events (createPipeline): the run, each node visit, each edge decision.
+  | PipelineEvent
 
 // runId is auto-populated at emit time from AsyncLocalStorage. Consumers that
 // multiplex events across concurrent runs on the same agent should filter by it.
-export type AgentEvent = AgentEventBody & { runId?: string }
+// nodeId / visit are set on the events a pipeline forwards from a node's agent (and on the
+// pipeline.node.* events themselves).
+export type AgentEvent = AgentEventBody & { runId?: string; nodeId?: string; visit?: number }
 
 export type EventHandler = (event: AgentEvent) => void
 
