@@ -40,7 +40,7 @@ across a session (`agent.usage`), **steering** a run while it goes (`RunControl`
 
 > **Using React?** [`@dudko.dev/agent-web-react`](https://www.npmjs.com/package/@dudko.dev/agent-web-react)
 > wraps this core in a `useAgent` hook, an `<AgentProvider>` context and drop-in
-> UI components — try the **[live demo](https://dudko-dev.github.io/agent-web-react/)**
+> UI components — try the **[live demo](https://agent.dudko.dev/demo/)**
 > ([source](https://github.com/dudko-dev/agents/tree/main/packages/agent-web-react)).
 
 ## Install
@@ -410,7 +410,7 @@ against it), `stopSubagent(id)` stops one subagent. `egress` (off by default) gi
 - [docs/tasks.md](docs/tasks.md) — status & roadmap.
 - [`@dudko.dev/agent-web-react`](https://www.npmjs.com/package/@dudko.dev/agent-web-react) —
   React bindings (`useAgent`, `<AgentProvider>`, pre-styled components) ·
-  [live demo](https://dudko-dev.github.io/agent-web-react/) ·
+  [live demo](https://agent.dudko.dev/demo/) ·
   [source](https://github.com/dudko-dev/agents/tree/main/packages/agent-web-react).
 - [`@dudko.dev/agent`](https://www.npmjs.com/package/@dudko.dev/agent) — the
   Node/server sibling (stdio MCP, persistence/resume, OpenTelemetry, CLI).

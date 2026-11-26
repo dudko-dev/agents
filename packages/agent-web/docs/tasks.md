@@ -70,7 +70,7 @@ Status of the work. See [design.md](./design.md) for the architecture,
 - [x] **MCP niceties** — `tools/list_changed` notification + `refreshServer()`.
       (Allow/deny filtering stays a host concern: `tools` is a plain object.)
 - [x] **React demo** — cloud BYOK, local WebLLM and your own MCP servers
-      ([live](https://dudko-dev.github.io/agent-web-react/)).
+      ([live](https://agent.dudko.dev/demo/)).
 - [ ] **Vanilla-JS example** — a demo without a framework.
 - [ ] **OPFS/Blob tool outputs** — optional spill target for binary MCP results.
 

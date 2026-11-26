@@ -24,9 +24,9 @@ export default defineConfig({
   expect: { timeout: 10_000 },
   reporter: process.env.CI ? [['list'], ['github']] : [['list']],
   use: {
-    // The subpath is deliberate: Pages serves the demo from /agent-web-react/,
-    // so testing the bare origin would exercise a layout that never ships.
-    baseURL: 'http://127.0.0.1:4173/agent-web-react/',
+    // The subpath is deliberate: the demo is served from /demo/ (the site's root is the
+    // documentation site), so testing the bare origin would exercise a layout that never ships.
+    baseURL: 'http://127.0.0.1:4173/demo/',
     trace: 'retain-on-failure',
     launchOptions: executablePath ? { executablePath } : {},
   },
@@ -40,7 +40,7 @@ export default defineConfig({
     // resolver from the equation.
     command:
       'pnpm --filter demo run build && pnpm --filter demo run preview --host 127.0.0.1 --port 4173 --strictPort',
-    url: 'http://127.0.0.1:4173/agent-web-react/',
+    url: 'http://127.0.0.1:4173/demo/',
     reuseExistingServer: !process.env.CI,
     // Playwright ignores webServer stdout by default, which is why the first CI
     // failure showed a build log and then silence. Piping it means the next one

@@ -68,7 +68,7 @@ fits its runs into it: compaction, tool lists and tool results are sized from
 the window ("Window: auto"). **Phi-3.5 Vision** is a local multimodal model:
 paste or drop an image and ask about it.
 
-**Live:** https://dudko-dev.github.io/agent-web-react/
+**Live:** https://agent.dudko.dev/demo/
 
 ## Run locally
 
@@ -84,7 +84,8 @@ The demo aliases `@dudko.dev/agent-web-react` to the built `packages/agent-web-r
 
 ## Deployment
 
-The Pages deployment workflow is being ported to the monorepo (the original is kept under
-`.github/_imported/agent-web-react/deploy-demo.yml` until then).
-The Vite `base` is `/agent-web-react/` to match the project-pages URL; override
-it with the `DEMO_BASE` env var if you fork under a different repo name.
+Cloudflare builds and serves it (Workers static assets, the root `wrangler.jsonc`): every push to
+`main` that touches the demo or the browser packages is built with `pnpm nx build demo` and
+deployed; pull requests get a preview. The Vite `base` is `/demo/` — the build lands in
+`dist/demo`, with a `dist/_redirects` that sends the site's root there until the documentation
+site takes it. Set `DEMO_BASE=/` to build the demo for the root of a host instead.

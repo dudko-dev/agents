@@ -7,3 +7,7 @@ packages:
 onlyBuiltDependencies:
   - esbuild
   - nx
+
+# nx starts several `pnpm run` at once. With this check on (some environments enable it globally),
+# they race on pnpm's workspace-state file and one fails with "Unexpected end of JSON input".
+verifyDepsBeforeRun: false
