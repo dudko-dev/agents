@@ -460,6 +460,7 @@ export const App = () => {
               controller={{ notes: notesAgent, mcp: mcpAgent, chess: chessAgent }[view]}
               modelWindow={modelWindow}
               tiersMissingKey={tiers.missingKey}
+              credentials={credentials}
               update={update}
               onReset={resetSettings}
             />

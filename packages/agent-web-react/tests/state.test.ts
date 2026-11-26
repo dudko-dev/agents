@@ -1,12 +1,21 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import type { AgentEvent } from '@dudko.dev/agent-web'
+import {
+  MEDIA_AUDIO_TYPES,
+  MEDIA_IMAGE_TYPES,
+  REPLAY_NOTE,
+  type AgentEvent,
+} from '@dudko.dev/agent-web'
 import {
   agentStateReducer,
   createInitialAgentState,
   lessonsOf,
+  mediaFamilyOf,
+  subagentTree,
+  webSearchOf,
   type AgentAction,
   type AgentUiState,
+  type SubagentNode,
 } from '../dist/index.js'
 
 const event = (state: AgentUiState, e: AgentEvent, maxEvents?: number): AgentUiState =>
@@ -836,4 +845,681 @@ test('other errors are shown as before: a step error stays in `error`, a run err
   assert.equal(s.messages[1].error, true)
   assert.equal(s.messages[1].content, 'Error: boom')
   assert.equal(s.messages[1].pending, false)
+})
+
+// ── the subagent tree ───────────────────────────────────────────────────────
+
+const at = (state: AgentUiState, e: AgentEvent, ms: number): AgentUiState =>
+  agentStateReducer(state, { type: 'event', event: e, at: ms } as AgentAction)
+
+/** `inner` as it reaches the top of the stream from the subagent `ids` (outermost first). */
+const wrapped = (ids: string[], inner: AgentEvent): AgentEvent =>
+  ids.reduceRight<AgentEvent>(
+    (e, id) => ({ type: 'subagent.event', id, name: 'spawn_subagent', event: e }),
+    inner,
+  )
+
+const shape = (nodes: SubagentNode[]): unknown[] =>
+  nodes.map((n) => (n.children.length ? [n.id, shape(n.children)] : n.id))
+
+const u = (input: number, output: number) => ({
+  inputTokens: input,
+  outputTokens: output,
+  totalTokens: input + output,
+})
+
+test('the subagent tree: static subagents and helpers are nodes of one tree, nested envelopes land on their own node', () => {
+  let s = startedRun()
+  // A static subagent and a helper the model started, both by the run (depth 1, parent = the run).
+  s = at(
+    s,
+    {
+      type: 'subagent.start',
+      id: 'A',
+      name: 'analyst',
+      task: 'weigh e4',
+      parentId: 'run-1',
+      depth: 1,
+    },
+    1000,
+  )
+  s = at(
+    s,
+    {
+      type: 'subagent.start',
+      id: 'H',
+      name: 'spawn_subagent',
+      task: 'read the docs',
+      parentId: 'run-1',
+      depth: 1,
+      dynamic: true,
+      role: 'researcher',
+      tools: ['fs_read', 'web_fetch'],
+    },
+    1100,
+  )
+  // The helper starts a helper of its own: its start comes up through H, already adopted.
+  s = at(
+    s,
+    wrapped(['H'], {
+      type: 'subagent.start',
+      id: 'G',
+      name: 'spawn_subagent',
+      task: 'read chapter 2',
+      parentId: 'H',
+      depth: 2,
+      dynamic: true,
+      tools: [],
+    }),
+    1200,
+  )
+  assert.deepEqual(
+    s.subagents.map((n) => [n.id, n.depth, n.parentId, n.dynamic, n.stepId]),
+    [
+      ['A', 1, undefined, undefined, 'a'],
+      ['H', 1, undefined, true, 'a'],
+      ['G', 2, 'H', true, 'a'],
+    ],
+  )
+  assert.ok(!('parentId' in s.subagents[0]), "the run's own subagents have no parent node")
+  assert.equal(s.subagents[1].role, 'researcher')
+  assert.deepEqual(s.subagents[1].tools, ['fs_read', 'web_fetch'])
+  assert.deepEqual(s.subagents[2].tools, [], 'a helper that only reasons')
+  assert.deepEqual(shape(subagentTree(s.subagents)), ['A', ['H', ['G']]])
+
+  // Events at depth 2 land on G, not on H.
+  const inner = { id: 'c1', description: 'Read' }
+  s = at(
+    s,
+    wrapped(['H', 'G'], {
+      type: 'step.start',
+      step: inner,
+      index: 1,
+      total: 1,
+      tier: 'light',
+      model: 'small-1',
+    }),
+    1300,
+  )
+  s = at(
+    s,
+    wrapped(['H', 'G'], { type: 'step.tool-call', step: inner, name: 'fs_read', input: {} }),
+    1310,
+  )
+  s = at(s, wrapped(['H', 'G'], { type: 'usage', phase: 'execute', usage: u(30, 10) }), 1320)
+  // G's spend is charged to H as it happens (a `usage` event of H's own run).
+  s = at(s, wrapped(['H'], { type: 'usage', phase: 'subagent', usage: u(30, 10) }), 1321)
+  s = at(s, wrapped(['H'], { type: 'usage', phase: 'plan', usage: u(5, 5) }), 1322)
+  const [, h, g] = s.subagents
+  assert.equal(g.toolCalls, 1)
+  assert.equal(g.steps, 1)
+  assert.equal(g.model, 'small-1')
+  assert.equal(g.tier, 'light')
+  assert.equal(g.usage.totalTokens, 40)
+  assert.equal(h.toolCalls, 0, "a nested helper's calls are not its parent's")
+  assert.equal(h.steps, 0)
+  assert.equal(h.model, undefined)
+  assert.equal(h.usage.totalTokens, 50, 'rolled up live: its own 10 and its helper 40')
+
+  // Status transitions, time and the rolled-up usage each end reports.
+  s = at(
+    s,
+    wrapped(['H'], {
+      type: 'subagent.complete',
+      id: 'G',
+      name: 'spawn_subagent',
+      text: 'chapter 2 says X',
+      usage: u(31, 11),
+    }),
+    2200,
+  )
+  assert.equal(s.subagents[2].status, 'done')
+  assert.equal(s.subagents[2].durationMs, 1000)
+  assert.equal(s.subagents[2].usage.totalTokens, 42, "the end's total replaces the live count")
+  assert.equal(s.subagents[1].status, 'running', 'its parent goes on')
+  s = at(
+    s,
+    {
+      type: 'subagent.error',
+      id: 'H',
+      name: 'spawn_subagent',
+      error: 'stopped by the user',
+      stopped: true,
+      usage: u(60, 20),
+    },
+    3100,
+  )
+  assert.equal(s.subagents[1].status, 'stopped')
+  assert.equal(s.subagents[1].durationMs, 2000)
+  assert.equal(s.subagents[1].usage.totalTokens, 80, 'a helper says what it had spent')
+  s = at(s, { type: 'subagent.error', id: 'A', name: 'analyst', error: 'boom' }, 3200)
+  assert.equal(s.subagents[0].status, 'error')
+  assert.equal(s.subagents[0].usage.totalTokens, 0, 'a static subagent that failed reports none')
+  // The whole tree is on the turn.
+  assert.deepEqual(shape(subagentTree(s.messages[1].subagents ?? [])), ['A', ['H', ['G']]])
+})
+
+test('the subagent tree: events for an id that was never started, a start that comes late, an unknown parent', () => {
+  let s = startedRun()
+  // G's event arrives before anything said G (or H) exists.
+  const inner = { id: 'c1', description: 'Read' }
+  s = event(
+    s,
+    wrapped(['H', 'G'], { type: 'step.tool-call', step: inner, name: 'fs_read', input: {} }),
+  )
+  assert.deepEqual(
+    s.subagents.map((n) => [n.id, n.depth, n.parentId, n.task, n.toolCalls, n.status]),
+    [
+      ['H', 1, undefined, '', 0, 'running'],
+      ['G', 2, 'H', '', 1, 'running'],
+    ],
+  )
+  // The starts arrive late: they fill the nodes in, nothing is duplicated or reset.
+  s = event(
+    s,
+    wrapped(['H'], {
+      type: 'subagent.start',
+      id: 'G',
+      name: 'spawn_subagent',
+      task: 'read',
+      parentId: 'H',
+      depth: 2,
+      dynamic: true,
+    }),
+  )
+  s = event(s, { type: 'subagent.start', id: 'H', name: 'spawn_subagent', task: 'dig', depth: 1 })
+  assert.equal(s.subagents.length, 2)
+  assert.deepEqual(
+    s.subagents.map((n) => [n.id, n.task, n.toolCalls]),
+    [
+      ['H', 'dig', 0],
+      ['G', 'read', 1],
+    ],
+  )
+  // An end for an id nobody announced still gives a node with that end.
+  s = event(s, { type: 'subagent.error', id: 'Z', name: 'analyst', error: 'lost' })
+  assert.deepEqual(
+    s.subagents.slice(2).map((n) => [n.id, n.status, n.depth]),
+    [['Z', 'error', 1]],
+  )
+  // A bare start that names a parent which is not there: kept, and drawn at the top.
+  s = event(s, {
+    type: 'subagent.start',
+    id: 'O',
+    name: 'spawn_subagent',
+    task: 'orphan',
+    parentId: 'ghost',
+    depth: 2,
+  })
+  assert.equal(s.subagents[3].parentId, 'ghost')
+  assert.equal(s.subagents[3].depth, 2)
+  assert.deepEqual(shape(subagentTree(s.subagents)), [['H', ['G']], 'Z', 'O'])
+  // A parent chain that loops is not a tree: nothing disappears.
+  const loop = subagentTree([
+    { ...s.subagents[0], id: 'x', parentId: 'y' },
+    { ...s.subagents[0], id: 'y', parentId: 'x' },
+  ])
+  assert.deepEqual(shape(loop), ['x', 'y'])
+})
+
+test("a helper's consent request reaches the user, and says which helper asks", () => {
+  let s = startedRun()
+  s = event(s, {
+    type: 'subagent.start',
+    id: 'H',
+    name: 'spawn_subagent',
+    task: 'tidy the board',
+    depth: 1,
+    dynamic: true,
+    role: 'tidier',
+  })
+  const inner = { id: 'c1', description: 'Remove' }
+  s = event(
+    s,
+    wrapped(['H'], {
+      type: 'tool.approval-requested',
+      id: 'ap1',
+      name: 'remove_note',
+      input: { id: 3 },
+      readOnly: false,
+      step: inner,
+      subagent: { id: 'H', depth: 1 },
+    }),
+  )
+  assert.deepEqual(s.approvals, [
+    {
+      id: 'ap1',
+      name: 'remove_note',
+      input: { id: 3 },
+      readOnly: false,
+      stepId: 'a',
+      subagent: { id: 'H', depth: 1, name: 'spawn_subagent', role: 'tidier' },
+      status: 'pending',
+    },
+  ])
+  s = event(
+    s,
+    wrapped(['H'], {
+      type: 'tool.approval-resolved',
+      id: 'ap1',
+      name: 'remove_note',
+      approved: true,
+      automatic: false,
+    }),
+  )
+  assert.equal(s.approvals[0].status, 'approved')
+  assert.equal(s.messages[1].approvals?.[0].subagent?.id, 'H')
+
+  // A subagent with a consent gate of its own (no `subagent` on the event) is its host's.
+  s = event(
+    s,
+    wrapped(['H'], {
+      type: 'tool.approval-requested',
+      id: 'ap2',
+      name: 'remove_note',
+      input: {},
+      readOnly: false,
+    }),
+  )
+  assert.equal(s.approvals.length, 1)
+  // The run's own request is what it always was: no `subagent` key at all.
+  s = event(s, {
+    type: 'tool.approval-requested',
+    id: 'ap3',
+    name: 'add_note',
+    input: {},
+    readOnly: false,
+    step: stepA,
+  })
+  assert.ok(!('subagent' in s.approvals[1]))
+})
+
+// ── media, the decision model, usage ────────────────────────────────────────
+
+test('generated media is kept on the turn, and on the step that made it', () => {
+  let s = startedRun()
+  s = event(s, {
+    type: 'media.generated',
+    kind: 'image',
+    path: '/media/poster.png',
+    mediaType: 'image/png',
+    bytes: 2048,
+    model: 'img-1',
+    step: stepA,
+  })
+  s = event(s, {
+    type: 'media.generated',
+    kind: 'speech',
+    path: '/media/hello.mp3',
+    mediaType: 'audio/mpeg',
+    bytes: 512,
+    model: 'tts-1',
+  })
+  const image = {
+    kind: 'image',
+    path: '/media/poster.png',
+    mediaType: 'image/png',
+    bytes: 2048,
+    model: 'img-1',
+    stepId: 'a',
+  }
+  const speech = {
+    kind: 'speech',
+    path: '/media/hello.mp3',
+    mediaType: 'audio/mpeg',
+    bytes: 512,
+    model: 'tts-1',
+  }
+  assert.deepEqual(s.media, [image, speech])
+  assert.deepEqual(s.steps[0].media, [image], 'only the one whose event named the step')
+  assert.deepEqual(s.messages[1].media, [image, speech])
+  assert.deepEqual(s.messages[1].steps?.[0].media, [image])
+
+  s = event(s, {
+    type: 'media.transcribed',
+    source: 'attachment',
+    name: 'memo.mp3',
+    text: 'Buy milk.',
+    language: 'en',
+    durationInSeconds: 3,
+    model: 'stt-1',
+  })
+  const transcript = {
+    source: 'attachment',
+    name: 'memo.mp3',
+    text: 'Buy milk.',
+    language: 'en',
+    durationInSeconds: 3,
+    model: 'stt-1',
+  }
+  assert.deepEqual(s.transcripts, [transcript])
+  assert.deepEqual(s.messages[1].transcripts, [transcript])
+
+  // What a subagent generated is in the same workspace: it shows in the turn, tied to no step.
+  s = event(s, { type: 'subagent.start', id: 'H', name: 'spawn_subagent', task: 't', depth: 1 })
+  s = event(
+    s,
+    wrapped(['H'], {
+      type: 'media.generated',
+      kind: 'image',
+      path: '/media/chart.webp',
+      mediaType: 'image/webp',
+      bytes: 9,
+      model: 'img-1',
+      step: { id: 'a', description: "the helper's own step a" },
+    }),
+  )
+  assert.equal(s.media?.length, 3)
+  assert.ok(!('stepId' in s.media![2]))
+  assert.equal(s.steps[0].media?.length, 1)
+
+  // The next run starts clean; the finished turn keeps its own.
+  s = event(s, { type: 'final', text: 'done' })
+  s = event(s, { type: 'run.start', goal: 'again' })
+  assert.ok(!('media' in s) && !('transcripts' in s))
+  assert.equal(s.messages[1].media?.length, 3)
+  assert.ok(!('media' in s.messages[3]))
+})
+
+test('only the media types the core generates are shown, and SVG is not one', () => {
+  for (const type of Object.keys(MEDIA_IMAGE_TYPES)) assert.equal(mediaFamilyOf(type), 'image')
+  for (const type of Object.keys(MEDIA_AUDIO_TYPES)) assert.equal(mediaFamilyOf(type), 'audio')
+  assert.equal(mediaFamilyOf('IMAGE/PNG'), 'image')
+  for (const type of ['image/svg+xml', 'text/html', 'application/pdf', 'video/mp4', 'toString'])
+    assert.equal(mediaFamilyOf(type), undefined, type)
+})
+
+test('usage: media calls and decision calls are carried, and absent until there is one', () => {
+  let s = event(createInitialAgentState(), { type: 'run.start', goal: 'x' })
+  s = event(s, { type: 'usage', phase: 'plan', usage: u(10, 5) })
+  assert.deepEqual(Object.keys(s.usage).sort(), [
+    'cacheWriteTokens',
+    'cachedInputTokens',
+    'inputTokens',
+    'outputTokens',
+    'reasoningTokens',
+    'totalTokens',
+  ])
+  s = event(s, {
+    type: 'usage',
+    phase: 'media',
+    usage: { ...u(0, 0), mediaCalls: 1, imagesGenerated: 1 },
+  })
+  s = event(s, {
+    type: 'usage',
+    phase: 'media',
+    usage: { ...u(0, 0), mediaCalls: 2, speechCharacters: 40, transcriptionSeconds: 2.5 },
+  })
+  s = event(s, { type: 'usage', phase: 'decision', usage: { ...u(7, 1), decisionCalls: 1 } })
+  s = event(s, { type: 'usage', phase: 'decision', usage: { ...u(7, 1), decisionCalls: 1 } })
+  const expected = {
+    inputTokens: 24,
+    outputTokens: 7,
+    totalTokens: 31,
+    reasoningTokens: 0,
+    cachedInputTokens: 0,
+    cacheWriteTokens: 0,
+    mediaCalls: 3,
+    imagesGenerated: 1,
+    speechCharacters: 40,
+    transcriptionSeconds: 2.5,
+    decisionCalls: 2,
+  }
+  assert.deepEqual(s.usage, expected)
+  assert.deepEqual(s.totalUsage, expected)
+  assert.deepEqual(s.messages[1].usage, expected)
+  // The conversation total keeps them across runs.
+  s = event(s, { type: 'final', text: 'ok' })
+  s = event(s, { type: 'run.start', goal: 'y' })
+  s = event(s, { type: 'usage', phase: 'decision', usage: { ...u(1, 1), decisionCalls: 1 } })
+  assert.equal(s.usage.decisionCalls, 1)
+  assert.equal(s.usage.mediaCalls, undefined)
+  assert.equal(s.totalUsage.decisionCalls, 3)
+  assert.equal(s.totalUsage.mediaCalls, 3)
+  // A subagent's node counts them too.
+  s = event(s, { type: 'subagent.start', id: 'H', name: 'spawn_subagent', task: 't', depth: 1 })
+  s = event(
+    s,
+    wrapped(['H'], { type: 'usage', phase: 'media', usage: { ...u(0, 0), mediaCalls: 1 } }),
+  )
+  assert.equal(s.subagents[0].usage.mediaCalls, 1)
+})
+
+test('a decision is recorded on the step it follows; one before any step is kept on the run', () => {
+  let s = event(createInitialAgentState(), { type: 'run.start', goal: 'x' })
+  s = event(s, {
+    type: 'decision',
+    point: 'route',
+    accepted: true,
+    choice: 'billing',
+    confidence: 0.97,
+    threshold: 0.8,
+    durationMs: 40,
+  })
+  assert.deepEqual(s.decisions, [
+    {
+      point: 'route',
+      accepted: true,
+      choice: 'billing',
+      confidence: 0.97,
+      threshold: 0.8,
+      durationMs: 40,
+    },
+  ])
+  s = event(s, { type: 'step.start', step: stepA, index: 1, total: 2 })
+  s = completeStep(s, stepA)
+  s = event(s, {
+    type: 'decision',
+    point: 'replan',
+    accepted: true,
+    choice: 'continue',
+    confidence: 0.934,
+    threshold: 0.8,
+    durationMs: 120,
+    model: 'decision-1',
+  })
+  s = event(s, {
+    type: 'replan.decision',
+    mode: 'continue',
+    reason: 'decision model',
+    confidence: 0.934,
+  })
+  assert.deepEqual(s.replan, { mode: 'continue', reason: 'decision model', confidence: 0.934 })
+  s = event(s, { type: 'step.start', step: stepB, index: 2, total: 2 })
+  s = completeStep(s, stepB)
+  s = event(s, {
+    type: 'decision',
+    point: 'replan',
+    accepted: false,
+    choice: 'finish',
+    confidence: 0.41,
+    threshold: 0.8,
+    reason: 'low-confidence',
+    durationMs: 90,
+  })
+  assert.equal(s.decisions?.length, 1, 'the later ones are on their steps')
+  assert.deepEqual(s.steps[0].decisions, [
+    {
+      point: 'replan',
+      accepted: true,
+      choice: 'continue',
+      confidence: 0.934,
+      threshold: 0.8,
+      durationMs: 120,
+      model: 'decision-1',
+    },
+  ])
+  assert.deepEqual(s.steps[1].decisions, [
+    {
+      point: 'replan',
+      accepted: false,
+      choice: 'finish',
+      confidence: 0.41,
+      threshold: 0.8,
+      reason: 'low-confidence',
+      durationMs: 90,
+    },
+  ])
+  assert.equal(s.messages[1].steps?.[1].decisions?.[0].reason, 'low-confidence')
+  // An ordinary replan decision is what it was.
+  s = event(s, { type: 'replan.decision', mode: 'finish', reason: 'done' })
+  assert.deepEqual(s.replan, { mode: 'finish', reason: 'done' })
+})
+
+test('without subagents, media or a decision model the state is exactly what it was', () => {
+  // The keys of the view before any of the three existed.
+  const STATE_KEYS = [
+    'approvals',
+    'budget',
+    'compactions',
+    'discoveredTools',
+    'error',
+    'events',
+    'fetches',
+    'finalReasoning',
+    'finalText',
+    'goal',
+    'learned',
+    'learnedNow',
+    'messages',
+    'modelLoad',
+    'notes',
+    'plan',
+    'planThought',
+    'queued',
+    'replan',
+    'runMessageId',
+    'runStartedAt',
+    'seq',
+    'skills',
+    'status',
+    'steps',
+    'stopped',
+    'subagents',
+    'totalUsage',
+    'undelivered',
+    'usage',
+  ]
+  assert.deepEqual(Object.keys(createInitialAgentState()).sort(), STATE_KEYS)
+  let s = runOneStep(false)
+  s = event(s, { type: 'usage', phase: 'execute', usage: u(10, 5) })
+  s = event(s, { type: 'replan.decision', mode: 'continue', reason: 'ok' })
+  s = event(s, { type: 'final', text: 'Added.' })
+  assert.deepEqual(Object.keys(s).sort(), STATE_KEYS)
+  assert.deepEqual(s.subagents, [])
+  assert.deepEqual(Object.keys(s.replan ?? {}).sort(), ['mode', 'reason'])
+  assert.deepEqual(Object.keys(s.steps[0]).sort(), [
+    'blocked',
+    'id',
+    'index',
+    'reasoning',
+    'status',
+    'step',
+    'summary',
+    'text',
+    'toolCalls',
+    'total',
+  ])
+  assert.deepEqual(Object.keys(s.messages[1]).sort(), [
+    'content',
+    'id',
+    'pending',
+    'role',
+    'skills',
+    'steps',
+    'subagents',
+    'usage',
+  ])
+  assert.deepEqual(s.messages[1].subagents, [])
+  assert.deepEqual(Object.keys(s.usage).length, 6)
+})
+
+test('a static subagent keeps the fields it had, and gains only its place in the tree', () => {
+  let s = startedRun()
+  s = event(s, { type: 'subagent.start', id: 'k1', name: 'analyst', task: 'weigh e4' })
+  assert.deepEqual(s.subagents[0], {
+    id: 'k1',
+    name: 'analyst',
+    task: 'weigh e4',
+    depth: 1,
+    status: 'running',
+    stepId: 'a',
+    activity: 'starting',
+    steps: 0,
+    toolCalls: 0,
+    text: '',
+    usage: {
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+      reasoningTokens: 0,
+      cachedInputTokens: 0,
+      cacheWriteTokens: 0,
+    },
+  })
+})
+
+// ── a replayed write, a web search ──────────────────────────────────────────
+
+test("a replayed write is recognised by the core's own note, not by a copy of its wording", () => {
+  let s = event(createInitialAgentState(), { type: 'run.start', goal: 'x' })
+  s = event(s, { type: 'step.start', step, index: 1, total: 1 })
+  s = event(s, { type: 'step.tool-call', step, name: 'add_note', input: { text: 'hi' } })
+  s = event(s, {
+    type: 'step.tool-result',
+    step,
+    name: 'add_note',
+    output: `${REPLAY_NOTE} {"id":1}`,
+    ok: true,
+  })
+  assert.equal(s.steps[0].toolCalls[0].replayed, true)
+  s = event(s, { type: 'step.tool-call', step, name: 'add_note', input: { text: 'yo' } })
+  s = event(s, {
+    type: 'step.tool-result',
+    step,
+    name: 'add_note',
+    output: `it said: ${REPLAY_NOTE}`,
+    ok: true,
+  })
+  assert.equal(s.steps[0].toolCalls[1].replayed, undefined)
+})
+
+test("webSearchOf reads the search tool's result and nothing else; a link is always http(s)", () => {
+  const out = {
+    query: 'vitest  browser mode',
+    results: [
+      { title: 'Browser Mode', url: 'https://vitest.dev/guide/browser/', snippet: 'Run tests…' },
+      { title: '<b>x</b>', url: 'javascript:alert(1)', snippet: 'evil' },
+      { title: '', url: 'http://example.com/a?b=1', snippet: '', date: '2026-10-01' },
+      { title: 'no url', snippet: 'x' },
+      'junk',
+    ],
+    filtered: 2,
+    truncated: true,
+    untrusted: true,
+  }
+  const view = webSearchOf(out)
+  assert.deepEqual(view, {
+    query: 'vitest browser mode',
+    results: [
+      {
+        title: 'Browser Mode',
+        url: 'https://vitest.dev/guide/browser/',
+        host: 'vitest.dev',
+        snippet: 'Run tests…',
+      },
+      {
+        title: 'example.com',
+        url: 'http://example.com/a?b=1',
+        host: 'example.com',
+        snippet: '',
+        date: '2026-10-01',
+      },
+    ],
+    filtered: 2,
+    truncated: true,
+  })
+  assert.deepEqual(webSearchOf(JSON.stringify(out)), view, 'a result that came back as text')
+  for (const other of [undefined, 'web_search failed: HTTP 401', { results: [] }, [1], 42])
+    assert.equal(webSearchOf(other), undefined)
 })

@@ -299,3 +299,5 @@ export type {
   ToolSelectionStrategy,
   UsagePhase,
 } from './types.ts'
+// A write the escalation guard did not run twice: how to recognise its tool result.
+export { isReplayedToolOutput, REPLAY_NOTE } from './tiers.ts'

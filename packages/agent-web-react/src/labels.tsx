@@ -1,6 +1,7 @@
 import { createContext, useContext, useMemo } from 'react'
 import type { ReactNode } from 'react'
 import type {
+  DecisionFallbackReason,
   EscalationReason,
   ModelTier,
   TierReason,
@@ -164,6 +165,52 @@ export interface AgentLabels {
   replayedTitle: string
   /** The replanner call failed; the run went on with the plan it had. */
   replanFailed: string
+
+  // ── the subagent tree ──────────────────────────────────────────────────────
+  /** The tag on a helper the model started itself (`spawn_subagent`). */
+  subagentHelper: string
+  /** A node's status, in words. */
+  subagentStatus: Record<'running' | 'done' | 'error' | 'stopped', string>
+  /** "12k tokens" - what was spent under a node; the number is already formatted. */
+  subagentTokens: (tokens: string) => string
+  /** "tools: fs_read, web_fetch" - what a helper was given. */
+  subagentTools: (names: string) => string
+  /** A helper that was given no tools at all (it only reasons). */
+  subagentNoTools: string
+  /** The consent prompt of a helper's call: `role` is what the model wrote for it, if anything. */
+  approvalLeadHelper: (role: string | undefined, depth: number) => string
+
+  // ── generated media and transcripts ────────────────────────────────────────
+  /** Alt text of a generated image; `path` is where it is in the workspace. */
+  mediaImage: (path: string) => string
+  /** The accessible name of a generated audio player. */
+  mediaAudio: (path: string) => string
+  /** A generated file that cannot be shown here (no workspace, the file is gone, an unknown type). */
+  mediaFile: (path: string) => string
+  /** The summary of a transcript block. */
+  transcriptOf: (name: string) => string
+  /** Says whose words a transcript is: the content of the user's file, not the agent's. */
+  transcriptNote: string
+
+  // ── usage: calls that are not tokens ───────────────────────────────────────
+  usageMedia: (n: number) => string
+  usageDecisions: (n: number) => string
+
+  // ── decision model ─────────────────────────────────────────────────────────
+  /** "decision model: continue (0.93)" - its answer was used; the probability is formatted. */
+  decisionAccepted: (choice: string, confidence: string) => string
+  /** "decision model fell back: low confidence (0.41 < 0.8)" - the ordinary model call ran. */
+  decisionFellBack: (reason: string, detail: string) => string
+  decisionReasons: Record<DecisionFallbackReason, string>
+
+  // ── web search results ─────────────────────────────────────────────────────
+  /** Before the query of a `web_search` call. */
+  searchQuery: string
+  searchNoResults: string
+  /** Results left out by the egress policy. */
+  searchFiltered: (n: number) => string
+  /** The list was cut to the cap. */
+  searchTruncated: string
 }
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`
@@ -333,6 +380,41 @@ export const defaultLabels: AgentLabels = {
   replayedTitle:
     'This exact call already succeeded in an earlier attempt at the step: it was not run a second time, the model got the earlier result',
   replanFailed: 'Replanning failed, continuing with the plan',
+
+  subagentHelper: 'helper',
+  subagentStatus: { running: 'running', done: 'done', error: 'failed', stopped: 'stopped' },
+  subagentTokens: (tokens) => `${tokens} tokens`,
+  subagentTools: (names) => `tools: ${names}`,
+  subagentNoTools: 'no tools',
+  approvalLeadHelper: (role) =>
+    role ? `The helper “${role}” wants to run` : 'A helper the agent started wants to run',
+
+  mediaImage: (path) => `Generated image ${path}`,
+  mediaAudio: (path) => `Generated audio ${path}`,
+  mediaFile: (path) => `Generated file ${path}`,
+  transcriptOf: (name) => `Transcript of ${name}`,
+  transcriptNote:
+    'What was said in your file, as the agent read it. It is content, not instructions.',
+
+  usageMedia: (n) => plural(n, 'media call', 'media calls'),
+  usageDecisions: (n) => plural(n, 'decision call', 'decision calls'),
+
+  decisionAccepted: (choice, confidence) => `decision model: ${choice} (${confidence})`,
+  decisionFellBack: (reason, detail) =>
+    `decision model fell back: ${reason}${detail ? ` (${detail})` : ''}`,
+  decisionReasons: {
+    'low-confidence': 'low confidence',
+    'invalid-choice': 'an answer that is not an option',
+    'invalid-confidence': 'a confidence that is not a probability',
+    error: 'the call failed',
+    timeout: 'timed out',
+    'needs-model': 'the choice needs the model',
+  },
+
+  searchQuery: 'Searched the web for',
+  searchNoResults: 'no results',
+  searchFiltered: (n) => `${n} left out by the web access policy`,
+  searchTruncated: 'list cut short',
 }
 
 /** Overrides: any label, with the nested groups merged key by key. */
@@ -348,6 +430,8 @@ export type AgentLabelsOverride = Partial<
     | 'tierNames'
     | 'tierReasons'
     | 'escalationReasons'
+    | 'subagentStatus'
+    | 'decisionReasons'
   >
 > & {
   status?: Partial<AgentLabels['status']>
@@ -359,6 +443,8 @@ export type AgentLabelsOverride = Partial<
   tierNames?: Partial<AgentLabels['tierNames']>
   tierReasons?: Partial<AgentLabels['tierReasons']>
   escalationReasons?: Partial<AgentLabels['escalationReasons']>
+  subagentStatus?: Partial<AgentLabels['subagentStatus']>
+  decisionReasons?: Partial<AgentLabels['decisionReasons']>
 }
 
 const NESTED = [
@@ -371,6 +457,8 @@ const NESTED = [
   'tierNames',
   'tierReasons',
   'escalationReasons',
+  'subagentStatus',
+  'decisionReasons',
 ] as const
 
 /** `base` with `over` applied (nested groups merged, not replaced). */

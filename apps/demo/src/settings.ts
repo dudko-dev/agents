@@ -42,6 +42,10 @@ export interface DemoSettings {
   egressAllow: string
   /** The model may run JavaScript it wrote (`run_js`), in a QuickJS sandbox inside a Web Worker. */
   sandbox: boolean
+  /** The model may start helpers of its own for sub-tasks (`spawn_subagent`). */
+  helpers: boolean
+  /** The model may search the web (`web_search`) through Tavily, with the user's own key. */
+  search: boolean
   /**
    * Model tiers: the id (in `MODELS`) of a cheaper model for the steps the planner rates easy,
    * and of a stronger one for the hard ones and for retries. '' = none; both empty = tiers off.
@@ -76,6 +80,8 @@ export const DEFAULT_SETTINGS: DemoSettings = {
   egress: false,
   egressAllow: 'en.wikipedia.org, api.github.com',
   sandbox: false,
+  helpers: false,
+  search: false,
   tierLight: '',
   tierStrong: '',
   showToolCalls: true,
@@ -137,6 +143,9 @@ export const enabledSkillsFor = (s: DemoSettings, view: View): Skill[] =>
 /** The model's window when it is known (local models: the one they are loaded with). */
 export const DEFAULT_WINDOW = 128_000
 
+/** Where the search API's key is kept in the vault (next to the model keys). */
+export const SEARCH_CREDENTIAL = 'tavily'
+
 export const useSettingsConfig = (s: DemoSettings, modelWindow: number | undefined) => {
   // Auto = the model's window; the agent never goes above a local model's anyway.
   const window = s.contextWindowTokens || modelWindow || DEFAULT_WINDOW
@@ -153,6 +162,8 @@ export const useSettingsConfig = (s: DemoSettings, modelWindow: number | undefin
     egress: s.egress,
     egressAllow: s.egressAllow,
     sandbox: s.sandbox,
+    helpers: s.helpers,
+    search: s.search,
   }
   const rebuildKey = JSON.stringify(baked)
   const config = useMemo<Partial<BrowserAgentConfig>>(
@@ -186,6 +197,13 @@ export const useSettingsConfig = (s: DemoSettings, modelWindow: number | undefin
             },
           }
         : {}),
+      // Helpers: the model may start an agent of its own for a sub-task. A helper is built from
+      // this agent's own pieces (its models, a subset of its tools, its consent mode) and spends
+      // this run's budget; the defaults bound depth (1), count (8) and how many run at once (3).
+      ...(s.helpers ? { subagents: { dynamic: true } } : {}),
+      // Web search: Tavily is the hosted API that answers a page directly (CORS). The key is the
+      // user's own, kept in the vault under SEARCH_CREDENTIAL and read at each call.
+      ...(s.search ? { search: { provider: 'tavily', credentialRef: SEARCH_CREDENTIAL } } : {}),
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [rebuildKey],

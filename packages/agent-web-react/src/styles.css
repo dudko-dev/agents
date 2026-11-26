@@ -1586,3 +1586,205 @@
 .awr-fetch--refused {
   color: var(--awr-warn);
 }
+
+/* ── The subagent tree: static subagents and the helpers the model started ─── */
+.awr-step--subagents > .awr-subagents {
+  margin-left: 0;
+}
+.awr-subagents--nested {
+  margin: 4px 0 0 6px;
+  padding-left: 8px;
+  border-left: 1px solid var(--awr-border);
+}
+.awr-subagent {
+  min-width: 0;
+}
+.awr-subagent__icon {
+  display: inline-flex;
+}
+.awr-subagent--running .awr-subagent__icon {
+  color: var(--awr-accent);
+}
+.awr-subagent--error .awr-subagent__icon {
+  color: var(--awr-danger);
+}
+.awr-subagent--stopped .awr-subagent__icon {
+  color: var(--awr-warn);
+}
+.awr-subagent__name {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.awr-subagent__task {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.awr-subagent__meta {
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: 6px;
+  margin-left: 19px;
+  font-size: 11px;
+  color: var(--awr-muted);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.awr-subagent__metaitem::before {
+  content: '· ';
+}
+.awr-subagent__status {
+  font-weight: 600;
+}
+.awr-subagent--running .awr-subagent__status {
+  color: var(--awr-accent);
+}
+.awr-subagent--done .awr-subagent__status {
+  color: var(--awr-ok);
+}
+.awr-subagent--error .awr-subagent__status {
+  color: var(--awr-danger);
+}
+.awr-subagent--stopped .awr-subagent__status {
+  color: var(--awr-warn);
+}
+.awr-subagent__tools {
+  margin-left: 19px;
+  font-size: 11px;
+  color: var(--awr-muted);
+  overflow-wrap: anywhere;
+}
+.awr-subagent__activity {
+  overflow-wrap: anywhere;
+}
+.awr-approval--helper {
+  border-style: dashed;
+}
+
+/* ── The decision model's note under a step ───────────────────────────────── */
+.awr-step__decision {
+  margin: 0 0 0 24px;
+  font-size: 11px;
+  color: var(--awr-muted);
+  overflow-wrap: anywhere;
+}
+.awr-step__decision--fallback {
+  color: var(--awr-warn);
+}
+.awr-activity > .awr-step__decision {
+  margin-left: 0;
+}
+
+/* ── A web_search call's results ──────────────────────────────────────────── */
+.awr-search {
+  margin: 2px 0 4px 19px;
+  font-size: 12px;
+  color: var(--awr-muted);
+  min-width: 0;
+}
+.awr-search__query {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.awr-search__query q {
+  color: var(--awr-fg);
+}
+.awr-search__results {
+  margin: 2px 0 0;
+  padding-left: 18px;
+}
+.awr-search__result {
+  overflow-wrap: anywhere;
+}
+.awr-search__title {
+  color: var(--awr-accent);
+  text-decoration: none;
+}
+.awr-search__title:hover {
+  text-decoration: underline;
+}
+.awr-search__host {
+  font-size: 11px;
+}
+.awr-search__snippet {
+  margin: 0;
+  white-space: pre-wrap;
+}
+.awr-search__note {
+  margin: 2px 0 0;
+  font-size: 11px;
+}
+
+/* ── Generated media and transcripts in an answer ─────────────────────────── */
+.awr-msg__media {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 100%;
+  min-width: 0;
+}
+.awr-media {
+  display: inline-flex;
+  max-width: 100%;
+  min-width: 0;
+}
+.awr-media__img {
+  display: block;
+  max-width: min(100%, 360px);
+  max-height: 360px;
+  border-radius: 8px;
+  border: 1px solid var(--awr-border);
+}
+.awr-media--audio {
+  width: min(100%, 320px);
+}
+.awr-media__audio {
+  width: 100%;
+  height: 36px;
+}
+.awr-media--file {
+  align-items: center;
+  gap: 4px;
+  overflow-wrap: anywhere;
+}
+.awr-msg__transcripts {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.awr-transcript {
+  border: 1px dashed var(--awr-border);
+  border-radius: 8px;
+  padding: 4px 8px;
+  font-size: 13px;
+  min-width: 0;
+}
+.awr-transcript__summary {
+  cursor: pointer;
+  color: var(--awr-muted);
+  user-select: none;
+  overflow-wrap: anywhere;
+}
+.awr-transcript__summary svg {
+  vertical-align: -2px;
+}
+.awr-transcript__note {
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: var(--awr-muted);
+}
+.awr-transcript__text {
+  margin: 4px 0 2px;
+  padding-left: 8px;
+  border-left: 2px solid var(--awr-border);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

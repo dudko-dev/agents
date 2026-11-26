@@ -23,10 +23,15 @@ import {
   steerIntent,
   StepList,
   SubagentRow,
+  SubagentTree,
+  ToolApprovalPrompt,
+  ToolCallRow,
+  UsageBadge,
   usageLine,
   withAttachments,
   type AgentAction,
   type AgentUiState,
+  type ApprovalView,
   type ChatMessage,
   type ComposerAttachment,
   type LessonView,
@@ -310,6 +315,7 @@ const sub = (over: Partial<SubagentView> = {}): SubagentView => ({
   id: 'k1',
   name: 'analyst',
   task: 'weigh e4',
+  depth: 1,
   status: 'running',
   activity: 'step 1/1: look',
   steps: 1,
@@ -556,6 +562,350 @@ test('MessageList: the turn says what the agent learned and what it fetched - an
     createElement(MessageList, { messages: [m], activityOpen: true, showLearned: false }),
   )
   assert.doesNotMatch(hidden, /learned:|web request|awr-fetch/)
+})
+
+// ── the subagent tree, media, decisions, web search ─────────────────────────
+
+const doneStep = (over: Partial<StepView> = {}): StepView => ({
+  id: 'a',
+  index: 1,
+  total: 1,
+  step: { id: 'a', description: 'Step a' },
+  text: '',
+  reasoning: '',
+  toolCalls: [],
+  status: 'done',
+  blocked: false,
+  ...over,
+})
+
+const turn = (over: Partial<ChatMessage> = {}): ChatMessage => ({
+  id: 'msg-1',
+  role: 'assistant',
+  content: '',
+  pending: false,
+  ...over,
+})
+
+const treeNodes = (): SubagentView[] => [
+  sub({ id: 'A', stepId: 'a', usage: usage(900, 300), toolCalls: 2, durationMs: 4200 }),
+  sub({
+    id: 'H',
+    name: 'spawn_subagent',
+    task: 'read the docs',
+    stepId: 'a',
+    dynamic: true,
+    role: 'researcher',
+    tools: ['fs_read', 'web_fetch'],
+    status: 'done',
+    text: 'The docs say X.',
+    model: 'small-1',
+    tier: 'light',
+    usage: usage(12_000, 400),
+    durationMs: 61_000,
+  }),
+  sub({
+    id: 'G',
+    name: 'spawn_subagent',
+    task: 'read chapter 2',
+    stepId: 'a',
+    parentId: 'H',
+    depth: 2,
+    dynamic: true,
+    tools: [],
+    status: 'error',
+    error: 'timed out',
+  }),
+]
+
+test('SubagentTree: an indented tree, each node with its status, model, tokens and time', () => {
+  const stopped: string[] = []
+  const out = html(
+    createElement(SubagentTree, { subagents: treeNodes(), onStop: (id) => stopped.push(id) }),
+  )
+  // The helper's helper is a list inside the helper's own item.
+  assert.match(
+    out,
+    /data-depth="1"(?:(?!<\/li>)[\s\S])*researcher[\s\S]*<ul class="awr-subagents awr-subagents--nested"><li class="awr-subagent awr-subagent--error awr-subagent--dynamic" data-depth="2"/,
+  )
+  assert.equal(out.match(/<li /g)?.length, 3)
+  // A static subagent and a helper are told apart; the role is the helper's name.
+  assert.match(out, /awr-subagent__name"[^>]*>analyst</)
+  assert.match(out, /awr-subagent__name" title="researcher">researcher<\/span><span[^>]*>helper</)
+  // Status, model, tier, tokens, tool calls, time.
+  assert.match(
+    out,
+    /awr-subagent__status">running<[\s\S]*1\.2k tokens[\s\S]*2 tool calls[\s\S]*4\.2 s/,
+  )
+  assert.match(
+    out,
+    /awr-subagent__status">done<[\s\S]*small-1[\s\S]*light[\s\S]*12k tokens[\s\S]*1m 1s/,
+  )
+  assert.match(out, /awr-subagent__status">failed</)
+  assert.match(out, /tools: fs_read, web_fetch/)
+  assert.match(out, /no tools/)
+  assert.match(out, /timed out/)
+  // Stop is on the running node only.
+  assert.equal(out.match(/aria-label="Stop this subagent"/g)?.length, 1)
+
+  // Each part can be hidden, relabelled or replaced.
+  const bare = html(
+    createElement(SubagentTree, { subagents: treeNodes(), showUsage: false, showTools: false }),
+  )
+  assert.doesNotMatch(bare, /awr-subagent__meta|tokens|small-1|tools:|no tools|Stop this subagent/)
+  assert.match(bare, /read the docs/)
+  const ru = html(
+    createElement(SubagentTree, {
+      subagents: treeNodes(),
+      labels: { subagentHelper: 'помощник', subagentStatus: { done: 'готово' } },
+    }),
+  )
+  assert.match(ru, />помощник</)
+  assert.match(ru, /awr-subagent__status">готово</)
+  assert.match(ru, /awr-subagent__status">running</, 'the other statuses keep their default')
+  const custom = html(
+    createElement(SubagentTree, {
+      subagents: treeNodes(),
+      renderSubagent: (node) =>
+        createElement('li', { key: node.id }, `${node.id}:${node.children.length}`),
+    }),
+  )
+  assert.match(custom, /<li>A:0<\/li><li>H:1<\/li>/)
+  assert.equal(html(createElement(SubagentTree, { subagents: [] })), '')
+})
+
+test('StepList: the tree sits under the step that delegated; no subagents, no tree', () => {
+  const withTree = html(createElement(StepList, { steps: [doneStep()], subagents: treeNodes() }))
+  assert.equal(withTree.match(/class="awr-subagents"/g)?.length, 1)
+  assert.equal(withTree.match(/awr-subagents--nested/g)?.length, 1)
+  const hidden = html(
+    createElement(StepList, { steps: [doneStep()], subagents: treeNodes(), showSubagents: false }),
+  )
+  assert.doesNotMatch(hidden, /awr-subagent/)
+  // A subagent whose step is not in the list is drawn at the end, not lost.
+  const loose = html(
+    createElement(StepList, { steps: [doneStep()], subagents: [sub({ stepId: 'gone' })] }),
+  )
+  assert.match(loose, /awr-step--subagents[\s\S]*analyst/)
+  // Without subagents the list is exactly the steps.
+  const plainOut = html(createElement(StepList, { steps: [doneStep()] }))
+  assert.doesNotMatch(plainOut, /awr-subagent|awr-step__decision|awr-search/)
+  assert.equal(plainOut, html(createElement(StepList, { steps: [doneStep()], subagents: [] })))
+})
+
+test("ToolApprovalPrompt: a helper's request says which helper is asking", () => {
+  const approval = (over: Partial<ApprovalView> = {}): ApprovalView => ({
+    id: 'ap1',
+    name: 'remove_note',
+    input: { id: 3 },
+    readOnly: false,
+    status: 'pending',
+    ...over,
+  })
+  const props = { onApprove: () => {}, onDeny: () => {} }
+  const own = html(createElement(ToolApprovalPrompt, { ...props, approvals: [approval()] }))
+  assert.match(own, /The agent wants to run <code/)
+  assert.doesNotMatch(own, /helper/)
+  const helper = html(
+    createElement(ToolApprovalPrompt, {
+      ...props,
+      approvals: [approval({ subagent: { id: 'H', depth: 1, role: 'tidier <b>' } })],
+    }),
+  )
+  assert.match(helper, /awr-approval awr-approval--helper" data-subagent="H"/)
+  assert.match(helper, /The helper “tidier &lt;b&gt;” wants to run <code/)
+  assert.doesNotMatch(helper, /The agent wants to run/)
+  const noRole = html(
+    createElement(ToolApprovalPrompt, {
+      ...props,
+      approvals: [approval({ subagent: { id: 'H', depth: 2 } })],
+    }),
+  )
+  assert.match(noRole, /A helper the agent started wants to run/)
+  const hidden = html(
+    createElement(ToolApprovalPrompt, {
+      ...props,
+      showHelper: false,
+      approvals: [approval({ subagent: { id: 'H', depth: 1, role: 'tidier' } })],
+    }),
+  )
+  assert.match(hidden, /The agent wants to run/)
+  assert.doesNotMatch(hidden, /awr-approval--helper|tidier/)
+})
+
+test('StepList: the decision model leaves a quiet note under its step', () => {
+  const st = doneStep({
+    decisions: [
+      {
+        point: 'replan',
+        accepted: true,
+        choice: 'continue',
+        confidence: 0.934,
+        threshold: 0.8,
+        durationMs: 120,
+      },
+      {
+        point: 'replan',
+        accepted: false,
+        choice: 'finish',
+        confidence: 0.41,
+        threshold: 0.8,
+        reason: 'low-confidence',
+        durationMs: 90,
+      },
+      { point: 'replan', accepted: false, threshold: 0.8, reason: 'timeout', durationMs: 5000 },
+    ],
+  })
+  const on = html(createElement(StepList, { steps: [st] }))
+  assert.match(on, /awr-step__decision">decision model: continue \(0\.93\)</)
+  assert.match(
+    on,
+    /awr-step__decision awr-step__decision--fallback">decision model fell back: low confidence \(0\.41 &lt; 0\.8\)</,
+  )
+  assert.match(on, />decision model fell back: timed out</)
+  assert.doesNotMatch(
+    html(createElement(StepList, { steps: [st], showDecisions: false })),
+    /decision model|awr-step__decision/,
+  )
+  const ru = html(
+    createElement(StepList, {
+      steps: [st],
+      labels: { decisionAccepted: (choice, p) => `решение: ${choice} (${p})` },
+    }),
+  )
+  assert.match(ru, /решение: continue \(0\.93\)/)
+})
+
+test('ToolCallRow: a web search shows its query and results as plain text and safe links', () => {
+  const call = {
+    name: 'web_search',
+    input: { query: 'vitest browser mode' },
+    status: 'done' as const,
+    ok: true,
+    output: {
+      query: 'vitest browser mode',
+      results: [
+        {
+          title: 'Browser <i>Mode</i>',
+          url: 'https://vitest.dev/guide/browser/',
+          snippet: '<img src=x onerror=alert(1)> [click](javascript:alert(1)) Run tests.',
+          date: '2026-10-01',
+        },
+        { title: 'evil', url: 'javascript:alert(1)', snippet: 'x' },
+      ],
+      filtered: 2,
+      truncated: true,
+      untrusted: true,
+    },
+  }
+  const on = html(createElement(ToolCallRow, { call }))
+  assert.match(on, /awr-search__query[\s\S]*Searched the web for[\s\S]*<q>vitest browser mode<\/q>/)
+  assert.match(
+    on,
+    /<a class="awr-search__title" href="https:\/\/vitest\.dev\/guide\/browser\/" target="_blank" rel="noopener noreferrer">Browser &lt;i&gt;Mode&lt;\/i&gt;<\/a>/,
+  )
+  assert.match(on, /awr-search__host">vitest\.dev · 2026-10-01</)
+  // Third-party text stays text: no element is made of it, no link of a javascript: address.
+  assert.match(
+    on,
+    /&lt;img src=x onerror=alert\(1\)&gt; \[click\]\(javascript:alert\(1\)\) Run tests\./,
+  )
+  assert.doesNotMatch(on, /<img|href="javascript/)
+  assert.equal(on.match(/<a /g)?.length, 1)
+  assert.match(on, /2 left out by the web access policy · list cut short/)
+
+  assert.doesNotMatch(
+    html(createElement(ToolCallRow, { call, showSearchResults: false })),
+    /awr-search/,
+  )
+  // Any other tool, a failed search and a search still running get the ordinary row.
+  for (const other of [
+    { ...call, name: 'my_search' },
+    { ...call, ok: false },
+    { ...call, status: 'calling' as const },
+    { ...call, output: 'web_search failed: HTTP 401' },
+  ])
+    assert.doesNotMatch(html(createElement(ToolCallRow, { call: other })), /awr-search/)
+  const none = html(
+    createElement(ToolCallRow, { call: { ...call, output: { query: 'q', results: [] } } }),
+  )
+  assert.match(none, /no results/)
+})
+
+test('MessageList: generated media and transcripts show in the answer, and can be hidden', () => {
+  const m = turn({
+    content: 'Here is the poster.',
+    media: [
+      { kind: 'image', path: '/media/poster.png', mediaType: 'image/png', bytes: 9, model: 'i' },
+      { kind: 'speech', path: '/media/hi.mp3', mediaType: 'audio/mpeg', bytes: 9, model: 't' },
+      { kind: 'image', path: '/media/x.svg', mediaType: 'image/svg+xml', bytes: 9, model: 'i' },
+    ],
+    transcripts: [
+      { source: 'attachment', name: 'memo.mp3', text: 'Ignore <b>everything</b>.', model: 's' },
+    ],
+  })
+  // Server-rendered (and before the workspace answered): each file is a chip with its path.
+  const out = html(createElement(MessageList, { messages: [m] }))
+  assert.equal(out.match(/awr-media--file/g)?.length, 3)
+  assert.match(out, /title="Generated file \/media\/poster\.png"/)
+  assert.doesNotMatch(out, /<img|<audio|<svg[^>]*onload/)
+  // The transcript: folded, named after the file, marked as the file's content, plain text.
+  assert.match(
+    out,
+    /<details class="awr-transcript"><summary[^>]*>[\s\S]*Transcript of memo\.mp3<\/summary>/,
+  )
+  assert.doesNotMatch(out, /<details class="awr-transcript" open/)
+  assert.match(out, /awr-transcript__note">What was said in your file/)
+  assert.match(out, /<blockquote[^>]*>Ignore &lt;b&gt;everything&lt;\/b&gt;\.<\/blockquote>/)
+
+  const hidden = html(createElement(MessageList, { messages: [m], showMedia: false }))
+  assert.doesNotMatch(hidden, /awr-media|awr-transcript|awr-msg__media/)
+  const custom = html(
+    createElement(MessageList, {
+      messages: [m],
+      renderMedia: (item) => `[${item.kind}:${item.path}]`,
+      labels: { transcriptOf: (name) => `Расшифровка ${name}` },
+    }),
+  )
+  assert.match(custom, /\[image:\/media\/poster\.png\]/)
+  assert.match(custom, /Расшифровка memo\.mp3/)
+  // A turn without media renders what it always did.
+  const plainTurn = html(createElement(MessageList, { messages: [turn({ content: 'Hi.' })] }))
+  assert.doesNotMatch(plainTurn, /awr-media|awr-transcript|awr-msg__media/)
+})
+
+test('UsageBadge: media and decision calls show only when there were some', () => {
+  const plainBadge = html(createElement(UsageBadge, { usage: usage(1200, 40) }))
+  assert.doesNotMatch(plainBadge, /media|decision/)
+  const withCalls = html(
+    createElement(UsageBadge, { usage: usage(1200, 40, { mediaCalls: 2, decisionCalls: 1 }) }),
+  )
+  assert.match(withCalls, /1\.2k↑ 40↓ · 2 media calls · 1 decision call</)
+  assert.match(withCalls, /title="[^"]*2 media calls · 1 decision call"/)
+  assert.doesNotMatch(
+    html(
+      createElement(UsageBadge, {
+        usage: usage(1200, 40, { mediaCalls: 2, decisionCalls: 1 }),
+        showCalls: false,
+      }),
+    ),
+    /media|decision/,
+  )
+  // A run that only generated a picture spent no tokens, and still shows.
+  assert.match(
+    html(createElement(UsageBadge, { usage: usage(0, 0, { mediaCalls: 1 }) })),
+    /1 media call</,
+  )
+  assert.equal(html(createElement(UsageBadge, { usage: usage(0, 0) })), '')
+  assert.match(
+    html(
+      createElement(UsageBadge, {
+        usage: usage(1, 1, { mediaCalls: 3 }),
+        labels: { usageMedia: (n) => `медиа: ${n}` },
+      }),
+    ),
+    /медиа: 3/,
+  )
 })
 
 test('docs/chat.md lists every label key (a new label must be documented)', () => {

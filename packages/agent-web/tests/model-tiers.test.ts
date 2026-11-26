@@ -7,11 +7,13 @@ import {
   defineTool,
   escalationReasonOf,
   isEscalatableError,
+  isReplayedToolOutput,
   MemoryRunStore,
   nextStrongerTier,
   nodeResolver,
   parsePlannerResponse,
   pickTier,
+  REPLAY_NOTE,
   resolveEscalation,
   TieredPlanSchema,
   type AgentEvent,
@@ -1061,4 +1063,11 @@ test('pipeline: a node keeps the base tiers, unless it names another model', asy
   const other = (await resolve(node('other'))) as BrowserAgentConfig
   assert.equal(other.model, r.models.big)
   assert.equal(other.executorTiers, undefined)
+})
+
+test('isReplayedToolOutput: only an output that starts with the replay note', () => {
+  assert.equal(isReplayedToolOutput(`${REPLAY_NOTE} {"id":1}`), true)
+  assert.equal(isReplayedToolOutput(`result: ${REPLAY_NOTE}`), false)
+  assert.equal(isReplayedToolOutput({ note: REPLAY_NOTE }), false)
+  assert.equal(isReplayedToolOutput(undefined), false)
 })

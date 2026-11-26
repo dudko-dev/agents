@@ -28,9 +28,11 @@ export {
 export {
   escalationReasonOf,
   isEscalatableError,
+  isReplayedToolOutput,
   MODEL_TIERS,
   nextStrongerTier,
   pickTier,
+  REPLAY_NOTE,
   resolveEscalation,
 } from './tiers.js'
 export type { PlanShape, ReplanShape } from './agent/schemas.js'

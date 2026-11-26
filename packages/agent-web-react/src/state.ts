@@ -1,13 +1,22 @@
-import type { AgentEvent, IUsage, Skill } from '@dudko.dev/agent-web'
+import {
+  isReplayedToolOutput,
+  type AgentEvent,
+  type IUsage,
+  type Skill,
+} from '@dudko.dev/agent-web'
 import type {
   AgentUiState,
   ApprovalView,
   ChatAttachment,
   ChatMessage,
+  DecisionView,
   LessonView,
+  MediaView,
   StepView,
+  SubagentNode,
   SubagentView,
   ToolCallView,
+  TranscriptView,
 } from './types.js'
 
 /**
@@ -74,14 +83,31 @@ const emptyUsage = (): IUsage => ({
   cacheWriteTokens: 0,
 })
 
-const addUsage = (a: IUsage, b: IUsage): IUsage => ({
-  inputTokens: a.inputTokens + b.inputTokens,
-  outputTokens: a.outputTokens + b.outputTokens,
-  totalTokens: a.totalTokens + b.totalTokens,
-  reasoningTokens: (a.reasoningTokens ?? 0) + (b.reasoningTokens ?? 0),
-  cachedInputTokens: (a.cachedInputTokens ?? 0) + (b.cachedInputTokens ?? 0),
-  cacheWriteTokens: (a.cacheWriteTokens ?? 0) + (b.cacheWriteTokens ?? 0),
-})
+// What a usage record counts besides tokens: calls to the media models and to the decision
+// model. Absent until there is one, so a run without them keeps the six-field shape.
+const USAGE_COUNTS = [
+  'mediaCalls',
+  'imagesGenerated',
+  'speechCharacters',
+  'transcriptionSeconds',
+  'decisionCalls',
+] as const
+
+const addUsage = (a: IUsage, b: IUsage): IUsage => {
+  const sum: IUsage = {
+    inputTokens: a.inputTokens + b.inputTokens,
+    outputTokens: a.outputTokens + b.outputTokens,
+    totalTokens: a.totalTokens + b.totalTokens,
+    reasoningTokens: (a.reasoningTokens ?? 0) + (b.reasoningTokens ?? 0),
+    cachedInputTokens: (a.cachedInputTokens ?? 0) + (b.cachedInputTokens ?? 0),
+    cacheWriteTokens: (a.cacheWriteTokens ?? 0) + (b.cacheWriteTokens ?? 0),
+  }
+  for (const key of USAGE_COUNTS) {
+    const n = (a[key] ?? 0) + (b[key] ?? 0)
+    if (n) sum[key] = n
+  }
+  return sum
+}
 
 /**
  * The notebook view of the agent's own skills (`agent.listLearnedSkills()`): what the core stored
@@ -170,7 +196,12 @@ const applySubagentEvent = (view: SubagentView, event: AgentEvent): SubagentView
         ...view,
         steps: view.steps + 1,
         activity: `step ${event.index}/${event.total}: ${event.step.description}`,
+        // Known only when the child runs with model tiers.
+        ...(event.model !== undefined ? { model: event.model } : {}),
+        ...(event.tier !== undefined ? { tier: event.tier } : {}),
       }
+    case 'step.escalated':
+      return { ...view, tier: event.to, ...(event.model ? { model: event.model } : {}) }
     case 'step.tool-call':
       return { ...view, toolCalls: view.toolCalls + 1, activity: `→ ${event.name}` }
     case 'final.text-delta':
@@ -182,6 +213,278 @@ const applySubagentEvent = (view: SubagentView, event: AgentEvent): SubagentView
     default:
       return view
   }
+}
+
+/** A subagent an event came through on its way up (a `subagent.event` envelope). */
+interface Ancestor {
+  id: string
+}
+
+type SubagentStart = Extract<AgentEvent, { type: 'subagent.start' }>
+
+/**
+ * The node `id`, created when it is not there yet. An event can arrive for a subagent whose
+ * `subagent.start` was never seen (a capped log replayed, a host that joined late): it gets a
+ * node from what the envelope says - its name, and where in the tree it is.
+ */
+const ensureSubagent = (
+  state: AgentUiState,
+  id: string,
+  name: string,
+  ancestors: Ancestor[],
+  ctx: EventContext,
+): AgentUiState => {
+  if (state.subagents.some((s) => s.id === id)) return state
+  const parentId = ancestors[ancestors.length - 1]?.id
+  const parent = parentId ? state.subagents.find((s) => s.id === parentId) : undefined
+  const stepId = parent ? parent.stepId : runningStepId(state.steps)
+  const node: SubagentView = {
+    id,
+    name,
+    task: '',
+    ...(parentId ? { parentId } : {}),
+    depth: ancestors.length + 1,
+    status: 'running',
+    ...(stepId ? { stepId } : {}),
+    ...(ctx.at !== undefined ? { startedAt: ctx.at } : {}),
+    activity: 'starting',
+    steps: 0,
+    toolCalls: 0,
+    text: '',
+    usage: emptyUsage(),
+  }
+  return { ...state, subagents: [...state.subagents, node] }
+}
+
+/** What a `subagent.start` says about its node (everything but the counters). */
+const startSubagent = (
+  state: AgentUiState,
+  event: SubagentStart,
+  ancestors: Ancestor[],
+  ctx: EventContext,
+): AgentUiState => {
+  // The envelopes around an event are its ancestry; a start that came bare says it itself
+  // (`parentId` is then a subagent only below depth 1 - at depth 1 it is the run's id).
+  const depth = Math.max(event.depth ?? 1, ancestors.length + 1)
+  const parentId = ancestors[ancestors.length - 1]?.id ?? (depth > 1 ? event.parentId : undefined)
+  const told = {
+    name: event.name,
+    task: event.task,
+    depth,
+    ...(parentId ? { parentId } : {}),
+    ...(event.profile ? { profile: event.profile } : {}),
+    ...(event.dynamic ? { dynamic: true as const } : {}),
+    ...(event.role ? { role: event.role } : {}),
+    ...(event.tools ? { tools: event.tools } : {}),
+  }
+  // Already there (its events arrived first): the start fills in what they could not say.
+  if (state.subagents.some((s) => s.id === event.id)) {
+    return {
+      ...state,
+      subagents: patchSubagent(state.subagents, event.id, (s) => ({ ...s, ...told })),
+    }
+  }
+  const parent = parentId ? state.subagents.find((s) => s.id === parentId) : undefined
+  // A nested one belongs to the step that delegated its top-most ancestor.
+  const stepId = parent ? parent.stepId : runningStepId(state.steps)
+  const node: SubagentView = {
+    id: event.id,
+    ...told,
+    status: 'running',
+    stepId,
+    ...(ctx.at !== undefined ? { startedAt: ctx.at } : {}),
+    activity: 'starting',
+    steps: 0,
+    toolCalls: 0,
+    text: '',
+    usage: emptyUsage(),
+  }
+  return { ...state, subagents: [...state.subagents, node] }
+}
+
+/** How long a subagent ran, when both ends were stamped. */
+const subagentDuration = (s: SubagentView, at?: number): Partial<SubagentView> =>
+  at !== undefined && s.startedAt !== undefined ? { durationMs: Math.max(0, at - s.startedAt) } : {}
+
+const addMedia = (state: AgentUiState, view: MediaView): AgentUiState => ({
+  ...state,
+  media: [...(state.media ?? []), view],
+  ...(view.stepId
+    ? {
+        steps: patchStep(state.steps, view.stepId, (s) => ({
+          ...s,
+          media: [...(s.media ?? []), view],
+        })),
+      }
+    : {}),
+})
+
+const mediaOf = (
+  event: Extract<AgentEvent, { type: 'media.generated' }>,
+  withStep: boolean,
+): MediaView => ({
+  kind: event.kind,
+  path: event.path,
+  mediaType: event.mediaType,
+  bytes: event.bytes,
+  model: event.model,
+  ...(withStep && event.step ? { stepId: event.step.id } : {}),
+})
+
+const transcriptOf = (
+  event: Extract<AgentEvent, { type: 'media.transcribed' }>,
+): TranscriptView => ({
+  source: event.source,
+  name: event.name,
+  text: event.text,
+  ...(event.language ? { language: event.language } : {}),
+  ...(event.durationInSeconds !== undefined ? { durationInSeconds: event.durationInSeconds } : {}),
+  model: event.model,
+})
+
+/**
+ * Fold a `subagent.*` event into the tree. `ancestors` are the subagents it came up through
+ * (outermost first): a subagent's own subagents arrive nested,
+ * `subagent.event{ A, subagent.event{ G, event } }`, and each level lands on its own node.
+ */
+const applySubagent = (
+  state: AgentUiState,
+  event: Extract<
+    AgentEvent,
+    { type: 'subagent.start' | 'subagent.event' | 'subagent.complete' | 'subagent.error' }
+  >,
+  ancestors: Ancestor[],
+  ctx: EventContext,
+): AgentUiState => {
+  switch (event.type) {
+    case 'subagent.start':
+      return startSubagent(state, event, ancestors, ctx)
+
+    case 'subagent.event': {
+      const known = ensureSubagent(state, event.id, event.name, ancestors, ctx)
+      const inner = event.event
+      switch (inner.type) {
+        case 'subagent.start':
+        case 'subagent.event':
+        case 'subagent.complete':
+        case 'subagent.error':
+          return applySubagent(known, inner, [...ancestors, { id: event.id }], ctx)
+
+        // A helper the model started asks through the run's own consent gate (the event says
+        // which helper): its request is the user's to answer, like the run's. A subagent with
+        // a gate of its own (no `subagent` on the event) is its host's business.
+        case 'tool.approval-requested': {
+          if (!inner.subagent || known.approvals.some((a) => a.id === inner.id)) return known
+          const node = known.subagents.find((s) => s.id === inner.subagent!.id)
+          return {
+            ...known,
+            approvals: [
+              ...known.approvals,
+              {
+                id: inner.id,
+                name: inner.name,
+                input: inner.input,
+                readOnly: inner.readOnly,
+                // The helper's own step ids mean nothing here: the step that delegated it does.
+                stepId: node?.stepId,
+                subagent: {
+                  id: inner.subagent.id,
+                  depth: inner.subagent.depth,
+                  ...(node ? { name: node.name } : {}),
+                  ...(node?.role ? { role: node.role } : {}),
+                },
+                status: 'pending',
+              },
+            ],
+          }
+        }
+        case 'tool.approval-resolved':
+          return known.approvals.some((a) => a.id === inner.id)
+            ? {
+                ...known,
+                approvals: patchApproval(known.approvals, inner.id, (a) => ({
+                  ...a,
+                  status: inner.approved ? 'approved' : 'denied',
+                  reason: inner.reason,
+                  automatic: inner.automatic,
+                })),
+              }
+            : known
+
+        // What a subagent generated is in the same workspace: it shows in the turn (its step
+        // ids are its own, so it is tied to no step here).
+        case 'media.generated':
+          return addMedia(known, mediaOf(inner, false))
+        case 'media.transcribed':
+          return { ...known, transcripts: [...(known.transcripts ?? []), transcriptOf(inner)] }
+
+        default:
+          return {
+            ...known,
+            subagents: patchSubagent(known.subagents, event.id, (s) =>
+              applySubagentEvent(s, inner),
+            ),
+          }
+      }
+    }
+
+    case 'subagent.complete': {
+      const known = ensureSubagent(state, event.id, event.name, ancestors, ctx)
+      return {
+        ...known,
+        subagents: patchSubagent(known.subagents, event.id, (s) => ({
+          ...s,
+          status: 'done',
+          activity: 'done',
+          text: event.text,
+          usage: event.usage,
+          ...subagentDuration(s, ctx.at),
+        })),
+      }
+    }
+
+    case 'subagent.error': {
+      const known = ensureSubagent(state, event.id, event.name, ancestors, ctx)
+      return {
+        ...known,
+        subagents: patchSubagent(known.subagents, event.id, (s) => ({
+          ...s,
+          status: event.stopped ? 'stopped' : 'error',
+          activity: event.stopped ? 'stopped' : 'failed',
+          error: event.error,
+          // A helper says what it had spent when it ended; a static subagent does not.
+          ...(event.usage ? { usage: event.usage } : {}),
+          ...subagentDuration(s, ctx.at),
+        })),
+      }
+    }
+  }
+}
+
+/**
+ * The flat `subagents` list as a tree: each node with the subagents it started, in the order
+ * they started. A node whose parent is not in the list (its start was never seen) is a root.
+ */
+export const subagentTree = (subagents: SubagentView[]): SubagentNode[] => {
+  const nodes = new Map<string, SubagentNode>()
+  for (const s of subagents) nodes.set(s.id, { ...s, children: [] })
+  // A parent chain that comes back to the node is not a tree: such a node is a root.
+  const loops = (node: SubagentNode): boolean => {
+    let up = node.parentId
+    for (let i = 0; up !== undefined && i <= nodes.size; i++) {
+      if (up === node.id) return true
+      up = nodes.get(up)?.parentId
+    }
+    return false
+  }
+  const roots: SubagentNode[] = []
+  for (const node of nodes.values()) {
+    const parent =
+      node.parentId !== undefined && !loops(node) ? nodes.get(node.parentId) : undefined
+    if (parent) parent.children.push(node)
+    else roots.push(node)
+  }
+  return roots
 }
 
 /** Finalize the trailing pending assistant message with the given content. */
@@ -219,11 +522,6 @@ const streamAssistant = (messages: ChatMessage[], content: string): ChatMessage[
   }
   return messages
 }
-
-// How the core marks the result of a write it did not run again (its `REPLAY_NOTE`, which is not
-// exported): the call was answered from an earlier attempt at the step.
-const isReplayedOutput = (output: unknown): boolean =>
-  typeof output === 'string' && output.startsWith('[not run again:')
 
 const applyEvent = (state: AgentUiState, event: AgentEvent, ctx: EventContext): AgentUiState => {
   switch (event.type) {
@@ -382,7 +680,7 @@ const applyEvent = (state: AgentUiState, event: AgentEvent, ctx: EventContext): 
                   ok: event.ok,
                   status: 'done' as const,
                   outputTokens: approxTokens(event.output),
-                  ...(isReplayedOutput(event.output) ? { replayed: true } : {}),
+                  ...(isReplayedToolOutput(event.output) ? { replayed: true } : {}),
                   ...(ctx.at !== undefined && c.startedAt !== undefined
                     ? { durationMs: Math.max(0, ctx.at - c.startedAt) }
                     : {}),
@@ -437,7 +735,7 @@ const applyEvent = (state: AgentUiState, event: AgentEvent, ctx: EventContext): 
                 ...(streamed?.durationMs !== undefined ? { durationMs: streamed.durationMs } : {}),
                 // With tiers the list holds every attempt's calls, in the order they were made.
                 ...(streamed?.attempt !== undefined ? { attempt: streamed.attempt } : {}),
-                ...(isReplayedOutput(c.output) ? { replayed: true } : {}),
+                ...(isReplayedToolOutput(c.output) ? { replayed: true } : {}),
               }
             })
           })(),
@@ -452,6 +750,7 @@ const applyEvent = (state: AgentUiState, event: AgentEvent, ctx: EventContext): 
             mode: event.mode,
             reason: event.reason,
             ...(event.byUser ? { byUser: true } : {}),
+            ...(event.confidence !== undefined ? { confidence: event.confidence } : {}),
           },
         }
       }
@@ -477,6 +776,36 @@ const applyEvent = (state: AgentUiState, event: AgentEvent, ctx: EventContext): 
           : state.steps,
       }
     }
+
+    case 'decision': {
+      // The decision model is asked after a step (continue / finish): the note belongs to it.
+      const view: DecisionView = {
+        point: event.point,
+        accepted: event.accepted,
+        ...(event.choice !== undefined ? { choice: event.choice } : {}),
+        ...(event.confidence !== undefined ? { confidence: event.confidence } : {}),
+        threshold: event.threshold,
+        ...(event.reason ? { reason: event.reason } : {}),
+        durationMs: event.durationMs,
+        ...(event.model ? { model: event.model } : {}),
+      }
+      const last = state.steps[state.steps.length - 1]
+      return last
+        ? {
+            ...state,
+            steps: patchStep(state.steps, last.id, (s) => ({
+              ...s,
+              decisions: [...(s.decisions ?? []), view],
+            })),
+          }
+        : { ...state, decisions: [...(state.decisions ?? []), view] }
+    }
+
+    case 'media.generated':
+      return addMedia(state, mediaOf(event, true))
+
+    case 'media.transcribed':
+      return { ...state, transcripts: [...(state.transcripts ?? []), transcriptOf(event)] }
 
     case 'message.queued':
       return state.queued.some((q) => q.id === event.id)
@@ -535,6 +864,7 @@ const applyEvent = (state: AgentUiState, event: AgentEvent, ctx: EventContext): 
             input: event.input,
             readOnly: event.readOnly,
             stepId: event.step?.id,
+            ...(event.subagent ? { subagent: event.subagent } : {}),
             status: 'pending',
           },
         ],
@@ -568,56 +898,10 @@ const applyEvent = (state: AgentUiState, event: AgentEvent, ctx: EventContext): 
     }
 
     case 'subagent.start':
-      return {
-        ...state,
-        subagents: [
-          ...state.subagents,
-          {
-            id: event.id,
-            name: event.name,
-            task: event.task,
-            status: 'running',
-            ...(event.profile ? { profile: event.profile } : {}),
-            stepId: runningStepId(state.steps),
-            activity: 'starting',
-            steps: 0,
-            toolCalls: 0,
-            text: '',
-            usage: emptyUsage(),
-          },
-        ],
-      }
-
     case 'subagent.event':
-      return {
-        ...state,
-        subagents: patchSubagent(state.subagents, event.id, (s) =>
-          applySubagentEvent(s, event.event),
-        ),
-      }
-
     case 'subagent.complete':
-      return {
-        ...state,
-        subagents: patchSubagent(state.subagents, event.id, (s) => ({
-          ...s,
-          status: 'done',
-          activity: 'done',
-          text: event.text,
-          usage: event.usage,
-        })),
-      }
-
     case 'subagent.error':
-      return {
-        ...state,
-        subagents: patchSubagent(state.subagents, event.id, (s) => ({
-          ...s,
-          status: event.stopped ? 'stopped' : 'error',
-          activity: event.stopped ? 'stopped' : 'failed',
-          error: event.error,
-        })),
-      }
+      return applySubagent(state, event, [], ctx)
 
     case 'skill.activated':
       return state.skills.includes(event.name)
@@ -749,6 +1033,9 @@ const syncRunMessage = (state: AgentUiState): AgentUiState => {
   if (state.learnedNow.length > 0 && m.learned !== state.learnedNow)
     patch.learned = state.learnedNow
   if (state.fetches.length > 0 && m.fetches !== state.fetches) patch.fetches = state.fetches
+  if (state.media && m.media !== state.media) patch.media = state.media
+  if (state.transcripts && m.transcripts !== state.transcripts)
+    patch.transcripts = state.transcripts
   if (
     (m.approvals?.length ?? 0) !== decided.length ||
     decided.some((a, k) => m.approvals?.[k] !== a)

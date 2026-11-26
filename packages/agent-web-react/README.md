@@ -196,12 +196,13 @@ function Custom() {
 | `messages` | transcript; each assistant message keeps its steps, tool calls, thoughts, approvals, subagents, usage and duration |
 | `plan` / `steps` | the live plan and per-step tool calls (with timing) |
 | `finalText` / `finalReasoning` | the streamed answer and its thoughts |
-| `usage` / `totalUsage` | tokens of this run / of the conversation, by kind |
-| `pendingApprovals`, `approve(id, { remember })`, `deny(id)` | tool consent |
+| `usage` / `totalUsage` | tokens of this run / of the conversation, by kind - plus `mediaCalls` and `decisionCalls` (calls, not tokens) when the run made some |
+| `pendingApprovals`, `approve(id, { remember })`, `deny(id)` | tool consent (a request made by a helper the model started carries `subagent: { id, depth, name?, role? }`) |
 | `approvalMode` / `setApprovalMode(mode)` | the autopilot switch, live |
 | `compact()` | summarise the stored transcript now |
 | `sessionId` / `loadChat(chat)` | the memory session; switch conversations |
-| `subagents`, `skills`, `discoveredTools`, `compactions`, `budget` | the rest of the run, folded |
+| `subagents`, `skills`, `discoveredTools`, `compactions`, `budget` | the rest of the run, folded. `subagents` is a **tree**: static subagents and the helpers the model started (`subagents.dynamic`), each node with `parentId` / `depth`, status, model, tokens, tool calls and time; `subagentTree(subagents)` nests it - see [docs/chat.md](docs/chat.md#subagents-and-helpers-the-tree) |
+| `media`, `transcripts`, `decisions` | absent until there is one: the files the run generated (`MediaView[]`: a path in the workspace, never bytes), the audio it transcribed (`TranscriptView[]`), and the decision model's answers that came before any step (`DecisionView[]`; later ones are on their step) |
 | `learned`, `learnedNow`, `fetches` | the agent's notebook (`LessonView[]`, survives `reset`), what it wrote this run, and the `web_fetch` requests this run made (`FetchView[]`) |
 | `queued`, `notes`, `undelivered`, `replan` | steering: messages waiting, shown (and where), left over; the last replan decision (`byUser` when a message caused it; `failed` + `error` when the replanner call itself failed and the run went on with its plan) |
 | `steps[i].tier`, `.model`, `.tierReason`, `.escalations`, `.replanFailed` | with the core's `executorTiers`: the tier and model a step is on, why it started there, and its escalations (`StepEscalationView[]`); a tool call of an escalated attempt has `attempt`, a write that was not run twice `replayed`. `replanFailed`: the replanner failed after this step (a warning). All absent when tiers are off — see [docs/chat.md](docs/chat.md#model-tiers-escalation-and-a-replanner-that-failed) |
@@ -522,8 +523,10 @@ use them standalone. The full guide: [docs/chat.md](docs/chat.md).
 | `<AgentChat>` | Full panel: transcript with per-answer activity + composer + optional history and files panels. Reads a `controller` prop or the `<AgentProvider>` context. |
 | `<AgentComposer>` | The input and its toolbar: attachments, commands, timer, agents, model/thinking, consent, mic, send/stop. |
 | `<MessageList>` | The transcript; each answer with its steps, tool calls, thoughts, usage. |
-| `<StepList>` / `<ToolCallRow>` | Execution steps / one tool call with its cost and images. With model tiers: the tier / model badge, the escalation line, the earlier attempt's calls (`showTiers`); a replanner failure as a warning (`showReplanFailed`). |
-| `<ToolApprovalPrompt>` | Consent cards (Allow once / Always / Deny). |
+| `<StepList>` / `<ToolCallRow>` | Execution steps / one tool call with its cost and images. With model tiers: the tier / model badge, the escalation line, the earlier attempt's calls (`showTiers`); a replanner failure as a warning (`showReplanFailed`); the decision model's note (`showDecisions`); the subagent tree under its step (`showSubagents`); a `web_search` call's results as plain text and safe links (`showSearchResults`). |
+| `<SubagentTree>` / `<SubagentRow>` | The run's subagents - static ones and the helpers the model started - as an indented tree: status, model, tokens, time and a Stop button per node (`onStop`, `showUsage`, `showTools`, `renderSubagent`). |
+| `<GeneratedMedia>` / `<TranscriptBlock>` | A file a media tool wrote, read from the workspace: an image inline or a native audio player (only the types the core generates; never SVG) / a folded "Transcript of …" block. `<MessageList files showMedia renderMedia>` places them in the answer. |
+| `<ToolApprovalPrompt>` | Consent cards (Allow once / Always / Deny); a helper's request says which helper asks (`showHelper`). |
 | `<ApprovalModeSwitch>` | Segmented consent-mode switch. |
 | `<ChatHistoryList>` | Saved chats (from `useChatHistory`). |
 | `<FilesPanel>` | A `VirtualFileSystem`, live: preview, download, delete, upload. |
@@ -531,7 +534,7 @@ use them standalone. The full guide: [docs/chat.md](docs/chat.md).
 | `<ContextMeter>` | Tokens by kind, budget bar, last compaction, Compact. |
 | `<PlanView>` | A plan's reasoning + step list. |
 | `<ModelLoadBar>` | WebLLM download/init progress. |
-| `<UsageBadge>` | Compact token readout. |
+| `<UsageBadge>` | Compact token readout; media and decision calls when there were some (`showCalls`). |
 | `<ApiKeyForm>` | BYOK key entry that writes to the encrypted vault. |
 | `<Composer>` | The minimal textarea + send/stop (kept for existing apps). |
 | `<PipelineEditor>` and its parts | The pipeline editor - from `@dudko.dev/agent-web-react/pipeline`, styled by `pipeline.css`. See [Pipelines](#pipelines-an-editor-on-a-canvas). |

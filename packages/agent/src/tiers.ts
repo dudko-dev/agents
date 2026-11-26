@@ -345,3 +345,11 @@ export const REPLAY_NOTE =
   '[not run again: this exact call already succeeded in an earlier attempt at this step, and its effect is in place. Its result then:]'
 
 export const replayOutput = (output: unknown): string => `${REPLAY_NOTE} ${asText(output, 20_000)}`
+
+// Whether a tool call's `output` (in a `step.tool-result` event or a step's `toolCalls`) is the
+// answer to a write that was NOT run again: the same call already succeeded in an earlier attempt
+// at the step, and the model was handed that result under REPLAY_NOTE. For a UI or a log that
+// marks such a call instead of counting it as a second execution. The browser sibling exports
+// the same helper.
+export const isReplayedToolOutput = (output: unknown): boolean =>
+  typeof output === 'string' && output.startsWith(REPLAY_NOTE)

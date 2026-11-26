@@ -11,6 +11,8 @@ export interface ToolApprovalPromptProps {
   onDeny: (id: string, reason?: string) => void
   /** Offer "Always allow" (remembers the tool for the agent's life). Default true. */
   allowRemember?: boolean
+  /** Say which helper is asking when the call is a helper's, not the run's own (default true). */
+  showHelper?: boolean
   /** Render a request yourself (gets the built-in card as `fallback`). */
   renderApproval?: (approval: ApprovalView, fallback: ReactNode) => ReactNode
   labels?: AgentLabelsOverride
@@ -27,6 +29,7 @@ export const ToolApprovalPrompt = ({
   onApprove,
   onDeny,
   allowRemember = true,
+  showHelper = true,
   renderApproval,
   labels,
   className,
@@ -36,12 +39,24 @@ export const ToolApprovalPrompt = ({
   return (
     <div className={['awr-approvals', className].filter(Boolean).join(' ')} role="alert">
       {approvals.map((a) => {
+        // A helper's role is text the model wrote: shown as plain text, shortened.
+        const helper = showHelper ? a.subagent : undefined
         const card = (
-          <div key={a.id} className="awr-approval">
+          <div
+            key={a.id}
+            className={`awr-approval${helper ? ' awr-approval--helper' : ''}`}
+            data-subagent={helper?.id}
+          >
             <div className="awr-approval__head">
               <ShieldIcon size={14} className="awr-approval__icon" />
               <span>
-                {L.approvalLead} <code className="awr-tool__name">{a.name}</code>
+                {helper
+                  ? L.approvalLeadHelper(
+                      previewValue(helper.role ?? '', 60) || undefined,
+                      helper.depth,
+                    )
+                  : L.approvalLead}{' '}
+                <code className="awr-tool__name">{a.name}</code>
                 {a.readOnly ? ` (${L.readOnlyTool})` : ''}
               </span>
             </div>
