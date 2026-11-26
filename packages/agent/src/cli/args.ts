@@ -57,6 +57,11 @@ Optional env vars (see env.example for the full list):
   AGENT_EGRESS_ALLOW / _DENY  comma lists: host, *.host, IP or CIDR (deny wins; allow limits to these)
   AGENT_EGRESS_PROTOCOLS      https (default) | http | https,http
   AGENT_EGRESS_ALLOW_PRIVATE  on lets it reach private networks (cloud metadata stays refused)
+  AGENT_SEARCH                brave | tavily | searxng lets the model search the web (web_search); off (default)
+  AGENT_SEARCH_API_KEY        the search API's key (brave, tavily); never logged
+  AGENT_SEARCH_BASE_URL       the SearXNG instance (required for searxng), or a gateway for the others
+  AGENT_SEARCH_MAX_RESULTS    results per search (default 5, at most 10)
+  AGENT_SEARCH_ALLOW_PRIVATE  on lets the search API itself be on a private address (a local SearXNG)
   AGENT_SANDBOX               on lets the model run JavaScript it wrote (run_js; needs quickjs-emscripten)
   AGENT_SANDBOX_TIMEOUT_MS    time limit of one run (default 5000, at most 60000)
   AGENT_SANDBOX_MEMORY_MB     heap of one run in MiB (default 32, at most 256)

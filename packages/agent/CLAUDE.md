@@ -58,6 +58,16 @@
     ranges refused, allow/deny, redirects re-judged, size/time bounded) + `web-fetch.ts` (the
     `web_fetch` tool that `config.egress` switches on). Security boundary: every change needs a
     test in `tests/safe-fetch.test.ts` and a mutation check.
+  - `web-search.ts` (`config.search`: the `web_search` tool; the adapter's request goes through
+    `createSafeFetch` under `searchEgressPolicy` - the allow list is exactly the search API's host,
+    no redirect - and results are filtered by the model's `egress` policy) + `web-search-shared.ts`
+    (pure, no imports: caps, cleaning of results, the built-in adapters as request builders /
+    response parsers - brave, tavily, searxng -, key redaction, the tool's description). The shared
+    file is a COPY of the browser sibling's `src/tools/web-search-shared.ts`, byte for byte: change
+    both (`tests/web-search-shared.test.ts` compares them, and the two copies of
+    `tests/helpers/search-server.ts`, the local imitation of the three APIs). Security boundary:
+    every guard has a test in `tests/web-search*.test.ts` and a mutation check; the key must never
+    reach an event, an error or a result. Tests never call a real search API.
   - `control.ts` (`createRunControl`: send a message into a running loop, stop one
     subagent). The runner drains it at round / step / final boundaries; messages are
     recorded in `IRunState.userUpdates` and in run snapshots.

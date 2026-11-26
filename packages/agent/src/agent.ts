@@ -12,6 +12,7 @@ import { MODEL_TIERS, resolveEscalation } from './tiers.ts'
 import { createSandboxTools, RUN_JS_TOOL } from './sandbox.ts'
 import { createSkillTools, validateSkills } from './skills.ts'
 import { createEgressTools } from './web-fetch.ts'
+import { createSearchTools } from './web-search.ts'
 import { createFindToolsTool, FIND_TOOLS_TOOL } from './tool-search.ts'
 import { accumulateUsage, normalizeUsage } from './utils.ts'
 import { wrapToolSet, type IToolWrapDeps } from './tool-wrap.ts'
@@ -174,9 +175,11 @@ export const createAgent = async (
   const egressTools = createEgressTools(config.egress)
   // What config.sandbox switches on (run_js). Off = nothing is created: no tool, no engine, no worker.
   const sandboxTools = createSandboxTools(config.sandbox)
+  // What config.search switches on (web_search): its own request is pinned to the search API.
+  const searchTools = createSearchTools(config.search, config.egress)
   const nativeTools: ToolSet | undefined =
-    egressTools || learning || sandboxTools
-      ? { ...egressTools, ...sandboxTools, ...learning?.tools, ...config.tools }
+    egressTools || searchTools || learning || sandboxTools
+      ? { ...egressTools, ...searchTools, ...sandboxTools, ...learning?.tools, ...config.tools }
       : config.tools
   // find_tools exists whenever the strategy can resolve to 'search'.
   const strategy = config.toolSelectionStrategy ?? 'auto'
