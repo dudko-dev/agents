@@ -285,6 +285,9 @@ const refreshIfExpired = async (
   fetchFn: FetchLike | undefined,
   log: NonNullable<ConnectMcpOptions['onLog']>,
   name: string,
+  // The host's own `onLog`, when it gave one: left undefined otherwise, so the
+  // enterprise provider falls back to the package's logger for its detail.
+  detailLog?: EnterpriseLog,
 ): Promise<void> => {
   const check = (provider as { isAccessTokenExpired?: () => boolean | Promise<boolean> })
     .isAccessTokenExpired
@@ -299,7 +302,7 @@ const refreshIfExpired = async (
     // discovery failure is left to the transport: the server's 401 may say
     // where its metadata lives, or it may need no authorization at all.
     try {
-      await enterprise.authorize({ fetch: fetchFn, onLog: log })
+      await enterprise.authorize({ fetch: fetchFn, onLog: detailLog })
     } catch (err) {
       if ((err as { hop?: unknown })?.hop !== 'discovery') throw err
       log('info', `[mcp] ${name}: ${err instanceof Error ? err.message : String(err)}; continuing`)
@@ -455,7 +458,7 @@ const connectAndList = async (
       )
     }
     assertSecureOAuthUrl(cfg.url, name)
-    await refreshIfExpired(cfg.authProvider, cfg.url, cfg.fetch, log, name)
+    await refreshIfExpired(cfg.authProvider, cfg.url, cfg.fetch, log, name, opts.onLog)
   }
   const transport = new StreamableHTTPClientTransport(new URL(cfg.url), {
     requestInit: headers ? { headers } : undefined,
@@ -463,7 +466,8 @@ const connectAndList = async (
     // The enterprise provider reports a refused grant itself: a short typed
     // error for the caller, the server's words (redacted) to the log.
     fetch:
-      (cfg.authProvider && asEnterpriseProvider(cfg.authProvider)?.transportFetch(cfg.fetch, log)) ||
+      (cfg.authProvider &&
+        asEnterpriseProvider(cfg.authProvider)?.transportFetch(cfg.fetch, opts.onLog)) ||
       cfg.fetch,
     reconnectionOptions: { ...DEFAULT_RECONNECTION, ...cfg.reconnection },
   })

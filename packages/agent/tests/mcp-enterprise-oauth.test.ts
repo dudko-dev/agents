@@ -643,12 +643,15 @@ const assertWorldLeaksNothing = (world: IWorld, texts: string[], more: string[] 
     ...more,
   ]
   for (const value of sensitive) {
-    assert.ok(!dump.includes(value), 'the store holds no token, assertion, key or secret')
-    for (const text of texts) {
-      assert.ok(
-        !text.includes(value),
-        `no token, assertion, key or secret in: ${text.slice(0, 90)}`,
-      )
+    // Not even the beginning of one: a clipped token is still its claims.
+    for (const needle of value.length > 60 ? [value, value.slice(0, 48)] : [value]) {
+      assert.ok(!dump.includes(needle), 'the store holds no token, assertion, key or secret')
+      for (const text of texts) {
+        assert.ok(
+          !text.includes(needle),
+          `no token, assertion, key or secret in: ${text.slice(0, 90)}`,
+        )
+      }
     }
   }
 }
@@ -1022,4 +1025,758 @@ test('e2e: a public client with no secret and no expectedIssuer gets a token on 
     },
     { publicClient: true },
   )
+})
+
+// ── private_key_jwt (RFC 7523 section 2.2, audience per rfc7523bis) ───────
+
+const EC_KEY = generateClientKey('ES256', 'ec-key-1')
+const RSA_KEY = generateClientKey('RSA', 'rsa-key-1')
+const IDP_ISSUER = 'https://idp.example.test'
+
+/** The private parts of a key, in every spelling a leak could take. */
+const keyMaterial = (key: ReturnType<typeof generateClientKey>): string[] => [
+  key.privatePem,
+  key.privatePem.replace(/-----[^-]+-----/g, '').replace(/\s+/g, ''),
+  ...['d', 'p', 'q', 'dp', 'dq', 'qi']
+    .map((m) => (key.privateJwk as Record<string, unknown>)[m])
+    .filter((v): v is string => typeof v === 'string'),
+]
+
+const jwtOptions = (extra: Record<string, unknown> = {}) =>
+  baseOptions({
+    clientSecret: undefined,
+    clientAuthMethod: 'private_key_jwt',
+    privateKey: EC_KEY.privateJwk,
+    algorithm: 'ES256',
+    keyId: EC_KEY.kid,
+    ...extra,
+  })
+
+test('private_key_jwt: what the options must hold, said when the provider is built', () => {
+  createEnterpriseOAuthProvider(jwtOptions())
+  // The audience of a signed assertion must not come from the MCP server alone.
+  assert.throws(
+    () => createEnterpriseOAuthProvider(jwtOptions({ expectedIssuer: undefined })),
+    /private_key_jwt needs expectedIssuer/,
+  )
+  assert.throws(
+    () => createEnterpriseOAuthProvider(jwtOptions({ privateKey: undefined })),
+    /needs privateKey and an algorithm/,
+  )
+  assert.throws(
+    () => createEnterpriseOAuthProvider(jwtOptions({ algorithm: 'HS256' })),
+    /needs privateKey and an algorithm/,
+  )
+  assert.throws(
+    () => createEnterpriseOAuthProvider(jwtOptions({ clientSecret: AS_SECRET })),
+    /clientSecret is not used with clientAuthMethod 'private_key_jwt'/,
+  )
+  // A key nobody asked to use is a mistake, not something to ignore quietly.
+  assert.throws(
+    () => createEnterpriseOAuthProvider(baseOptions({ privateKey: EC_KEY.privateJwk })),
+    /privateKey is only used with/,
+  )
+  assert.throws(
+    () =>
+      createEnterpriseOAuthProvider(
+        baseOptions({ clientSecret: undefined, clientAuthMethod: 'client_secret_post' }),
+      ),
+    /needs clientSecret/,
+  )
+  assert.throws(
+    () => createEnterpriseOAuthProvider(baseOptions({ clientAuthMethod: 'none' })),
+    /clientSecret is not used with clientAuthMethod 'none'/,
+  )
+
+  // The same at the IdP, where the audience is its issuer and has to be given.
+  const idp = (extra: Record<string, unknown>) => ({
+    idp: {
+      tokenEndpoint: IDP_TOKEN_URL,
+      clientId: 'agent-at-idp',
+      clientAuthMethod: 'private_key_jwt',
+      privateKey: RSA_KEY.privatePem,
+      algorithm: 'RS256',
+      issuer: IDP_ISSUER,
+      ...extra,
+    },
+  })
+  createEnterpriseOAuthProvider(baseOptions(idp({})))
+  assert.throws(
+    () => createEnterpriseOAuthProvider(baseOptions(idp({ issuer: undefined }))),
+    /needs idp\.issuer/,
+  )
+  assert.throws(
+    () => createEnterpriseOAuthProvider(baseOptions(idp({ issuer: 'http://idp.example.test' }))),
+    /Enterprise IdP issuer: requires https/,
+  )
+  assert.throws(
+    () => createEnterpriseOAuthProvider(baseOptions(idp({ algorithm: undefined }))),
+    /needs idp\.privateKey and an idp\.algorithm/,
+  )
+  assert.throws(
+    () => createEnterpriseOAuthProvider(baseOptions(idp({ clientSecret: IDP_SECRET }))),
+    /idp\.clientSecret is not used/,
+  )
+  assert.throws(
+    () =>
+      createEnterpriseOAuthProvider(
+        baseOptions({
+          idp: {
+            tokenEndpoint: IDP_TOKEN_URL,
+            clientId: 'agent-at-idp',
+            clientSecret: IDP_SECRET,
+            privateKey: RSA_KEY.privatePem,
+          },
+        }),
+      ),
+    /idp\.privateKey is only used with/,
+  )
+})
+
+test('client assertion: the claims rfc7523bis asks for, short-lived, a new jti every time', async () => {
+  const make = () =>
+    createClientAssertion({
+      clientId: 'agent-at-as',
+      audience: AS_URL,
+      privateKey: EC_KEY.privateJwk,
+      algorithm: 'ES256',
+      keyId: EC_KEY.kid,
+    })
+  const before = Math.floor(Date.now() / 1000)
+  const first = await make()
+  const second = await make()
+  const verified = verifyJwt(first, { keys: [EC_KEY.publicJwk] })
+  assert.ok(verified, 'signed by the key')
+  assert.deepEqual(verified.header, {
+    alg: 'ES256',
+    typ: 'client-authentication+jwt',
+    kid: EC_KEY.kid,
+  })
+  const { payload } = verified
+  assert.deepEqual(Object.keys(payload).sort(), ['aud', 'exp', 'iat', 'iss', 'jti', 'sub'])
+  assert.equal(payload.iss, 'agent-at-as')
+  assert.equal(payload.sub, 'agent-at-as')
+  // The issuer identifier as the SOLE audience: a string, not a list, not a token endpoint.
+  assert.equal(payload.aud, AS_URL)
+  assert.ok((payload.iat as number) >= before && (payload.iat as number) <= before + 2)
+  assert.equal((payload.exp as number) - (payload.iat as number), 60, 'one minute, no more')
+  assert.match(String(payload.jti), /^[0-9a-f-]{36}$/)
+  assert.notEqual(payload.jti, peekJwt(second).payload.jti, 'unique per request')
+  // No kid when none was given.
+  const bare = await createClientAssertion({
+    clientId: 'c',
+    audience: AS_URL,
+    privateKey: EC_KEY.privateJwk,
+    algorithm: 'ES256',
+  })
+  assert.equal('kid' in peekJwt(bare).header, false)
+})
+
+test('client assertion: every algorithm verifies, from a JWK, a PEM and a KeyObject', async () => {
+  const { createPrivateKey } = await import('node:crypto')
+  const keys: Record<string, ReturnType<typeof generateClientKey>> = {
+    ES256: EC_KEY,
+    ES384: generateClientKey('ES384'),
+    ES512: generateClientKey('ES512'),
+    RSA: RSA_KEY,
+  }
+  const algorithms: EnterpriseAssertionAlgorithm[] = [
+    'ES256',
+    'ES384',
+    'ES512',
+    'RS256',
+    'RS384',
+    'RS512',
+    'PS256',
+    'PS384',
+    'PS512',
+  ]
+  for (const algorithm of algorithms) {
+    const key = keys[algorithm.startsWith('ES') ? algorithm : 'RSA']
+    for (const privateKey of [key.privateJwk, key.privatePem, createPrivateKey(key.privatePem)]) {
+      const jwt = await createClientAssertion({
+        clientId: 'c',
+        audience: AS_URL,
+        privateKey,
+        algorithm,
+        keyId: key.kid,
+      })
+      const verified = verifyJwt(jwt, { keys: [key.publicJwk] })
+      assert.ok(verified, `${algorithm} verifies`)
+      assert.equal(verified.header.alg, algorithm)
+    }
+  }
+})
+
+test('client assertion: a key that does not fit, or is broken, fails without describing the key', async () => {
+  const cases: [EnterpriseAssertionAlgorithm, unknown, string[]][] = [
+    // An RSA key would sign anything: it must not sign under an EC name.
+    ['ES256', RSA_KEY.privateJwk, keyMaterial(RSA_KEY)],
+    ['RS256', EC_KEY.privatePem, keyMaterial(EC_KEY)],
+    ['ES384', EC_KEY.privateJwk, keyMaterial(EC_KEY)],
+    ['ES256', EC_KEY.publicJwk, []],
+    [
+      'ES256',
+      '-----BEGIN PRIVATE KEY-----\nTUFSS0VSLWluLWEtYnJva2VuLWtleQ==\n-----END PRIVATE KEY-----',
+      ['TUFSS0VSLWluLWEtYnJva2VuLWtleQ=='],
+    ],
+    [
+      'ES256',
+      { kty: 'EC', crv: 'P-256', d: 'bWFya2VyLWluLWEtYnJva2VuLWp3aw', x: 'AA', y: 'AA' },
+      ['bWFya2VyLWluLWEtYnJva2VuLWp3aw'],
+    ],
+  ]
+  for (const [algorithm, privateKey, material] of cases) {
+    await assert.rejects(
+      () =>
+        createClientAssertion({
+          clientId: 'c',
+          audience: AS_URL,
+          privateKey: privateKey as never,
+          algorithm,
+        }),
+      (err: Error) => {
+        assert.equal(
+          err.message,
+          `Enterprise MCP authorization: could not sign the client assertion with ${algorithm}; check that privateKey is a private key for that algorithm`,
+        )
+        for (const secret of material) assert.ok(!err.message.includes(secret))
+        return true
+      },
+    )
+  }
+})
+
+test('requestIdJag: private_key_jwt sends the assertion and no other credential', async () => {
+  const idp = mockIdp(goodExchange)
+  const clientAssertion = 'eyJhbGciOiJFUzI1NiJ9.Y2xpZW50LWFzc2VydGlvbg.c2lnbmF0dXJl'
+  const pkjwt = {
+    tokenEndpoint: IDP_TOKEN_URL,
+    clientId: 'agent-at-idp',
+    clientAuthMethod: 'private_key_jwt' as const,
+    privateKey: EC_KEY.privateJwk,
+    algorithm: 'ES256' as const,
+    issuer: IDP_ISSUER,
+  }
+  await exchange(idp.fetchFn, { idp: pkjwt, clientAssertion })
+  const [call] = idp.calls
+  assert.equal(call.params.get('client_assertion_type'), CLIENT_ASSERTION_TYPE)
+  assert.equal(call.params.get('client_assertion'), clientAssertion)
+  assert.equal(call.params.has('client_secret'), false)
+  assert.equal(call.headers.get('authorization'), null)
+
+  // Echoed back by a careless IdP, the assertion is cut out like the ID token.
+  const echo = mockIdp(() =>
+    jsonResponse(
+      { error: 'invalid_client', error_description: `bad client_assertion=${clientAssertion}` },
+      401,
+    ),
+  )
+  const err = await rejection(() => exchange(echo.fetchFn, { idp: pkjwt, clientAssertion }))
+  assert.ok(!err.message.includes(clientAssertion))
+  assert.match(err.message, /\[redacted\]/)
+  // Without an assertion nothing is sent at all.
+  const silent = mockIdp(goodExchange)
+  await assert.rejects(() => exchange(silent.fetchFn, { idp: pkjwt }), /no client assertion/)
+  assert.equal(silent.calls.length, 0)
+})
+
+test('provider: a private key is never printed, serialized or stored', async () => {
+  const idp = mockIdp(goodExchange)
+  const store = new MemoryOAuthStore()
+  const provider = createEnterpriseOAuthProvider(
+    jwtOptions({
+      store,
+      fetch: idp.fetchFn,
+      privateKey: RSA_KEY.privatePem,
+      algorithm: 'RS256',
+      keyId: RSA_KEY.kid,
+      idp: {
+        tokenEndpoint: IDP_TOKEN_URL,
+        clientId: 'agent-at-idp',
+        clientAuthMethod: 'private_key_jwt',
+        privateKey: EC_KEY.privateJwk,
+        algorithm: 'ES256',
+        issuer: IDP_ISSUER,
+      },
+    }),
+  )
+  await provider.saveDiscoveryState(discovery())
+  await provider.prepareTokenRequest()
+  const headers = new Headers()
+  const params = new URLSearchParams()
+  await provider.addClientAuthentication?.(headers, params, `${AS_URL}/token`, undefined)
+  const forAs = params.get('client_assertion') ?? ''
+  const forIdp = idp.calls[0].params.get('client_assertion') ?? ''
+
+  // One assertion per server, each for that server's issuer and no other.
+  assert.equal(peekJwt(forIdp).payload.aud, IDP_ISSUER)
+  assert.equal(peekJwt(forIdp).payload.iss, 'agent-at-idp')
+  assert.equal(peekJwt(forAs).payload.aud, AS_URL)
+  assert.equal(peekJwt(forAs).payload.iss, 'agent-at-as')
+  assert.ok(verifyJwt(forIdp, { keys: [EC_KEY.publicJwk] }))
+  assert.ok(verifyJwt(forAs, { keys: [RSA_KEY.publicJwk] }))
+  assert.equal(params.has('client_secret'), false)
+  assert.equal(headers.get('authorization'), null)
+
+  const secrets = [...keyMaterial(EC_KEY), ...keyMaterial(RSA_KEY), forAs, forIdp, ID_TOKEN, ID_JAG]
+  const views = {
+    inspect: inspect(provider, { depth: 8, showHidden: true }),
+    json: JSON.stringify(provider),
+    keys: JSON.stringify(Object.getOwnPropertyNames(provider)),
+    store: JSON.stringify([...(store as unknown as { map: Map<string, string> }).map]),
+  }
+  for (const [name, text] of Object.entries(views)) {
+    for (const secret of secrets) assert.ok(!text.includes(secret), `${name} holds no key or token`)
+  }
+})
+
+test('provider: the assertion for the authorization server is refused when discovery is not the expected issuer', async () => {
+  const provider = createEnterpriseOAuthProvider(jwtOptions())
+  // Discovery now says another authorization server: no assertion is signed for it.
+  await provider.saveDiscoveryState(
+    discovery(
+      { authorizationServerUrl: 'https://evil.example.test/' },
+      { issuer: 'https://evil.example.test', token_endpoint: 'https://evil.example.test/token' },
+    ),
+  )
+  const params = new URLSearchParams()
+  await assert.rejects(
+    () =>
+      Promise.resolve(
+        provider.addClientAuthentication?.(
+          new Headers(),
+          params,
+          'https://evil.example.test/token',
+        ),
+      ),
+    /expected "https:\/\/as\.example\.test"; refusing to send credentials/,
+  )
+  assert.equal(params.has('client_assertion'), false)
+})
+
+// ── CIMD as the client id ─────────────────────────────────────────────────
+
+const CIMD_URL = 'https://client.example.test/oauth/client.json'
+
+test('CIMD: a clientId that is a URL must be an https document URL, and takes no secret', () => {
+  for (const clientId of [
+    'http://client.example.test/oauth/client.json',
+    'https://client.example.test/',
+    'https://client.example.test',
+    'ftp://client.example.test/client.json',
+  ]) {
+    assert.throws(
+      () => createEnterpriseOAuthProvider(baseOptions({ clientId, clientSecret: undefined })),
+      /client ID metadata document: it requires https and a non-root path/,
+      clientId,
+    )
+  }
+  // A document anyone can read establishes no shared secret.
+  assert.throws(
+    () => createEnterpriseOAuthProvider(baseOptions({ clientId: CIMD_URL })),
+    /cannot be used with clientSecret/,
+  )
+  createEnterpriseOAuthProvider(jwtOptions({ clientId: CIMD_URL }))
+  createEnterpriseOAuthProvider(baseOptions({ clientId: CIMD_URL, clientSecret: undefined }))
+  // An ordinary identifier is not a URL and is left alone.
+  createEnterpriseOAuthProvider(baseOptions({ clientId: 'urn:example:agent' }))
+})
+
+// ── private_key_jwt and CIMD, over real sockets ───────────────────────────
+
+const postForm = async (url: string, params: Record<string, string>) => {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams(params),
+  })
+  return { status: res.status, body: (await res.json()) as Record<string, string> }
+}
+
+test('e2e: private_key_jwt on both hops, each assertion for its own server only', async () => {
+  await withWorld(
+    async (world) => {
+      const { idp, mcp } = world
+      const logs = collectLogs()
+      const provider = world.provider({
+        clientSecret: undefined,
+        clientAuthMethod: 'private_key_jwt',
+        privateKey: RSA_KEY.privatePem,
+        algorithm: 'RS256',
+        keyId: RSA_KEY.kid,
+        idp: {
+          tokenEndpoint: idp.tokenEndpoint,
+          issuer: idp.issuer,
+          clientId: IDP_CLIENT,
+          clientAuthMethod: 'private_key_jwt',
+          privateKey: EC_KEY.privateJwk,
+          algorithm: 'ES256',
+          keyId: EC_KEY.kid,
+        },
+      })
+      const connected = await connectMcpServers(
+        { files: { url: mcp.url, authProvider: provider } },
+        logs.log as never,
+        'agent-test',
+      )
+      try {
+        assert.deepEqual(connected.results, [{ name: 'files', connected: true }])
+        // A second round, mid-session: new assertions, never the old ones again.
+        mcp.validTokens.clear()
+        await callTool(connected.tools, 'files__echo', { text: 'signed' })
+      } finally {
+        await connected.close()
+      }
+
+      assert.equal(idp.exchanges.length, 2)
+      assert.equal(mcp.tokenRequests().length, 2)
+      const forIdp = idp.exchanges.map((e) => peekJwt(e.params.client_assertion))
+      const forAs = mcp.tokenRequests().map((r) => peekJwt(r.params.client_assertion))
+      for (const exchange of idp.exchanges) {
+        assert.equal(exchange.authMethod, 'assertion')
+        assert.equal(exchange.status, 200)
+        assert.equal(exchange.params.client_secret, undefined)
+      }
+      for (const grant of mcp.tokenRequests()) {
+        assert.equal(grant.authMethod, 'assertion')
+        assert.equal(grant.error, undefined)
+        assert.equal(grant.params.client_assertion_type, CLIENT_ASSERTION_TYPE)
+      }
+      for (const { header, payload } of forIdp) {
+        assert.equal(payload.aud, idp.issuer, 'for the IdP: its issuer, not its token endpoint')
+        assert.equal(payload.iss, IDP_CLIENT)
+        assert.equal(payload.sub, IDP_CLIENT)
+        assert.equal(header.alg, 'ES256')
+        assert.equal(header.kid, EC_KEY.kid)
+      }
+      for (const { header, payload } of forAs) {
+        assert.equal(payload.aud, mcp.issuer, 'for the authorization server: its issuer')
+        assert.equal(payload.iss, AS_CLIENT)
+        assert.equal(header.alg, 'RS256')
+      }
+      const all = [...forIdp, ...forAs].map((j) => j.payload)
+      assert.equal(new Set(all.map((p) => p.jti)).size, 4, 'a new jti for every request')
+      for (const p of all) {
+        assert.ok((p.exp as number) - (p.iat as number) <= 60, 'exp is at most a minute away')
+      }
+
+      // The servers hold the line too: an assertion made for one is refused by the other.
+      const mint = (
+        clientId: string,
+        audience: string,
+        key: typeof EC_KEY,
+        algorithm: 'ES256' | 'RS256',
+      ) =>
+        createClientAssertion({
+          clientId,
+          audience,
+          privateKey: key.privateJwk,
+          algorithm,
+          keyId: key.kid,
+        })
+      const idpBoundAtAs = await postForm(`${mcp.issuer}/token`, {
+        grant_type: JWT_BEARER_GRANT,
+        assertion: idp.issuedIdJags[0],
+        client_assertion_type: CLIENT_ASSERTION_TYPE,
+        client_assertion: await mint(AS_CLIENT, idp.issuer, RSA_KEY, 'RS256'),
+      })
+      assert.equal(idpBoundAtAs.status, 401)
+      assert.equal(
+        idpBoundAtAs.body.error_description,
+        'Client assertion audience is not this server',
+      )
+      const asBoundAtIdp = await postForm(idp.tokenEndpoint, {
+        grant_type: TOKEN_EXCHANGE_GRANT,
+        client_assertion_type: CLIENT_ASSERTION_TYPE,
+        client_assertion: await mint(IDP_CLIENT, mcp.issuer, EC_KEY, 'ES256'),
+      })
+      assert.equal(asBoundAtIdp.status, 401)
+      assert.equal(
+        asBoundAtIdp.body.error_description,
+        'Client assertion audience is not this server',
+      )
+      // A used assertion is not accepted twice.
+      const replay = await postForm(`${mcp.issuer}/token`, {
+        grant_type: JWT_BEARER_GRANT,
+        assertion: idp.issuedIdJags[0],
+        client_assertion_type: CLIENT_ASSERTION_TYPE,
+        client_assertion: mcp.tokenRequests()[0].params.client_assertion,
+      })
+      assert.equal(replay.body.error_description, 'Client assertion was already used')
+
+      assertWorldLeaksNothing(world, logs.lines, [...keyMaterial(EC_KEY), ...keyMaterial(RSA_KEY)])
+    },
+    {
+      idp: { clientSecret: undefined, clientJwks: { keys: [EC_KEY.publicJwk] } },
+      enterprise: { clientSecret: undefined, clientJwks: { keys: [RSA_KEY.publicJwk] } },
+    },
+  )
+})
+
+test('e2e: a client assertion signed with the wrong key is refused on each hop, by name', async () => {
+  const other = generateClientKey('ES256', EC_KEY.kid)
+  await withWorld(
+    async (world) => {
+      const { idp, mcp } = world
+      const pkjwt = (key: typeof EC_KEY) => ({
+        clientSecret: undefined,
+        clientAuthMethod: 'private_key_jwt' as const,
+        privateKey: key.privateJwk,
+        algorithm: 'ES256' as const,
+        keyId: key.kid,
+      })
+      const idpClient = (key: typeof EC_KEY) => ({
+        tokenEndpoint: idp.tokenEndpoint,
+        issuer: idp.issuer,
+        clientId: IDP_CLIENT,
+        clientAuthMethod: 'private_key_jwt' as const,
+        privateKey: key.privateJwk,
+        algorithm: 'ES256' as const,
+        keyId: key.kid,
+      })
+      const atIdp = await failToConnect(
+        world,
+        world.provider({ ...pkjwt(EC_KEY), idp: idpClient(other) }),
+      )
+      assert.match(
+        atIdp.error,
+        /Enterprise IdP token exchange failed: the identity provider answered 401 invalid_client - Client assertion signature validation failed/,
+      )
+      assert.equal(mcp.tokenRequests().length, 0)
+
+      const atAs = await failToConnect(
+        world,
+        world.provider({ ...pkjwt(other), idp: idpClient(EC_KEY) }),
+      )
+      assert.equal(
+        atAs.error,
+        'MCP authorization server refused the ID-JAG grant: invalid_client (HTTP 401)',
+      )
+      assert.ok(atAs.logs.some((l) => /Client assertion signature validation failed/.test(l)))
+      assertWorldLeaksNothing(
+        world,
+        [atIdp.error, ...atIdp.logs, atAs.error, ...atAs.logs],
+        [...keyMaterial(EC_KEY), ...keyMaterial(other)],
+      )
+    },
+    {
+      idp: { clientSecret: undefined, clientJwks: { keys: [EC_KEY.publicJwk] } },
+      enterprise: { clientSecret: undefined, clientJwks: { keys: [EC_KEY.publicJwk] } },
+    },
+  )
+})
+
+test('e2e: a client ID metadata document as the client id, with private_key_jwt', async () => {
+  // The client's own site: the document and the keys it points at.
+  const served: string[] = []
+  const site = createServer((req, res) => {
+    served.push(req.url ?? '')
+    res.writeHead(200, { 'content-type': 'application/json' })
+    if (req.url === '/oauth/client.json') {
+      res.end(
+        JSON.stringify({
+          client_id: CIMD_URL,
+          client_name: 'agent-enterprise-test',
+          redirect_uris: [],
+          grant_types: [TOKEN_EXCHANGE_GRANT, JWT_BEARER_GRANT],
+          token_endpoint_auth_method: 'private_key_jwt',
+          jwks_uri: 'https://client.example.test/oauth/jwks.json',
+        }),
+      )
+      return
+    }
+    res.end(JSON.stringify({ keys: [EC_KEY.publicJwk] }))
+  })
+  await new Promise<void>((resolve) => site.listen(0, '127.0.0.1', resolve))
+  const siteOrigin = `http://127.0.0.1:${(site.address() as AddressInfo).port}`
+  try {
+    await withWorld(
+      async (world) => {
+        const { idp, mcp } = world
+        const logs = collectLogs()
+        const connected = await connectMcpServers(
+          {
+            files: {
+              url: mcp.url,
+              authProvider: world.provider({
+                clientId: CIMD_URL,
+                clientSecret: undefined,
+                clientAuthMethod: 'private_key_jwt',
+                privateKey: EC_KEY.privatePem,
+                algorithm: 'ES256',
+                keyId: EC_KEY.kid,
+              }),
+            },
+          },
+          logs.log as never,
+          'agent-test',
+        )
+        try {
+          assert.deepEqual(connected.results, [{ name: 'files', connected: true }])
+          await callTool(connected.tools, 'files__echo', { text: 'cimd' })
+        } finally {
+          await connected.close()
+        }
+        assert.deepEqual(mcp.cimdFetches, [CIMD_URL], 'the server resolved the client by its URL')
+        assert.deepEqual(served, ['/oauth/client.json', '/oauth/jwks.json'])
+        const [grant] = mcp.tokenRequests()
+        assert.equal(grant.error, undefined)
+        const assertion = peekJwt(grant.params.client_assertion)
+        assert.equal(assertion.payload.iss, CIMD_URL)
+        assert.equal(assertion.payload.sub, CIMD_URL)
+        assert.equal(assertion.payload.aud, mcp.issuer)
+        // The ID-JAG names the same client: the IdP knows it by that URL.
+        assert.equal(peekJwt(idp.issuedIdJags[0]).payload.client_id, CIMD_URL)
+        assert.equal(mcp.registrations(), 0)
+        assertWorldLeaksNothing(world, logs.lines, keyMaterial(EC_KEY))
+      },
+      {
+        idp: { resourceClientId: CIMD_URL },
+        enterprise: {
+          clientId: 'no-pre-registered-client',
+          clientSecret: undefined,
+          cimd: { resolve: (url) => url.replace('https://client.example.test', siteOrigin) },
+        },
+      },
+    )
+  } finally {
+    site.closeAllConnections()
+    await new Promise<void>((resolve) => site.close(() => resolve()))
+  }
+})
+
+// ── a refusal in the middle of a session ──────────────────────────────────
+
+test('e2e: an authorization server that starts refusing mid-session gives a clean error; the detail goes to the log, redacted', async () => {
+  await withWorld(
+    async (world) => {
+      const { idp, mcp } = world
+      const logs = collectLogs()
+      const connected = await connectMcpServers(
+        {
+          files: {
+            url: mcp.url,
+            authProvider: world.provider({
+              clientSecret: undefined,
+              clientAuthMethod: 'private_key_jwt',
+              privateKey: EC_KEY.privateJwk,
+              algorithm: 'ES256',
+              keyId: EC_KEY.kid,
+            }),
+          },
+        },
+        logs.log as never,
+        'agent-test',
+      )
+      try {
+        assert.deepEqual(connected.results, [{ name: 'files', connected: true }])
+        await callTool(connected.tools, 'files__echo', { text: 'fine' })
+        const linesBefore = logs.lines.length
+
+        // The token dies and the server now refuses every grant, quoting the
+        // whole request - grant, client assertion and all - in its answer.
+        mcp.validTokens.clear()
+        mcp.faults.echoRequest = true
+        let thrown: unknown
+        try {
+          await callTool(connected.tools, 'files__echo', { text: 'refused' })
+        } catch (err) {
+          thrown = err
+        }
+        assert.ok(thrown instanceof EnterpriseOAuthError, `got ${String(thrown)}`)
+        assert.equal(thrown.hop, 'authorization-server')
+        assert.equal(thrown.code, 'invalid_request')
+        assert.equal(
+          thrown.message,
+          'MCP authorization server refused the ID-JAG grant: invalid_request (HTTP 400)',
+        )
+        assert.equal(idp.exchanges.length, 2, 'one fresh exchange, and no second try')
+
+        // The same with an ordinary refusal: the code for the UI, the words for the log.
+        mcp.faults.echoRequest = false
+        mcp.faults.refuseGrant = {
+          error: 'access_denied',
+          description: 'The end-user is not licensed for this application',
+        }
+        await assert.rejects(
+          () => callTool(connected.tools, 'files__echo', { text: 'refused' }),
+          (err: unknown) =>
+            err instanceof EnterpriseOAuthError &&
+            err.message ===
+              'MCP authorization server refused the ID-JAG grant: access_denied (HTTP 400)',
+        )
+
+        const added = logs.lines.slice(linesBefore)
+        const detail = added.filter((l) => l.includes('enterprise authorization'))
+        assert.equal(detail.length, 2)
+        assert.ok(logs.levels.slice(linesBefore).includes('warn'))
+        assert.match(detail[0], /refused the ID-JAG grant with 400 invalid_request: cannot accept/)
+        assert.match(detail[0], /\[redacted\]/)
+        assert.match(detail[1], /400 access_denied: The end-user is not licensed/)
+        assertWorldLeaksNothing(
+          world,
+          [thrown.message, inspect(thrown), ...logs.lines],
+          keyMaterial(EC_KEY),
+        )
+      } finally {
+        await connected.close()
+      }
+    },
+    { enterprise: { clientSecret: undefined, clientJwks: { keys: [EC_KEY.publicJwk] } } },
+  )
+})
+
+test('provider: without a log nothing is reported, and a log that throws changes nothing', async () => {
+  const idp = mockIdp(goodExchange)
+  const said: string[] = []
+  const provider = createEnterpriseOAuthProvider(
+    baseOptions({ fetch: idp.fetchFn, onLog: (_l: string, m: string) => void said.push(m) }),
+  )
+  await provider.saveDiscoveryState(discovery())
+  const refuse = async (): Promise<Response> =>
+    jsonResponse(
+      { error: 'bad code "><script>', error_description: `no: ${ID_JAG} ${AS_SECRET}` },
+      403,
+    )
+
+  // Not the grant: passed through untouched.
+  const through = await provider.transportFetch(refuse)(`${AS_URL}/token`, {
+    method: 'POST',
+    body: new URLSearchParams({ grant_type: 'refresh_token' }),
+  })
+  assert.equal(through.status, 403)
+
+  const grant = await provider.prepareTokenRequest()
+  const err = await rejection(() =>
+    provider.transportFetch(refuse)(`${AS_URL}/token`, { method: 'POST', body: grant }),
+  )
+  // A code that is not a code is not repeated.
+  assert.equal(
+    err.message,
+    'MCP authorization server refused the ID-JAG grant: no error code (HTTP 403)',
+  )
+  assert.equal(err.code, undefined)
+  assert.equal(said.length, 1, 'the provider-level onLog is the fallback')
+  assertNoSecrets(said[0], 'the log line')
+  assert.match(said[0], /\[redacted\] \[redacted\]/)
+
+  // A network failure on the grant is named too, and its text is not passed on.
+  const again = await provider.prepareTokenRequest()
+  const down = await rejection(() =>
+    provider.transportFetch(async () => {
+      throw new Error(`socket hang up while sending ${ID_JAG}`)
+    })(`${AS_URL}/token`, { method: 'POST', body: again }),
+  )
+  assert.equal(down.message, 'MCP authorization server could not be reached for the ID-JAG grant')
+  assertNoSecrets(said.join('\n'), 'the log')
+
+  // A log sink that throws does not replace the error.
+  const third = await provider.prepareTokenRequest()
+  const loud = await rejection(() =>
+    provider.transportFetch(refuse, () => {
+      throw new Error('log sink exploded')
+    })(`${AS_URL}/token`, { method: 'POST', body: third }),
+  )
+  assert.equal(loud.hop, 'authorization-server')
 })

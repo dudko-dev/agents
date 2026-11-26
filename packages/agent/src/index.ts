@@ -19,7 +19,10 @@ export {
   NodeEnterpriseOAuthProvider,
 } from './mcp-enterprise-oauth.ts'
 export type {
+  EnterpriseAssertionAlgorithm,
   EnterpriseOAuthHop,
+  EnterpriseOAuthLog,
+  EnterprisePrivateKey,
   IEnterpriseIdpOptions,
   IEnterpriseOAuthProviderOptions,
 } from './mcp-enterprise-oauth.ts'

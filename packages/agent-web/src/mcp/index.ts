@@ -33,7 +33,10 @@ export {
   EnterpriseOAuthError,
 } from './enterprise-oauth.js'
 export type {
+  EnterpriseAssertionAlgorithm,
   EnterpriseIdpOptions,
   EnterpriseOAuthHop,
+  EnterpriseOAuthLog,
   EnterpriseOAuthProviderOptions,
+  EnterprisePrivateKey,
 } from './enterprise-oauth.js'
