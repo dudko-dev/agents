@@ -17,6 +17,7 @@ import type { SandboxConfig } from './sandbox/index.js'
 import type { Skill } from './skills.js'
 import type { IEgressPolicy } from './tools/egress.js'
 import type { ISearchConfig } from './tools/web-search.js'
+import type { IMediaConfig } from './tools/media.js'
 import {
   resolveThinking,
   thinkingFor,
@@ -109,6 +110,18 @@ export interface BrowserAgentConfig {
    * cross-origin calls from a page - see `ISearchConfig`.
    */
   search?: ISearchConfig
+  /**
+   * Image generation, speech and transcription, each as a tool that exists only when its model
+   * is set: `imageModel` -> `generate_image`, `speechModel` -> `generate_speech`,
+   * `transcriptionModel` -> audio attachments transcribed once (the model reads the text) and,
+   * with a file system, `transcribe_audio`. Off unless set. Generated files are written to the
+   * virtual file system (`media.files`, else the one of the mounted file tools) and the model
+   * gets a path, never the bytes. Each call is a write for tool approval, counts in
+   * `usage.mediaCalls`, and a run may make `media.maxCalls` of them (default 8). Prompts, spoken text
+   * and audio leave for the provider of that model; a key is named by `credentialRef`, never
+   * written here. See `IMediaConfig`.
+   */
+  media?: IMediaConfig
   /**
    * Let the agent RUN JavaScript it wrote (the `run_js` tool) and read the output. Off unless
    * set: with it off the tool does not exist and the engine is never loaded. `true` = the

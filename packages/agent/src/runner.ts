@@ -45,6 +45,7 @@ import type {
   ReplanTrigger,
 } from './types.ts'
 import { ATTR, withSpan } from './tracing.ts'
+import { attachRunFiles } from './media.ts'
 import { accumulateUsage, clipText, combineSignals, isAuthError, normalizeUsage } from './utils.ts'
 
 // The default ('failure') replan trigger fires when:
@@ -281,7 +282,7 @@ const runAgentLoopInner = async (
   // be silently mixing two different requests in the same trace.
   // History follows the same rule for symmetry - the original run's history
   // is what shaped the saved trace, so we keep it. Documented in README.
-  const input = resumed?.input ?? options.input
+  let input = resumed?.input ?? options.input
   let history: IConversationTurn[] | undefined = resumed?.history
     ? [...resumed.history]
     : options.history
@@ -336,6 +337,11 @@ const runAgentLoopInner = async (
   if (store) {
     store.emit = proxiedCtx.emit
     store.state = state
+  }
+  // Audio the user attached is transcribed once, here, and travels as text from now on (a
+  // resumed run's saved input already carries it). Refused when there is no transcription model.
+  if (!resumed && options.files?.length) {
+    input = await attachRunFiles(ctx.media, input, options.files, signal)
   }
   // From here a `send` is announced as it comes (and anything sent earlier, now).
   port?.attach(proxiedCtx.emit)

@@ -122,6 +122,45 @@ export type {
   SearchFreshness,
   SearchProvider,
 } from './web-search-shared.ts'
+// Media: generate_image / generate_speech / transcribe_audio, and audio attachments as text.
+export { createMedia } from './media.ts'
+export type {
+  IMedia,
+  IMediaConfig,
+  IMediaFile,
+  IMediaModelSpec,
+  IRunFile,
+  ITranscription,
+  MediaImageModel,
+  MediaSpeechModel,
+  MediaTranscriptionModel,
+} from './media.ts'
+export {
+  acceptMedia,
+  GENERATE_IMAGE_TOOL,
+  GENERATE_SPEECH_TOOL,
+  MEDIA_AUDIO_TYPES,
+  MEDIA_DEFAULT_MAX_CALLS,
+  MEDIA_FOLDER,
+  MEDIA_IMAGE_TYPES,
+  MEDIA_MAX_ATTACHED_AUDIO,
+  MEDIA_MAX_AUDIO_INPUT_BYTES,
+  MEDIA_MAX_IMAGE_BYTES,
+  MEDIA_MAX_PROMPT_CHARS,
+  MEDIA_MAX_SPEECH_BYTES,
+  MEDIA_MAX_SPEECH_CHARS,
+  MEDIA_MAX_TRANSCRIPT_CHARS,
+  MEDIA_TIMEOUT_MS,
+  MediaBudgetError,
+  MediaError,
+  mediaUsageOf,
+  sniffMediaType,
+  TRANSCRIBE_AUDIO_TOOL,
+  wrapTranscript,
+} from './media-shared.ts'
+export type { IMediaUsage, MediaKind } from './media-shared.ts'
+export { buildMediaModelFromStage } from './provider.ts'
+export type { MediaModelKind } from './provider.ts'
 // Sandbox: the run_js tool (JavaScript in QuickJS/WebAssembly, in a worker thread).
 export {
   createSandboxTool,

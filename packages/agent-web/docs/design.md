@@ -379,6 +379,67 @@ of invisible characters, capped per field and in total, flagged `untrusted`. The
 search tools (server-side, inside the model call) are a different mechanism with none of these
 controls and are left for a separate change.
 
+## Media: three models, one object, bytes that stay out of the context
+
+Image generation, speech and transcription are tools a model may call, and one input path
+(attached audio). The decisions:
+
+**The AI SDK's own model interfaces are the seam.** `generateImage`, `generateSpeech` and
+`transcribe` take an `ImageModel`, a `SpeechModel` and a `TranscriptionModel` (stable names in
+`ai` v7). The agent accepts those objects directly, or a spec the existing registry resolves:
+`buildMediaModelFromSpec` builds the same provider factory as for a language model - same
+package, same key from the `CredentialStore`, same `baseURL` and headers - and asks it for
+`imageModel(id)` / `speechModel(id)` / `transcriptionModel(id)`, the names every `ProviderV4`
+carries. No provider-specific code, and no new dependency.
+
+**One `media` object, not three top-level fields.** The three models share a budget
+(`maxCalls`), a timeout, a destination (`files`, `folder`) and a threat model; `egress`,
+`search` and `sandbox` are each one object for the same reason. Inside it the names are the
+plain ones - `imageModel`, `speechModel`, `transcriptionModel` - and each mounts its tool only
+when set, so a host pays (in prompt tokens for a tool definition, and in attack surface) only
+for the modality it configured. The golden-request fixture guards that "off" is byte-for-byte
+the old behaviour.
+
+**The bytes go to the virtual file system; the model gets a path.** A megabyte of base64 in a
+tool result would overflow a small window at once and be re-sent on every later call. The file
+system is already the workspace the user sees. When there is none, `createAgent` refuses an
+image or speech model instead of falling back to "bytes in an event": one place for a file, one
+code path, and an event that stays small enough to cross a worker boundary or sit in a
+checkpoint. `media.generated` names the path, and `vfs.readDataUrl(path)` is the picture.
+
+**The type of a file is what its bytes are.** A provider's declared media type is a claim; the
+signature is a fact. `sniffMediaType` knows a short list (four image formats, seven audio
+containers) and everything else is refused - including SVG, which a page would execute.
+
+**Usage is counted in its own units.** An image is not tokens. Four optional numbers on `IUsage`
+(`mediaCalls`, `imagesGenerated`, `speechCharacters`, `transcriptionSeconds`) ride on the same
+`usage` events, phase `'media'`, with zero tokens. They are flat numbers, not a nested object,
+on purpose: every place that sums a usage field by field - the pipeline engine, a host's own
+reducer - then carries them without knowing they exist. So `agent.usage`, `sessionUsage`, a
+checkpoint and a subagent's charge to its parent all carry them for free, and the token limits
+are not distorted. Tokens some
+image models report for themselves are deliberately not added to `totalTokens`: they are priced
+differently, and a cap meant for the language model would start counting pictures.
+
+**A cap on calls, per run, with a small default.** A model in a loop can ask for a picture
+forty times. `media.maxCalls` (8) is checked against the media calls in the run's usage - which
+a resumed run inherits from its checkpoint - plus the calls in flight, so parallel tool calls
+of one model step cannot pass together. Past it the tool fails with a message that tells the
+model to stop; the run goes on (other tools are not affected), which is why this is not a
+`budget.exceeded` stop. A failed call counts and is not retried by the SDK (`maxRetries: 0`).
+
+**Transcription is an input path first.** The point of the transcription model is that a
+text-only model can work with a voice memo, so attached audio is transcribed once, before
+planning, and replaced by a fenced, labelled block under the goal - every stage then sees the
+same text, memory and checkpoints keep it, and no stage gets the audio. It is on by default
+when the model is set (`transcribeAttachments: false` for a model that listens itself). The
+tool, `transcribe_audio`, is the same call on a file of the workspace. No duration cap exists
+because none can be enforced before the call; the size cap can.
+
+The pure part (caps, the sniffer, names, the budget, the transcript wrapper, the descriptions)
+is `tools/media-shared.ts`, a byte-for-byte copy of the Node sibling's file. The Node agent
+writes to its per-run directory instead of a virtual file system; everything else is the same.
+
 ## Learning: a notebook, knowledge never policy
 
 An agent that solves a problem and forgets it solves it again next session.

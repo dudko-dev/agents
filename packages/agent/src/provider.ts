@@ -132,10 +132,47 @@ const loadProvider = async <T>(pkg: string): Promise<T> => {
 //   GOOGLE_APPLICATION_CREDENTIALS in the environment.
 // - `cloudflare` needs `accountId`: pass it via providerOptions.accountId
 //   or CLOUDFLARE_ACCOUNT_ID env var.
-export const buildModelFromStage = async (
+export const buildModelFromStage = (
   clientName: string,
   stage: IResolvedStage,
-): Promise<LanguageModel> => {
+): Promise<LanguageModel> =>
+  buildFromStage(clientName, stage, (provider, modelId) =>
+    (provider as (id: string) => LanguageModel)(modelId),
+  )
+
+// The media models of a provider (config.media), by the names every AI SDK provider carries
+// (ProviderV4: imageModel, speechModel, transcriptionModel).
+export type MediaModelKind = 'image' | 'speech' | 'transcription'
+
+const MEDIA_FACTORY: Record<MediaModelKind, string> = {
+  image: 'imageModel',
+  speech: 'speechModel',
+  transcription: 'transcriptionModel',
+}
+
+// The same provider factory as buildModelFromStage (same package, key, baseURL, options), asked
+// for an image / speech / transcription model instead of a language model. A provider that has
+// none of that kind says so here, at createAgent, not at the first call.
+export const buildMediaModelFromStage = (
+  clientName: string,
+  stage: IResolvedStage,
+  kind: MediaModelKind,
+): Promise<unknown> =>
+  buildFromStage(clientName, stage, (provider, modelId) => {
+    const factory = (provider as Record<string, unknown>)[MEDIA_FACTORY[kind]]
+    if (typeof factory !== 'function') {
+      throw new Error(
+        `provider "${stage.providerType}" has no ${kind} models (its package exposes no ${MEDIA_FACTORY[kind]}())`,
+      )
+    }
+    return (factory as (id: string) => unknown).call(provider, modelId)
+  })
+
+const buildFromStage = async <T>(
+  clientName: string,
+  stage: IResolvedStage,
+  pick: (provider: unknown, modelId: string) => T,
+): Promise<T> => {
   // Normalise once so every branch can `...providerOptions` unconditionally.
   const providerOptions: Record<string, unknown> = stage.providerOptions ?? {}
   switch (stage.providerType) {
@@ -148,7 +185,7 @@ export const buildModelFromStage = async (
         apiKey: stage.apiKey,
         ...providerOptions,
       })
-      return provider(stage.model)
+      return pick(provider, stage.model)
     }
     case 'anthropic': {
       const { createAnthropic } = await loadProvider<typeof import('@ai-sdk/anthropic')>(
@@ -159,7 +196,7 @@ export const buildModelFromStage = async (
         apiKey: stage.apiKey,
         ...providerOptions,
       })
-      return provider(stage.model)
+      return pick(provider, stage.model)
     }
     case 'openai-compatible': {
       if (!stage.baseURL) {
@@ -174,7 +211,7 @@ export const buildModelFromStage = async (
         apiKey: stage.apiKey,
         ...providerOptions,
       })
-      return provider(stage.model)
+      return pick(provider, stage.model)
     }
     case 'google': {
       const { createGoogleGenerativeAI } = await loadProvider<typeof import('@ai-sdk/google')>(
@@ -185,7 +222,7 @@ export const buildModelFromStage = async (
         apiKey: stage.apiKey,
         ...providerOptions,
       })
-      return provider(stage.model)
+      return pick(provider, stage.model)
     }
     case 'xai': {
       const { createXai } = await loadProvider<typeof import('@ai-sdk/xai')>(PROVIDER_PACKAGE.xai)
@@ -194,7 +231,7 @@ export const buildModelFromStage = async (
         apiKey: stage.apiKey,
         ...providerOptions,
       })
-      return provider(stage.model)
+      return pick(provider, stage.model)
     }
     case 'azure': {
       // Azure has no public default endpoint. resolveStage normally enforces
@@ -212,7 +249,7 @@ export const buildModelFromStage = async (
         apiKey: stage.apiKey,
         ...providerOptions,
       })
-      return provider(stage.model)
+      return pick(provider, stage.model)
     }
     case 'amazon-bedrock': {
       const { createAmazonBedrock } = await loadProvider<typeof import('@ai-sdk/amazon-bedrock')>(
@@ -223,7 +260,7 @@ export const buildModelFromStage = async (
         apiKey: stage.apiKey,
         ...providerOptions,
       })
-      return provider(stage.model)
+      return pick(provider, stage.model)
     }
     case 'google-vertex': {
       const { createVertex } = await loadProvider<typeof import('@ai-sdk/google-vertex')>(
@@ -235,7 +272,7 @@ export const buildModelFromStage = async (
         baseURL: stage.baseURL || undefined,
         ...providerOptions,
       })
-      return provider(stage.model)
+      return pick(provider, stage.model)
     }
     case 'deepseek': {
       const { createDeepSeek } = await loadProvider<typeof import('@ai-sdk/deepseek')>(
@@ -246,7 +283,7 @@ export const buildModelFromStage = async (
         apiKey: stage.apiKey,
         ...providerOptions,
       })
-      return provider(stage.model)
+      return pick(provider, stage.model)
     }
     case 'gateway': {
       // Vercel AI Gateway ships inside the `ai` package itself, so there is
@@ -257,7 +294,7 @@ export const buildModelFromStage = async (
         apiKey: stage.apiKey,
         ...providerOptions,
       })
-      return provider(stage.model)
+      return pick(provider, stage.model)
     }
     case 'cloudflare': {
       // Cloudflare Workers AI needs an account ID alongside the API key.
@@ -284,7 +321,7 @@ export const buildModelFromStage = async (
         'binding' in rest ? rest : { accountId: accountId!, apiKey: stage.apiKey, ...rest }
       ) as Parameters<typeof createWorkersAI>[0]
       const provider = createWorkersAI(opts)
-      return provider(stage.model as Parameters<typeof provider>[0])
+      return pick(provider, stage.model)
     }
   }
 }

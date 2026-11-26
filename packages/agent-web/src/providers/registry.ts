@@ -148,15 +148,65 @@ export const buildModelFromStage = async (
   clientName = 'agent-web',
 ): Promise<LanguageModel> => {
   if (resolved.type === 'direct') return resolved.model
-  const spec = resolved.spec
+  if (resolved.spec.providerType === 'web-llm') {
+    // As before the factory was shared: a key reference is still resolved (and checked) first.
+    await resolveApiKey(resolved.spec, credentials)
+    const { createWebLLMModel } = await import('./webllm.js')
+    return createWebLLMModel(resolved.spec.model, resolved.spec.providerOptions ?? {})
+  }
+  return buildFromSpec(resolved.spec, credentials, clientName, (provider, modelId) =>
+    (provider as (id: string) => LanguageModel)(modelId),
+  )
+}
+
+/** The media models of a provider (`config.media`), by the names every AI SDK provider carries. */
+export type MediaModelKind = 'image' | 'speech' | 'transcription'
+
+const MEDIA_FACTORY: Record<MediaModelKind, string> = {
+  image: 'imageModel',
+  speech: 'speechModel',
+  transcription: 'transcriptionModel',
+}
+
+/**
+ * The same provider factory as `buildModelFromStage` (same package, key from the
+ * CredentialStore, baseURL, headers, options), asked for an image / speech / transcription
+ * model instead of a language model. A provider that has none of that kind says so here, when
+ * the agent is created, not at the first call.
+ */
+export const buildMediaModelFromSpec = (
+  spec: ProviderModelSpec,
+  kind: MediaModelKind,
+  credentials?: CredentialStore,
+  clientName = 'agent-web',
+): Promise<unknown> => {
+  if (spec.providerType === 'web-llm') {
+    return Promise.reject(new Error(`provider "web-llm" has no ${kind} models`))
+  }
+  return buildFromSpec(normalizeSpec(spec), credentials, clientName, (provider, modelId) => {
+    const factory = (provider as Record<string, unknown>)[MEDIA_FACTORY[kind]]
+    if (typeof factory !== 'function') {
+      throw new Error(
+        `provider "${spec.providerType}" has no ${kind} models (its package exposes no ${MEDIA_FACTORY[kind]}())`,
+      )
+    }
+    return (factory as (id: string) => unknown).call(provider, modelId)
+  })
+}
+
+const buildFromSpec = async <T>(
+  spec: ProviderModelSpec,
+  credentials: CredentialStore | undefined,
+  clientName: string,
+  pick: (provider: unknown, modelId: string) => T,
+): Promise<T> => {
   const providerOptions = spec.providerOptions ?? {}
   const apiKey = await resolveApiKey(spec, credentials)
 
   switch (spec.providerType) {
-    case 'web-llm': {
-      const { createWebLLMModel } = await import('./webllm.js')
-      return createWebLLMModel(spec.model, providerOptions)
-    }
+    case 'web-llm':
+      // Built by the callers: it is a language model only, and takes no key.
+      throw new Error('provider "web-llm" is not built from a provider factory')
     case 'gateway': {
       // The Vercel AI Gateway ships inside `ai` — no separate peer to install.
       const { createGateway } = await import('ai')
@@ -166,7 +216,7 @@ export const buildModelFromStage = async (
         headers: spec.headers,
         ...providerOptions,
       })
-      return provider(spec.model)
+      return pick(provider, spec.model)
     }
     case 'openai': {
       const { createOpenAI } = await loadProvider<typeof import('@ai-sdk/openai')>(
@@ -178,7 +228,7 @@ export const buildModelFromStage = async (
         headers: spec.headers,
         ...providerOptions,
       })
-      return provider(spec.model)
+      return pick(provider, spec.model)
     }
     case 'anthropic': {
       const { createAnthropic } = await loadProvider<typeof import('@ai-sdk/anthropic')>(
@@ -192,7 +242,7 @@ export const buildModelFromStage = async (
         headers: { 'anthropic-dangerous-direct-browser-access': 'true', ...spec.headers },
         ...providerOptions,
       })
-      return provider(spec.model)
+      return pick(provider, spec.model)
     }
     case 'google': {
       const { createGoogleGenerativeAI } = await loadProvider<typeof import('@ai-sdk/google')>(
@@ -204,7 +254,7 @@ export const buildModelFromStage = async (
         headers: spec.headers,
         ...providerOptions,
       })
-      return provider(spec.model)
+      return pick(provider, spec.model)
     }
     case 'openai-compatible': {
       const { createOpenAICompatible } = await loadProvider<
@@ -217,7 +267,7 @@ export const buildModelFromStage = async (
         headers: spec.headers,
         ...providerOptions,
       })
-      return provider(spec.model)
+      return pick(provider, spec.model)
     }
     case 'xai': {
       const { createXai } = await loadProvider<typeof import('@ai-sdk/xai')>(PROVIDER_PACKAGE.xai)
@@ -227,7 +277,7 @@ export const buildModelFromStage = async (
         headers: spec.headers,
         ...providerOptions,
       })
-      return provider(spec.model)
+      return pick(provider, spec.model)
     }
     case 'deepseek': {
       const { createDeepSeek } = await loadProvider<typeof import('@ai-sdk/deepseek')>(
@@ -239,7 +289,7 @@ export const buildModelFromStage = async (
         headers: spec.headers,
         ...providerOptions,
       })
-      return provider(spec.model)
+      return pick(provider, spec.model)
     }
   }
 }

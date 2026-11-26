@@ -12,8 +12,12 @@ import type { PipelineEvent } from './pipeline/engine.js'
 
 export type ReplanMode = 'continue' | 'revise' | 'finish'
 export type Phase = 'plan' | 'execute' | 'replan' | 'synthesize'
-/** Phases a `usage` event can be charged to: the four stages plus compaction and subagents. */
-export type UsagePhase = Phase | 'compact' | 'subagent'
+/**
+ * Phases a `usage` event can be charged to: the four stages plus compaction and subagents, and
+ * 'media' - a call to an image / speech / transcription model (`config.media`), whose `usage`
+ * carries the media fields and zero tokens.
+ */
+export type UsagePhase = Phase | 'compact' | 'subagent' | 'media'
 
 /**
  * Everything the agent does is streamed as a typed event so any UI (or none)
@@ -107,6 +111,33 @@ type AgentEventBody =
     }
   /** A lesson was deleted (by the agent's forget_skill, or the host's forgetSkill). */
   | { type: 'skill.forgotten'; name: string }
+  /**
+   * A media tool (`config.media`) wrote a file to the virtual file system: `path` is where (read
+   * it with `vfs.readDataUrl(path)` to show the picture or play the audio), `mediaType` what its
+   * bytes are, `bytes` its size. The bytes themselves are never in an event.
+   */
+  | {
+      type: 'media.generated'
+      kind: 'image' | 'speech'
+      path: string
+      mediaType: string
+      bytes: number
+      model: string
+      step?: IPlanStep
+    }
+  /**
+   * An audio file was transcribed: one the user attached to the run ('attachment') or one the
+   * model asked about ('tool'). `text` is what the model reads of it (cleaned and capped).
+   */
+  | {
+      type: 'media.transcribed'
+      source: 'attachment' | 'tool'
+      name: string
+      text: string
+      language?: string
+      durationInSeconds?: number
+      model: string
+    }
   /** find_tools activated more tools (large-catalogue search mode). */
   | { type: 'tools.discovered'; step?: IPlanStep; query: string; names: string[] }
   /** A tool call is waiting for the user's consent (see `toolApproval`). */

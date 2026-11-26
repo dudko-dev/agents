@@ -13,6 +13,7 @@ import { createSandboxTools, RUN_JS_TOOL } from './sandbox.ts'
 import { createSkillTools, validateSkills } from './skills.ts'
 import { createEgressTools } from './web-fetch.ts'
 import { createSearchTools } from './web-search.ts'
+import { createMedia } from './media.ts'
 import { createFindToolsTool, FIND_TOOLS_TOOL } from './tool-search.ts'
 import { accumulateUsage, normalizeUsage } from './utils.ts'
 import { wrapToolSet, type IToolWrapDeps } from './tool-wrap.ts'
@@ -177,9 +178,19 @@ export const createAgent = async (
   const sandboxTools = createSandboxTools(config.sandbox)
   // What config.search switches on (web_search): its own request is pinned to the search API.
   const searchTools = createSearchTools(config.search, config.egress)
+  // What config.media switches on (generate_image / generate_speech / transcribe_audio): only
+  // the tools whose model is configured; nothing at all without one.
+  const media = await createMedia(config)
   const nativeTools: ToolSet | undefined =
-    egressTools || searchTools || learning || sandboxTools
-      ? { ...egressTools, ...searchTools, ...sandboxTools, ...learning?.tools, ...config.tools }
+    egressTools || searchTools || learning || sandboxTools || media
+      ? {
+          ...egressTools,
+          ...searchTools,
+          ...sandboxTools,
+          ...media?.tools,
+          ...learning?.tools,
+          ...config.tools,
+        }
       : config.tools
   // find_tools exists whenever the strategy can resolve to 'search'.
   const strategy = config.toolSelectionStrategy ?? 'auto'
@@ -434,6 +445,7 @@ export const createAgent = async (
         }
       : {}),
     approval,
+    ...(media ? { media } : {}),
   }
   // Only between runs (here, a refresh, a reconnect): a run keeps the text it started with.
   const syncMcpInstructions = (text: string): void => {

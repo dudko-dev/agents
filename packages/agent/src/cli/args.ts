@@ -62,6 +62,13 @@ Optional env vars (see env.example for the full list):
   AGENT_SEARCH_BASE_URL       the SearXNG instance (required for searxng), or a gateway for the others
   AGENT_SEARCH_MAX_RESULTS    results per search (default 5, at most 10)
   AGENT_SEARCH_ALLOW_PRIVATE  on lets the search API itself be on a private address (a local SearXNG)
+  AGENT_IMAGE_MODEL           an image model id: the model can generate images (generate_image)
+  AGENT_SPEECH_MODEL          a speech model id: the model can speak text to a file (generate_speech)
+  AGENT_TRANSCRIPTION_MODEL   a transcription model id: /audio <file> attaches audio as text (transcribe_audio)
+  AGENT_MEDIA_PROVIDER_TYPE   the provider of those models when not the main one (+ AGENT_MEDIA_API_KEY / _BASE_URL)
+  AGENT_MEDIA_DIR             where generated files are kept (default ./agent-media)
+  AGENT_MEDIA_MAX_CALLS       media calls one run may make (default 8; 0 = no cap)
+  AGENT_SPEECH_VOICE          the default voice of generate_speech (provider-specific id)
   AGENT_SANDBOX               on lets the model run JavaScript it wrote (run_js; needs quickjs-emscripten)
   AGENT_SANDBOX_TIMEOUT_MS    time limit of one run (default 5000, at most 60000)
   AGENT_SANDBOX_MEMORY_MB     heap of one run in MiB (default 32, at most 256)

@@ -181,7 +181,13 @@ export type {
 } from './config.js'
 
 // ── Providers / models ───────────────────────────────────────────────────────
-export { buildModelFromStage, resolveStage, resolveModel } from './providers/registry.js'
+export {
+  buildMediaModelFromSpec,
+  buildModelFromStage,
+  resolveStage,
+  resolveModel,
+} from './providers/registry.js'
+export type { MediaModelKind } from './providers/registry.js'
 export {
   createWebLLMModel,
   preloadWebLLMModel,
@@ -293,6 +299,44 @@ export type {
   SearchFreshness,
   SearchProvider,
 } from './tools/web-search-shared.js'
+// Media: generate_image / generate_speech / transcribe_audio, and audio attachments as text.
+export { createMedia } from './tools/media.js'
+export type {
+  IMedia,
+  IMediaConfig,
+  IMediaFile,
+  IMediaModelSpec,
+  IMediaOptions,
+  IMediaRun,
+  ITranscription,
+  MediaImageModel,
+  MediaSpeechModel,
+  MediaTranscriptionModel,
+} from './tools/media.js'
+export {
+  acceptMedia,
+  GENERATE_IMAGE_TOOL,
+  GENERATE_SPEECH_TOOL,
+  MEDIA_AUDIO_TYPES,
+  MEDIA_DEFAULT_MAX_CALLS,
+  MEDIA_FOLDER,
+  MEDIA_IMAGE_TYPES,
+  MEDIA_MAX_ATTACHED_AUDIO,
+  MEDIA_MAX_AUDIO_INPUT_BYTES,
+  MEDIA_MAX_IMAGE_BYTES,
+  MEDIA_MAX_PROMPT_CHARS,
+  MEDIA_MAX_SPEECH_BYTES,
+  MEDIA_MAX_SPEECH_CHARS,
+  MEDIA_MAX_TRANSCRIPT_CHARS,
+  MEDIA_TIMEOUT_MS,
+  MediaBudgetError,
+  MediaError,
+  mediaUsageOf,
+  sniffMediaType,
+  TRANSCRIBE_AUDIO_TOOL,
+  wrapTranscript,
+} from './tools/media-shared.js'
+export type { IMediaUsage, MediaKind } from './tools/media-shared.js'
 export { renderCatalog, dispatch } from './tools/prompted.js'
 export { selectToolMode } from './tools/mode.js'
 export { promptHintOf } from './tools/types.js'
