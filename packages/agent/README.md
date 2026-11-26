@@ -240,11 +240,16 @@ const agent = await createAgent({ /* … */ mcpServers: { docs: { url: auth.serv
 
 // First run only: the server answers 401, the connect result carries
 // needsAuthorization, and the operator visits the URL above. Feed the code back:
-await finishMcpOAuth(auth, { code, state })
+await finishMcpOAuth(auth, { code, state, iss }) // iss: pass it when the redirect carries one
 await agent.reconnect()
 ```
 
 Nothing is printed or opened on your behalf; `onAuthorizationUrl` and the loopback listener are yours to wire. `agent.listTools()` stays empty until the flow completes — a server that needs authorization reports `needsAuthorization: true` in its connect result rather than a generic failure. `MCP_SERVERS` (the CLI's env config) is JSON, so it can only express `headers`; OAuth is a library-level feature.
+
+- **`iss` (RFC 9207).** `finishMcpOAuth` checks the `iss` query parameter of the redirect against the authorization server the flow was started with, after `state` and before the code is exchanged. A different issuer is refused (a mix-up attack: a code meant for one server sent to another), and so is a missing `iss` when the server's metadata says `authorization_response_iss_parameter_supported: true`. The comparison is exact, character for character. Read `iss` off the callback URL together with `code` and `state`; `checkAuthorizationResponseIssuer` is the rule on its own.
+- **`clientMetadataUrl` (CIMD).** Host a client ID metadata document and pass its URL: an authorization server that advertises `client_id_metadata_document_supported` takes the URL as the `client_id`, and no registration request is made. Other servers get dynamic registration as before, and a registration already in the store wins over both. The URL must be https with a path (anything else throws when the provider is built), and the document must list the same `redirect_uris` as `redirectUrl`.
+- **Registration** describes a public PKCE client. `application_type` follows the redirect URL: `'native'` for a loopback address (the usual CLI callback), `'web'` for an https one. Change any field through `clientMetadata`.
+- **Discovery is stored** next to the tokens (the authorization server and its metadata), so later calls skip it and the issuer check has something to compare with. `auth.reset()` forgets it with everything else - use it when a server moved to another authorization server.
 
 ## Thinking (reasoning)
 

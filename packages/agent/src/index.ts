@@ -4,6 +4,7 @@ export { getCurrentRunId, getCurrentRunSandbox } from './context.ts'
 export { addUsage, normalizeUsage, redactHeaders } from './utils.ts'
 export {
   beginMcpOAuth,
+  checkAuthorizationResponseIssuer,
   createNodeOAuthProvider,
   FileOAuthStore,
   finishMcpOAuth,

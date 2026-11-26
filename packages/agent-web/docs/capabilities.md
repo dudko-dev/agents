@@ -15,6 +15,7 @@ implements the same features with the same field and event names.
 - [Skills](#skills)
 - [Tool consent and autopilot](#tool-consent-and-autopilot)
 - [Large tool catalogues (several MCP servers)](#large-tool-catalogues-several-mcp-servers)
+- [MCP servers behind OAuth](#mcp-servers-behind-oauth)
 - [Subagents (in-process or Web Workers)](#subagents-in-process-or-web-workers)
 - [Images, PDFs, files and URLs in](#images-pdfs-files-and-urls-in--and-models-that-cant-take-them)
 - [Virtual file system](#virtual-file-system)
@@ -385,6 +386,41 @@ every call wastes the window — and OpenAI rejects more than 128 tools.
 for the rest of the run (`tools.discovered` event). In prompted mode the newly
 available tools — with parameter hints derived from their JSON schemas — are
 listed in the next round's prompt. `searchTools(catalog, query)` is exported.
+
+## MCP servers behind OAuth
+
+The `./mcp` subpath connects remote MCP servers; the README has the flow
+(`BrowserOAuthProvider`, `readOAuthCallback`, `finishMcpOAuth`). What the
+provider takes and does:
+
+```ts
+new BrowserOAuthProvider({
+  serverUrl, redirectUrl,
+  clientName: 'my-app', scope: 'mcp:tools',
+  clientMetadata: { software_id: '…' },       // merged over the registration defaults
+  clientMetadataUrl: 'https://my-app.example/oauth/client.json', // CIMD, optional
+  storage,                                    // default: the encrypted vault
+})
+```
+
+- **Which client ID is used**: a registration already in storage, else
+  `clientMetadataUrl` when the authorization server advertises
+  `client_id_metadata_document_supported`, else dynamic registration (RFC 7591).
+  `clientMetadataUrl` must be https with a non-root path, and the document it
+  serves must list the same `redirect_uris`.
+- **Registration defaults**: a public client (`token_endpoint_auth_method:
+  'none'`, PKCE), `authorization_code` + `refresh_token`, `application_type` by the
+  redirect URL (`'web'` for an https page, `'native'` for a loopback one).
+- **Stored per server URL**: tokens, the client, the PKCE verifier, the `state`,
+  and the discovery state (the authorization server and its metadata), which
+  later calls reuse instead of discovering again. `reset()` and
+  `invalidateCredentials('all')` drop all of it; `'discovery'`, `'tokens'`,
+  `'client'` and `'verifier'` drop one.
+- **On the way back** `finishMcpOAuth` checks `state`, then the `iss` parameter
+  (RFC 9207, `checkAuthorizationResponseIssuer`), then exchanges the code. See
+  [security.md](./security.md#mcp-oauth-the-authorization-response).
+
+The Node package has the same options and functions (`createNodeOAuthProvider`).
 
 ## Subagents (in-process or Web Workers)
 

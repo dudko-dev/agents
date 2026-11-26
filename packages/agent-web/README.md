@@ -253,12 +253,32 @@ if (mcp.results[0]?.needsAuthorization) {
 }
 ```
 
-Tokens, the dynamic registration and the PKCE verifier are stored in the same
+Tokens, the registration, the PKCE verifier and what discovery found are stored in the same
 **encrypted IndexedDB vault** as provider API keys (`VaultOAuthStorage`; swap in
 `MemoryOAuthStorage` or your own via `storage`). `redirectToAuthorization` never
 navigates on its own — the SDK can demand authorization from inside a running
 tool call, and evicting the user then would discard the run. The URL is recorded
 on `provider.authorizationUrl` and the app decides when to use it.
+
+- **`iss` (RFC 9207).** `readOAuthCallback` reads the `iss` parameter of the
+  redirect and `finishMcpOAuth` checks it against the authorization server the
+  flow was started with, after `state` and before the code is exchanged. A
+  different issuer is refused (a mix-up attack), and so is a missing `iss` when
+  the server's metadata says `authorization_response_iss_parameter_supported:
+  true`. The comparison is exact. If you parse the callback yourself, pass `iss`
+  along; `checkAuthorizationResponseIssuer` is the rule on its own.
+- **`clientMetadataUrl` (CIMD).** Host a client ID metadata document and pass
+  its URL: an authorization server that advertises
+  `client_id_metadata_document_supported` takes the URL as the `client_id` and
+  no registration request is made. Other servers get dynamic registration as
+  before, and a registration already in storage wins over both. The URL must be
+  https with a path (anything else throws in the constructor), and the document
+  must list the same `redirect_uris` as `redirectUrl`.
+- **Registration** describes a public PKCE client. `application_type` follows
+  the redirect URL: `'web'` for an https page, `'native'` for a loopback one
+  (local development). Change any field through `clientMetadata`.
+- `provider.reset()` forgets tokens, registration and discovery - use it when a
+  server moved to another authorization server.
 
 ### CORS: what the server must send
 
