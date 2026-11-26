@@ -68,6 +68,9 @@ importers:
       chess.js:
         specifier: ^1.4.0
         version: 1.4.0
+      quickjs-emscripten:
+        specifier: ^0.32.0
+        version: 0.32.0
       react:
         specifier: ^19.3.1
         version: 19.3.1

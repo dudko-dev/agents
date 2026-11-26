@@ -269,7 +269,7 @@ export const AgentSettingsPanel = ({
       </div>
 
       <div className="agentset__group">
-        <span className="settings__label">Learning and web access</span>
+        <span className="settings__label">Learning, web access and running code</span>
         <div className="agentset__checks">
           <label title="The agent keeps a notebook: when it solves a problem it writes the lesson down as a skill of its own, and the planner sees it from then on. You can read, edit and delete the files in the Files panel (/skills).">
             <input
@@ -286,6 +286,14 @@ export const AgentSettingsPanel = ({
               onChange={(e) => update({ egress: e.target.checked })}
             />{' '}
             Let it read the web (web_fetch)
+          </label>
+          <label title="Off by default: with it off the model can only describe what its code would print. On, it gets one tool, run_js: the code runs in an isolated JavaScript engine (QuickJS in WebAssembly) inside a Web Worker - no page, no network, limited time and memory - and can read and write the workspace files the agent itself may.">
+            <input
+              type="checkbox"
+              checked={settings.sandbox}
+              onChange={(e) => update({ sandbox: e.target.checked })}
+            />{' '}
+            Let it run code (run_js, sandboxed)
           </label>
         </div>
         {settings.egress && (
