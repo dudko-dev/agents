@@ -107,9 +107,9 @@ If dependencies changed, run `pnpm install` at the repo root and ensure it retur
 
 ## CI quirks carried over from the standalone repo
 
-The release and live-model workflows now live at the monorepo root (`.github/workflows/`); the
-autoupdate flow is still being ported (its original is under `.github/_imported/agent/`). The
-reasons below still apply.
+The release, live-model, autoupdate and Claude workflows now live at the monorepo root
+(`.github/workflows/`, described in the root `CLAUDE.md`). The reasons below still apply; where a
+file name or command differs, the root file is right.
 
 This repo follows the unified `autoupdate-with-claude` baseline (same template across siblings). Several workarounds are intentional:
 - `autoupdate.yml` uses `GITHUB_TOKEN` and explicitly dispatches `test.yml` (the `CI` workflow) after PR creation, because events created via `GITHUB_TOKEN` don't trigger `pull_request` workflows.
