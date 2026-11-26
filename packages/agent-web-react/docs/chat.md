@@ -126,7 +126,7 @@ full size) and file chips. The header shows the conversation's total.
 | `attachments` | `false`, or `{ accept, maxBytes, imageMaxDimension, imageMaxPixels }` |
 | `convertFile` / `convert` | file → text (e.g. PDF → Markdown), `'when-needed'` or `'always'` |
 | `files` | save attachments into a `VirtualFileSystem` under `/attachments/` |
-| `dropZone` | `'self'` (default), `'window'`, or a ref (`<AgentChat>` passes its panel) |
+| `dropZone` | `'self'` (default), `'window'`, or a ref (`<AgentChat>` passes its panel). Files dropped there are attached, and so are files pasted there with Ctrl+V - in the message field, on anything inside the zone, or with nothing focused when the zone is the window or the last click was inside it. A paste into another field, and pasted text, are left alone |
 | `speech` | `false`, or `{ lang }` |
 | `steering` / `showQueued` | typing to the agent while it works; the queue strips ([below](#talking-to-the-agent-while-it-works)) |
 | `showTimer` / `showAgents` / `showApprovalMode` / `showNotices` | toolbar parts |

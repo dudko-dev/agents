@@ -107,6 +107,37 @@ test('a file dropped anywhere on the page is attached', async ({ page }) => {
   await expect(page.locator('.awr-files .awr-file__name')).toHaveText(['notes.md'])
 })
 
+test('a file pasted with nothing focused is attached; a paste into another field is left alone', async ({
+  page,
+}) => {
+  await mockGemini(page, () => ({ text: 'ok' }))
+  await openWithKey(page)
+  const paste = (selector: string) =>
+    page.evaluate((sel) => {
+      const d = new DataTransfer()
+      d.items.add(new File(['# Notes\n- one'], 'pasted.md', { type: 'text/markdown' }))
+      const e = new ClipboardEvent('paste', { clipboardData: d, bubbles: true, cancelable: true })
+      document.querySelector(sel)!.dispatchEvent(e)
+      return e.defaultPrevented
+    }, selector)
+  // Another field on the page keeps its paste.
+  await page.locator('.agentset__title').click()
+  expect(await paste('.agentset input')).toBe(false)
+  await expect(page.locator('.awr-files .awr-file__name')).toHaveCount(0)
+  // Nothing focused: the chat takes the file.
+  expect(await paste('body')).toBe(true)
+  await expect(page.locator('.awr-files .awr-file__name')).toHaveText(['pasted.md'])
+  // Text alone is never taken.
+  const text = await page.evaluate(() => {
+    const d = new DataTransfer()
+    d.setData('text/plain', 'hello')
+    const e = new ClipboardEvent('paste', { clipboardData: d, bubbles: true, cancelable: true })
+    document.body.dispatchEvent(e)
+    return e.defaultPrevented
+  })
+  expect(text).toBe(false)
+})
+
 test('consent: in "Ask" mode a write tool waits for the user', async ({ page }) => {
   await mockGemini(page, oneToolCall('add_note', { text: 'needs consent' }, 'Added it.'))
   await openWithKey(page)
