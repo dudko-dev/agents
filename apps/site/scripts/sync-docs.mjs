@@ -60,6 +60,12 @@ export const PAGES = [
     'Chat components',
     'The AgentChat panel and its parts: transcript, composer, steering, the notebook, attachments, saved chats, the workspace and every label.',
   ],
+  [
+    'packages/agent-web-react/docs/pipeline.md',
+    'react/pipeline',
+    'Pipeline editor',
+    'A canvas editor for graphs of agents: the PipelineEditor component, the usePipeline hook and its pure reducer, the generic canvas, the editing helpers and every label.',
+  ],
 ].map(([source, route, title, description]) => ({ source, route, title, description }))
 
 const routeOf = new Map(

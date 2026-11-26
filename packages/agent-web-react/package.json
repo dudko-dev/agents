@@ -30,7 +30,18 @@
         "default": "./dist/mcp.cjs"
       }
     },
+    "./pipeline": {
+      "import": {
+        "types": "./dist/pipeline.d.ts",
+        "default": "./dist/pipeline.js"
+      },
+      "require": {
+        "types": "./dist/pipeline.d.cts",
+        "default": "./dist/pipeline.cjs"
+      }
+    },
     "./styles.css": "./dist/styles.css",
+    "./pipeline.css": "./dist/pipeline.css",
     "./package.json": "./package.json"
   },
   "files": [

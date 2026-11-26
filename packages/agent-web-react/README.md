@@ -23,6 +23,10 @@ app with a single hook and (optionally) a set of pre-styled components:
   chip and speech to text; saved chats in IndexedDB and a workspace (virtual
   file system) panel. Everything is a prop: show/hide, labels (i18n), render
   props, slots, swappable components, theme — see [docs/chat.md](docs/chat.md).
+- 🕸️ **Pipeline editor** — draw a graph of agents on a canvas (our own: no canvas or
+  graph library), connect them with conditions and loops, run it with live statuses,
+  copy it as code: `<PipelineEditor>` and `usePipeline`, behind
+  `@dudko.dev/agent-web-react/pipeline` — see [docs/pipeline.md](docs/pipeline.md).
 - 🗣️ **Steering and learning** — type to the agent while it works (`send`,
   `stopSubagent`; queued / delivered notes under the step that got them), and watch
   it keep a notebook: lessons it wrote down as skills (`learned`, `<LearnedSkills>`,
@@ -361,6 +365,37 @@ subpath the decision is yours:
 > `describeMcpResult`, `isUnauthorizedError`) and types (`McpStatus`,
 > `McpAuthMode`, `McpServerView`, …) moved: change the import path, nothing else.
 
+## Pipelines: an editor on a canvas
+
+```tsx
+import { PipelineEditor, usePipeline } from '@dudko.dev/agent-web-react/pipeline'
+import '@dudko.dev/agent-web-react/pipeline.css'
+
+const pipeline = usePipeline(definition, { base: { model, credentials }, tools: { files } })
+return <PipelineEditor value={definition} onChange={setDefinition} controller={pipeline} />
+```
+
+The editor for the core's [pipelines](https://github.com/dudko-dev/agents/blob/main/packages/agent-web/docs/capabilities.md#pipelines-a-graph-of-agents)
+(a graph of agents in plain JSON) lives in its own entry, like MCP and for a similar reason: a
+chat host should not carry a canvas, an inspector and a code generator, nor need a core new
+enough to have `createPipeline`. Nothing in the main entry references it. Its stylesheet,
+`pipeline.css`, is separate too and stands on its own. It adds **no dependency**: the canvas is
+this package's own code.
+
+| Export | What it is |
+| --- | --- |
+| `usePipeline(definition, options)` | Builds the pipeline with the core (`resolveNode`, or the registries of `nodeResolver`: `base`, `models`, `skills`, `tools`, `mcpServers`), and returns `run(input)`, `stop()`, `reset()`, `isRunning`, `validation`, `result` plus the state below. |
+| `pipelineStateReducer`, `createInitialPipelineState`, `pipelineNodeView` | The pure event → state reducer: per-node status and visits, which edges fired, what each node's agent is doing, outputs, usage, `stoppedBy`, the error. |
+| `<PipelineEditor>` | The editor: canvas, node cards, inspector, toolbar, validation, run bar, results. Controlled (`value`, `onChange`). |
+| `<PipelineNodeCard>`, `<PipelineInspector>`, `<PipelineResults>`, `<PipelineIssues>`, `<PipelineCodeDialog>` | Its parts, to compose your own. |
+| `<Canvas>`, `<CanvasPort>` and the canvas maths | The generic node-and-edge canvas underneath: pan, zoom, drag, connect, keyboard, screen readers. |
+| `addNode`, `removeNode`, `renameNode`, `addEdge`, `updateEdge`, `removeEdge`, `setEntry`, `autoLayout`, `parsePipelineJson`, ... | Editing a definition, as pure functions. |
+| `pipelineToCode(definition, { target })` | "Copy as code": a snippet for the browser package or for the Node one. |
+| `PipelineLabelsProvider`, `defaultPipelineLabels`, `usePipelineLabels` | Every string of the editor (its own labels object, not `AgentLabels`). |
+
+The full guide, with every prop, state field and label: [docs/pipeline.md](docs/pipeline.md).
+Live: <https://agent.dudko.dev/pipeline/>.
+
 ## The `useMcp` hook — connect a remote MCP server
 
 Let the user name their own MCP server at runtime and hand its tools to the
@@ -448,6 +483,7 @@ use them standalone. The full guide: [docs/chat.md](docs/chat.md).
 | `<UsageBadge>` | Compact token readout. |
 | `<ApiKeyForm>` | BYOK key entry that writes to the encrypted vault. |
 | `<Composer>` | The minimal textarea + send/stop (kept for existing apps). |
+| `<PipelineEditor>` and its parts | The pipeline editor - from `@dudko.dev/agent-web-react/pipeline`, styled by `pipeline.css`. See [Pipelines](#pipelines-an-editor-on-a-canvas). |
 
 ### Build your own UI
 
@@ -508,7 +544,14 @@ from one place.
   is read, a metadata address is refused). The MCP and authorization servers it
 talks to are started on loopback by [`e2e/servers.ts`](e2e/servers.ts), CORS
 headers included — so the test also pins the deployment requirement that the
-challenge header be exposed.
+challenge header be exposed;
+- the pipeline editor at `/pipeline/` ([`e2e/pipeline.spec.ts`](e2e/pipeline.spec.ts)): a node
+  added, dragged and connected with the mouse and with the keyboard alone, a three-node
+  pipeline run for real against the scripted endpoint (nodes light up in order, the route is
+  taken, the loop runs once, the result is shown), stop and a failing node, import / export /
+  copy as code, the definition surviving a reload, the vault shared with the demo, and a phone:
+  no sideways scroll, the inspector as a bottom sheet, one finger panning and two zooming the
+  canvas while the page stays put.
 
 These cover what unit tests structurally cannot: effect ordering across a real
 render, a real navigation away and back, and IndexedDB.
@@ -527,6 +570,9 @@ pnpm --filter demo dev
 
 The demo aliases `@dudko.dev/agent-web-react` to this package's built `dist`, so rebuild the
 library after changing its source.
+
+The same Vite project has a second page, the pipeline editor (`apps/demo/pipeline/index.html`),
+served at `/pipeline/`: <http://localhost:5173/pipeline/> in dev.
 
 ## License
 

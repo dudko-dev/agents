@@ -5,9 +5,11 @@ Monorepo (pnpm workspaces + Nx) of three published packages and two private apps
 - `packages/agent` — `@dudko.dev/agent`, the Node / server agent.
 - `packages/agent-web` — `@dudko.dev/agent-web`, the in-browser agent (the core of the next two).
 - `packages/agent-web-react` — `@dudko.dev/agent-web-react`, React bindings; its `e2e/` drives the demo.
-- `apps/demo` — the Vite demo of the React package (private, never published).
+- `apps/demo` — the Vite demo of the React package (private, never published). One project, two
+  pages: the demo (`/demo/`) and the pipeline editor (`/pipeline/`).
 - `apps/site` — https://agent.dudko.dev: the landing page and the docs (Astro + Starlight), with the
-  built demo mounted under `/demo/`. The docs pages are **generated** from the packages' READMEs
+  built demo mounted under `/demo/` and the pipeline editor under `/pipeline/` (`scripts/assemble.mjs`
+  copies both from `apps/demo/dist` and adds `/pipeline/` to the sitemap). The docs pages are **generated** from the packages' READMEs
   and `docs/*.md` (`scripts/sync-docs.mjs`): edit the source file in the package, never the copy.
   A new docs file needs an entry in that script's `PAGES` and in the sidebar (`astro.config.mjs`).
   Dark theme only; colours, type and motion come from `src/styles/tokens.css`.

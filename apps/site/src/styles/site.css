@@ -112,6 +112,12 @@ a:hover {
   color: var(--c-text);
   background: var(--c-accent-soft);
 }
+/* A phone has room for three: the repository is also in the footer. */
+@media (max-width: 30rem) {
+  .nav__links .nav__wide {
+    display: none;
+  }
+}
 
 /* buttons and links */
 .btn {
