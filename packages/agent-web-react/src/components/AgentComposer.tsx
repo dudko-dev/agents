@@ -77,7 +77,7 @@ export interface AgentComposerProps {
   skillCommands?: boolean
   /**
    * "+" button, paste (Ctrl+V) and drag & drop of files and images (default
-   * true). Text files are inlined into the message; images, PDFs and other
+   * true). Paste works in the message field and anywhere in the drop zone. Text files are inlined into the message; images, PDFs and other
    * files go to the model as attachments — when the model can take them.
    */
   attachments?:
@@ -564,15 +564,49 @@ export const AgentComposer = ({
       e.preventDefault()
       void addFilesRef.current(Array.from(dropped))
     }
+    const doc = globalThis.document
+    let pointerInside = false
+    const onPointer = (e: Event) => {
+      pointerInside =
+        target !== globalThis.window &&
+        e.target instanceof Node &&
+        (target as HTMLElement).contains(e.target)
+    }
+    // Ctrl+V of files outside the textarea (which has its own handler and has
+    // already taken the event by the time it gets here): anywhere inside the
+    // drop zone (with nothing focused: when the zone is the window, or the last
+    // click was inside it). A
+    // paste into another field is that field's, and text is never touched.
+    const onPasteFiles = (e: Event) => {
+      if (e.defaultPrevented) return
+      const pasted = (e as globalThis.ClipboardEvent).clipboardData?.files
+      if (!pasted?.length) return
+      const at = e.target instanceof Element ? e.target : null
+      if (at?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])'))
+        return
+      if (target !== globalThis.window) {
+        const zone = target as HTMLElement
+        // Nothing focusable was clicked (the transcript, say): the event lands on
+        // the body, and the last click says whether the user is in this zone.
+        const unfocused = !at || at === doc?.body || at === doc?.documentElement
+        if (unfocused ? !pointerInside : !zone.contains(at)) return
+      }
+      e.preventDefault()
+      void addFilesRef.current(Array.from(pasted))
+    }
     target.addEventListener('dragenter', onEnter)
     target.addEventListener('dragover', onOver)
     target.addEventListener('dragleave', onLeave)
     target.addEventListener('drop', onDropFiles)
+    doc?.addEventListener('paste', onPasteFiles)
+    doc?.addEventListener('pointerdown', onPointer, true)
     return () => {
       target.removeEventListener('dragenter', onEnter)
       target.removeEventListener('dragover', onOver)
       target.removeEventListener('dragleave', onLeave)
       target.removeEventListener('drop', onDropFiles)
+      doc?.removeEventListener('paste', onPasteFiles)
+      doc?.removeEventListener('pointerdown', onPointer, true)
     }
   }, [attachments, dropZone])
 

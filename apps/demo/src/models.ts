@@ -31,6 +31,12 @@ export interface ModelOption {
   contextWindow?: number
   /** Takes images, where the core can't tell from the model (built-in, Gemma 4). */
   vision?: boolean
+  /**
+   * Where the model stands among its provider's models in this list: 1 = the light one, higher =
+   * more capable (and dearer). It is what "auto" model tiers read: the lightest model below the
+   * chosen one and the strongest above it, same provider, same key. Unset = never an auto tier.
+   */
+  rank?: number
 }
 
 // Shared per-provider key metadata (all models of a provider use one key).
@@ -111,6 +117,7 @@ export const MODELS: ModelOption[] = [
   // ── Google (Gemini) — 1M window, images & PDFs ─────────────────────────────
   {
     id: 'google-flash-lite',
+    rank: 1,
     group: 'Google · Gemini',
     label: 'Gemini 3.5 Flash-Lite — fast',
     model: 'gemini-3.5-flash-lite',
@@ -120,6 +127,7 @@ export const MODELS: ModelOption[] = [
   },
   {
     id: 'google-flash',
+    rank: 2,
     group: 'Google · Gemini',
     label: 'Gemini 3.8 Flash — balanced',
     model: 'gemini-3.8-flash',
@@ -129,6 +137,7 @@ export const MODELS: ModelOption[] = [
   },
   {
     id: 'google-pro',
+    rank: 3,
     group: 'Google · Gemini',
     label: 'Gemini 3.1 Pro — smart',
     model: 'gemini-3.1-pro-preview',
@@ -140,6 +149,7 @@ export const MODELS: ModelOption[] = [
   // ── Anthropic (Claude) ───────────────────────────────────────────────────────
   {
     id: 'anthropic-haiku',
+    rank: 1,
     group: 'Anthropic · Claude',
     label: 'Claude Haiku 4.5 — fast',
     model: 'claude-haiku-4-5',
@@ -149,6 +159,7 @@ export const MODELS: ModelOption[] = [
   },
   {
     id: 'anthropic-sonnet',
+    rank: 2,
     group: 'Anthropic · Claude',
     label: 'Claude Sonnet 5.5 — balanced',
     model: 'claude-sonnet-5-5',
@@ -158,6 +169,7 @@ export const MODELS: ModelOption[] = [
   },
   {
     id: 'anthropic-opus',
+    rank: 3,
     group: 'Anthropic · Claude',
     label: 'Claude Opus 5.5 — smart',
     model: 'claude-opus-5-5',
@@ -167,6 +179,7 @@ export const MODELS: ModelOption[] = [
   },
   {
     id: 'anthropic-fable',
+    rank: 4,
     group: 'Anthropic · Claude',
     label: 'Claude Fable 5.1 — top tier',
     model: 'claude-fable-5-1',
@@ -178,6 +191,7 @@ export const MODELS: ModelOption[] = [
   // ── OpenAI (GPT-6) ───────────────────────────────────────────────────────────
   {
     id: 'openai-luna',
+    rank: 1,
     group: 'OpenAI · GPT',
     label: 'GPT-6 Luna — fast',
     model: 'gpt-6-luna',
@@ -187,6 +201,7 @@ export const MODELS: ModelOption[] = [
   },
   {
     id: 'openai-sol',
+    rank: 2,
     group: 'OpenAI · GPT',
     label: 'GPT-6.1 Sol — balanced',
     model: 'gpt-6.1-sol',
@@ -196,6 +211,7 @@ export const MODELS: ModelOption[] = [
   },
   {
     id: 'openai-astra',
+    rank: 3,
     group: 'OpenAI · GPT',
     label: 'GPT-6 Astra — smart',
     model: 'gpt-6-astra',
@@ -207,6 +223,7 @@ export const MODELS: ModelOption[] = [
   // ── Moonshot (Kimi) ──────────────────────────────────────────────────────────
   {
     id: 'kimi-k2_6',
+    rank: 1,
     group: 'Moonshot · Kimi',
     label: 'Kimi K2.6 — balanced',
     model: 'kimi-k2.6',
@@ -216,6 +233,7 @@ export const MODELS: ModelOption[] = [
   },
   {
     id: 'kimi-k3',
+    rank: 2,
     group: 'Moonshot · Kimi',
     label: 'Kimi K3 — smart',
     model: 'kimi-k3',
@@ -227,6 +245,7 @@ export const MODELS: ModelOption[] = [
   // ── Fast inference (Groq, Cerebras) ──────────────────────────────────────────
   {
     id: 'groq-oss-20b',
+    rank: 1,
     group: 'Fast · Groq / Cerebras',
     label: 'GPT-OSS 20B on Groq — fastest',
     model: 'openai/gpt-oss-20b',
@@ -236,6 +255,7 @@ export const MODELS: ModelOption[] = [
   },
   {
     id: 'groq-oss-120b',
+    rank: 2,
     group: 'Fast · Groq / Cerebras',
     label: 'GPT-OSS 120B on Groq',
     model: 'openai/gpt-oss-120b',
@@ -265,6 +285,7 @@ export const MODELS: ModelOption[] = [
   // ── Mistral ──────────────────────────────────────────────────────────────────
   {
     id: 'mistral-small',
+    rank: 1,
     group: 'Mistral',
     label: 'Mistral Small 4 — fast',
     model: 'mistral-small-2603',
@@ -274,6 +295,7 @@ export const MODELS: ModelOption[] = [
   },
   {
     id: 'mistral-medium',
+    rank: 2,
     group: 'Mistral',
     label: 'Mistral Medium 3.5 — balanced',
     model: 'mistral-medium-2604',
