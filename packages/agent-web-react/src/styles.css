@@ -1742,8 +1742,11 @@
   border-radius: 8px;
   border: 1px solid var(--awr-border);
 }
+/* A width of its own, capped by the column: the list of files shrinks to its content, so a
+   width in per cent of it resolved to nothing and the player had no size. */
 .awr-media--audio {
-  width: min(100%, 320px);
+  width: 320px;
+  max-width: 100%;
 }
 .awr-media__audio {
   width: 100%;
