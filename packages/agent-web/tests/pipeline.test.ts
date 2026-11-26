@@ -94,9 +94,15 @@ test('pipeline: the nodes of a wave run concurrently', async () => {
     {},
     { b: 40, c: 40 },
   )
-  const started = Date.now()
   await p.run()
-  assert.ok(Date.now() - started < 75, 'b and c did not run one after the other')
+  // Read off the order of events, not off the clock: both have started before either finished.
+  const seen = p.events
+    .filter(
+      (e) =>
+        (e.nodeId === 'b' || e.nodeId === 'c') && /node\.(started|finished)$/.test(String(e.type)),
+    )
+    .map((e) => String(e.type).replace('pipeline.node.', ''))
+  assert.deepEqual(seen, ['started', 'started', 'finished', 'finished'])
 })
 
 // a → b → join, a → c → d → join: the branches have different lengths.
