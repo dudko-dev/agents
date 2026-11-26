@@ -8,7 +8,7 @@ import {
 import { assertLoopbackHost } from './http.ts'
 import { startLocalIdp, type ILocalIdp } from './idp-server.ts'
 import { generateClientKey, type ClientAssertionProfile } from './jwt.ts'
-import { startLocalMcpServer, type ILocalMcpServer } from './mcp-server.ts'
+import { startLocalMcpServer, type ILocalMcpServer, type McpProtocol } from './mcp-server.ts'
 
 /**
  * The test servers as a process, for a harness that cannot call them as
@@ -40,6 +40,9 @@ Options:
   --assertion-profile <p>    what a private_key_jwt assertion must look like:
                              rfc7523bis (default: aud = issuer, typ client-authentication+jwt)
                              or rfc7523 (aud = token endpoint, typ JWT)
+  --protocol <revisions>     what the MCP server speaks: legacy (default: the 2025 revisions,
+                             an initialize handshake), modern (2026-07-28 only: no handshake,
+                             no session) or dual (both on the one endpoint)
   --help                     this text
 
 Prints one JSON line with the URLs and the generated credentials, then serves until SIGINT/SIGTERM.
@@ -54,6 +57,7 @@ export interface ICliArgs {
   cors?: string
   clientAuth: 'secret' | 'private_key_jwt'
   assertionProfile: ClientAssertionProfile
+  protocol: McpProtocol
   help: boolean
 }
 
@@ -67,6 +71,7 @@ export const parseCliArgs = (argv: string[]): ICliArgs => {
     host: '127.0.0.1',
     clientAuth: 'secret',
     assertionProfile: 'rfc7523bis',
+    protocol: 'legacy',
     help: false,
   }
   for (let i = 0; i < argv.length; i += 1) {
@@ -104,6 +109,12 @@ export const parseCliArgs = (argv: string[]): ICliArgs => {
         throw new Error(`--assertion-profile must be rfc7523bis or rfc7523, got "${profile}"`)
       }
       args.assertionProfile = profile
+    } else if (flag === '--protocol') {
+      const protocol = value()
+      if (protocol !== 'legacy' && protocol !== 'modern' && protocol !== 'dual') {
+        throw new Error(`--protocol must be legacy, modern or dual, got "${protocol}"`)
+      }
+      args.protocol = protocol
     } else {
       throw new Error(`unknown option "${flag}" (see --help)`)
     }
@@ -143,7 +154,7 @@ export interface ICliInfo {
     mode: 'enterprise' | 'interactive'
     assertionProfile?: ClientAssertionProfile
   }
-  mcp?: { url: string; requireAuth: boolean }
+  mcp?: { url: string; requireAuth: boolean; protocol: McpProtocol }
   cors?: string
 }
 
@@ -244,12 +255,13 @@ export const startFromCli = async (args: ICliArgs): Promise<ICliServers> => {
         requireAuth: as !== undefined,
         authorizationServers: as ? [as.issuer] : [],
         validTokens: as?.validTokens,
+        protocol: args.protocol,
       })
       started.push(mcp)
       if (as) {
         as.resource = mcp.url
       }
-      info.mcp = { url: mcp.url, requireAuth: as !== undefined }
+      info.mcp = { url: mcp.url, requireAuth: as !== undefined, protocol: mcp.protocol }
     }
     return { info, idp, as, mcp, close }
   } catch (err) {

@@ -12,6 +12,7 @@ import {
   startFromCli,
   startLocalMcpServer,
 } from '../src/index.ts'
+import { CLI_HELP } from '../src/cli.ts'
 import { basic, exchangeParams, getJson, grantParams, postForm } from './helpers.ts'
 
 const CLI = fileURLToPath(new URL('../src/cli.ts', import.meta.url))
@@ -27,6 +28,7 @@ test('cli args: defaults, and every flag', () => {
     host: '127.0.0.1',
     clientAuth: 'secret',
     assertionProfile: 'rfc7523bis',
+    protocol: 'legacy',
     help: false,
   })
   // Naming servers starts only those.
@@ -47,6 +49,8 @@ test('cli args: defaults, and every flag', () => {
       'private_key_jwt',
       '--assertion-profile',
       'rfc7523',
+      '--protocol',
+      'dual',
     ]),
     {
       idp: true,
@@ -57,6 +61,7 @@ test('cli args: defaults, and every flag', () => {
       cors: 'http://localhost:5173',
       clientAuth: 'private_key_jwt',
       assertionProfile: 'rfc7523',
+      protocol: 'dual',
       help: false,
     },
   )
@@ -71,6 +76,11 @@ test('cli args: a typo, a missing value or a host that is not loopback stops it'
   assert.throws(() => parseCliArgs(['--port-base', '65535']), /--port-base must be/)
   assert.throws(() => parseCliArgs(['--client-auth', 'none']), /--client-auth must be/)
   assert.throws(() => parseCliArgs(['--assertion-profile', 'bis']), /--assertion-profile must be/)
+  assert.throws(
+    () => parseCliArgs(['--protocol', '2026']),
+    /--protocol must be legacy, modern or dual/,
+  )
+  assert.throws(() => parseCliArgs(['--protocol']), /--protocol needs a value/)
   for (const host of ['0.0.0.0', 'localhost', '192.168.0.2']) {
     assert.throws(() => parseCliArgs(['--host', host]), /loopback only/, host)
   }
@@ -106,6 +116,71 @@ test('cli: only the servers that were named are started, wired to each other', a
   } finally {
     await noIdp.close()
   }
+})
+
+test('cli: --protocol picks what the MCP server speaks, and the line says which', async () => {
+  const discover = (url: string) =>
+    fetch(url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+        'mcp-protocol-version': '2026-07-28',
+        'mcp-method': 'server/discover',
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'server/discover',
+        params: {
+          _meta: {
+            'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+            'io.modelcontextprotocol/clientCapabilities': {},
+          },
+        },
+      }),
+    })
+  const initialize = (url: string) =>
+    fetch(url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: {
+          protocolVersion: '2025-11-25',
+          capabilities: {},
+          clientInfo: { name: 'cli-test', version: '1.0.0' },
+        },
+      }),
+    })
+  const expected = { legacy: [400, 200], modern: [200, 400], dual: [200, 200] } as const
+  for (const flags of [
+    [],
+    ['--protocol', 'legacy'],
+    ['--protocol', 'modern'],
+    ['--protocol', 'dual'],
+  ]) {
+    const servers = await startFromCli(parseCliArgs(['--mcp', ...flags]))
+    try {
+      const protocol = servers.info.mcp?.protocol ?? 'legacy'
+      assert.equal(protocol, flags[1] ?? 'legacy')
+      assert.equal(servers.mcp?.protocol, protocol)
+      const url = String(servers.info.mcp?.url)
+      assert.deepEqual(
+        [(await discover(url)).status, (await initialize(url)).status],
+        expected[protocol],
+        protocol,
+      )
+    } finally {
+      await servers.close()
+    }
+  }
+  assert.match(CLI_HELP, /--protocol <revisions>/)
 })
 
 test('cli: --port-base puts the three servers on consecutive ports', async () => {

@@ -7,6 +7,8 @@ export {
   applyCors,
   assertLoopbackHost,
   closeServer,
+  CORS_ALLOW_HEADERS,
+  CORS_ALLOW_HEADERS_2025,
   corsHeaders,
   listen,
   type IListenOptions,
@@ -44,6 +46,14 @@ export {
   type ITokenRequest,
 } from './authorization-server.ts'
 export {
+  ELICIT_FORM_SCHEMA,
+  validFormContent,
+  type ElicitationRequest,
+  type IElicitationFaults,
+  type IElicitationRound,
+  type IUrlElicitation,
+} from './mcp-elicitation.ts'
+export {
   REPORT_IMAGE_BASE64,
   REPORT_VALUE,
   startLocalMcp,
@@ -52,6 +62,9 @@ export {
   type ILocalMcpOptions,
   type ILocalMcpServer,
   type ILocalMcpServerOptions,
+  type IMcpRequestRecord,
+  type McpProtocol,
+  type ProbeFault,
   type StructuredFault,
 } from './mcp-server.ts'
 export { parseCliArgs, startFromCli, type ICliArgs, type ICliServers } from './cli.ts'

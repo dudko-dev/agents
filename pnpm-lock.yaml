@@ -309,9 +309,15 @@ importers:
 
   packages/test-servers:
     dependencies:
+      '@modelcontextprotocol/node':
+        specifier: ^2.1.2
+        version: 2.1.2(@modelcontextprotocol/server@2.4.0)
       '@modelcontextprotocol/sdk':
         specifier: ^1.32.2
         version: 1.32.2(zod@4.6.7)
+      '@modelcontextprotocol/server':
+        specifier: ^2.4.0
+        version: 2.4.0
       zod:
         specifier: ^4.6.7
         version: 4.6.7
@@ -1161,6 +1167,16 @@ packages:
   '@mlc-ai/web-xgrammar@0.1.27':
     resolution: {integrity: sha512-0WJvW3mjotHA2NeAfaWFE2pQkOgXH9xC2U4IQOJNcioLac0k6VjSbj14jBRprt89frnPzxLo280riaEb+ZQqbg==}
 
+  '@modelcontextprotocol/core@2.4.0':
+    resolution: {integrity: sha512-z8QBKqdfXLPzkLQuG4xp8hrVEMm1PZ1IgxMN2sMbJiFiAKOWXnAzogXn2W4aqIBlP1ea6U5yiqVquvUNM1Cj6Q==}
+    engines: {node: '>=20'}
+
+  '@modelcontextprotocol/node@2.1.2':
+    resolution: {integrity: sha512-IIcIqBpr6NCQQs5DgJTgvbSOAw+3iaR/uquqg+e0nXCdudfjPg/80x0TseUnQx14AUAtE4fsJCEpJKPyb6WPVA==}
+    engines: {node: '>=20'}
+    peerDependencies:
+      '@modelcontextprotocol/server': ^2.4.0
+
   '@modelcontextprotocol/sdk@1.32.2':
     resolution: {integrity: sha512-SWsVtH/0vULSQStoZ6xxH2K09Li8fXYTMC64ZeogCdpZ3XSi1eCPOByV1OpuJxuI3OcmHhosDWYyii07tpPsLw==}
     engines: {node: '>=18'}
@@ -1170,6 +1186,10 @@ packages:
     peerDependenciesMeta:
       '@cfworker/json-schema':
         optional: true
+
+  '@modelcontextprotocol/server@2.4.0':
+    resolution: {integrity: sha512-rgR9yxSaAJ+bcsi/XroT/S2AfPiIWloXAnrdfYSCms9ivVju0ishu/wW0J21Ho6+ZOR1r7RyeRbjiRuF87ix5Q==}
+    engines: {node: '>=20'}
 
   '@napi-rs/wasm-runtime@0.2.4':
     resolution: {integrity: sha512-9zESzOO5aDByvhIAsOy9TbpZ0Ur2AJbUI7UT73kcUTS2mxAMHOBaa1st/jAymNoCtvrit99kkzT1FZuXVcgfIQ==}
@@ -4866,6 +4886,16 @@ snapshots:
 
   '@mlc-ai/web-xgrammar@0.1.27': {}
 
+  '@modelcontextprotocol/core@2.4.0':
+    dependencies:
+      zod: 4.6.7
+
+  '@modelcontextprotocol/node@2.1.2(@modelcontextprotocol/server@2.4.0)':
+    dependencies:
+      '@hono/node-server': 2.1.11(hono@4.13.22)
+      '@modelcontextprotocol/server': 2.4.0
+      hono: 4.13.22
+
   '@modelcontextprotocol/sdk@1.32.2(zod@4.6.7)':
     dependencies:
       '@hono/node-server': 2.1.11(hono@4.13.22)
@@ -4887,6 +4917,11 @@ snapshots:
       zod-to-json-schema: 3.25.2(zod@4.6.7)
     transitivePeerDependencies:
       - supports-color
+
+  '@modelcontextprotocol/server@2.4.0':
+    dependencies:
+      '@modelcontextprotocol/core': 2.4.0
+      zod: 4.6.7
 
   '@napi-rs/wasm-runtime@0.2.4':
     dependencies:

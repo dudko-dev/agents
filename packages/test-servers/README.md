@@ -1,8 +1,9 @@
 # @dudko.dev/test-servers
 
 Test servers for the agent packages in this repository: an enterprise identity provider, an MCP
-authorization server and an MCP server. Real sockets, real signatures, the MCP SDK's own server —
-and switches that make each of them misbehave on purpose.
+authorization server and an MCP server. Real sockets, real signatures, the MCP SDK's own servers
+(1.x for the 2025 revisions of the protocol, 2.x for 2026-07-28) — and switches that make each of
+them misbehave on purpose.
 
 **Private. Never published. For tests only.** These servers hand a token to anyone who asks the
 right way, generate their keys and secrets at start-up, keep nothing, and can be told to lie. They
@@ -17,7 +18,7 @@ TypeScript run directly by Node (type stripping, Node ≥ 22.6); there is no bui
 | --- | --- | --- |
 | Identity provider | `startLocalIdp(opts)` | Issues signed ID tokens for a test user, serves its JWKS, and answers the RFC 8693 token exchange with a signed ID-JAG (draft-ietf-oauth-identity-assertion-authz-grant) after authenticating the client. |
 | Authorization server | `startLocalAuthorizationServer(opts)` | Metadata (RFC 8414), dynamic registration and a token endpoint that rotates the access token. With `enterprise`: only the `jwt-bearer` grant with an ID-JAG from one IdP, verified claim by claim. |
-| MCP server | `startLocalMcpServer(opts)` | The MCP SDK's streamable-HTTP server with three tools (`echo`, `secret`, `boom`), optional `instructions` in its `initialize` result (`mcp.setInstructions()` changes them for the next client to connect), optional structured tools (`structuredTools`: `report` and `report_mixed` declare an `outputSchema` and answer with `structuredContent`), protected resource metadata (RFC 9728) and, with `requireAuth`, the 401 challenge. |
+| MCP server | `startLocalMcpServer(opts)` | The MCP SDK's streamable-HTTP server with three tools (`echo`, `secret`, `boom`), optional `instructions` in its `initialize` / `server/discover` result (`mcp.setInstructions()` changes them for the next client to connect), optional structured tools (`structuredTools`: `report` and `report_mixed` declare an `outputSchema` and answer with `structuredContent`), optional elicitation tools (`elicitationTools`, below), protected resource metadata (RFC 9728) and, with `requireAuth`, the 401 challenge. `protocol` picks the revisions it speaks: `'legacy'` (default), `'modern'` or `'dual'` (below). |
 | The pair | `startLocalMcp(opts)` | An MCP server and the authorization server that guards it, on two ports, already wired together. What most tests want. |
 
 Every one returns its URLs, what it recorded, and `close()`.
@@ -77,11 +78,80 @@ free port) and `cors`.
   status answered), `issuedIdJags`.
 - Authorization server: `tokenRequests()` (parameters, auth method, the OAuth error answered),
   `grants()`, `tokenClientIds()`, `registrations()`, `cimdFetches`, `validTokens`.
-- MCP server: `calls` (every tool call), `initializeCapabilities`, `secret` (what the `secret` tool
-  returns: a value a model cannot know without calling it).
+- MCP server: `calls` (every tool call; a call to an elicitation tool is one entry however many
+  rounds it took), `initializeCapabilities`, `requests` (every JSON-RPC request and notification
+  received: `{ era, method }`, the era being the one the message claimed - `modern` when it carried
+  the per-request protocol version in `_meta`), `elicitations` and `urlElicitations` (below),
+  `secret` (what the `secret` tool returns: a value a model cannot know without calling it).
 
 `peekJwt`, `verifyJwt`, `signJwt`, `generateClientKey` and the grant / token-type constants are
 exported for assertions about what was sent.
+
+## The MCP server's protocol: `legacy`, `modern`, `dual`
+
+```ts
+const mcp = await startLocalMcpServer({ protocol: 'dual' }) // or startLocalMcp({ protocol: ... })
+```
+
+| `protocol` | Speaks | Served by |
+| --- | --- | --- |
+| `'legacy'` (default) | 2025-11-25 and earlier: the `initialize` handshake, stateless (no `Mcp-Session-Id` is issued), the GET stream. Exactly what this server has always put on the wire. | `@modelcontextprotocol/sdk` 1.x |
+| `'modern'` | 2026-07-28 only: no handshake, no session, every request carries its version, client info and capabilities in `_meta`. | `@modelcontextprotocol/server` 2.x (`createMcpHandler`, `legacy: 'reject'`) |
+| `'dual'` | Both on the one endpoint. A request with the modern `_meta` goes to the 2.x handler, everything else (the SDK's own `isLegacyRequest` decides) to the 1.x one: each era gets byte for byte what the single-era server answers. | both |
+
+Legacy is not served by the 2.x SDK, although it can: its answers to a 2025 client differ from
+the 1.x ones (JSON Schema 2020-12 instead of draft-07 in `tools/list`, no `execution` block, an
+unknown tool as a JSON-RPC error instead of a tool error, 405 on GET and DELETE).
+
+What the modern era answers (all of it the SDK's doing, asserted in `tests/mcp-protocol.test.ts`
+with hand-built JSON-RPC):
+
+- `server/discover`: `{ resultType: 'complete', supportedVersions: ['2026-07-28'], capabilities,
+  instructions?, ttlMs, cacheScope, _meta: { 'io.modelcontextprotocol/serverInfo' } }`. In `dual`
+  mode too it lists the modern revision only.
+- Every result has `resultType`; `server/discover` and `tools/list` carry `ttlMs` / `cacheScope`
+  (`0` / `'private'` unless the `cacheHint` option says otherwise).
+- A POST without `MCP-Protocol-Version`, `Mcp-Method` or (for `tools/call`) `Mcp-Name`, or with one
+  that disagrees with the body: HTTP 400, JSON-RPC `-32020`. A version it does not speak - a 2025
+  `initialize` included: 400, `-32022` with `data: { supported, requested }`. An unknown method:
+  404, `-32601`. A tool that needs a capability the request did not declare: 400, `-32021`.
+- `GET` and `DELETE`: 405. No `Mcp-Session-Id`, ever.
+- `subscriptions/listen`: the acknowledgement first, then only what the filter asked for; `close()`
+  ends each stream with its result.
+
+**A tool list change, in both eras.** `mcp.notifyToolsChanged()` sends
+`notifications/tools/list_changed` to every open `subscriptions/listen` stream that asked for it
+(modern) and every open GET stream (legacy). `mcp.addTool(name)` first adds a tool that answers
+`<name>:ok`, so a client that refetches sees a difference. `mcp.changeListeners()` says how many
+streams would be reached - wait for it instead of sleeping.
+
+### Elicitation tools
+
+`elicitationTools: true` adds four tools that ask the user something. One implementation serves
+both eras: on 2026-07-28 a question is an `input_required` result and the answer a retry of the
+call with `inputResponses` and the `requestState` it was given; on the 2025 revisions the server
+sends a real `elicitation/create` request on the stream of the call and waits for the client to
+POST its answer (the state never leaves the server).
+
+| Tool | What it does |
+| --- | --- |
+| `elicit_form` | One form with every field type form mode allows (`ELICIT_FORM_SCHEMA`: a string with length limits, the formats `email` / `uri` / `date` / `date-time`, a number and an integer with bounds, a boolean, single-select plain and titled, multi-select plain and titled). No `requestState`. Content that breaks the schema is asked for again. |
+| `elicit_url` | URL mode: points at `GET <origin>/elicit/<id>`, a page of this server with one button. `POST` to the same URL submits it (what the button does) - no token needed, with `requireAuth` too. After `accept` the call waits up to `urlElicitationWaitMs` (default 3000) for the page; if it was not submitted it asks to be called again (`requestState` only). On legacy the request carries `elicitationId` and the result is preceded by `notifications/elicitation/complete`. |
+| `elicit_twice` | Two rounds: a name, then a color. The name travels in `requestState`. |
+| `elicit_state` | Hands out a signed state with a confirmation and finishes only if exactly that string comes back. |
+
+Every `requestState` is HMAC-signed with a key made at start-up, names the tool it was issued to
+and expires after ten minutes. Anything else is refused: `-32602` `Invalid or expired
+requestState` on the modern wire.
+
+Answers are JSON in the result's text: `{ tool, action, ... }`; `decline` and `cancel` are results,
+not errors. `mcp.elicitations` has one entry per round: `{ tool, era, capabilities, responses,
+requestState, stateValid, asked?, issuedState? }` - what the client declared, answered and echoed,
+exactly as it arrived. `mcp.urlElicitations` lists the pages: `{ id, url, opened, completed }`.
+
+On the legacy wire the server is stateless, so it judges the client's `elicitation` capability by
+the latest `initialize` it received; a mode that was not declared fails the tool call without a
+request being sent. It gives up after 8 rounds of one call.
 
 ## The misbehaviour switches
 
@@ -114,6 +184,24 @@ Set one at a time; that is how a negative test stays about one thing.
 | `result: 'mismatch'` | answer with `structuredContent` that breaks the declared `outputSchema` (`temperature` is a string) |
 | `result: 'missing'` | answer with no `structuredContent` at all, while `tools/list` still declares the schema |
 
+**MCP server** — `mcp.protocolFaults`, for the request a client in "auto" mode probes with. Works
+in every `protocol` mode; only `server/discover` is touched:
+
+| `probe` | `server/discover` then |
+| --- | --- |
+| `'unauthorized'` | answers 401 with the `WWW-Authenticate` challenge, whatever the token |
+| `'server_error'` | answers 503 with a plain-text body |
+| `'garbage'` | answers 200 `application/json` with a body that is not JSON |
+| `'cors'` | is blocked in a browser: every preflight answers with the request headers a pre-2026 deployment allows (no `Mcp-Method`, no `Mcp-Name`). A client that is not a browser is not subject to CORS and sees no difference. |
+
+**MCP server** — `mcp.elicitationFaults` (with `elicitationTools`), both eras:
+
+| Field | The elicitation tools then |
+| --- | --- |
+| `neverSatisfied` | ask their first question again on every round, whatever was answered (legacy: the call fails after 8 rounds) |
+| `undeclaredMode` | ask in the mode the client did not declare: URL mode from a client that declared the form only or nothing, a form from one that declared URL mode only (the answer is reported back as `{ tool, undeclared, action }`). A client that declared both gets the normal tool. |
+| `tamperState` | hand out a `requestState` whose signature is broken: echoed exactly, it is still refused |
+
 **Options that change what a server accepts:**
 
 | Option | Where | Effect |
@@ -126,6 +214,8 @@ Set one at a time; that is how a negative test stays about one thing.
 | `clientIdMetadataDocument`, `issParameter` | authorization server | Advertise those two metadata flags. |
 | `idTokenEndpoint` | IdP | Serve `GET /test/id-token` (a fresh ID token for anyone): for a harness in another process. Off by default. |
 | `requireAuth` | MCP server | Answer 401 with `WWW-Authenticate` until the bearer token is in `validTokens`. |
+| `protocol` | MCP server | `'legacy'` (default), `'modern'` or `'dual'`: see above. |
+| `cacheHint: { ttlMs, cacheScope }` | MCP server | The cache fields of the modern `server/discover` and `tools/list` results. |
 
 There is no `/authorize` page: a test that needs the interactive flow plays the redirect itself.
 
@@ -138,10 +228,15 @@ browser package's README asks of a real deployment:
 ```
 Access-Control-Allow-Origin:   <origin>
 Access-Control-Allow-Methods:  GET, POST, DELETE, OPTIONS
-Access-Control-Allow-Headers:  Content-Type, Authorization, mcp-session-id, MCP-Protocol-Version, Last-Event-ID
+Access-Control-Allow-Headers:  Content-Type, Authorization, mcp-session-id, MCP-Protocol-Version, Last-Event-ID, Mcp-Method, Mcp-Name
 Access-Control-Expose-Headers: WWW-Authenticate, mcp-session-id
 Access-Control-Max-Age:        86400
 ```
+
+`Mcp-Method` and `Mcp-Name` are the request headers the 2026-07-28 revision adds (exported as
+`CORS_ALLOW_HEADERS`; `CORS_ALLOW_HEADERS_2025` is the list without them). `Mcp-Param-*` headers
+are named by tool definitions and cannot be listed in advance: a preflight that asks for some gets
+those names added to the allowed list. No new header is exposed: the modern era has no session id.
 
 Without the option no CORS header is sent at all.
 
@@ -158,7 +253,7 @@ node packages/test-servers/src/cli.ts --idp --as --mcp --port-base 0 --cors http
 and serves until `SIGINT` / `SIGTERM`:
 
 ```json
-{"cors":"http://localhost:5173","idp":{"issuer":"http://127.0.0.1:40001","tokenEndpoint":"http://127.0.0.1:40001/token","jwksUri":"...","idTokenEndpoint":"http://127.0.0.1:40001/test/id-token","assertionProfile":"rfc7523bis","clientId":"test-agent-at-idp","clientAuthMethod":"client_secret_basic","clientSecret":"<generated>"},"as":{"issuer":"http://127.0.0.1:40002","tokenEndpoint":"http://127.0.0.1:40002/token","mode":"enterprise","assertionProfile":"rfc7523bis","clientId":"test-agent-at-as","clientAuthMethod":"client_secret_basic","clientSecret":"<generated>"},"mcp":{"url":"http://127.0.0.1:40003/mcp","requireAuth":true}}
+{"cors":"http://localhost:5173","idp":{"issuer":"http://127.0.0.1:40001","tokenEndpoint":"http://127.0.0.1:40001/token","jwksUri":"...","idTokenEndpoint":"http://127.0.0.1:40001/test/id-token","assertionProfile":"rfc7523bis","clientId":"test-agent-at-idp","clientAuthMethod":"client_secret_basic","clientSecret":"<generated>"},"as":{"issuer":"http://127.0.0.1:40002","tokenEndpoint":"http://127.0.0.1:40002/token","mode":"enterprise","assertionProfile":"rfc7523bis","clientId":"test-agent-at-as","clientAuthMethod":"client_secret_basic","clientSecret":"<generated>"},"mcp":{"url":"http://127.0.0.1:40003/mcp","requireAuth":true,"protocol":"legacy"}}
 ```
 
 | Flag | Meaning |
@@ -169,6 +264,7 @@ and serves until `SIGINT` / `SIGTERM`:
 | `--cors <origin>` | CORS for that origin on every server started. |
 | `--client-auth <secret\|private_key_jwt>` | How the test client authenticates on both hops. With `private_key_jwt` the line carries `privateJwk`, `keyId` and `algorithm` instead of `clientSecret`. |
 | `--assertion-profile <rfc7523bis\|rfc7523>` | The form of client assertion the servers accept. |
+| `--protocol <legacy\|modern\|dual>` | What the MCP server speaks. `legacy` (default): the 2025 revisions. `modern`: 2026-07-28 only. `dual`: both on the one endpoint. The line says which (`mcp.protocol`). |
 
 The ID token a browser harness needs comes from `GET <idp.idTokenEndpoint>` (`{"id_token": "..."}`),
 which the CLI switches on. The same thing from code: `startFromCli(parseCliArgs([...]))` returns
