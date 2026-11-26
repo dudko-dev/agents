@@ -56,6 +56,38 @@ skills (each tab lists its own built-in examples; your own or imported
 (IndexedDB), the files panel, theme, and the labels (English / Russian — every
 string of the chat is a prop).
 
+**Every capability is on by default** - the demo shows the most the library can do, which is
+not the library's own default (there each of these is off until the host switches it on): the
+notebook (`learning`), web access (`web_fetch`, limited to the listed hosts), running code
+(`run_js`, sandboxed), helpers (`spawn_subagent`), auto-compaction and every part of the chat.
+Four more are **on when possible** - the switch is on, and the panel says whether it is in
+effect and what is missing:
+
+| Capability | In effect when | Otherwise the panel says |
+| --- | --- | --- |
+| Model tiers (`auto`) | the chosen model's provider has a lighter / a stronger model in the list (same key) | `off: no lighter model of this provider` |
+| Web search (`web_search`) | a Tavily key is saved (the form is in the panel) | `off: needs a Tavily key` |
+| Media (`generate_image`, `generate_speech`, `transcribe_audio`, attached audio) | a Google or an OpenAI key is saved | `off: needs a Google or OpenAI key` |
+| The decision model (`gemini-decision-1`) | a Google key is saved | `off: needs a Google key` |
+
+Tool consent is not changed by any of this: it is the mode you chose (autopilot unless you
+changed it), and the panel's first lines say what the agent may do on its own under it. Media
+calls are billed by the provider to your key; Google's image models have no free quota, so on a
+free-tier key `generate_image` answers with Google's quota error, shown under the tool call.
+The models are built in the app from the vault's key (`src/use-extras.ts`), like the chat
+models: the core's own `{ providerType, model, credentialRef }` spec imports the provider by a
+bare specifier, which a bundle cannot resolve.
+
+Settings are stored in `localStorage` as `{ v: 2, set }`: only what you changed. Everything
+else follows the defaults of the day, so new defaults reach a returning visitor. Settings stored
+before that (the whole object) are read once: a field that differs from the default of that
+time is your choice and is kept; a field equal to it follows the new default. **Reset settings**
+forgets every choice.
+
+On the pipeline page the loop settings, the model tiers and the decision model (it picks a
+node's route) apply to every node; web, code, helpers, search and media go to the nodes that
+tick them in the inspector.
+
 The chat itself shows every tool call with its cost, tokens by kind per answer
 and in total, thoughts, subagents and consent prompts; the composer has
 attachments, "/" commands, a run timer, the running-agents count, the model +

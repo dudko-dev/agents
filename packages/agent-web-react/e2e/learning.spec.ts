@@ -44,8 +44,9 @@ test('learning: a lesson is written, listed, kept in the workspace across a relo
     return { text: 'Done.' }
   })
   await openWithKey(page)
+  // The notebook is on by default: there, and empty.
   await page.locator('.agentset__title').click()
-  await page.getByLabel('Let the agent learn').check()
+  await expect(page.getByLabel('Let the agent learn')).toBeChecked()
   await expect(page.getByText('The agent has not written any lessons down yet.')).toBeVisible()
 
   await send(page, 'remember how to convert images')
@@ -85,9 +86,19 @@ test('learning: a lesson is written, listed, kept in the workspace across a relo
   await expect(
     page.locator('.awr-filelist__path').filter({ hasText: '/skills/notes/' }),
   ).toHaveCount(0)
+
+  // Switched off: no notebook in the panel, none in the prompt, no tool to write one.
+  await page.getByLabel('Let the agent learn').uncheck()
+  await expect(page.locator('.agentset__notebook')).toHaveCount(0)
+  const before = calls.length
+  await send(page, 'and one more')
+  await expect.poll(() => calls.slice(before).some((c) => c.stage === 'executor')).toBe(true)
+  const off = calls.slice(before).find((c) => c.stage === 'executor')
+  expect(off?.system).not.toContain('You keep a notebook of lessons')
+  expect(off?.tools).not.toContain('save_skill')
 })
 
-test('egress: off by default; on, the model reads an allowed page and a refused one comes back as an error it can read', async ({
+test('egress: on by default with the allow list - the model reads an allowed page and a refused one comes back as an error it can read; switched off, there is no tool', async ({
   page,
 }) => {
   const fetched: string[] = []
@@ -102,6 +113,7 @@ test('egress: off by default; on, the model reads an allowed page and a refused 
   const calls = await mockGemini(page, (c: GeminiCall): GeminiReply => {
     if (c.stage === 'planner') return plan('Look it up')
     if (c.stage === 'executor') {
+      if (!c.tools.includes('web_fetch')) return { text: 'No way to look anything up.' }
       const n = c.functionResponses.length
       if (n === 0)
         return { call: { name: 'web_fetch', args: { url: 'https://en.wikipedia.org/wiki/JPEG' } } }
@@ -117,19 +129,12 @@ test('egress: off by default; on, the model reads an allowed page and a refused 
   })
   await openWithKey(page)
 
-  // Off: the model is not even offered the tool, and no page was asked for.
-  await send(page, 'look up jpeg')
-  await expect(page.locator('.awr-msg--assistant .awr-msg__bubble')).toHaveText('Done.')
-  expect(fetched).toHaveLength(0)
-  const offered = calls.filter((c) => c.stage === 'executor').flatMap((c) => c.tools)
-  expect(offered).not.toContain('web_fetch')
-
-  // On, limited to the listed hosts.
+  // The default: on, limited to the listed hosts - and the panel says so before anything runs.
   await page.locator('.agentset__title').click()
-  await page.getByLabel('Let it read the web').check()
+  await expect(page.getByLabel('Let it read the web')).toBeChecked()
   await expect(page.getByLabel('Allowed hosts')).toHaveValue('en.wikipedia.org, api.github.com')
-  const before = calls.length
-  await send(page, 'look up jpeg again')
+  await expect(page.locator('.agentset__can')).toContainText('read the web (2 allowed hosts)')
+  await send(page, 'look up jpeg')
   await expect(page.locator('.awr-msg--assistant .awr-msg__bubble').last()).toHaveText('Done.')
   await expect(page.locator('.awr-msg--assistant .awr-activity__summary').last()).toContainText(
     '2 web requests',
@@ -144,6 +149,20 @@ test('egress: off by default; on, the model reads an allowed page and a refused 
   await expect(rows.last()).toContainText('https://169.254.169.254/latest/meta-data/')
   await expect(rows.last()).toContainText('refused:')
   // The model got the refusal as a tool result it can act on.
-  const after = calls.slice(before).filter((c) => c.stage === 'executor')
-  expect(JSON.stringify(after.at(-1)?.functionResponses)).toMatch(/allow list|non-public/)
+  const on = calls.filter((c) => c.stage === 'executor')
+  expect(JSON.stringify(on.at(-1)?.functionResponses)).toMatch(/allow list|non-public/)
+
+  // Off: the model is not even offered the tool, and no page is asked for.
+  await page.getByLabel('Let it read the web').uncheck()
+  await expect(page.getByLabel('Allowed hosts')).toHaveCount(0)
+  const before = calls.length
+  await send(page, 'look up jpeg again')
+  await expect(page.locator('.awr-msg--assistant .awr-msg__bubble').last()).toHaveText('Done.')
+  const offered = calls
+    .slice(before)
+    .filter((c) => c.stage === 'executor')
+    .flatMap((c) => c.tools)
+  expect(calls.slice(before).some((c) => c.stage === 'executor')).toBe(true)
+  expect(offered).not.toContain('web_fetch')
+  expect(fetched).toHaveLength(1)
 })

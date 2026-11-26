@@ -239,7 +239,7 @@ test('a setting changed mid-run keeps the run going and applies to the next one'
   await send(page, 'hello')
   await expect(page.locator('.awr-sendbtn--stop')).toBeVisible()
   await page.locator('.agentset__title').click()
-  await page.locator('.agentset select').first().selectOption('high')
+  await page.locator('.agentset').getByLabel('Thinking').selectOption('high')
   // The rebuild doesn't flip the panel out of "running".
   await expect(page.locator('.awr-sendbtn--stop')).toBeVisible()
   await expect(page.locator('.awr-msg--assistant .awr-msg__bubble')).toHaveText('Hi there.')

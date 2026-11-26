@@ -132,6 +132,26 @@ export const TIER_MODELS: ModelOption[] = MODELS.filter(
 
 type TierName = 'light' | 'strong'
 
+/**
+ * "Auto" tiers for a chosen model: the lightest ranked model of the SAME provider below it and
+ * the strongest above it (`rank` in models.ts). The same provider means the same key, so auto
+ * tiers never ask for a second one. A local model, OpenRouter's "any model" or a provider with a
+ * single model in the list has none - tiers are then off, and the panel says so.
+ */
+export const autoTiers = (chosen: ModelOption): { light?: ModelOption; strong?: ModelOption } => {
+  if (chosen.rank === undefined || !chosen.provider) return {}
+  const family = TIER_MODELS.filter(
+    (m) => m.provider === chosen.provider && m.rank !== undefined && m.id !== chosen.id,
+  ).sort((a, b) => a.rank! - b.rank!)
+  const light = family.find((m) => m.rank! < chosen.rank!)
+  const strong = family.filter((m) => m.rank! > chosen.rank!).at(-1)
+  return { ...(light ? { light } : {}), ...(strong ? { strong } : {}) }
+}
+
+/** A tier setting ('auto', '' or a model id) as the id `useDemoTiers` takes. */
+export const tierChoice = (setting: string, auto: ModelOption | undefined): string =>
+  setting === 'auto' ? (auto?.id ?? '') : setting
+
 export interface DemoTiers {
   /** `config.executorTiers`, or undefined when no tier model could be built (tiers off). */
   executorTiers?: Partial<Record<TierName, ModelInput>>
