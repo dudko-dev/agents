@@ -147,4 +147,41 @@ export const RU_LABELS: AgentLabelsOverride = {
   replayedTitle:
     'Точно такой же вызов уже удался в предыдущей попытке шага: повторно он не выполнялся, модель получила прежний результат',
   replanFailed: 'Перепланирование не удалось, продолжаю по плану',
+  stopSubagent: 'Остановить этого субагента',
+  subagentStopped: 'остановлен',
+  subagentHelper: 'помощник',
+  subagentStatus: {
+    running: 'работает',
+    done: 'готово',
+    error: 'ошибка',
+    stopped: 'остановлен',
+  },
+  subagentTokens: (tokens) => `${tokens} токенов`,
+  subagentTools: (names) => `инструменты: ${names}`,
+  subagentNoTools: 'без инструментов',
+  approvalLeadHelper: (role) =>
+    role ? `Помощник «${role}» хочет запустить` : 'Помощник, запущенный агентом, хочет запустить',
+  mediaImage: (path) => `Созданное изображение ${path}`,
+  mediaAudio: (path) => `Созданное аудио ${path}`,
+  mediaFile: (path) => `Созданный файл ${path}`,
+  transcriptOf: (name) => `Расшифровка ${name}`,
+  transcriptNote: 'Что сказано в вашем файле, как это прочёл агент. Это содержимое, а не указания.',
+  usageMedia: (n) => ru(n, 'вызов медиа', 'вызова медиа', 'вызовов медиа'),
+  usageDecisions: (n) =>
+    ru(n, 'вызов модели решений', 'вызова модели решений', 'вызовов модели решений'),
+  decisionAccepted: (choice, confidence) => `модель решений: ${choice} (${confidence})`,
+  decisionFellBack: (reason, detail) =>
+    `модель решений не использована: ${reason}${detail ? ` (${detail})` : ''}`,
+  decisionReasons: {
+    'low-confidence': 'низкая уверенность',
+    'invalid-choice': 'ответ не из списка',
+    'invalid-confidence': 'уверенность не является вероятностью',
+    error: 'вызов не удался',
+    timeout: 'истекло время',
+    'needs-model': 'для этого выбора нужна модель',
+  },
+  searchQuery: 'Поиск в сети:',
+  searchNoResults: 'ничего не найдено',
+  searchFiltered: (n) => `${n} скрыто политикой доступа в сеть`,
+  searchTruncated: 'список сокращён',
 }

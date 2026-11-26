@@ -1116,3 +1116,11 @@ test('pipeline: a node keeps the base tiers, unless it names another model', asy
   const tiered = (await resolve(node('tiered'))) as IAgentConfig
   assert.deepEqual(tiered.executorTiers, { strong: { model: 'other-big' } })
 })
+
+test('isReplayedToolOutput: true for the note the guard returns, false for anything else', async () => {
+  const { isReplayedToolOutput, REPLAY_NOTE } = await import('../src/index.ts')
+  assert.equal(isReplayedToolOutput(`${REPLAY_NOTE} {"ok":true}`), true)
+  assert.equal(isReplayedToolOutput('{"ok":true}'), false)
+  assert.equal(isReplayedToolOutput({ note: REPLAY_NOTE }), false)
+  assert.equal(isReplayedToolOutput(undefined), false)
+})

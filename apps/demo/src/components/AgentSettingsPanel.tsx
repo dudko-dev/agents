@@ -1,14 +1,17 @@
 import { useState } from 'react'
 import {
+  ApiKeyForm,
   ApprovalModeSwitch,
   LearnedSkills,
   loadSkillFromUrl,
   parseSkillMarkdown,
   type UseAgentReturn,
+  type UseCredentialsReturn,
 } from '@dudko.dev/agent-web-react'
 import {
   allSkills,
   DEFAULT_WINDOW,
+  SEARCH_CREDENTIAL,
   skillsOfView,
   type DemoSettings,
   type ThinkingChoice,
@@ -28,6 +31,8 @@ export interface AgentSettingsPanelProps {
   modelWindow?: number
   /** Tier models that are chosen but have no key saved yet (they stay off until it is). */
   tiersMissingKey?: { tier: 'light' | 'strong'; model: ModelOption }[]
+  /** The key vault: the search API's key is saved there, like a model's. */
+  credentials: UseCredentialsReturn
   update: (patch: Partial<DemoSettings>) => void
   onReset: () => void
 }
@@ -50,6 +55,7 @@ export const AgentSettingsPanel = ({
   controller,
   modelWindow,
   tiersMissingKey = [],
+  credentials,
   update,
   onReset,
 }: AgentSettingsPanelProps) => {
@@ -313,7 +319,7 @@ export const AgentSettingsPanel = ({
       </div>
 
       <div className="agentset__group">
-        <span className="settings__label">Learning, web access and running code</span>
+        <span className="settings__label">Learning, web access, code and helpers</span>
         <div className="agentset__checks">
           <label title="The agent keeps a notebook: when it solves a problem it writes the lesson down as a skill of its own, and the planner sees it from then on. You can read, edit and delete the files in the Files panel (/skills).">
             <input
@@ -339,7 +345,40 @@ export const AgentSettingsPanel = ({
             />{' '}
             Let it run code (run_js, sandboxed)
           </label>
+          <label title="Off by default: with it off the tool does not exist. On, the model gets spawn_subagent: for an independent sub-task it starts a helper agent of its own, built from this agent's models and a subset of its tools, under the same consent mode and inside this run's budget. Each helper shows in the chat as a node of a tree, with a Stop button.">
+            <input
+              type="checkbox"
+              checked={settings.helpers}
+              onChange={(e) => update({ helpers: e.target.checked })}
+            />{' '}
+            Let it start helpers (spawn_subagent)
+          </label>
+          <label title="Off by default: the library ships no search engine and no key. On, the model gets web_search, which asks Tavily - the hosted search API that answers a page directly - with your own key. Results are third-party text: the chat shows them as plain text.">
+            <input
+              type="checkbox"
+              checked={settings.search}
+              onChange={(e) => update({ search: e.target.checked })}
+            />{' '}
+            Let it search the web (web_search)
+          </label>
         </div>
+        {settings.search && (
+          <div className="settings__field">
+            <ApiKeyForm
+              credentials={credentials}
+              credentialRef={SEARCH_CREDENTIAL}
+              label="Tavily API key"
+              placeholder="tvly-…"
+            />
+            <span className="settings__note">
+              Search provider: Tavily. The key is stored encrypted in this browser, next to the
+              model keys, and sent only to api.tavily.com.{' '}
+              <a href="https://app.tavily.com" target="_blank" rel="noopener noreferrer">
+                Get a key →
+              </a>
+            </span>
+          </div>
+        )}
         {settings.egress && (
           <label className="settings__field">
             <span className="settings__label">Allowed hosts</span>

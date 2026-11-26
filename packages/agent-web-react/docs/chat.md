@@ -50,6 +50,10 @@ function Assistant() {
 - [Transcript](#transcript)
 - [Composer](#composer)
 - [Talking to the agent while it works](#talking-to-the-agent-while-it-works)
+- [Subagents and helpers: the tree](#subagents-and-helpers-the-tree)
+- [Generated media and transcripts](#generated-media-and-transcripts)
+- [The decision model's note](#the-decision-models-note)
+- [Web search results](#web-search-results)
 - [The agent's notebook, and what it fetched](#the-agents-notebook-and-what-it-fetched)
 - [Attachments: images, PDFs, files, URLs](#attachments-images-pdfs-files-urls)
 - [Saved chats (IndexedDB)](#saved-chats-indexeddb)
@@ -70,7 +74,10 @@ the reducer mirrors the run onto the message:
 - **every tool call** — name, arguments, status, ≈tokens of its arguments and
   of the result fed back to the model, its duration, and any images it
   returned (data URLs or `{ type: 'image' }` parts are shown as thumbnails);
-- consent decisions and subagent delegations under the step that made them;
+- consent decisions and the [subagent tree](#subagents-and-helpers-the-tree) under the step that
+  made them;
+- what the run generated - images inline, audio as a player
+  ([media](#generated-media-and-transcripts));
 - the answer's thoughts (when the model thinks);
 - a usage line with **tokens by kind**: `in 12k · out 456 · think 120 · cached 9k · 4.2 s`.
 
@@ -84,6 +91,10 @@ full size) and file chips. The header shows the conversation's total.
 | `showUsage` | `true` | per-answer and per-tool-call tokens |
 | `showTotalUsage` | `true` | the conversation total in the header |
 | `showThoughts` | `true` | step and answer thoughts |
+| `showSubagents` | `true` | the [subagent tree](#subagents-and-helpers-the-tree) under a step |
+| `showMedia` | `true` | generated images / audio and transcripts in an answer |
+| `showDecisions` | `true` | the decision model's note under a step |
+| `showSearchResults` | `true` | a `web_search` call's results under its row |
 | `showStatus` | `true` | the status dot in the header |
 | `showContext` | `false` | context meter above the composer (`number` = budget bar) |
 | `activityOpen` | `false` | keep finished answers' activity expanded |
@@ -213,6 +224,129 @@ agent.replan // { mode, reason, byUser?, failed?, error? }
 Labels: `tierNames`, `tierReasons`, `escalationReasons`, `escalated`, `escalatedAttemptText`,
 `escalations`, `attemptTag`, `replayed`, `replayedTitle`, `replanFailed`.
 
+## Subagents and helpers: the tree
+
+A run can delegate: to a subagent the host defined (`createSubagentTool`, in-process or a Web
+Worker) and, with `subagents: { dynamic: true }` in the agent's config, to **helpers the model
+starts itself** (`spawn_subagent`) - which can start helpers of their own when `maxDepth` allows.
+All of them are nodes of **one tree**, and the state holds it:
+
+```ts
+agent.subagents // SubagentView[] - every node of the run, at every depth, in start order
+// each: { id, parentId?, depth, name, task, dynamic?, role?, tools?, profile?,
+//         status: 'running' | 'done' | 'error' | 'stopped',
+//         model?, tier?, usage, toolCalls, steps, activity, text, error?,
+//         startedAt?, durationMs?, stepId? }
+subagentTree(agent.subagents) // SubagentNode[] - the same nodes nested: { ...view, children }
+```
+
+- `parentId` is the subagent that started the node; the run's own subagents (depth 1) have none.
+  The reducer reads it from the events alone: a subagent's own subagents arrive as nested
+  `subagent.event` envelopes, and each level lands on its own node.
+- `dynamic` marks a helper the model started; `role` is what the model wrote for it (model-written
+  text - the components show it as plain text) and `tools` the tool names it was given.
+- `usage` is everything spent **under** the node, its own helpers included: counted live from its
+  `usage` events, then replaced by the total its end reports. `toolCalls` / `steps` are its own.
+- `model` / `tier` are known when the child runs with model tiers (its steps say them).
+- `startedAt` / `durationMs` need the hook's timestamps (it stamps every event).
+- Events for an id whose start was never seen still give a node (with an empty `task`); a start
+  that arrives late fills it in; a node whose parent is unknown is drawn at the top.
+- Each assistant message keeps its own tree (`message.subagents`).
+
+`<SubagentTree subagents onStop />` draws it as an indented list - under the step that delegated,
+in `<AgentChat>` / `<MessageList>` / `<StepList>`. Each node shows who it is (a helper's role, a
+static subagent's name and profile), its task, a status line - **status, model, tier, tokens, tool
+calls, time** - what it is doing now (or its answer, or its error), the tools a helper was given,
+and, while it runs, a **Stop** button (`useAgent().stopSubagent(id)`: only that node stops, its
+parent is told and goes on). It wraps at phone width.
+
+| Prop | |
+| --- | --- |
+| `subagents` | the flat list (`agent.subagents`, a message's) |
+| `onStop` | a stop button on each running node |
+| `showUsage` (default true) | the status line |
+| `showTools` (default true) | the tools each helper was given |
+| `renderSubagent(node, fallback)` | draw a node yourself (`node.children` are its subagents; return an `<li>`) |
+| `labels`, `className` | |
+
+`showSubagents={false}` (chat / message list / step list) hides the tree; `renderSubagent` is on all
+three too. `<SubagentRow sub />` is one node on its own.
+
+**A helper's consent request.** A helper asks through the run's own consent gate, so its request
+is the user's to answer: it appears in `pendingApprovals` like any other, with
+`subagent: { id, depth, name?, role? }`, and `<ToolApprovalPrompt>` says who is asking - "The
+helper “researcher” wants to run …" (`showHelper={false}` shows the ordinary lead). A subagent
+with a consent gate of its own is its host's business and is not lifted.
+
+Without subagents the state and the markup are exactly what they were.
+
+Labels: `subagentHelper`, `subagentStatus`, `subagentTokens`, `subagentTools`, `subagentNoTools`,
+`approvalLeadHelper`, and `stopSubagent` / `subagentStopped` from the steering set.
+
+## Generated media and transcripts
+
+With `media` in the agent's config (core: an image, a speech and / or a transcription model) the
+run can write files and transcribe audio. The bytes are **never in the state**: a generated file
+is in the workspace (`VirtualFileSystem`) at its `path`.
+
+```ts
+agent.media // MediaView[] | undefined - { kind: 'image' | 'speech', path, mediaType, bytes, model, stepId? }
+agent.transcripts // TranscriptView[] | undefined - { source, name, text, language?, durationInSeconds?, model }
+message.media / message.transcripts // the same, kept on each assistant turn
+step.media // the files that step's tool calls wrote
+```
+
+`<AgentChat files={vfs}>` shows them in the answer:
+
+- **an image** inline (click to open it), **audio** as a native `<audio controls>` player. The
+  file is read from `files` into an object URL that is revoked when the message goes away. Only
+  the types the core generates are rendered (PNG, JPEG, GIF, WebP; its audio list) - anything
+  else, **SVG included**, a file that is gone, or no `files` at all is a chip with the path;
+- **a transcript** as a folded "Transcript of memo.mp3" block, marked as what was said in the
+  user's file: it is content, shown as plain text, never as markup.
+
+`showMedia={false}` (chat / message list) hides both; `renderMedia(media, message, fallback)` draws
+a file yourself. `<GeneratedMedia media files />` and `<TranscriptBlock transcript />` are the
+parts on their own; `mediaFamilyOf(mediaType)` says `'image'`, `'audio'` or `undefined`.
+
+**Usage.** A media call is not a token: `usage.mediaCalls` (and `imagesGenerated`,
+`speechCharacters`, `transcriptionSeconds`) and `usage.decisionCalls` are carried through the
+run's, the turn's and the conversation's usage, and `<UsageBadge>` shows "· 2 media calls · 1
+decision call" when there were some (`showCalls={false}` hides them).
+
+Labels: `mediaImage`, `mediaAudio`, `mediaFile`, `transcriptOf`, `transcriptNote`, `usageMedia`,
+`usageDecisions`.
+
+## The decision model's note
+
+With `decisionModel` in the agent's config a small model answers the replanner's continue / finish.
+Each question it was asked leaves a quiet line under the step it followed:
+
+- "decision model: continue (0.93)" - its answer was used;
+- "decision model fell back: low confidence (0.41 < 0.8)" - the ordinary model call ran instead
+  (also: an answer that is not an option, a timeout, an error).
+
+```ts
+step.decisions // DecisionView[] | undefined - { point, accepted, choice?, confidence?, threshold, reason?, durationMs, model? }
+agent.decisions // the ones asked before any step existed
+agent.replan?.confidence // set when the decision model made the last replan decision
+```
+
+`showDecisions={false}` (chat / message list / step list) hides the lines; `decisionNote(view,
+labels)` is the sentence itself. Labels: `decisionAccepted`, `decisionFellBack`, `decisionReasons`.
+
+## Web search results
+
+`web_search` (core: `search` in the config) is an ordinary tool call. Its row gets a readable
+result under it: the query, then each result as **title + host** - the title a link that opens in
+a new tab with `rel="noopener noreferrer"` - and its snippet. Titles and snippets are third-party
+text: they are rendered as plain text, never as HTML or Markdown, and a result whose address is
+not `http(s)` is left out. "2 left out by the web access policy" / "list cut short" follow when
+the core says so. `showSearchResults={false}` (chat / message list / step list / tool call row)
+keeps the plain row; `webSearchOf(output)` is the parser.
+
+Labels: `searchQuery`, `searchNoResults`, `searchFiltered`, `searchTruncated`.
+
 ## The agent's notebook, and what it fetched
 
 With `learning` in the agent's config (core: `learning: true`, or `{ store: new VfsSkillStore(files) }`
@@ -309,8 +443,9 @@ chip in the composer and the `/autopilot`, `/ask`, `/ask-all`, `/read-only`
 commands switch the mode live, even mid-run.
 
 `<ToolApprovalPrompt>` (usable on its own) takes `approvals` (e.g. `useAgent().pendingApprovals`), `onApprove(id, { remember })` and
-`onDeny(id, reason)` (wire them to `useAgent().approve` / `.deny`), and `allowRemember` (default
-true; false hides "Always allow"). `<ContextMeter>` shows tokens against `budgetTokens` and, with
+`onDeny(id, reason)` (wire them to `useAgent().approve` / `.deny`), `allowRemember` (default
+true; false hides "Always allow") and `showHelper` (default true: a request made by a helper the
+model started says which helper asks - see [the tree](#subagents-and-helpers-the-tree)). `<ContextMeter>` shows tokens against `budgetTokens` and, with
 `onCompact` (e.g. `agent.compact`), a "Compact" button — `compacting` disables it while it runs.
 
 ## Customising
@@ -341,6 +476,8 @@ rendering as `fallback`:
   renderAttachment={(a) => <MyThumb attachment={a} />}
   renderMessage={(m, fallback) => <Animated key={m.id}>{fallback}</Animated>}
   renderApproval={(req, fallback) => fallback}
+  renderSubagent={(node, fallback) => fallback}
+  renderMedia={(media, message, fallback) => fallback}
 />
 ```
 
@@ -368,6 +505,8 @@ tokens inside an element with class `awr-theme`.
 | `useMcp` / `useMcpServers` | one or several MCP servers, merged tools — import from `@dudko.dev/agent-web-react/mcp`. `instructions` (on `useMcp`, and on each of `useMcpServers().servers`) is what the server told the agent in its handshake - third-party text that goes into the agent's prompt: show it to the user as the server's words. Options: `clientName`, `clientMetadataUrl` (a client ID metadata document, CIMD, used as the OAuth `client_id` where the authorization server supports it; per server through `oauth.clientMetadataUrl`), `onLog` — see the README |
 | `mcpOAuthProviderOptions` | the options the MCP hooks hand the core's OAuth provider for one server (pure; same subpath) |
 | `agentStateReducer` | the pure event → UI reducer |
+| `subagentTree` | `agent.subagents` (flat) as nested `SubagentNode[]` |
+| `webSearchOf`, `mediaFamilyOf`, `decisionNote` | a `web_search` result as a view, the family a generated file may be shown as, the decision model's sentence |
 | `useAgentContext` / `useOptionalAgentContext` | the controller of the enclosing `<AgentProvider>` (the first throws outside one, the second returns `undefined`) |
 | `useLabels` / `mergeLabels` / `defaultLabels` | the labels in effect, merged over a base, and the English defaults ([below](#label-reference)) |
 | `parseSlash`, `filterCommands`, `attachmentKindOf`, `withAttachments`, `attachmentRefusal`, `noticesOf`, `formatElapsed`, `usageLine` | the composer's and transcript's pure logic |
@@ -401,6 +540,15 @@ component or `<AgentLabelsProvider>`); whatever you leave out falls back to `def
   `stopSubagent`, `subagentStopped`.
 - **Files and saved chats:** `filesEmpty`, `upload`, `download`, `delete`, `preview`, `bytes` *(fn: n)*,
   `historyEmpty`, `deleteChat`, `messagesCount` *(fn: n)*.
+- **Subagent tree:** `subagentHelper`, `subagentStatus` *(map by `running` / `done` / `error` /
+  `stopped`)*, `subagentTokens` *(fn: tokens)*, `subagentTools` *(fn: names)*, `subagentNoTools`,
+  `approvalLeadHelper` *(fn: role?, depth)*.
+- **Media, decisions, search:** `mediaImage` *(fn: path)*, `mediaAudio` *(fn: path)*, `mediaFile`
+  *(fn: path)*, `transcriptOf` *(fn: name)*, `transcriptNote`, `usageMedia` *(fn: n)*,
+  `usageDecisions` *(fn: n)*, `decisionAccepted` *(fn: choice, confidence)*, `decisionFellBack`
+  *(fn: reason, detail)*, `decisionReasons` *(map by `low-confidence` / `invalid-choice` /
+  `invalid-confidence` / `error` / `timeout` / `needs-model`)*, `searchQuery`, `searchNoResults`,
+  `searchFiltered` *(fn: n)*, `searchTruncated`.
 - **Consent:** `approvalLead`, `approve`, `alwaysAllow`, `deny`, `declinedReason`, `readOnlyTool`,
   `consentWaiting`, `consentAllowed`, `consentDenied` *(fn: reason?)*.
 

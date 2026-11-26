@@ -63,7 +63,7 @@ export { AgentProvider, useAgentContext, useOptionalAgentContext } from './conte
 export type { AgentProviderProps } from './context.js'
 
 // ── Headless state (the pure event → UI reducer, for custom UIs) ─────────────
-export { agentStateReducer, createInitialAgentState, lessonsOf } from './state.js'
+export { agentStateReducer, createInitialAgentState, lessonsOf, subagentTree } from './state.js'
 export type { AgentAction } from './state.js'
 export type {
   AgentUiState,
@@ -75,12 +75,16 @@ export type {
   ChatAttachment,
   ChatMessage,
   CompactionView,
+  DecisionView,
   FetchView,
   LessonView,
+  MediaView,
   StepEscalationView,
   StepView,
+  SubagentNode,
   SubagentView,
   ToolCallView,
+  TranscriptView,
   ModelLoadState,
   ReplanState,
 } from './types.js'
@@ -112,8 +116,18 @@ export { Composer } from './components/Composer.js'
 export type { ComposerProps } from './components/Composer.js'
 export { PlanView } from './components/PlanView.js'
 export type { PlanViewProps } from './components/PlanView.js'
-export { StepList, SubagentRow, ToolCallRow, UserNoteRow } from './components/StepList.js'
+export { StepList, ToolCallRow, UserNoteRow, decisionNote } from './components/StepList.js'
 export type { StepListProps, ToolCallRowProps, RenderToolCall } from './components/StepList.js'
+export { SubagentRow, SubagentTree } from './components/SubagentTree.js'
+export type {
+  RenderSubagent,
+  SubagentRowProps,
+  SubagentTreeProps,
+} from './components/SubagentTree.js'
+export { GeneratedMedia, TranscriptBlock, mediaFamilyOf } from './components/Media.js'
+export type { GeneratedMediaProps, TranscriptBlockProps } from './components/Media.js'
+export { webSearchOf } from './components/format.js'
+export type { WebSearchResultView, WebSearchView } from './components/format.js'
 export { ToolApprovalPrompt } from './components/ToolApprovalPrompt.js'
 export type { ToolApprovalPromptProps } from './components/ToolApprovalPrompt.js'
 export { ApprovalModeSwitch } from './components/ApprovalModeSwitch.js'

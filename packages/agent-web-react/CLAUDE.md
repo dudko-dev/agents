@@ -74,6 +74,11 @@ against its production build.
   `AgentComposer`, `MessageList`, `StepList` (+ `ToolCallRow`),
   `ToolApprovalPrompt`, `ApprovalModeSwitch`, `ChatHistoryList`, `FilesPanel`, `LearnedSkills`
   (the agent's notebook: `learned` in the state belongs to the agent, not the conversation),
+  `SubagentTree` (+ `SubagentRow`: `subagents` in the state is a flat list that IS a tree -
+  `parentId` / `depth`, nested by `subagentTree`; nested `subagent.event` envelopes are unwrapped in
+  the reducer, and a helper's consent request is lifted from them), `Media` (`GeneratedMedia`: a
+  generated file read from the VFS into an object URL, only the core's media types, never SVG;
+  `TranscriptBlock`),
   `ContextMeter`, `Composer` (minimal), `PlanView`, `ModelLoadBar`,
   `UsageBadge`, `ApiKeyForm`, `icons`, `format`. Docs: `docs/chat.md`.
 - `apps/demo/src/components/McpPanel.tsx` (monorepo root) — the demo's "bring your own MCP" panel.
@@ -91,7 +96,9 @@ against its production build.
   server on loopback). `agent.spec.ts`, `steering.spec.ts`, `learning.spec.ts`: the agent end to end
   (a run, typing to it while it works, the notebook and the fetched pages) against a scripted Gemini
   endpoint (`gemini.ts`, routed by the stage markers; it can script tool calls and the notebook's
-  `save_skill`). `pipeline.spec.ts`: the pipeline editor at `/pipeline/` - mouse, keyboard, a real
+  `save_skill`). `helpers.spec.ts`: helpers the model starts (`spawn_subagent`) - the tree, Stop on a
+  slow helper, a helper's consent prompt; a helper's calls are told from the run's by what they
+  were given (a helper knows its task, never the user's goal). `pipeline.spec.ts`: the pipeline editor at `/pipeline/` - mouse, keyboard, a real
   run against the scripted endpoint, a reload, a phone (touch pan and pinch through CDP).
   `enterprise.spec.ts` is the one spec that does NOT use the demo: enterprise-managed MCP
   authorization (ID-JAG) has no screen there and the hooks take no `authProvider`, so it drives the

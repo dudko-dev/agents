@@ -1,10 +1,12 @@
 import type { ReactNode } from 'react'
-import type { IUsage } from '@dudko.dev/agent-web'
+import type { IUsage, VirtualFileSystem } from '@dudko.dev/agent-web'
 import { useLabels, type AgentLabels, type AgentLabelsOverride } from '../labels.js'
-import type { ChatAttachment, ChatMessage } from '../types.js'
+import type { ChatAttachment, ChatMessage, MediaView } from '../types.js'
 import { formatDuration, formatTokens } from './format.js'
 import { BookIcon, BrainIcon, FileIcon, GlobeIcon, SpinnerIcon } from './icons.js'
+import { GeneratedMedia, TranscriptBlock } from './Media.js'
 import { StepList, type RenderToolCall } from './StepList.js'
+import type { RenderSubagent } from './SubagentTree.js'
 
 export interface MessageListProps {
   messages: ChatMessage[]
@@ -26,6 +28,23 @@ export interface MessageListProps {
   showTiers?: boolean
   /** The "replanning failed, continuing with the plan" warning under a step (default true). */
   showReplanFailed?: boolean
+  /** The decision model's note under a step (default true; nothing shows without one). */
+  showDecisions?: boolean
+  /** A `web_search` call's results as a list under its row (default true). */
+  showSearchResults?: boolean
+  /** The subagent tree under the step that started it (default true). */
+  showSubagents?: boolean
+  /**
+   * What the run generated, in the answer: images inline, audio as a player - and the
+   * transcripts of audio files, folded (default true). Needs `files` to show the bytes.
+   */
+  showMedia?: boolean
+  /** The workspace generated files are read from (the core's `VirtualFileSystem`). */
+  files?: VirtualFileSystem
+  /** A generated file; `fallback` is the built-in image / player / chip. */
+  renderMedia?: (media: MediaView, message: ChatMessage, fallback: ReactNode) => ReactNode
+  /** A node of the subagent tree (gets the built-in `<li>` as `fallback`). */
+  renderSubagent?: RenderSubagent
   /** Give a running subagent a stop button (`useAgent().stopSubagent`). */
   onStopSubagent?: (id: string) => void
   /** Open the activity of finished answers too (default: only while it runs). */
@@ -111,6 +130,13 @@ export const MessageList = ({
   showLearned = true,
   showTiers = true,
   showReplanFailed = true,
+  showDecisions = true,
+  showSearchResults = true,
+  showSubagents = true,
+  showMedia = true,
+  files,
+  renderMedia,
+  renderSubagent,
   onStopSubagent,
   activityOpen = false,
   liveExtra,
@@ -157,7 +183,11 @@ export const MessageList = ({
                     showThoughts={showThoughts}
                     showTiers={showTiers}
                     showReplanFailed={showReplanFailed}
+                    showDecisions={showDecisions}
+                    showSearchResults={showSearchResults}
+                    showSubagents={showSubagents}
                     renderToolCall={renderToolCall}
+                    renderSubagent={renderSubagent}
                     labels={labels}
                   />
                   {showLearned && m.fetches?.length ? (
@@ -190,6 +220,13 @@ export const MessageList = ({
                   )}
                 </details>
               )}
+              {showMedia && m.transcripts?.length ? (
+                <div className="awr-msg__transcripts">
+                  {m.transcripts.map((t, i) => (
+                    <TranscriptBlock key={i} transcript={t} labels={labels} />
+                  ))}
+                </div>
+              ) : null}
               {(m.content || m.pending || !m.attachments?.length) && (
                 <div className="awr-msg__bubble">
                   {m.content ? (renderContent ? renderContent(m) : m.content) : null}
@@ -198,6 +235,22 @@ export const MessageList = ({
                   )}
                 </div>
               )}
+              {showMedia && m.media?.length ? (
+                <div className="awr-msg__media">
+                  {m.media.map((item, i) => {
+                    const built = (
+                      <GeneratedMedia key={i} media={item} files={files} labels={labels} />
+                    )
+                    return renderMedia ? (
+                      <span key={i} className="awr-msg__mediaitem">
+                        {renderMedia(item, m, built)}
+                      </span>
+                    ) : (
+                      built
+                    )
+                  })}
+                </div>
+              ) : null}
               {m.attachments?.length ? (
                 <div className="awr-msg__attachments" aria-label={L.attachments}>
                   {m.attachments.map((a, i) => (

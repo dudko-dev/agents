@@ -13,7 +13,8 @@ import { FilesPanel, type FilesPanelProps } from './FilesPanel.js'
 import { AlertIcon, FileIcon, HistoryIcon } from './icons.js'
 import { MessageList, type MessageListProps } from './MessageList.js'
 import { ModelLoadBar } from './ModelLoadBar.js'
-import type { RenderToolCall } from './StepList.js'
+import { decisionNote, type RenderToolCall } from './StepList.js'
+import type { RenderSubagent } from './SubagentTree.js'
 import { ToolApprovalPrompt, type ToolApprovalPromptProps } from './ToolApprovalPrompt.js'
 import { UsageBadge } from './UsageBadge.js'
 
@@ -86,6 +87,23 @@ export interface AgentChatProps {
   showTiers?: boolean
   /** The "replanning failed, continuing with the plan" warning (default true). */
   showReplanFailed?: boolean
+  /**
+   * The decision model's note under the step it was asked after - "decision model: continue
+   * (0.93)" (default true; nothing shows without `decisionModel`).
+   */
+  showDecisions?: boolean
+  /** A `web_search` call's results as a short list under its row (default true). */
+  showSearchResults?: boolean
+  /**
+   * The subagent tree - static subagents and the helpers the model started - under the step
+   * that started them (default true).
+   */
+  showSubagents?: boolean
+  /**
+   * What a run generated (`config.media`): images inline in the answer, audio as a player, and
+   * the transcripts of audio files, folded (default true). The bytes are read from `files`.
+   */
+  showMedia?: boolean
   /** A stop button on each running subagent (default true). */
   stoppableSubagents?: boolean
   /** Conversation total in the header (default true). */
@@ -132,6 +150,10 @@ export interface AgentChatProps {
   renderMessage?: MessageListProps['renderMessage']
   renderAttachment?: MessageListProps['renderAttachment']
   renderToolCall?: RenderToolCall
+  /** A node of the subagent tree. */
+  renderSubagent?: RenderSubagent
+  /** A generated image / audio file. */
+  renderMedia?: MessageListProps['renderMedia']
   renderApproval?: ToolApprovalPromptProps['renderApproval']
   slots?: AgentChatSlots
   components?: AgentChatComponents
@@ -188,6 +210,10 @@ const AgentChatInner = ({
   showLearned = true,
   showTiers = true,
   showReplanFailed = true,
+  showDecisions = true,
+  showSearchResults = true,
+  showSubagents = true,
+  showMedia = true,
   stoppableSubagents = true,
   showTotalUsage = true,
   showStatus = true,
@@ -204,6 +230,8 @@ const AgentChatInner = ({
   renderMessage,
   renderAttachment,
   renderToolCall,
+  renderSubagent,
+  renderMedia,
   renderApproval,
   slots = {},
   components = {},
@@ -283,8 +311,10 @@ const AgentChatInner = ({
   // A replanner that failed before any step exists has no step to hang its warning on.
   const replanFailedEarly =
     showReplanFailed && agent.replan?.failed === true && agent.steps.length === 0
+  // A decision made before any step exists has no step to sit under either.
+  const earlyDecisions = showDecisions ? (agent.decisions ?? []) : []
   const liveExtra =
-    agent.planThought.trim() || showReplan || replanFailedEarly ? (
+    agent.planThought.trim() || showReplan || replanFailedEarly || earlyDecisions.length > 0 ? (
       <>
         {agent.planThought.trim() && (
           <details className="awr-activity__plan">
@@ -302,6 +332,14 @@ const AgentChatInner = ({
             <AlertIcon size={12} /> {L.replanFailed}
           </p>
         )}
+        {earlyDecisions.map((d, i) => (
+          <p
+            key={i}
+            className={`awr-step__decision${d.accepted ? '' : ' awr-step__decision--fallback'}`}
+          >
+            {decisionNote(d, L)}
+          </p>
+        ))}
       </>
     ) : undefined
 
@@ -410,6 +448,13 @@ const AgentChatInner = ({
             showLearned={showLearned}
             showTiers={showTiers}
             showReplanFailed={showReplanFailed}
+            showDecisions={showDecisions}
+            showSearchResults={showSearchResults}
+            showSubagents={showSubagents}
+            showMedia={showMedia}
+            files={files}
+            renderMedia={renderMedia}
+            renderSubagent={renderSubagent}
             onStopSubagent={stoppableSubagents ? agent.stopSubagent : undefined}
             activityOpen={activityOpen}
             liveExtra={liveExtra}

@@ -1,20 +1,34 @@
 import { Fragment } from 'react'
 import type { ReactNode } from 'react'
 import { useLabels, type AgentLabels, type AgentLabelsOverride } from '../labels.js'
-import type { ApprovalView, StepView, SubagentView, ToolCallView, UserNoteView } from '../types.js'
-import { formatDuration, formatTokens, imagesInOutput, previewValue } from './format.js'
+import type {
+  ApprovalView,
+  DecisionView,
+  StepView,
+  SubagentView,
+  ToolCallView,
+  UserNoteView,
+} from '../types.js'
+import {
+  formatDuration,
+  formatProbability,
+  formatTokens,
+  imagesInOutput,
+  previewValue,
+  webSearchOf,
+} from './format.js'
 import {
   AlertIcon,
   ArrowUpIcon,
-  BotIcon,
   BrainIcon,
   CheckIcon,
+  GlobeIcon,
   SendIcon,
   ShieldIcon,
   SpinnerIcon,
-  StopIcon,
   ToolIcon,
 } from './icons.js'
+import { SubagentTree, type RenderSubagent } from './SubagentTree.js'
 
 /** Render a tool call yourself; `fallback` is the built-in `<li>` row — return it, or your own `<li>`. */
 export type RenderToolCall = (call: ToolCallView, fallback: ReactNode) => ReactNode
@@ -27,19 +41,35 @@ export interface ToolCallRowProps {
    * time (default true). Nothing shows without model tiers.
    */
   showTiers?: boolean
+  /**
+   * A `web_search` call's results as a short list under the row: the query, then title + host
+   * of each result as a link and its snippet as plain text (default true).
+   */
+  showSearchResults?: boolean
   labels?: AgentLabelsOverride
 }
 
-/** One tool call: name, arguments, status — and optionally its cost and any images it returned. */
+/** The name of the core's search tool (its `WEB_SEARCH_TOOL`). */
+const WEB_SEARCH = 'web_search'
+
+/**
+ * One tool call: name, arguments, status — and optionally its cost, any images it returned and,
+ * for a web search, what it found.
+ */
 export const ToolCallRow = ({
   call,
   showUsage = true,
   showTiers = true,
+  showSearchResults = true,
   labels,
 }: ToolCallRowProps) => {
   const L = useLabels(labels)
   const state = call.status === 'calling' ? 'calling' : call.ok === false ? 'failed' : 'ok'
   const images = call.ok === false ? [] : imagesInOutput(call.output).slice(0, 4)
+  const search =
+    showSearchResults && call.name === WEB_SEARCH && call.status === 'done' && call.ok !== false
+      ? webSearchOf(call.output)
+      : undefined
   const cost = [
     call.inputTokens ? `≈${formatTokens(call.inputTokens)} in` : '',
     call.outputTokens ? `≈${formatTokens(call.outputTokens)} out` : '',
@@ -84,56 +114,47 @@ export const ToolCallRow = ({
           ))}
         </div>
       )}
-    </li>
-  )
-}
-
-/**
- * A subagent delegation: name, task, live activity, and its answer when done. With
- * `onStop`, a running one gets a stop button (the run and its siblings go on).
- */
-export const SubagentRow = ({
-  sub,
-  onStop,
-  labels,
-}: {
-  sub: SubagentView
-  /** Stop this subagent (`useAgent().stopSubagent`); the button shows while it runs. */
-  onStop?: (id: string) => void
-  labels?: AgentLabelsOverride
-}) => {
-  const L = useLabels(labels)
-  return (
-    <li className={`awr-subagent awr-subagent--${sub.status}`}>
-      <div className="awr-subagent__head">
-        <BotIcon size={13} className="awr-subagent__icon" />
-        <span className="awr-subagent__name">{sub.name}</span>
-        {sub.profile && <span className="awr-subagent__profile">{sub.profile}</span>}
-        <span className="awr-subagent__task" title={sub.task}>
-          {previewValue(sub.task, 90)}
-        </span>
-        {sub.status === 'running' && <SpinnerIcon size={12} className="awr-tool__spin" />}
-        {sub.status === 'running' && onStop && (
-          <button
-            type="button"
-            className="awr-iconbtn awr-subagent__stop"
-            aria-label={L.stopSubagent}
-            title={L.stopSubagent}
-            onClick={() => onStop(sub.id)}
-          >
-            <StopIcon size={12} />
-          </button>
-        )}
-      </div>
-      <div className="awr-subagent__activity">
-        {sub.status === 'error'
-          ? sub.error
-          : sub.status === 'stopped'
-            ? L.subagentStopped
-            : sub.status === 'done'
-              ? previewValue(sub.text, 160)
-              : `${sub.activity}${sub.toolCalls ? ` · ${L.toolCalls(sub.toolCalls)}` : ''}`}
-      </div>
+      {search && (
+        <div className="awr-search">
+          <p className="awr-search__query">
+            <GlobeIcon size={12} /> {L.searchQuery} <q>{search.query}</q>
+          </p>
+          {search.results.length > 0 ? (
+            <ol className="awr-search__results">
+              {search.results.map((r, i) => (
+                <li key={i} className="awr-search__result">
+                  {/* Third-party text: React text nodes only, never markup. */}
+                  <a
+                    className="awr-search__title"
+                    href={r.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    {r.title}
+                  </a>{' '}
+                  <span className="awr-search__host">
+                    {r.host}
+                    {r.date ? ` · ${r.date}` : ''}
+                  </span>
+                  {r.snippet && <p className="awr-search__snippet">{r.snippet}</p>}
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <p className="awr-search__note">{L.searchNoResults}</p>
+          )}
+          {(search.filtered > 0 || search.truncated) && (
+            <p className="awr-search__note">
+              {[
+                search.filtered > 0 ? L.searchFiltered(search.filtered) : '',
+                search.truncated ? L.searchTruncated : '',
+              ]
+                .filter(Boolean)
+                .join(' · ')}
+            </p>
+          )}
+        </div>
+      )}
     </li>
   )
 }
@@ -156,6 +177,21 @@ export const UserNoteRow = ({
   )
 }
 
+/** "decision model: continue (0.93)" / "decision model fell back: low confidence (0.41 < 0.8)". */
+export const decisionNote = (d: DecisionView, L: AgentLabels): string => {
+  if (d.accepted) {
+    return L.decisionAccepted(
+      d.choice ?? '',
+      d.confidence !== undefined ? formatProbability(d.confidence) : '',
+    )
+  }
+  const detail =
+    d.reason === 'low-confidence' && d.confidence !== undefined
+      ? `${formatProbability(d.confidence)} < ${formatProbability(d.threshold)}`
+      : ''
+  return L.decisionFellBack(d.reason ? L.decisionReasons[d.reason] : '', detail)
+}
+
 const decisionLabel = (a: ApprovalView, L: AgentLabels): string =>
   a.status === 'pending'
     ? L.consentWaiting
@@ -174,7 +210,11 @@ interface StepItemProps {
   showThoughts: boolean
   showTiers: boolean
   showReplanFailed: boolean
+  showDecisions: boolean
+  showSearchResults: boolean
+  showSubagents: boolean
   renderToolCall?: RenderToolCall
+  renderSubagent?: RenderSubagent
   L: AgentLabels
 }
 
@@ -189,7 +229,11 @@ const StepItem = ({
   showThoughts,
   showTiers,
   showReplanFailed,
+  showDecisions,
+  showSearchResults,
+  showSubagents,
   renderToolCall,
+  renderSubagent,
   L,
 }: StepItemProps) => (
   <li className={`awr-step awr-step--${step.blocked ? 'blocked' : step.status}`}>
@@ -249,7 +293,13 @@ const StepItem = ({
       <ul className="awr-step__tools">
         {step.toolCalls.map((call, i) => {
           const row = (
-            <ToolCallRow key={i} call={call} showUsage={showUsage} showTiers={showTiers} />
+            <ToolCallRow
+              key={i}
+              call={call}
+              showUsage={showUsage}
+              showTiers={showTiers}
+              showSearchResults={showSearchResults}
+            />
           )
           return renderToolCall ? <Fragment key={i}>{renderToolCall(call, row)}</Fragment> : row
         })}
@@ -262,16 +312,18 @@ const StepItem = ({
             <ShieldIcon size={13} className="awr-tool__icon" />
             <code className="awr-tool__name">{a.name}</code>
             <span className="awr-tool__args">{decisionLabel(a, L)}</span>
+            {a.subagent && <span className="awr-tool__tag">{L.subagentHelper}</span>}
           </li>
         ))}
       </ul>
     )}
-    {subagents.length > 0 && (
-      <ul className="awr-subagents">
-        {subagents.map((sub) => (
-          <SubagentRow key={sub.id} sub={sub} onStop={onStopSubagent} />
-        ))}
-      </ul>
+    {showSubagents && (
+      <SubagentTree
+        subagents={subagents}
+        onStop={onStopSubagent}
+        showUsage={showUsage}
+        renderSubagent={renderSubagent}
+      />
     )}
     {notes.length > 0 && (
       <ul className="awr-notes">
@@ -286,6 +338,16 @@ const StepItem = ({
         <AlertIcon size={12} /> {L.replanFailed}
       </p>
     )}
+    {showDecisions &&
+      step.decisions?.map((d, i) => (
+        <p
+          key={i}
+          className={`awr-step__decision${d.accepted ? '' : ' awr-step__decision--fallback'}`}
+          title={d.model}
+        >
+          {decisionNote(d, L)}
+        </p>
+      ))}
   </li>
 )
 
@@ -301,6 +363,10 @@ export interface StepListProps {
   showNotes?: boolean
   /** Give a running subagent a stop button (`agent.stopSubagent`). */
   onStopSubagent?: (id: string) => void
+  /** The subagent tree under the step that started it (default true). */
+  showSubagents?: boolean
+  /** Render a node of the subagent tree yourself (gets the built-in `<li>` as `fallback`). */
+  renderSubagent?: RenderSubagent
   /** Show each tool call (default true). */
   showToolCalls?: boolean
   /** Show each tool call's ≈tokens and duration (default true). */
@@ -314,6 +380,13 @@ export interface StepListProps {
   showTiers?: boolean
   /** The "replanning failed, continuing with the plan" warning under a step (default true). */
   showReplanFailed?: boolean
+  /**
+   * The decision model's note under the step it was asked after - "decision model: continue
+   * (0.93)" (default true; nothing shows without `decisionModel`).
+   */
+  showDecisions?: boolean
+  /** A `web_search` call's results as a list under its row (default true). */
+  showSearchResults?: boolean
   /** Render tool calls yourself (gets the built-in row as `fallback`). */
   renderToolCall?: RenderToolCall
   labels?: AgentLabelsOverride
@@ -336,7 +409,11 @@ export const StepList = ({
   showThoughts = true,
   showTiers = true,
   showReplanFailed = true,
+  showDecisions = true,
+  showSearchResults = true,
+  showSubagents = true,
   renderToolCall,
+  renderSubagent,
   labels,
   className,
 }: StepListProps) => {
@@ -346,6 +423,9 @@ export const StepList = ({
   // A note tied to a step shows under it; one said before the answer (or whose step is
   // gone) shows at the end.
   const atEnd = showNotes ? notes.filter((n) => !n.stepId || !known.has(n.stepId)) : []
+  // A subagent is drawn under the step that delegated it (its own subagents come with it: they
+  // carry the same step). One whose step is not known is drawn at the end rather than lost.
+  const loose = showSubagents ? subagents.filter((s) => !s.stepId || !known.has(s.stepId)) : []
   return (
     <ol className={['awr-steps', className].filter(Boolean).join(' ')}>
       {steps.map((step) => (
@@ -361,10 +441,24 @@ export const StepList = ({
           showThoughts={showThoughts}
           showTiers={showTiers}
           showReplanFailed={showReplanFailed}
+          showDecisions={showDecisions}
+          showSearchResults={showSearchResults}
+          showSubagents={showSubagents}
           renderToolCall={renderToolCall}
+          renderSubagent={renderSubagent}
           L={L}
         />
       ))}
+      {loose.length > 0 && (
+        <li className="awr-step awr-step--subagents">
+          <SubagentTree
+            subagents={loose}
+            onStop={onStopSubagent}
+            showUsage={showUsage}
+            renderSubagent={renderSubagent}
+          />
+        </li>
+      )}
       {atEnd.length > 0 && (
         <li className="awr-step awr-step--notes">
           <ul className="awr-notes">

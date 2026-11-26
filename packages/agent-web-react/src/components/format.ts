@@ -50,3 +50,75 @@ export const imagesInOutput = (output: unknown, depth = 0): string[] => {
   }
   return []
 }
+
+/** One result of the core's `web_search` tool, as far as a UI shows it. */
+export interface WebSearchResultView {
+  title: string
+  /** An http(s) address - anything else is left out. */
+  url: string
+  /** The host of `url`, for the line under the title. */
+  host: string
+  snippet: string
+  date?: string
+}
+
+export interface WebSearchView {
+  query: string
+  results: WebSearchResultView[]
+  /** Results the egress policy left out. */
+  filtered: number
+  truncated: boolean
+}
+
+const text = (v: unknown, max: number): string =>
+  typeof v === 'string' ? v.replace(/\s+/g, ' ').trim().slice(0, max) : ''
+
+/**
+ * The result of the core's `web_search` tool (`{ query, results: [{ title, url, snippet, date? }],
+ * filtered?, truncated?, untrusted: true }`), or undefined when `output` is not one. Titles and
+ * snippets are third-party text: they come back as plain strings, to be rendered as text. A
+ * result whose `url` is not http(s) is dropped, so a link can never be a `javascript:` one.
+ */
+export const webSearchOf = (output: unknown): WebSearchView | undefined => {
+  let value = output
+  if (typeof value === 'string') {
+    try {
+      value = JSON.parse(value)
+    } catch {
+      return undefined
+    }
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const o = value as Record<string, unknown>
+  if (typeof o.query !== 'string' || !Array.isArray(o.results)) return undefined
+  const results: WebSearchResultView[] = []
+  for (const r of o.results.slice(0, 10)) {
+    if (!r || typeof r !== 'object') continue
+    const item = r as Record<string, unknown>
+    if (typeof item.url !== 'string') continue
+    let url: URL
+    try {
+      url = new URL(item.url)
+    } catch {
+      continue
+    }
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') continue
+    const date = text(item.date, 40)
+    results.push({
+      title: text(item.title, 200) || url.host,
+      url: url.href,
+      host: url.host,
+      snippet: text(item.snippet, 400),
+      ...(date ? { date } : {}),
+    })
+  }
+  return {
+    query: text(o.query, 300),
+    results,
+    filtered: typeof o.filtered === 'number' && o.filtered > 0 ? o.filtered : 0,
+    truncated: o.truncated === true,
+  }
+}
+
+/** 0.934 → "0.93", 0.8 → "0.8", 1 → "1". */
+export const formatProbability = (p: number): string => String(Math.round(p * 100) / 100)
