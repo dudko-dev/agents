@@ -1,3 +1,8 @@
+# 0.0.37 / 2026-11-26
+
+### :tada: Enhancements
+- Updated dependencies: ai
+
 # 0.0.35 / 2026-11-21
 
 ### :tada: Enhancements

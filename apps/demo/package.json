@@ -10,34 +10,34 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "^4.0.99",
-    "@ai-sdk/cerebras": "^3.0.87",
-    "@ai-sdk/google": "^4.0.114",
-    "@ai-sdk/groq": "^4.0.78",
-    "@ai-sdk/mistral": "^4.0.81",
-    "@ai-sdk/moonshotai": "^3.0.87",
-    "@ai-sdk/openai": "^4.0.111",
+    "@ai-sdk/anthropic": "^4.0.110",
+    "@ai-sdk/cerebras": "^3.0.97",
+    "@ai-sdk/google": "^4.0.128",
+    "@ai-sdk/groq": "^4.0.88",
+    "@ai-sdk/mistral": "^4.0.91",
+    "@ai-sdk/moonshotai": "^3.0.97",
+    "@ai-sdk/openai": "^4.0.125",
     "@browser-ai/core": "^3.0.4",
-    "@browser-ai/transformers-js": "^3.0.4",
+    "@browser-ai/transformers-js": "^3.0.5",
     "@browser-ai/web-llm": "^3.0.4",
     "@dudko.dev/agent-web": "workspace:*",
     "@dudko.dev/pdf-to-md-core": "^0.3.6",
     "@huggingface/transformers": "^4.3.2",
-    "@mlc-ai/web-llm": "^0.2.87",
+    "@mlc-ai/web-llm": "^0.2.89",
     "@modelcontextprotocol/sdk": "^1.32.2",
     "@openrouter/ai-sdk-provider": "^3.1.0",
-    "ai": "^7.0.179",
+    "ai": "^7.0.183",
     "chess.js": "^1.4.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@types/react": "^19.3.0",
+    "@dudko.dev/agent-web-react": "workspace:*",
+    "@types/react": "^19.3.3",
     "@types/react-dom": "^19.3.0",
-    "@vitejs/plugin-react": "^6.2.1",
+    "@vitejs/plugin-react": "^6.3.0",
     "typescript": "^6.0.3",
-    "vite": "^8.3.6",
-    "@dudko.dev/agent-web-react": "workspace:*"
+    "vite": "^8.4.0"
   }
 }
