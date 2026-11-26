@@ -73,7 +73,7 @@ tool. Do not infer success from "the change looks right".
 
 - Prettier (root `.prettierrc.json`): no semicolons, single quotes, trailing commas, width 100.
   It checks `.ts` / `.tsx` / `.css` only — do not run it on `.md`.
-- Docs ship inside the npm packages: a new config field, event, export, env var or label is
+- Docs live next to the code (the README goes to npm; `docs/*.md` are published on the site, not in the npm package): a new config field, event, export, env var or label is
   documented in the same pull request (each package's `CLAUDE.md` says where).
 - Security boundaries (safe fetch / egress, learning guards, consent, OAuth) need a test for every
   guard and a mutation check.

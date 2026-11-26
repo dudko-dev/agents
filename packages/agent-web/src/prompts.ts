@@ -43,6 +43,8 @@ export interface PlannerPromptContext {
   searchMode?: boolean
   /** Set when `config.sandbox` is on: when to plan a `run_js` step. */
   sandbox?: string
+  /** Set when `config.executorTiers` is on: the planner rates every step's complexity. */
+  tiers?: boolean
 }
 export interface ExecutorPromptContext {
   goal: string
@@ -78,6 +80,8 @@ export interface ReplannerPromptContext {
   updates?: string[]
   /** How many of `updates` (the last ones) the plan has not been weighed against yet. */
   newUpdates?: number
+  /** Set when `config.executorTiers` is on: the steps of a revised plan are rated too. */
+  tiers?: boolean
 }
 export interface SynthesizerPromptContext {
   goal: string
@@ -166,6 +170,17 @@ ${PLANNER_RULES}`
 
 const PLANNER_SKILLS = `\nIf a SKILLS list is present, list the names of the skills that apply to this goal in "skills" (or leave it empty).`
 
+// Only in the prompts of an agent with `config.executorTiers`: runs without it send what they
+// always did. The levels are spelled out the same way everywhere, so a model sees one vocabulary.
+const COMPLEXITY_LEVELS = `low = mechanical work (a lookup, one obvious tool call, copying or reformatting data); medium = ordinary work (a few tool calls, some judgement); high = hard work (multi-part reasoning, analysis, writing or fixing code, weighing conflicting data). When unsure between two, choose the higher.`
+
+const PLANNER_TIERS_NATIVE = `\nSteps run on models of different strength: set "complexity" on every step. ${COMPLEXITY_LEVELS}`
+
+// The prompted plan is a list of strings, so the rating is a tag at the start of each one.
+const PLANNER_TIERS_PROMPTED = `\nSteps run on models of different strength: start every "plan" string with its complexity in brackets, e.g. "[low] Look up the order". ${COMPLEXITY_LEVELS}`
+
+const REPLANNER_TIERS = `\nIf you revise, start every "plan" string with its complexity in brackets, e.g. "[high] Rework the query". ${COMPLEXITY_LEVELS}`
+
 const PLANNER_SEARCH = `\nThe TOOLS list may be abbreviated: the executor can search the full catalogue, so describe WHAT to do; name tools only when you see them listed.`
 
 // --- executor --------------------------------------------------------------
@@ -233,6 +248,7 @@ export const defaultPrompts: Prompts = {
     system:
       (ctx.mode === 'prompted' ? PLANNER_PROMPTED : PLANNER_NATIVE) +
       (ctx.skills ? PLANNER_SKILLS : '') +
+      (ctx.tiers ? (ctx.mode === 'prompted' ? PLANNER_TIERS_PROMPTED : PLANNER_TIERS_NATIVE) : '') +
       (ctx.searchMode ? PLANNER_SEARCH : '') +
       (ctx.sandbox ? `\n${ctx.sandbox}` : '') +
       section('SKILLS', ctx.skills) +
@@ -262,6 +278,7 @@ export const defaultPrompts: Prompts = {
   replanner: (ctx) => ({
     system:
       (ctx.mode === 'prompted' ? REPLANNER_PROMPTED : REPLANNER_NATIVE) +
+      (ctx.tiers ? REPLANNER_TIERS : '') +
       section('ACTIVE SKILL INSTRUCTIONS', ctx.activeSkills),
     prompt: [
       `GOAL: ${ctx.goal}`,

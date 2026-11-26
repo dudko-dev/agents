@@ -52,6 +52,7 @@ export const decideReplan = async (
       mode,
       activeSkills: active.length ? renderActiveSkills(active) : undefined,
       ...(updates?.length ? { updates, newUpdates } : {}),
+      ...(ctx.tiers ? { tiers: true } : {}),
     })
     return {
       ...stageCall(ctx, 'replanner', parts.system),

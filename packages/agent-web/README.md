@@ -531,6 +531,8 @@ Loading a definition someone else wrote: [docs/security.md](docs/security.md#pip
 | --- | --- | --- |
 | `model` | — | a `LanguageModel` or `ProviderModelSpec` (the executor/default) |
 | `planner` / `synthesizer` | = `model` | per-stage model overrides (inherit base provider/creds if partial) |
+| `executorTiers` | off | `{ light?, standard?, strong? }`, each a model like `planner`: the planner rates every step low / medium / high and the executor runs it on that tier's model; a tier that is not configured falls back to the nearest one; the smallest window among them governs the run ([model tiers](docs/capabilities.md#model-tiers-and-escalation)) |
+| `escalation` | on with tiers | `false`, or `{ maxPerStep?, maxPerRun? }` (1 / 3): a step that fails in a way a stronger model could fix is retried on the next stronger tier before the replanner is asked - continuing the step, never writing twice. Nothing without tiers |
 | `credentials` | — | a `CredentialStore` for `credentialRef` keys |
 | `tools` | `{}` | host tools (`defineTool`) |
 | `availableTools` / `excludedTools` | — | whitelist / blacklist of tool names mounted from `tools` |

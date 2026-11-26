@@ -35,6 +35,11 @@ Required env vars (set directly or via --env-file):
   MCP_SERVERS           JSON: { "<name>": { "url": "...", "headers"?: {...} } | { "command": "...", "args"?: [], "env"?: {} } }
 
 Optional env vars (see env.example for the full list):
+  AGENT_EXECUTOR_LIGHT_MODEL  a cheaper executor model for steps the planner rates "low"
+  AGENT_EXECUTOR_STRONG_MODEL a stronger executor model for steps it rates "high" (AGENT_MODEL runs the rest);
+                              each takes _PROVIDER_TYPE / _BASE_URL / _API_KEY / _PROVIDER_OPTIONS like the planner
+  AGENT_ESCALATION            off keeps a failed step on its tier (default with tier models: retry it on a stronger one)
+  AGENT_ESCALATION_MAX_PER_STEP / _PER_RUN  caps on those retries (default 1 / 3)
   AGENT_THINKING              off | minimal | low | medium | high | xhigh | <budget tokens>
   AGENT_MAX_INPUT_TOKENS      per-run caps; crossing one jumps to the final answer
   AGENT_MAX_OUTPUT_TOKENS

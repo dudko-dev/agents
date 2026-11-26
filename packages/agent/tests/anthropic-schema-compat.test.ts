@@ -2,8 +2,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { zodSchema } from '@ai-sdk/provider-utils'
 import type { z } from 'zod'
-import { PlanSchema } from '../src/planner.ts'
-import { DecisionSchema } from '../src/replanner.ts'
+import { PlanSchema, TieredPlanSchema } from '../src/planner.ts'
+import { DecisionSchema, TieredDecisionSchema } from '../src/replanner.ts'
 
 // Anthropic's native structured output (output_config.format.schema) rejects
 // `maxItems` on array types. This test guards against re-introducing it.
@@ -22,6 +22,9 @@ const collect = (node: unknown, path: string, hits: string[]): void => {
 const cases: ReadonlyArray<readonly [string, z.ZodType]> = [
   ['PlanSchema', PlanSchema],
   ['DecisionSchema (replanner)', DecisionSchema],
+  // With config.executorTiers: the same schemas plus a step's `complexity` enum.
+  ['TieredPlanSchema', TieredPlanSchema],
+  ['TieredDecisionSchema (replanner)', TieredDecisionSchema],
 ]
 
 for (const [name, schema] of cases) {

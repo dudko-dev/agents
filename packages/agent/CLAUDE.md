@@ -102,6 +102,18 @@
     (`generateStructured` on the planner model), `nodeResolver`. A definition is untrusted input: the
     caps, the `otherwise` rule, the condition input bound and the join deferral each need a test
     and a mutation check.
+  - `tiers.ts` (`config.executorTiers` / `config.escalation`, the pure rules: `pickTier` - the
+    planner's `complexity`, else `standard`; a missing tier falls back to the nearest configured one,
+    the stronger of two; `escalationReasonOf` / `isEscalatableError` - what is a failure a stronger
+    model could fix; what the escalated attempt is shown; and the write guard, `IStepWrites`: a
+    non-read-only call that already succeeded in an earlier attempt at the step is answered from its
+    result by `tool-wrap.ts`, not executed again). The runner's escalation loop is in `runner.ts`,
+    the tiered schemas in `planner.ts` / `replanner.ts` (SEPARATE schemas: an agent without tiers
+    sends what it always did). Same rules and names as the browser sibling's `src/tiers.ts`: change
+    both. OFF without `executorTiers.light` / `.strong`: `tests/model-tiers.test.ts` compares the
+    requests with `tests/fixtures/requests-without-tiers.json`, recorded before the feature existed
+    (`UPDATE_GOLDEN=1` rewrites it after a deliberate prompt or schema change). Every guard has a
+    test there and a mutation check.
   - `internal.ts` (`IRunState`: the per-run mutable state shared by the runner, the stages and the tool
     wrappers) + `context.ts` (`runContext`, the AsyncLocalStorage that carries run id, emit and state
     into tools). Neither is public API.

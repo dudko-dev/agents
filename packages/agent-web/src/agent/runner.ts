@@ -1,7 +1,7 @@
 import type { LanguageModel, ToolSet } from 'ai'
 import { resolveCaching } from '../caching.js'
 import type { BrowserAgentConfig } from '../config.js'
-import { resolveBudgets, resolveConfig } from '../config.js'
+import { resolveBudgets, resolveConfig, stageOutputCap } from '../config.js'
 import type { AgentEvent, AgentEventHandler, UsagePhase } from '../events.js'
 import { checkLimits, type LimitBreach } from '../limits.js'
 import {
@@ -50,20 +50,41 @@ import type { AgentToolSet } from '../tools/types.js'
 import { createCallCounter, schemaHintOf, wrapToolsForRun } from '../tools/wrap.js'
 import { portOf, type RunControl, type RunControlPort } from './control.js'
 import { executeStep, replanWanted } from './executor.js'
-import type { AgentContext, EffectiveToolStrategy } from './internal.js'
+import type {
+  AgentContext,
+  EffectiveToolStrategy,
+  ExecutorTier,
+  ExecutorTiers,
+} from './internal.js'
 import {
   addUsage,
   emptyUsage,
   type IPlan,
   type IPlanStep,
+  type IStepEscalation,
   type IStepResult,
+  type IToolCall,
   type IUsage,
+  type ModelTier,
 } from './loop-types.js'
 import { resolveResume, type RunSnapshot, type RunStatus } from './persistence.js'
 import { createPlan, type PlanOutcome } from './planner.js'
 import { decideReplan } from './replanner.js'
 import { synthesizeAnswer } from './synthesizer.js'
 import { createLogger } from '../logger.js'
+import { splitComplexityTag } from '../parse.js'
+import {
+  createStepWrites,
+  escalationReasonOf,
+  isEscalatableError,
+  MODEL_TIERS,
+  nextStrongerTier,
+  pickTier,
+  REPLAY_NOTE,
+  resolveEscalation,
+  type IEarlierAttempt,
+  type IStepWrites,
+} from '../tiers.js'
 import { collectMcpInstructions, renderMcpInstructions } from '../mcp/shared.js'
 import {
   AttachmentsNotSupportedError,
@@ -211,10 +232,20 @@ export interface Agent {
     planner: LanguageModel
     executor: LanguageModel
     synthesizer: LanguageModel
+    /** The executor models by tier, when `config.executorTiers` is on (`standard` is `executor`). */
+    tiers?: Partial<Record<ModelTier, LanguageModel>>
   }
 }
 
 const errMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err))
+
+/** A model's id, for the tier events. */
+const modelIdOf = (model: LanguageModel): string =>
+  typeof model === 'string' ? model : ((model as { modelId?: string }).modelId ?? 'unknown')
+
+/** A call the tool wrapper answered from an earlier attempt instead of running it. */
+const isReplayed = (call: IToolCall): boolean =>
+  typeof call.output === 'string' && call.output.startsWith(REPLAY_NOTE)
 
 /** Apply the config's availableTools whitelist and excludedTools blacklist. */
 const filterTools = (
@@ -257,19 +288,40 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
       config.credentials,
       cfg.clientName,
     )
-  const executorP = buildStage(undefined, 'executor')
-  const [executorModel, plannerModel, synthesizerModel] = await Promise.all([
-    executorP,
-    config.planner === undefined ? executorP : buildStage(config.planner, 'planner'),
-    config.synthesizer === undefined ? executorP : buildStage(config.synthesizer, 'synthesizer'),
-  ])
+  // The `standard` tier IS the executor: `model`, unless executorTiers.standard overrides it.
+  // Tiers are in play only when a light or a strong model is named too.
+  const tierInput = config.executorTiers ?? {}
+  const executorP = buildStage(tierInput.standard, 'executor')
+  const [executorModel, plannerModel, synthesizerModel, lightModel, strongModel] =
+    await Promise.all([
+      executorP,
+      config.planner === undefined ? executorP : buildStage(config.planner, 'planner'),
+      config.synthesizer === undefined ? executorP : buildStage(config.synthesizer, 'synthesizer'),
+      tierInput.light === undefined
+        ? undefined
+        : buildStage(tierInput.light, 'executorTiers.light'),
+      tierInput.strong === undefined
+        ? undefined
+        : buildStage(tierInput.strong, 'executorTiers.strong'),
+    ])
+  const tierModels: Partial<Record<ModelTier, LanguageModel>> | undefined =
+    lightModel || strongModel
+      ? {
+          ...(lightModel ? { light: lightModel } : {}),
+          standard: executorModel,
+          ...(strongModel ? { strong: strongModel } : {}),
+        }
+      : undefined
 
   const plannerMode = selectToolMode(plannerModel, cfg.toolMode)
   const executorMode = selectToolMode(executorModel, cfg.toolMode)
   // The window every run must fit: the configured one, capped by the smallest
   // window of the models in play (a local model's is a few thousand tokens),
-  // with the compaction sizes derived from it.
-  const modelWindows = [executorModel, plannerModel, synthesizerModel]
+  // with the compaction sizes derived from it. Every executor tier is a model in play: a step
+  // may land on any of them (by the plan, or by escalation), and the step log and transcript it
+  // is handed were compacted before anyone knew which - so the SMALLEST tier's window governs.
+  const modelWindows = [executorModel, plannerModel, synthesizerModel, lightModel, strongModel]
+    .filter((m): m is LanguageModel => m !== undefined)
     .map(contextWindowOf)
     .filter((w): w is number => w !== undefined)
   const modelWindow = modelWindows.length ? Math.min(...modelWindows) : undefined
@@ -277,6 +329,37 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
   // The per-call output caps follow the window that is really in use (a 4k local model cannot
   // hold a 3000-token answer next to its prompt); what the host set explicitly still wins.
   cfg.budgets = resolveBudgets(config, cfg.compaction.contextWindowTokens)
+  // Each tier's own tool-mode and output cap. The PROMPT of a step is fitted to the smallest
+  // window (above); how much the step may WRITE follows the model that writes it: its own window
+  // when that is known (a local model), else the window the host stated, else the run's. Never
+  // less than the run's window - the prompt was sized for that one, so the room is there.
+  const tiers: ExecutorTiers | undefined = tierModels
+    ? {
+        byTier: Object.fromEntries(
+          MODEL_TIERS.filter((t) => tierModels[t] !== undefined).map((t) => {
+            const model = tierModels[t] as LanguageModel
+            const own = contextWindowOf(model)
+            const stated = config.compaction?.contextWindowTokens
+            const windowTokens = Math.max(
+              cfg.compaction.contextWindowTokens,
+              own !== undefined
+                ? Math.min(own, stated ?? Infinity)
+                : (stated ?? cfg.compaction.contextWindowTokens),
+            )
+            const tier: ExecutorTier = {
+              model,
+              mode: selectToolMode(model, cfg.toolMode),
+              id: modelIdOf(model),
+              windowTokens,
+              outputCap: stageOutputCap(config, 'executor', windowTokens).tokens ?? 0,
+            }
+            return [t, tier]
+          }),
+        ),
+        configured: new Set(MODEL_TIERS.filter((t) => tierModels[t] !== undefined)),
+        escalation: resolveEscalation(config.escalation, true),
+      }
+    : undefined
   // A known small window means compacting by tokens even without a configured
   // `compaction` (the legacy chars threshold knows nothing of the window).
   const byTokens = Boolean(config.compaction) || modelWindow !== undefined
@@ -488,6 +571,10 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
       (u) => ({ ...u }),
     )
     let currentStep: IPlanStep | undefined
+    // Escalations made so far in the run (`escalation.maxPerRun`), and the writes of the step in
+    // flight while it may be escalated (the tool wrapper reads them: see `tiers.ts`).
+    let escalationCount = resumed?.escalations ?? 0
+    let stepWrites: IStepWrites | undefined
     const counter = createCallCounter(cfg.maxToolCalls, resumed?.toolCalls)
     const builtins: ToolSet = {}
     if (skills.length || learning) {
@@ -524,6 +611,7 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
         control: port,
         runId,
         fetched,
+        stepWrites: () => stepWrites,
       },
     )
     // Take what the user sent since the last boundary and hand it to the model: recorded (a
@@ -623,6 +711,7 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
       raw: config,
       plannerModel,
       executorModel,
+      ...(tiers ? { tiers } : {}),
       synthesizerModel,
       plannerMode,
       executorMode,
@@ -757,6 +846,7 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
         discovered: [...discovered],
         attachments: images.length,
         ...(userUpdates.length ? { userUpdates: userUpdates.map((u) => ({ ...u })) } : {}),
+        ...(escalationCount ? { escalations: escalationCount } : {}),
         ...extra,
       })
       const persist = async (
@@ -802,13 +892,119 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
         const step = remaining.shift() as IPlanStep
         const stepNo = result.trace.length + 1
         const total = stepNo + remaining.length
-        emit({ type: 'step.start', step, index: stepNo, total })
+        // With `config.executorTiers`: the tier the planner's rating names (or the nearest
+        // configured one), announced with the step. Without: the event is what it always was.
+        const routed = tiers ? pickTier(step.complexity, tiers.configured) : undefined
+        emit({
+          type: 'step.start',
+          step,
+          index: stepNo,
+          total,
+          ...(tiers && routed
+            ? {
+                tier: routed.tier,
+                model: tiers.byTier[routed.tier]?.id,
+                tierReason: routed.reason,
+              }
+            : {}),
+        })
 
         let stepResult: IStepResult
+        // With tiers: what is known of the step should its last attempt throw - the tier it was
+        // on, how it got there, and the calls that had already been made.
+        let reached: Pick<IStepResult, 'tier' | 'model' | 'escalations'> = {}
+        let made: () => IToolCall[] = () => []
         try {
-          const out = await executeStep(ctx, text, step, stepNo, total, done)
-          bumpUsage(out.usage, 'execute')
-          stepResult = out.result
+          if (!tiers || !routed) {
+            const out = await executeStep(ctx, text, step, stepNo, total, done)
+            bumpUsage(out.usage, 'execute')
+            stepResult = out.result
+          } else {
+            // ESCALATION: an attempt that failed in a way a stronger model could fix is retried
+            // on the next stronger configured tier, before the replanner hears of it. The retry
+            // CONTINUES the step: it is shown the earlier attempts' tool calls and results, and
+            // the tool wrapper does not execute again a write that already succeeded.
+            let tier = routed.tier
+            const earlier: IEarlierAttempt[] = []
+            const escalations: IStepEscalation[] = []
+            const mayEscalate = (): boolean =>
+              tiers.escalation.enabled &&
+              escalations.length < tiers.escalation.maxPerStep &&
+              escalationCount < tiers.escalation.maxPerRun &&
+              !isAborted() &&
+              !breach()
+            if (tiers.escalation.enabled && nextStrongerTier(tier, tiers.configured)) {
+              stepWrites = createStepWrites()
+            }
+            for (;;) {
+              const calls: IToolCall[] = []
+              reached = {
+                tier,
+                model: tiers.byTier[tier]?.id,
+                ...(escalations.length ? { escalations: [...escalations] } : {}),
+              }
+              made = () => [...earlier.flatMap((a) => a.toolCalls), ...calls]
+              let out: Awaited<ReturnType<typeof executeStep>> | undefined
+              let failure: { error: unknown } | undefined
+              try {
+                out = await executeStep(ctx, text, step, stepNo, total, done, {
+                  tier,
+                  calls,
+                  ...(earlier.length ? { earlier } : {}),
+                })
+                bumpUsage(out.usage, 'execute')
+              } catch (err) {
+                failure = { error: err }
+              }
+              const next = mayEscalate() ? nextStrongerTier(tier, tiers.configured) : undefined
+              const reason = !next
+                ? undefined
+                : failure
+                  ? !(failure.error instanceof AttachmentsNotSupportedError) &&
+                    isEscalatableError(failure.error)
+                    ? ('error' as const)
+                    : undefined
+                  : escalationReasonOf((out as NonNullable<typeof out>).outcome)
+              if (!next || !reason) {
+                if (failure) throw failure.error
+                const last = (out as NonNullable<typeof out>).result
+                stepResult = {
+                  ...last,
+                  // Every attempt's calls, in order: all of them happened.
+                  toolCalls: [...earlier.flatMap((a) => a.toolCalls), ...last.toolCalls],
+                  ...reached,
+                }
+                break
+              }
+              if (failure) {
+                log.warn(
+                  `the ${tier} model failed on step ${stepNo}, retrying on ${next}:`,
+                  errMessage(failure.error),
+                )
+              }
+              earlier.push({
+                tier,
+                reason,
+                summary: failure
+                  ? errMessage(failure.error)
+                  : (out as NonNullable<typeof out>).result.summary,
+                toolCalls: failure ? calls : (out as NonNullable<typeof out>).result.toolCalls,
+              })
+              escalations.push({ from: tier, to: next, reason })
+              escalationCount += 1
+              if (stepWrites) stepWrites.attempt += 1
+              log.info(`step ${stepNo} escalated ${tier} → ${next} (${reason})`)
+              emit({
+                type: 'step.escalated',
+                step,
+                from: tier,
+                to: next,
+                model: tiers.byTier[next]?.id ?? '',
+                reason,
+              })
+              tier = next
+            }
+          }
         } catch (err) {
           // A user abort surfaces as a thrown AbortError — that is a stop, not
           // a step failure.
@@ -816,13 +1012,21 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
           // A model that refuses the attachments can't do any step: end the run.
           if (err instanceof AttachmentsNotSupportedError) throw err
           emit({ type: 'error', phase: 'execute', error: errMessage(err) })
-          stepResult = { step, summary: errMessage(err), toolCalls: [], blocked: true }
+          stepResult = {
+            step,
+            summary: errMessage(err),
+            toolCalls: made(),
+            blocked: true,
+            ...reached,
+          }
         } finally {
           currentStep = undefined
+          stepWrites = undefined
         }
 
         result.trace.push(stepResult)
-        const applied = stepResult.toolCalls.filter((c) => c.ok).length
+        // A call answered from an earlier attempt did not go through a second time.
+        const applied = stepResult.toolCalls.filter((c) => c.ok && !isReplayed(c)).length
         const failed = stepResult.toolCalls.length - applied
         result.applied += applied
         result.steps = stepNo
@@ -940,7 +1144,11 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
             if (!byUser) revisions += 1
             remaining = decision.plan
               .slice(0, Math.min(cfg.maxPlanSteps, cfg.maxIterations - iter))
-              .map((description, i) => ({ id: `r${iter}-${i + 1}`, description }))
+              // With tiers a revised step may open with its rating: "[high] ...".
+              .map((raw, i) => ({
+                id: `r${iter}-${i + 1}`,
+                ...(tiers ? splitComplexityTag(raw) : { description: raw }),
+              }))
             emit({
               type: 'plan.revised',
               plan: { thought: planned.plan.thought, steps: remaining },
@@ -1123,6 +1331,11 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
     forgetSkill: async (name: string, onEvent?: (event: AgentEvent) => void) =>
       learning ? learning.forget(name, onEvent) : false,
     capabilities: { images: accepts.image, pdf: accepts.pdf, files: accepts.file },
-    models: { planner: plannerModel, executor: executorModel, synthesizer: synthesizerModel },
+    models: {
+      planner: plannerModel,
+      executor: executorModel,
+      synthesizer: synthesizerModel,
+      ...(tierModels ? { tiers: tierModels } : {}),
+    },
   }
 }

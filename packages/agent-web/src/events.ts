@@ -1,4 +1,12 @@
-import type { IPlan, IPlanStep, IStepResult, IUsage } from './agent/loop-types.js'
+import type {
+  EscalationReason,
+  IPlan,
+  IPlanStep,
+  IStepResult,
+  IUsage,
+  ModelTier,
+  TierReason,
+} from './agent/loop-types.js'
 import type { LimitKind } from './limits.js'
 import type { PipelineEvent } from './pipeline/engine.js'
 
@@ -30,7 +38,31 @@ type AgentEventBody =
   | { type: 'plan.step-added'; step: IPlanStep; index: number }
   | { type: 'plan.created'; plan: IPlan }
   | { type: 'plan.revised'; plan: IPlan; reason: string }
-  | { type: 'step.start'; step: IPlanStep; index: number; total: number }
+  /**
+   * `tier` / `model` / `tierReason`: only when `config.executorTiers` is on - the tier the step
+   * starts on, its model id, and why that tier (see `TierReason`).
+   */
+  | {
+      type: 'step.start'
+      step: IPlanStep
+      index: number
+      total: number
+      tier?: ModelTier
+      model?: string
+      tierReason?: TierReason
+    }
+  /**
+   * The step failed on `from` and is retried on the stronger tier `to` (`config.escalation`);
+   * `model` is the model id of `to`. Fires between the step's start and its completion.
+   */
+  | {
+      type: 'step.escalated'
+      step: IPlanStep
+      from: ModelTier
+      to: ModelTier
+      model: string
+      reason: EscalationReason
+    }
   | { type: 'step.text-delta'; step: IPlanStep; delta: string }
   /** The executor model's streamed thoughts (thinking enabled + provider support). */
   | { type: 'step.reasoning-delta'; step: IPlanStep; delta: string }

@@ -4,8 +4,35 @@ export type { Agent, CompactOptions, CompactResult, RunOptions, RunResult } from
 // Steer a run while it goes: send a message, stop one subagent.
 export { createRunControl } from './agent/control.js'
 export type { RunControl, SubagentInfo } from './agent/control.js'
-export type { IPlan, IPlanStep, IStepResult, IToolCall, IUsage } from './agent/loop-types.js'
-export { PlanSchema, PlanStepSchema, ReplanSchema } from './agent/schemas.js'
+export type {
+  EscalationConfig,
+  EscalationReason,
+  IPlan,
+  IPlanStep,
+  IStepEscalation,
+  IStepResult,
+  IToolCall,
+  IUsage,
+  ModelTier,
+  StepComplexity,
+  TierReason,
+} from './agent/loop-types.js'
+export {
+  PlanSchema,
+  PlanStepSchema,
+  ReplanSchema,
+  TieredPlanSchema,
+  TieredPlanStepSchema,
+} from './agent/schemas.js'
+// Model tiers and escalation: the pure rules (which tier, when to escalate), for hosts and tests.
+export {
+  escalationReasonOf,
+  isEscalatableError,
+  MODEL_TIERS,
+  nextStrongerTier,
+  pickTier,
+  resolveEscalation,
+} from './tiers.js'
 export type { PlanShape, ReplanShape } from './agent/schemas.js'
 // Phase functions + helpers, for hosts building a custom loop.
 export { createPlan } from './agent/planner.js'

@@ -8,9 +8,10 @@ import {
   type PromptCatalogMode,
 } from './prompts.ts'
 import { streamStructured } from './structured.ts'
+import { STEP_COMPLEXITIES, isStepComplexity } from './tiers.ts'
 import { resolveToolStrategy } from './tool-search.ts'
 import { ATTR, withSpan } from './tracing.ts'
-import type { IConversationTurn, IPlan, IUsage } from './types.ts'
+import type { IConversationTurn, IPlan, IUsage, StepComplexity } from './types.ts'
 import { normalizeUsage, usageOfError, withRetry, withTimeout } from './utils.ts'
 
 export const PlanStepSchema = z.object({
@@ -38,6 +39,25 @@ export const PlanSchema = z.object({
     .optional()
     .describe('Names of skills from the SKILLS list that apply to this request'),
 })
+
+// The plan of an agent with config.executorTiers: each step also carries the planner's rating.
+// A SEPARATE schema, so an agent without tiers sends exactly the schema it always did. Optional
+// (a model that leaves it out still gives a valid plan; the step then runs on `standard`), and an
+// enum, never a number with bounds: nothing here that Anthropic's structured output rejects.
+export const TieredPlanStepSchema = PlanStepSchema.extend({
+  complexity: z
+    .enum(STEP_COMPLEXITIES as [string, ...string[]])
+    .optional()
+    .describe('How hard the step is: low, medium or high'),
+})
+
+export const TieredPlanSchema = PlanSchema.extend({
+  steps: z.array(TieredPlanStepSchema).min(1),
+})
+
+// The plan schema an agent's planner (and the `revise` branch of its replanner) is held to.
+export const planSchemaFor = (ctx: IAgentInternalContext): typeof PlanSchema =>
+  ctx.tiers ? (TieredPlanSchema as unknown as typeof PlanSchema) : PlanSchema
 
 // The effective plan-step cap of an agent.
 export const planStepCap = (ctx: IAgentInternalContext): number => {
@@ -170,11 +190,12 @@ const streamPlanOnce = async (
       skills: ctx.skills,
       ...(ctx.sandbox ? { sandbox: ctx.sandbox } : {}),
       ...(ctx.mcpInstructions ? { mcpInstructions: ctx.mcpInstructions } : {}),
+      ...(ctx.tiers ? { tiers: true } : {}),
     }),
   )
   const result = streamStructured({
     model: ctx.plannerModel,
-    schema: PlanSchema,
+    schema: planSchemaFor(ctx),
     ...call,
     prompt: buildPlannerUserPrompt(input, history),
     abortSignal: withTimeout(signal, ctx.config.llmTimeoutMs ?? 0),
@@ -231,6 +252,9 @@ const streamPlanOnce = async (
           suggestedTools: Array.isArray(candidate.suggestedTools)
             ? (candidate.suggestedTools.filter((s) => typeof s === 'string') as string[])
             : undefined,
+          ...(ctx.tiers && isStepComplexity((candidate as { complexity?: unknown }).complexity)
+            ? { complexity: (candidate as { complexity: StepComplexity }).complexity }
+            : {}),
         }
         ctx.emit({ type: 'plan.step-added', step, index: stepsEmitted })
         stepsEmitted++

@@ -96,6 +96,17 @@ behind every decision.
   tool's name), `worker` is the `./sandbox-worker` entry — the only file that names the peer.
   Security boundary: every guard has a test (`tests/sandbox.test.ts` here, the engine's in the
   server package) and a mutation check.
+- `src/tiers.ts` — `config.executorTiers` / `config.escalation`, the pure rules: which tier a step
+  runs on (`pickTier`: the planner's `complexity`, else `standard`; a missing tier falls back to the
+  nearest configured one, the stronger of two), what is a failure a stronger model could fix
+  (`escalationReasonOf`, `isEscalatableError`), what the escalated attempt is shown, and the write
+  guard (`IStepWrites`: a non-read-only call that already succeeded in an earlier attempt at the
+  step is answered from its result by `tools/wrap.ts`, not executed again). Same rules and names as
+  the Node sibling's `src/tiers.ts`: change both. OFF without `executorTiers.light` / `.strong`:
+  `tests/model-tiers.test.ts` compares the calls with `tests/fixtures/requests-without-tiers.json`,
+  recorded before the feature existed (`UPDATE_GOLDEN=1` rewrites it after a deliberate prompt or
+  schema change). The smallest window among all models, tiers included, governs a run; a tier's
+  tool-mode and output cap are its own. Every guard has a test there and a mutation check.
 - `src/subagent/` — `tool` (createSubagentTool), `worker` (serveSubagentWorker),
   `protocol` (postMessage shapes).
 - `src/{thinking,limits,caching,skills,images}.ts` — see docs/capabilities.md.
@@ -149,7 +160,7 @@ package. Keep all four green before pushing.
 ## Conventions
 
 - Prettier: no semicolons, single quotes, trailing commas, width 100.
-- Docs ship in the npm package. A new config field, event, export or entry point goes in the README
+- Docs live next to the code (the README goes to npm; `docs/*.md` are published on the site, not in the npm package). A new config field, event, export or entry point goes in the README
   (config table), `docs/capabilities.md` (the section + the event reference) and, if it can hurt
   someone, `docs/security.md`. A new design decision gets its rationale in `docs/design.md`.
 - Keep the core free of DOM-UI, framework, and `node:*` imports. Use

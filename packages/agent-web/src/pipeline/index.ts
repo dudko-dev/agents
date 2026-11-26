@@ -224,9 +224,10 @@ export const nodeResolver =
   async (node) => {
     let config: BrowserAgentConfig = { ...options.base }
     if (node.model !== undefined) {
-      // Another model: the base's per-stage overrides were written for the base model.
-      const { planner, synthesizer, ...rest } = config
-      void [planner, synthesizer]
+      // Another model: the base's per-stage overrides - and its executor tiers - were written
+      // for the base model.
+      const { planner, synthesizer, executorTiers, ...rest } = config
+      void [planner, synthesizer, executorTiers]
       config = { ...rest, model: lookup(node, 'model', options.models, node.model) }
     }
     if (node.skills?.length) {

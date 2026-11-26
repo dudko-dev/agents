@@ -87,6 +87,7 @@ export const loadConfig = (): IAgentConfig => {
     synthesizer: parseStageOverride('AGENT_SYNTHESIZER'),
     plannerModel: process.env.AGENT_PLANNER_MODEL?.trim() || undefined,
     synthesizerModel: process.env.AGENT_SYNTHESIZER_MODEL?.trim() || undefined,
+    ...parseExecutorTiers(),
     mcpServers: parseMcpServers(process.env.MCP_SERVERS),
     availableTools: parseList(process.env.AGENT_AVAILABLE_TOOLS),
     excludedTools: parseList(process.env.AGENT_EXCLUDED_TOOLS),
@@ -132,6 +133,57 @@ export const parseThinking = (raw: string | undefined): ThinkingSetting | undefi
   throw new Error(
     `AGENT_THINKING must be off | ${THINKING_LEVELS.join(' | ')} | <budget tokens>, got: ${raw}`,
   )
+}
+
+// AGENT_EXECUTOR_LIGHT_MODEL / AGENT_EXECUTOR_STRONG_MODEL name the executor models by tier
+// (AGENT_MODEL is the `standard` one); each takes the same _PROVIDER_TYPE / _BASE_URL / _API_KEY /
+// _PROVIDER_OPTIONS block as the planner. AGENT_ESCALATION=off keeps a failed step on its tier;
+// AGENT_ESCALATION_MAX_PER_STEP / _PER_RUN set the caps. Nothing is returned when no tier model
+// is named, so the config is what it always was.
+export const parseExecutorTiers = (
+  env: NodeJS.ProcessEnv = process.env,
+): Pick<IAgentConfig, 'executorTiers' | 'escalation'> => {
+  const tiers: NonNullable<IAgentConfig['executorTiers']> = {}
+  for (const tier of ['light', 'strong'] as const) {
+    const prefix = `AGENT_EXECUTOR_${tier.toUpperCase()}`
+    const model = env[`${prefix}_MODEL`]?.trim()
+    const block = parseStageOverride(prefix, env)
+    if (!model) {
+      if (block) {
+        throw new Error(`${prefix}_* is set but ${prefix}_MODEL is not - name the ${tier} model`)
+      }
+      continue
+    }
+    tiers[tier] = { ...block, model }
+  }
+  const raw = env.AGENT_ESCALATION?.trim().toLowerCase()
+  const off = raw !== undefined && ['off', 'false', '0', 'no'].includes(raw)
+  if (raw && !off && !['on', 'true', '1', 'yes'].includes(raw)) {
+    throw new Error(`AGENT_ESCALATION must be on | off, got: ${env.AGENT_ESCALATION}`)
+  }
+  const maxPerStep = parseOptionalInt(env.AGENT_ESCALATION_MAX_PER_STEP)
+  const maxPerRun = parseOptionalInt(env.AGENT_ESCALATION_MAX_PER_RUN)
+  if (!tiers.light && !tiers.strong) {
+    if (raw || maxPerStep !== undefined || maxPerRun !== undefined) {
+      throw new Error(
+        'AGENT_ESCALATION* is set but no tier model is - set AGENT_EXECUTOR_LIGHT_MODEL or AGENT_EXECUTOR_STRONG_MODEL',
+      )
+    }
+    return {}
+  }
+  return {
+    executorTiers: tiers,
+    ...(off
+      ? { escalation: false }
+      : maxPerStep !== undefined || maxPerRun !== undefined
+        ? {
+            escalation: {
+              ...(maxPerStep !== undefined ? { maxPerStep } : {}),
+              ...(maxPerRun !== undefined ? { maxPerRun } : {}),
+            },
+          }
+        : {}),
+  }
 }
 
 const PER_CALL_STAGES = ['planner', 'executor', 'replanner', 'synthesizer', 'compaction'] as const
@@ -452,11 +504,14 @@ export const skillsDirFromEnv = (): string | undefined =>
 // Read AGENT_<prefix>_PROVIDER_TYPE / _BASE_URL / _API_KEY / _MODEL into a
 // stage override block. Returns undefined if no field is set so the agent
 // inherits everything from the top-level defaults.
-const parseStageOverride = (prefix: string): IAgentStageOverride | undefined => {
-  const provider = process.env[`${prefix}_PROVIDER_TYPE`]?.trim()
-  const baseURL = process.env[`${prefix}_BASE_URL`]?.trim()
-  const apiKey = process.env[`${prefix}_API_KEY`]?.trim()
-  const providerOptions = parseProviderOptions(`${prefix}_PROVIDER_OPTIONS`)
+const parseStageOverride = (
+  prefix: string,
+  env: NodeJS.ProcessEnv = process.env,
+): IAgentStageOverride | undefined => {
+  const provider = env[`${prefix}_PROVIDER_TYPE`]?.trim()
+  const baseURL = env[`${prefix}_BASE_URL`]?.trim()
+  const apiKey = env[`${prefix}_API_KEY`]?.trim()
+  const providerOptions = parseProviderOptions(`${prefix}_PROVIDER_OPTIONS`, env)
   // Stage block mirrors planner/synthesizer.model. The deprecated single-
   // string AGENT_PLANNER_MODEL / AGENT_SYNTHESIZER_MODEL still flows through
   // the legacy plannerModel/synthesizerModel slot - we ignore it here so the
@@ -478,8 +533,11 @@ const parseStageOverride = (prefix: string): IAgentStageOverride | undefined => 
 // Parse a provider-options JSON env block (e.g. AGENT_PROVIDER_OPTIONS,
 // AGENT_PLANNER_PROVIDER_OPTIONS). Empty / unset returns undefined so the
 // agent's config-level inheritance kicks in.
-const parseProviderOptions = (varName: string): Record<string, unknown> | undefined => {
-  const raw = process.env[varName]?.trim()
+const parseProviderOptions = (
+  varName: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Record<string, unknown> | undefined => {
+  const raw = env[varName]?.trim()
   if (!raw) {
     return undefined
   }

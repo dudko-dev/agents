@@ -1,0 +1,376 @@
+[
+  {
+    "model": "plan",
+    "max_tokens": 2000,
+    "response_format": {
+      "type": "json_schema",
+      "json_schema": {
+        "schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "properties": {
+            "thought": {
+              "type": "string",
+              "minLength": 1,
+              "description": "One-paragraph reasoning about how to approach the request"
+            },
+            "steps": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Short stable id, e.g. \"s1\", \"fetch-companies\""
+                  },
+                  "description": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Concrete action to perform"
+                  },
+                  "expectedOutcome": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "What state/data should exist after this step"
+                  },
+                  "suggestedTools": {
+                    "description": "Tool names from the available list, if any",
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "id",
+                  "description",
+                  "expectedOutcome"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "skills": {
+              "description": "Names of skills from the SKILLS list that apply to this request",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "thought",
+            "steps"
+          ],
+          "additionalProperties": false
+        },
+        "strict": true,
+        "name": "response"
+      }
+    },
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are the Planner of a multi-step agent system.\n\nYour only job is to decompose the user's request into a short ordered list of concrete actionable steps that a tool-using Executor can perform one at a time.\n\nRules:\n1. Produce 1-5 steps for typical requests (hard cap is 8). Prefer FEWER, larger steps over many micro-steps. If the task is trivial and needs no tools, output a single step \"Answer the user directly\".\n2. Each step must be self-contained, action-oriented, and verifiable. State what should be done and what the expected outcome is.\n3. If a step needs a tool, suggest tool name(s) ONLY from the provided available-tools list. NEVER fabricate tool names.\n4. If the request asks for information that is likely retrievable via the available tools, plan to use them. If no tool fits, plan to answer from general knowledge.\n5. The last step must produce the deliverable for the user (do not append a separate \"summarize\" step - the system synthesizes the final answer).\n6. The agent works autonomously: never plan a step that asks the user for clarification, confirmation or permission (the host handles tool consent). If the request is ambiguous, pick the most reasonable interpretation and state the assumption in the step description.\n7. Output strict JSON matching the requested schema. No prose outside JSON.\n\nAvailable tools:\n- note_write: Write a note."
+      },
+      {
+        "role": "user",
+        "content": "User request:\nDo the work\nProduce the plan now."
+      }
+    ],
+    "stream": true
+  },
+  {
+    "model": "std",
+    "max_tokens": 8000,
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are the Executor of a multi-step agent system. You receive ONE step at a time and you must accomplish only that step.\n\nRules:\n1. Stay focused on the CURRENT step. Do not jump ahead, do not redo finished steps.\n2. Use the available tools when they help. Call them with valid arguments. Read prior step results in the trace before re-fetching the same data.\n3. When the step is complete, write a short concrete \"step result\" describing what you found / did. Include identifiers, names, or key data the next step might need.\n4. If the step is impossible with the available tools, or if you are otherwise blocked, explain the blocker briefly and end your reply with the literal token [BLOCKER] on its own line. The system uses this token (language-independent) to invoke the Replanner. Do not fabricate data.\n5. Be concise. Do not narrate your reasoning at length - the Replanner reads only your final summary."
+      },
+      {
+        "role": "user",
+        "content": "Original user request:\nDo the work\nOverall plan:\nPlan thought: Plan.\nSteps:\n  1. [s1] Step s1\n     expected: s1 done\n  2. [s2] Step s2\n     expected: s2 done\nTrace so far:\n(no steps executed yet)\nCURRENT STEP to execute (id=s1): Step s1\nExpected outcome: s1 done\nExecute this step now. Reply with a concise summary of what you found / did - the system uses your full reply as the step result."
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "note_write",
+          "description": "Write a note.",
+          "parameters": {
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "text"
+            ],
+            "additionalProperties": false
+          }
+        }
+      }
+    ],
+    "tool_choice": "auto",
+    "stream": true
+  },
+  {
+    "model": "std",
+    "max_tokens": 8000,
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are the Executor of a multi-step agent system. You receive ONE step at a time and you must accomplish only that step.\n\nRules:\n1. Stay focused on the CURRENT step. Do not jump ahead, do not redo finished steps.\n2. Use the available tools when they help. Call them with valid arguments. Read prior step results in the trace before re-fetching the same data.\n3. When the step is complete, write a short concrete \"step result\" describing what you found / did. Include identifiers, names, or key data the next step might need.\n4. If the step is impossible with the available tools, or if you are otherwise blocked, explain the blocker briefly and end your reply with the literal token [BLOCKER] on its own line. The system uses this token (language-independent) to invoke the Replanner. Do not fabricate data.\n5. Be concise. Do not narrate your reasoning at length - the Replanner reads only your final summary."
+      },
+      {
+        "role": "user",
+        "content": "Original user request:\nDo the work\nOverall plan:\nPlan thought: Plan.\nSteps:\n  1. [s1] Step s1\n     expected: s1 done\n  2. [s2] Step s2\n     expected: s2 done\nTrace so far:\n(no steps executed yet)\nCURRENT STEP to execute (id=s1): Step s1\nExpected outcome: s1 done\nExecute this step now. Reply with a concise summary of what you found / did - the system uses your full reply as the step result."
+      },
+      {
+        "role": "assistant",
+        "content": null,
+        "tool_calls": [
+          {
+            "id": "call_0",
+            "type": "function",
+            "function": {
+              "name": "note_write",
+              "arguments": "{\"text\":\"hello\"}"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "tool_call_id": "call_0",
+        "content": "saved hello"
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "note_write",
+          "description": "Write a note.",
+          "parameters": {
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "text"
+            ],
+            "additionalProperties": false
+          }
+        }
+      }
+    ],
+    "tool_choice": "auto",
+    "stream": true
+  },
+  {
+    "model": "plan",
+    "max_tokens": 1000,
+    "response_format": {
+      "type": "json_schema",
+      "json_schema": {
+        "schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "continue"
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Why the next step is still appropriate"
+                }
+              },
+              "required": [
+                "mode",
+                "reason"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "finish"
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Why no more steps are needed"
+                }
+              },
+              "required": [
+                "mode",
+                "reason"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "revise"
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Why the plan must change"
+                },
+                "newPlan": {
+                  "type": "object",
+                  "properties": {
+                    "thought": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "One-paragraph reasoning about how to approach the request"
+                    },
+                    "steps": {
+                      "minItems": 1,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": "Short stable id, e.g. \"s1\", \"fetch-companies\""
+                          },
+                          "description": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": "Concrete action to perform"
+                          },
+                          "expectedOutcome": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": "What state/data should exist after this step"
+                          },
+                          "suggestedTools": {
+                            "description": "Tool names from the available list, if any",
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "description",
+                          "expectedOutcome"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "skills": {
+                      "description": "Names of skills from the SKILLS list that apply to this request",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": [
+                    "thought",
+                    "steps"
+                  ],
+                  "description": "Plan covering ONLY the remaining work",
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "mode",
+                "reason",
+                "newPlan"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "strict": true,
+        "name": "response"
+      }
+    },
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are the Replanner of an autonomous multi-step agent system. After an Executor step you decide what should happen next.\n\nYou have three options:\n- \"continue\": the next planned step is still appropriate.\n- \"revise\": the plan is wrong or incomplete given what we now know - produce a NEW plan covering only the REMAINING work (do not include already-completed steps). The new plan must follow the same rules as the original Planner.\n- \"finish\": we already have enough information to answer the user, or nothing more can be done. The system will then synthesize the final answer from the trace.\n\nRules:\n1. Prefer \"continue\" when the original plan still applies. Revise only when needed.\n2. Prefer \"finish\" as soon as the user's request is satisfied - do not run unnecessary extra steps.\n3. When a step failed or was blocked, prefer revising around the failure (another tool, other arguments, another source, a reasonable assumption) over finishing with nothing. Finish only when no workable alternative remains.\n4. Never revise into a step that asks the user for input, clarification or permission - the agent runs autonomously.\n5. When revising, the new plan must NOT repeat already-completed work; it covers only what is still needed.\n6. Output strict JSON matching the schema. No prose outside JSON.\n\nAvailable tools (for the revise option):\n- note_write: Write a note."
+      },
+      {
+        "role": "user",
+        "content": "Original user request:\nDo the work\n\n\nCurrent plan:\nPlan thought: Plan.\nSteps:\n  1. [s1] Step s1\n     expected: s1 done\n  2. [s2] Step s2\n     expected: s2 done\n\nCompleted steps:\nStep 1: Step s1\n  Result: finished s1\n  Tool calls:\n    - note_write ok: saved hello\n\nNext planned step: [s2] Step s2\n\nDecide now: continue, revise, or finish."
+      }
+    ]
+  },
+  {
+    "model": "std",
+    "max_tokens": 8000,
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are the Executor of a multi-step agent system. You receive ONE step at a time and you must accomplish only that step.\n\nRules:\n1. Stay focused on the CURRENT step. Do not jump ahead, do not redo finished steps.\n2. Use the available tools when they help. Call them with valid arguments. Read prior step results in the trace before re-fetching the same data.\n3. When the step is complete, write a short concrete \"step result\" describing what you found / did. Include identifiers, names, or key data the next step might need.\n4. If the step is impossible with the available tools, or if you are otherwise blocked, explain the blocker briefly and end your reply with the literal token [BLOCKER] on its own line. The system uses this token (language-independent) to invoke the Replanner. Do not fabricate data.\n5. Be concise. Do not narrate your reasoning at length - the Replanner reads only your final summary."
+      },
+      {
+        "role": "user",
+        "content": "Original user request:\nDo the work\nOverall plan:\nPlan thought: Plan.\nSteps:\n  1. [s1] Step s1\n     expected: s1 done\n  2. [s2] Step s2\n     expected: s2 done\nTrace so far:\nStep 1: Step s1\n  Result: finished s1\n  Tool calls:\n    - note_write ok: saved hello\nCURRENT STEP to execute (id=s2): Step s2\nExpected outcome: s2 done\nExecute this step now. Reply with a concise summary of what you found / did - the system uses your full reply as the step result."
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "note_write",
+          "description": "Write a note.",
+          "parameters": {
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "text"
+            ],
+            "additionalProperties": false
+          }
+        }
+      }
+    ],
+    "tool_choice": "auto",
+    "stream": true
+  },
+  {
+    "model": "plan",
+    "max_tokens": 4000,
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are the Synthesizer. Produce the final answer for the user from the agent's plan and execution trace.\n\nRules:\n1. Answer the user directly and concisely: report what was done and what was found. Do NOT mention \"steps\", \"plans\", or internal mechanics unless the user explicitly asked for them.\n2. Use facts from the trace verbatim when accuracy matters (names, IDs, numbers, quotes). Never invent results the trace does not contain.\n3. Mention the assumptions the agent made, briefly.\n4. If the trace shows the request (or part of it) could not be completed, say so plainly and explain what blocked it.\n5. Do not end with questions or offers unless the request genuinely cannot be completed without input from the user.\n6. Use the user's language."
+      },
+      {
+        "role": "user",
+        "content": "User request:\nDo the work\nPlan that was executed:\nPlan thought: Plan.\nSteps:\n  1. [s1] Step s1\n     expected: s1 done\n  2. [s2] Step s2\n     expected: s2 done\nExecution trace:\nStep 1: Step s1\n  Result: finished s1\n  Tool calls:\n    - note_write ok: saved hello\nStep 2: Step s2\n  Result: finished s2\n  Tool calls:\n    (no tool calls)\nWrite the final answer for the user now."
+      }
+    ],
+    "stream": true
+  }
+]

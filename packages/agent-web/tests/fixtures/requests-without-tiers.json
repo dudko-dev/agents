@@ -1,0 +1,724 @@
+{
+  "native": [
+    {
+      "prompt": [
+        {
+          "role": "system",
+          "content": "You are the PLANNER of an autonomous tool-using agent that works step by step.\nProduce a brief \"thought\" and an ordered \"steps\" list (1–6 DISTINCT, self-contained steps).\nReturn an EMPTY steps list ONLY for a pure greeting, thanks or small talk, or a question you can answer completely from the STATE and general knowledge without any tool — then put the answer itself in \"thought\".\n- Act autonomously: whenever the TOOLS can do the work or look up the answer, plan the steps — a question that needs data, a lookup or a check is a real goal too.\n- Never plan a step that asks the user something. If the request is ambiguous, pick the most reasonable interpretation and say which one you chose.\n- Plan realistic steps the available TOOLS can perform, grounded in the current STATE.\n- If a CONVERSATION SO FAR section is present, use it to resolve references to earlier turns.\n- Never repeat or pad steps.\n\nTOOLS:\n- note_write({ text: string }): Write a note.",
+          "providerOptions": {
+            "anthropic": {
+              "cacheControl": {
+                "type": "ephemeral"
+              }
+            }
+          }
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "GOAL: Take a note and check it"
+            }
+          ]
+        }
+      ],
+      "toolChoice": {
+        "type": "auto"
+      },
+      "responseFormat": {
+        "type": "json",
+        "schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "properties": {
+            "thought": {
+              "type": "string"
+            },
+            "steps": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "description": {
+                    "type": "string"
+                  },
+                  "expectedOutcome": {
+                    "type": "string"
+                  },
+                  "suggestedTools": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "description"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "skills": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "thought",
+            "steps"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "maxOutputTokens": 800,
+      "providerOptions": {
+        "openai": {
+          "promptCacheKey": "agent-web:planner"
+        }
+      }
+    },
+    {
+      "prompt": [
+        {
+          "role": "system",
+          "content": "You are the EXECUTOR of an autonomous tool-using agent. Carry out ONLY the current step by calling the provided tools.\n- Work autonomously: never ask the user questions or for confirmation. Look things up with the tools, choose sensible defaults, and state any assumption in your reply. Permission to run tools is handled by the system, not by you.\n- Build on the current STATE and on the results of earlier steps — do not repeat work that is already done.\n- When the step is done, reply with a short factual summary of what you did and found, including the concrete data (names, ids, numbers, values) later steps or the final answer need. No JSON.\n- If you truly CANNOT complete the step (a needed tool is missing or was denied, credentials or data are unavailable), explain why in one sentence and include the token [BLOCKER].",
+          "providerOptions": {
+            "anthropic": {
+              "cacheControl": {
+                "type": "ephemeral"
+              }
+            }
+          }
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "GOAL: Take a note and check it\n\nSTEP 1/2: Step s1"
+            }
+          ],
+          "providerOptions": {
+            "anthropic": {
+              "cacheControl": {
+                "type": "ephemeral"
+              }
+            }
+          }
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "name": "note_write",
+          "inputSchema": {
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "text"
+            ],
+            "additionalProperties": false
+          },
+          "description": "Write a note."
+        }
+      ],
+      "toolChoice": {
+        "type": "auto"
+      },
+      "maxOutputTokens": 1200,
+      "providerOptions": {
+        "openai": {
+          "promptCacheKey": "agent-web:executor"
+        }
+      }
+    },
+    {
+      "prompt": [
+        {
+          "role": "system",
+          "content": "You are the EXECUTOR of an autonomous tool-using agent. Carry out ONLY the current step by calling the provided tools.\n- Work autonomously: never ask the user questions or for confirmation. Look things up with the tools, choose sensible defaults, and state any assumption in your reply. Permission to run tools is handled by the system, not by you.\n- Build on the current STATE and on the results of earlier steps — do not repeat work that is already done.\n- When the step is done, reply with a short factual summary of what you did and found, including the concrete data (names, ids, numbers, values) later steps or the final answer need. No JSON.\n- If you truly CANNOT complete the step (a needed tool is missing or was denied, credentials or data are unavailable), explain why in one sentence and include the token [BLOCKER].",
+          "providerOptions": {
+            "anthropic": {
+              "cacheControl": {
+                "type": "ephemeral"
+              }
+            }
+          }
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "GOAL: Take a note and check it\n\nSTEP 1/2: Step s1"
+            }
+          ]
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool-call",
+              "toolCallId": "call-N",
+              "toolName": "note_write",
+              "input": {
+                "text": "hello"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": [
+            {
+              "type": "tool-result",
+              "toolCallId": "call-N",
+              "toolName": "note_write",
+              "output": {
+                "type": "text",
+                "value": "saved hello"
+              }
+            }
+          ],
+          "providerOptions": {
+            "anthropic": {
+              "cacheControl": {
+                "type": "ephemeral"
+              }
+            }
+          }
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "name": "note_write",
+          "inputSchema": {
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "text"
+            ],
+            "additionalProperties": false
+          },
+          "description": "Write a note."
+        }
+      ],
+      "toolChoice": {
+        "type": "auto"
+      },
+      "maxOutputTokens": 1200,
+      "providerOptions": {
+        "openai": {
+          "promptCacheKey": "agent-web:executor"
+        }
+      }
+    },
+    {
+      "prompt": [
+        {
+          "role": "system",
+          "content": "You are the REPLANNER of an autonomous agent. After an executed step, decide whether to keep going, revise the remaining steps, or finish.\n\"continue\": the remaining steps still fit. \"revise\": provide a better \"plan\" for the REMAINING work (never repeat done work). \"finish\": the goal is already met.\nJudge from the current STATE and the progress vs the goal. Prefer \"continue\".\nAfter a failure, prefer revising around it (another tool, another approach) over giving up; never add a step that asks the user something.",
+          "providerOptions": {
+            "anthropic": {
+              "cacheControl": {
+                "type": "ephemeral"
+              }
+            }
+          }
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "GOAL: Take a note and check it\n\nAlready done:\n1. Step s1 — finished [1 tool call(s) ok]\n\nRemaining plan:\n1. Step s2\n\nDecide: continue, revise, or finish."
+            }
+          ]
+        }
+      ],
+      "toolChoice": {
+        "type": "auto"
+      },
+      "responseFormat": {
+        "type": "json",
+        "schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "properties": {
+            "decision": {
+              "type": "string",
+              "enum": [
+                "continue",
+                "revise",
+                "finish"
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "plan": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "decision",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "maxOutputTokens": 400,
+      "providerOptions": {
+        "openai": {
+          "promptCacheKey": "agent-web:replanner"
+        }
+      }
+    },
+    {
+      "prompt": [
+        {
+          "role": "system",
+          "content": "You are the EXECUTOR of an autonomous tool-using agent. Carry out ONLY the current step by calling the provided tools.\n- Work autonomously: never ask the user questions or for confirmation. Look things up with the tools, choose sensible defaults, and state any assumption in your reply. Permission to run tools is handled by the system, not by you.\n- Build on the current STATE and on the results of earlier steps — do not repeat work that is already done.\n- When the step is done, reply with a short factual summary of what you did and found, including the concrete data (names, ids, numbers, values) later steps or the final answer need. No JSON.\n- If you truly CANNOT complete the step (a needed tool is missing or was denied, credentials or data are unavailable), explain why in one sentence and include the token [BLOCKER].",
+          "providerOptions": {
+            "anthropic": {
+              "cacheControl": {
+                "type": "ephemeral"
+              }
+            }
+          }
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "GOAL: Take a note and check it\n\nAlready done:\n1. Step s1 — finished [1 tool call(s) ok]\n\nSTEP 2/2: Step s2"
+            }
+          ],
+          "providerOptions": {
+            "anthropic": {
+              "cacheControl": {
+                "type": "ephemeral"
+              }
+            }
+          }
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "name": "note_write",
+          "inputSchema": {
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "text"
+            ],
+            "additionalProperties": false
+          },
+          "description": "Write a note."
+        }
+      ],
+      "toolChoice": {
+        "type": "auto"
+      },
+      "maxOutputTokens": 1200,
+      "providerOptions": {
+        "openai": {
+          "promptCacheKey": "agent-web:executor"
+        }
+      }
+    },
+    {
+      "prompt": [
+        {
+          "role": "system",
+          "content": "You are the REPLANNER of an autonomous agent. After an executed step, decide whether to keep going, revise the remaining steps, or finish.\n\"continue\": the remaining steps still fit. \"revise\": provide a better \"plan\" for the REMAINING work (never repeat done work). \"finish\": the goal is already met.\nJudge from the current STATE and the progress vs the goal. Prefer \"continue\".\nAfter a failure, prefer revising around it (another tool, another approach) over giving up; never add a step that asks the user something.",
+          "providerOptions": {
+            "anthropic": {
+              "cacheControl": {
+                "type": "ephemeral"
+              }
+            }
+          }
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "GOAL: Take a note and check it\n\nAlready done:\n1. Step s1 — finished [1 tool call(s) ok]\n2. Step s2 — finished\n\nRemaining plan:\n(none)\n\nDecide: continue, revise, or finish."
+            }
+          ]
+        }
+      ],
+      "toolChoice": {
+        "type": "auto"
+      },
+      "responseFormat": {
+        "type": "json",
+        "schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "properties": {
+            "decision": {
+              "type": "string",
+              "enum": [
+                "continue",
+                "revise",
+                "finish"
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "plan": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "decision",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "maxOutputTokens": 400,
+      "providerOptions": {
+        "openai": {
+          "promptCacheKey": "agent-web:replanner"
+        }
+      }
+    },
+    {
+      "prompt": [
+        {
+          "role": "system",
+          "content": "You are the SYNTHESIZER. Answer the user's goal from what the agent did and found.\n- Lead with the result: the concrete data, from the FINDINGS verbatim when accuracy matters (names, numbers, ids), then — briefly — what was changed.\n- Mention any assumption the agent made. If something could not be done, say so plainly and why.\n- Do not ask follow-up questions unless the goal genuinely cannot be completed without the user.\n- Be concise and friendly. Plain text (light markdown is fine) — no JSON, no code.",
+          "providerOptions": {
+            "anthropic": {
+              "cacheControl": {
+                "type": "ephemeral"
+              }
+            }
+          }
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "GOAL: Take a note and check it\n\nWhat was done:\n1. Step s1 — finished [1 tool call(s) ok]\n2. Step s2 — finished\n\nFINDINGS (tool results):\n- note_write: saved hello\n\nWrite the final answer for the user."
+            }
+          ]
+        }
+      ],
+      "toolChoice": {
+        "type": "auto"
+      },
+      "maxOutputTokens": 3000,
+      "providerOptions": {
+        "openai": {
+          "promptCacheKey": "agent-web:synthesizer"
+        }
+      }
+    }
+  ],
+  "prompted": [
+    {
+      "prompt": [
+        {
+          "role": "system",
+          "content": "You are the PLANNER of an autonomous tool-using agent that works step by step.\n\nReply with a single JSON object, nothing else:\n{ \"reply\": string, \"plan\": string[], \"skills\": string[] }\n- For a real goal: \"reply\" is one short sentence; \"plan\" is 1–6 DISTINCT, self-contained steps.\n- Set \"plan\": [] ONLY for a pure greeting, thanks or small talk, or a question you can answer completely from the STATE and general knowledge without any tool — then put the answer itself in \"reply\".\n- Act autonomously: whenever the TOOLS can do the work or look up the answer, plan the steps — a question that needs data, a lookup or a check is a real goal too.\n- Never plan a step that asks the user something. If the request is ambiguous, pick the most reasonable interpretation and say which one you chose.\n- Plan realistic steps the available TOOLS can perform, grounded in the current STATE.\n- If a CONVERSATION SO FAR section is present, use it to resolve references to earlier turns.\n- Never repeat or pad steps.\n\nTOOLS:\n- note_write({ text: string }): Write a note.",
+          "providerOptions": {
+            "anthropic": {
+              "cacheControl": {
+                "type": "ephemeral"
+              }
+            }
+          }
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "GOAL: Take a note and check it"
+            }
+          ]
+        }
+      ],
+      "toolChoice": {
+        "type": "auto"
+      },
+      "maxOutputTokens": 800,
+      "providerOptions": {
+        "openai": {
+          "promptCacheKey": "agent-web:planner"
+        }
+      }
+    },
+    {
+      "prompt": [
+        {
+          "role": "system",
+          "content": "You are the EXECUTOR of an autonomous tool-using agent. Carry out ONLY the current step by emitting tool calls.\n\nReply with a single JSON object, nothing else:\n{ \"reply\": string, \"actions\": [ { \"tool\": string, \"args\": object } ] }\n- \"actions\" are the tool calls for THIS step ([] if none are needed). Use ONLY tools from the TOOLS list; \"args\" must match the tool's parameters.\n- Work autonomously: never ask the user questions or for confirmation. Look things up with the tools, choose sensible defaults, and state any assumption in your reply. Permission to run tools is handled by the system, not by you.\n- Build on the current STATE and on the results of earlier steps — do not repeat work that is already done.\n- \"reply\" is a short factual summary (no JSON) of what you did and found, with the concrete data later steps need.\n- After your actions run you will see their TOOL RESULTS and may continue the same step; finish with \"actions\": [] once it is done.\n- If you truly CANNOT complete the step, set \"actions\": [] and put the token [BLOCKER] in \"reply\" with a short reason.",
+          "providerOptions": {
+            "anthropic": {
+              "cacheControl": {
+                "type": "ephemeral"
+              }
+            }
+          }
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "GOAL: Take a note and check it\n\nTOOLS:\n- note_write({ text: string }): Write a note.\n\nSTEP 1/2: [low] Note it"
+            }
+          ],
+          "providerOptions": {
+            "anthropic": {
+              "cacheControl": {
+                "type": "ephemeral"
+              }
+            }
+          }
+        }
+      ],
+      "toolChoice": {
+        "type": "auto"
+      },
+      "maxOutputTokens": 1200,
+      "providerOptions": {
+        "openai": {
+          "promptCacheKey": "agent-web:executor"
+        }
+      }
+    },
+    {
+      "prompt": [
+        {
+          "role": "system",
+          "content": "You are the EXECUTOR of an autonomous tool-using agent. Carry out ONLY the current step by emitting tool calls.\n\nReply with a single JSON object, nothing else:\n{ \"reply\": string, \"actions\": [ { \"tool\": string, \"args\": object } ] }\n- \"actions\" are the tool calls for THIS step ([] if none are needed). Use ONLY tools from the TOOLS list; \"args\" must match the tool's parameters.\n- Work autonomously: never ask the user questions or for confirmation. Look things up with the tools, choose sensible defaults, and state any assumption in your reply. Permission to run tools is handled by the system, not by you.\n- Build on the current STATE and on the results of earlier steps — do not repeat work that is already done.\n- \"reply\" is a short factual summary (no JSON) of what you did and found, with the concrete data later steps need.\n- After your actions run you will see their TOOL RESULTS and may continue the same step; finish with \"actions\": [] once it is done.\n- If you truly CANNOT complete the step, set \"actions\": [] and put the token [BLOCKER] in \"reply\" with a short reason.",
+          "providerOptions": {
+            "anthropic": {
+              "cacheControl": {
+                "type": "ephemeral"
+              }
+            }
+          }
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "GOAL: Take a note and check it\n\nTOOLS:\n- note_write({ text: string }): Write a note.\n\nSTEP 1/2: [low] Note it"
+            }
+          ]
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "{\"reply\":\"\",\"actions\":[{\"tool\":\"note_write\",\"args\":{\"text\":\"hello\"}}]}"
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "TOOL RESULTS:\n- note_write {\"text\":\"hello\"} → ok: \"saved hello\"\n\nContinue THIS step using the results above. Reply with a single JSON object, nothing else:\n{ \"reply\": string, \"actions\": [ { \"tool\": string, \"args\": object } ] }\n- If the step is now complete: \"actions\": [] and a short outcome in \"reply\".\n- Otherwise emit ONLY the remaining or corrective calls — never repeat a successful call."
+            }
+          ],
+          "providerOptions": {
+            "anthropic": {
+              "cacheControl": {
+                "type": "ephemeral"
+              }
+            }
+          }
+        }
+      ],
+      "toolChoice": {
+        "type": "auto"
+      },
+      "maxOutputTokens": 1200,
+      "providerOptions": {
+        "openai": {
+          "promptCacheKey": "agent-web:executor"
+        }
+      }
+    },
+    {
+      "prompt": [
+        {
+          "role": "system",
+          "content": "You are the REPLANNER of an autonomous agent. After each executed step you decide whether to keep going, revise the remaining steps, or finish.\n\nReply with a single JSON object, nothing else:\n{ \"decision\": \"continue\" | \"revise\" | \"finish\", \"reason\": string, \"plan\": string[] }\n- \"continue\": remaining steps still fit — proceed (omit \"plan\").\n- \"revise\": replace the REMAINING steps with a better list in \"plan\"; never repeat done work.\n- \"finish\": the goal is already met — stop (omit \"plan\").\nJudge from the current STATE and the progress vs the goal. Prefer \"continue\".\nAfter a failure, prefer revising around it (another tool, another approach) over giving up; never add a step that asks the user something.",
+          "providerOptions": {
+            "anthropic": {
+              "cacheControl": {
+                "type": "ephemeral"
+              }
+            }
+          }
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "GOAL: Take a note and check it\n\nAlready done:\n1. [low] Note it — finished [1 tool call(s) ok]\n\nRemaining plan:\n1. Check it\n\nDecide: continue, revise, or finish."
+            }
+          ]
+        }
+      ],
+      "toolChoice": {
+        "type": "auto"
+      },
+      "maxOutputTokens": 400,
+      "providerOptions": {
+        "openai": {
+          "promptCacheKey": "agent-web:replanner"
+        }
+      }
+    },
+    {
+      "prompt": [
+        {
+          "role": "system",
+          "content": "You are the EXECUTOR of an autonomous tool-using agent. Carry out ONLY the current step by emitting tool calls.\n\nReply with a single JSON object, nothing else:\n{ \"reply\": string, \"actions\": [ { \"tool\": string, \"args\": object } ] }\n- \"actions\" are the tool calls for THIS step ([] if none are needed). Use ONLY tools from the TOOLS list; \"args\" must match the tool's parameters.\n- Work autonomously: never ask the user questions or for confirmation. Look things up with the tools, choose sensible defaults, and state any assumption in your reply. Permission to run tools is handled by the system, not by you.\n- Build on the current STATE and on the results of earlier steps — do not repeat work that is already done.\n- \"reply\" is a short factual summary (no JSON) of what you did and found, with the concrete data later steps need.\n- After your actions run you will see their TOOL RESULTS and may continue the same step; finish with \"actions\": [] once it is done.\n- If you truly CANNOT complete the step, set \"actions\": [] and put the token [BLOCKER] in \"reply\" with a short reason.",
+          "providerOptions": {
+            "anthropic": {
+              "cacheControl": {
+                "type": "ephemeral"
+              }
+            }
+          }
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "GOAL: Take a note and check it\n\nTOOLS:\n- note_write({ text: string }): Write a note.\n\nAlready done:\n1. [low] Note it — finished [1 tool call(s) ok]\n\nSTEP 2/2: Check it"
+            }
+          ],
+          "providerOptions": {
+            "anthropic": {
+              "cacheControl": {
+                "type": "ephemeral"
+              }
+            }
+          }
+        }
+      ],
+      "toolChoice": {
+        "type": "auto"
+      },
+      "maxOutputTokens": 1200,
+      "providerOptions": {
+        "openai": {
+          "promptCacheKey": "agent-web:executor"
+        }
+      }
+    },
+    {
+      "prompt": [
+        {
+          "role": "system",
+          "content": "You are the REPLANNER of an autonomous agent. After each executed step you decide whether to keep going, revise the remaining steps, or finish.\n\nReply with a single JSON object, nothing else:\n{ \"decision\": \"continue\" | \"revise\" | \"finish\", \"reason\": string, \"plan\": string[] }\n- \"continue\": remaining steps still fit — proceed (omit \"plan\").\n- \"revise\": replace the REMAINING steps with a better list in \"plan\"; never repeat done work.\n- \"finish\": the goal is already met — stop (omit \"plan\").\nJudge from the current STATE and the progress vs the goal. Prefer \"continue\".\nAfter a failure, prefer revising around it (another tool, another approach) over giving up; never add a step that asks the user something.",
+          "providerOptions": {
+            "anthropic": {
+              "cacheControl": {
+                "type": "ephemeral"
+              }
+            }
+          }
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "GOAL: Take a note and check it\n\nAlready done:\n1. [low] Note it — finished [1 tool call(s) ok]\n2. Check it — finished\n\nRemaining plan:\n(none)\n\nDecide: continue, revise, or finish."
+            }
+          ]
+        }
+      ],
+      "toolChoice": {
+        "type": "auto"
+      },
+      "maxOutputTokens": 400,
+      "providerOptions": {
+        "openai": {
+          "promptCacheKey": "agent-web:replanner"
+        }
+      }
+    },
+    {
+      "prompt": [
+        {
+          "role": "system",
+          "content": "You are the SYNTHESIZER. Answer the user's goal from what the agent did and found.\n- Lead with the result: the concrete data, from the FINDINGS verbatim when accuracy matters (names, numbers, ids), then — briefly — what was changed.\n- Mention any assumption the agent made. If something could not be done, say so plainly and why.\n- Do not ask follow-up questions unless the goal genuinely cannot be completed without the user.\n- Be concise and friendly. Plain text (light markdown is fine) — no JSON, no code.",
+          "providerOptions": {
+            "anthropic": {
+              "cacheControl": {
+                "type": "ephemeral"
+              }
+            }
+          }
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "GOAL: Take a note and check it\n\nWhat was done:\n1. [low] Note it — finished [1 tool call(s) ok]\n2. Check it — finished\n\nFINDINGS (tool results):\n- note_write: saved hello\n\nWrite the final answer for the user."
+            }
+          ]
+        }
+      ],
+      "toolChoice": {
+        "type": "auto"
+      },
+      "maxOutputTokens": 3000,
+      "providerOptions": {
+        "openai": {
+          "promptCacheKey": "agent-web:synthesizer"
+        }
+      }
+    }
+  ]
+}

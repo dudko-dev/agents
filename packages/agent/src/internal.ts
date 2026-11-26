@@ -1,6 +1,14 @@
 import type { LanguageModel, ToolSet } from 'ai'
 import type { IApprovalController } from './approval.ts'
-import type { EventHandler, IAgentConfig, ISkill, IToolCatalogEntry, IUsage } from './types.ts'
+import type { IResolvedEscalation, IStepWrites } from './tiers.ts'
+import type {
+  EventHandler,
+  IAgentConfig,
+  ISkill,
+  IToolCatalogEntry,
+  IUsage,
+  ModelTier,
+} from './types.ts'
 
 // The effective (resolved) tool selection strategy of a run.
 export type EffectiveToolStrategy = 'all' | 'plan-narrowed' | 'search'
@@ -28,6 +36,21 @@ export interface IRunState {
   // What the user said while the run was going (RunControl.send), oldest first, and whether
   // the replanner has weighed each. Reconciled ones always precede the unreconciled ones.
   userUpdates: { text: string; reconciled: boolean }[]
+  // Escalations made so far in the run (escalation.maxPerRun).
+  escalations?: number
+  // The writes of the step in flight, set only while that step may be escalated: the tool wrapper
+  // records them and hands an earlier attempt's result back instead of writing twice (tiers.ts).
+  stepWrites?: IStepWrites
+}
+
+// The executor models by tier, when config.executorTiers is on. `standard` is always there (it
+// is ctx.executorModel).
+export interface IExecutorTiers {
+  models: Partial<Record<ModelTier, LanguageModel>>
+  // Model ids, for the events.
+  ids: Partial<Record<ModelTier, string>>
+  configured: ReadonlySet<ModelTier>
+  escalation: IResolvedEscalation
 }
 
 export interface IAgentInternalContext {
@@ -36,6 +59,9 @@ export interface IAgentInternalContext {
   // IAgent.usage). Not called for a resumed run's earlier usage: that was spent before.
   onUsage?: (usage: IUsage) => void
   executorModel: LanguageModel
+  // Set only when config.executorTiers names a light or a strong model: the planner then rates
+  // steps and the executor runs each on its tier. Absent = one executor model, as ever.
+  tiers?: IExecutorTiers
   plannerModel: LanguageModel
   synthesizerModel: LanguageModel
   // Host + MCP tools, already wrapped (approval gate, tool-call budget,

@@ -2,12 +2,13 @@ import type { LanguageModel, ToolSet } from 'ai'
 import { createApprovalController, isReadOnlyTool } from './approval.ts'
 import { compactionMaxTokens } from './call-options.ts'
 import { compactHistory, resolveCompaction } from './compaction.ts'
-import type { IAgentInternalContext } from './internal.ts'
+import type { IAgentInternalContext, IExecutorTiers } from './internal.ts'
 import { connectMcpServers, filterTools } from './mcp.ts'
 import { collectMcpInstructions, renderMcpInstructions } from './mcp-shared.ts'
 import { buildModelFromStage, resolveStage } from './provider.ts'
 import { runAgentLoop } from './runner.ts'
 import { createLearning } from './learning.ts'
+import { MODEL_TIERS, resolveEscalation } from './tiers.ts'
 import { createSandboxTools, RUN_JS_TOOL } from './sandbox.ts'
 import { createSkillTools, validateSkills } from './skills.ts'
 import { createEgressTools } from './web-fetch.ts'
@@ -357,8 +358,12 @@ export const createAgent = async (
   let executorModel: LanguageModel
   let plannerModel: LanguageModel
   let synthesizerModel: LanguageModel
+  let tiers: IExecutorTiers | undefined
   try {
-    const executorStage = resolveStage(config, undefined, undefined, 'executor')
+    // The `standard` tier IS the executor: the top-level model unless executorTiers.standard
+    // overrides it. Tiers are in play only when a light or a strong model is named too.
+    const tierConfig = config.executorTiers ?? {}
+    const executorStage = resolveStage(config, tierConfig.standard, undefined, 'executor')
     const plannerStage = resolveStage(config, config.planner, config.plannerModel, 'planner')
     const synthesizerStage = resolveStage(
       config,
@@ -371,6 +376,23 @@ export const createAgent = async (
       buildModelFromStage(config.clientName, plannerStage),
       buildModelFromStage(config.clientName, synthesizerStage),
     ])
+    if (tierConfig.light || tierConfig.strong) {
+      const models: IExecutorTiers['models'] = { standard: executorModel }
+      const ids: IExecutorTiers['ids'] = { standard: executorStage.model }
+      for (const tier of ['light', 'strong'] as const) {
+        if (tierConfig[tier]) {
+          const stage = resolveStage(config, tierConfig[tier], undefined, `executorTiers.${tier}`)
+          models[tier] = await buildModelFromStage(config.clientName, stage)
+          ids[tier] = stage.model
+        }
+      }
+      tiers = {
+        models,
+        ids,
+        configured: new Set(MODEL_TIERS.filter((t) => models[t] !== undefined)),
+        escalation: resolveEscalation(config.escalation, true),
+      }
+    }
   } catch (err) {
     await connected.connection.close().catch(() => {})
     emit({
@@ -395,6 +417,7 @@ export const createAgent = async (
     config,
     onUsage: (usage) => accumulateUsage(spent, usage),
     executorModel,
+    ...(tiers ? { tiers } : {}),
     plannerModel,
     synthesizerModel,
     tools: connected.tools,

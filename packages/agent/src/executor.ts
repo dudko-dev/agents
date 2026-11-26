@@ -1,4 +1,11 @@
-import { stepCountIs, streamText, type ModelMessage, type StopCondition, type ToolSet } from 'ai'
+import {
+  stepCountIs,
+  streamText,
+  type LanguageModel,
+  type ModelMessage,
+  type StopCondition,
+  type ToolSet,
+} from 'ai'
 import { resolvePromptCaching, withRollingBreakpoint } from './caching.ts'
 import { resolveCompaction } from './compaction.ts'
 import { createToolResultClearer } from './context-editing.ts'
@@ -9,6 +16,7 @@ import { effectiveToolStrategy } from './planner.ts'
 import { WEB_FETCH_TOOL } from './web-fetch.ts'
 import { buildExecutorUserPrompt, composeExecutorSystem, renderUserMessages } from './prompts.ts'
 import { stageEmitsThoughts } from './thinking.ts'
+import type { IAttemptOutcome, IEarlierAttempt } from './tiers.ts'
 import { MAX_CARRIED_DISCOVERED_TOOLS } from './tool-search.ts'
 import { ATTR, withSpan } from './tracing.ts'
 import type { IConversationTurn, IPlan, IPlanStep, IStepResult, IUsage } from './types.ts'
@@ -71,6 +79,20 @@ interface RunOnceOutcome {
   toolCalls: IStepResult['toolCalls']
   usage: IUsage
   blocked: boolean
+  empty: boolean
+  cut: boolean
+  stopped: boolean
+}
+
+// One attempt at a step on a given model (config.executorTiers / escalation). Without it the
+// step runs on ctx.executorModel, exactly as before tiers existed.
+export interface IStepAttempt {
+  model?: LanguageModel
+  // The attempts weaker tiers already made at this step: shown to the model so it continues.
+  earlier?: IEarlierAttempt[]
+  // Every tool call the attempt makes is also pushed here as it completes, so a caller still has
+  // them when the attempt THROWS (the calls happened either way).
+  calls?: IStepResult['toolCalls']
 }
 
 export const executeStep = async (
@@ -82,6 +104,19 @@ export const executeStep = async (
   ctx: IAgentInternalContext,
   signal?: AbortSignal,
 ): Promise<IStepResult> =>
+  (await executeStepAttempt(input, plan, step, trace, history, ctx, signal)).result
+
+// executeStep, plus what escalation needs to know about how the attempt ended.
+export const executeStepAttempt = async (
+  input: string,
+  plan: IPlan,
+  step: IPlanStep,
+  trace: IStepResult[],
+  history: IConversationTurn[] | undefined,
+  ctx: IAgentInternalContext,
+  signal?: AbortSignal,
+  attempt: IStepAttempt = {},
+): Promise<{ result: IStepResult; outcome: IAttemptOutcome }> =>
   withSpan(
     'agent.execute_step',
     {
@@ -91,7 +126,7 @@ export const executeStep = async (
     async (span) => {
       const startedAt = Date.now()
       const outcome = await withRetry(
-        () => runOnce(input, plan, step, trace, history, ctx, signal),
+        () => runOnce(input, plan, step, trace, history, ctx, signal, attempt),
         {
           maxRetries: ctx.config.llmMaxRetries ?? 2,
           signal,
@@ -106,11 +141,20 @@ export const executeStep = async (
       span.setAttribute(ATTR.STEP_BLOCKED, outcome.blocked)
       span.setAttribute(ATTR.TOOL_COUNT, outcome.toolCalls.length)
       return {
-        step,
-        summary: outcome.summary,
-        toolCalls: outcome.toolCalls,
-        durationMs: Date.now() - startedAt,
-        blocked: outcome.blocked,
+        result: {
+          step,
+          summary: outcome.summary,
+          toolCalls: outcome.toolCalls,
+          durationMs: Date.now() - startedAt,
+          blocked: outcome.blocked,
+        },
+        outcome: {
+          toolCalls: outcome.toolCalls,
+          blocked: outcome.blocked,
+          empty: outcome.empty,
+          cut: outcome.cut,
+          stopped: outcome.stopped,
+        },
       }
     },
   )
@@ -165,8 +209,13 @@ const runOnce = async (
   history: IConversationTurn[] | undefined,
   ctx: IAgentInternalContext,
   signal?: AbortSignal,
+  attempt: IStepAttempt = {},
 ): Promise<RunOnceOutcome> => {
   const toolCalls: IStepResult['toolCalls'] = []
+  const record = (call: IStepResult['toolCalls'][number]): void => {
+    toolCalls.push(call)
+    attempt.calls?.push(call)
+  }
   const toolInputs = new Map<string, { name: string; input: unknown }>()
 
   const { tools, activeTools, active } = buildExecutorTools(ctx, step)
@@ -273,7 +322,7 @@ const runOnce = async (
   const steered = ctx.takeRoundUpdates
 
   const result = streamText({
-    model: ctx.executorModel,
+    model: attempt.model ?? ctx.executorModel,
     tools,
     ...(activeTools ? { activeTools } : {}),
     ...(active || editMessages || steered
@@ -310,6 +359,7 @@ const runOnce = async (
       history,
       view,
       run?.userUpdates.map((u) => u.text),
+      attempt.earlier,
     ),
     abortSignal: withTimeout(signal, ctx.config.llmTimeoutMs ?? 0),
   })
@@ -342,7 +392,7 @@ const runOnce = async (
         // not happen). Sanitize the raw fallback input so an out-of-order
         // event still doesn't leak secrets.
         const recordedInput = known?.input ?? (await sanitizeForEvent(part.toolName, part.input))
-        toolCalls.push({
+        record({
           name: part.toolName,
           input: recordedInput,
           output: part.output,
@@ -361,7 +411,7 @@ const runOnce = async (
       case 'tool-error': {
         const known = toolInputs.get(part.toolCallId)
         const recordedInput = known?.input ?? (await sanitizeForEvent(part.toolName, part.input))
-        toolCalls.push({
+        record({
           name: part.toolName,
           input: recordedInput,
           output: part.error,
@@ -408,5 +458,8 @@ const runOnce = async (
     toolCalls,
     blocked,
     usage: usage ? normalizeUsage(usage) : emptyUsage(),
+    empty: cleaned.length === 0,
+    cut: finishReason === 'length',
+    stopped: stoppedBy !== undefined,
   }
 }

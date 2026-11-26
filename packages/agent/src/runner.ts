@@ -14,13 +14,21 @@ import {
 } from './compaction.ts'
 import { portOf, type RunControlPort } from './control.ts'
 import { runContext } from './context.ts'
-import { executeStep } from './executor.ts'
+import { executeStepAttempt } from './executor.ts'
 import { checkLimits, resolveLimits } from './limits.ts'
 import { createInitialPlan, filterPlanSkills, planStepCap } from './planner.ts'
 import { renderTrace, renderTraceSteps } from './prompts.ts'
 import { decideNextAction, type ReplanDecision } from './replanner.ts'
 import { activateSkill } from './skills.ts'
 import { synthesizeAnswer } from './synthesizer.ts'
+import {
+  createStepWrites,
+  escalationReasonOf,
+  isEscalatableError,
+  nextStrongerTier,
+  pickTier,
+  type IEarlierAttempt,
+} from './tiers.ts'
 import { resolveToolStrategy } from './tool-search.ts'
 import type { EffectiveToolStrategy, IAgentInternalContext, IRunState } from './internal.ts'
 import type {
@@ -32,6 +40,7 @@ import type {
   IPersistence,
   IPlan,
   IRunSnapshot,
+  IStepEscalation,
   IStepResult,
   ReplanTrigger,
 } from './types.ts'
@@ -300,6 +309,7 @@ const runAgentLoopInner = async (
     traceSummary: resumed?.traceSummary,
     traceSummaryUpTo: resumed?.traceSummaryUpTo ?? 0,
     userUpdates: (resumed?.userUpdates ?? []).map((u) => ({ ...u })),
+    escalations: resumed?.escalations ?? 0,
   }
 
   // proxiedCtx must be in scope BEFORE callPersistence so the persistence
@@ -585,6 +595,7 @@ const runAgentLoopInner = async (
     ...(state.activeSkills.length ? { activeSkills: [...state.activeSkills] } : {}),
     ...(state.toolCalls ? { toolCallCount: state.toolCalls } : {}),
     ...(state.userUpdates.length ? { userUpdates: state.userUpdates.map((u) => ({ ...u })) } : {}),
+    ...(state.escalations ? { escalations: state.escalations } : {}),
     ...extra,
   })
 
@@ -621,7 +632,18 @@ const runAgentLoopInner = async (
     if (store) {
       store.currentStep = step
     }
-    proxiedCtx.emit({ type: 'step.start', step, index: stepIndex })
+    // With config.executorTiers: the tier the planner's rating names (or the nearest configured
+    // one), announced with the step. Without: nothing here, and the event is what it always was.
+    const tiers = ctx.tiers
+    const routed = tiers ? pickTier(step.complexity, tiers.configured) : undefined
+    proxiedCtx.emit({
+      type: 'step.start',
+      step,
+      index: stepIndex,
+      ...(tiers && routed
+        ? { tier: routed.tier, model: tiers.ids[routed.tier], tierReason: routed.reason }
+        : {}),
+    })
 
     // Per-step abort: separate from the run-level signal so the user can
     // cancel just the current step (records as blocked, replanner runs)
@@ -645,7 +667,103 @@ const runAgentLoopInner = async (
     let result: IStepResult
     try {
       await maybeCompactTrace(trace)
-      result = await executeStep(input, currentPlan, step, trace, history, proxiedCtx, stepSignal)
+      if (!tiers || !routed) {
+        result = (
+          await executeStepAttempt(input, currentPlan, step, trace, history, proxiedCtx, stepSignal)
+        ).result
+      } else {
+        // ESCALATION: an attempt that failed in a way a stronger model could fix is retried on
+        // the next stronger configured tier, before the replanner hears of it. The retry
+        // CONTINUES the step: it is shown the earlier attempts' tool calls and results, and the
+        // tool wrapper does not execute again a write that already succeeded (state.stepWrites).
+        let tier = routed.tier
+        const earlier: IEarlierAttempt[] = []
+        const escalations: IStepEscalation[] = []
+        const startedAt = Date.now()
+        const mayEscalate = (): boolean =>
+          tiers.escalation.enabled &&
+          escalations.length < tiers.escalation.maxPerStep &&
+          (state.escalations ?? 0) < tiers.escalation.maxPerRun &&
+          !stepSignal.aborted &&
+          !budgetBreach()
+        if (tiers.escalation.enabled && nextStrongerTier(tier, tiers.configured)) {
+          state.stepWrites = createStepWrites()
+        }
+        try {
+          for (;;) {
+            const calls: IStepResult['toolCalls'] = []
+            let attempt: Awaited<ReturnType<typeof executeStepAttempt>> | undefined
+            let failure: { error: unknown } | undefined
+            try {
+              attempt = await executeStepAttempt(
+                input,
+                currentPlan,
+                step,
+                trace,
+                history,
+                proxiedCtx,
+                stepSignal,
+                { model: tiers.models[tier], calls, ...(earlier.length ? { earlier } : {}) },
+              )
+            } catch (err) {
+              failure = { error: err }
+            }
+            const next = mayEscalate() ? nextStrongerTier(tier, tiers.configured) : undefined
+            const reason = !next
+              ? undefined
+              : failure
+                ? isEscalatableError(failure.error)
+                  ? ('error' as const)
+                  : undefined
+                : escalationReasonOf(attempt!.outcome)
+            if (!next || !reason) {
+              if (failure) {
+                throw failure.error
+              }
+              const last = attempt!.result
+              result = {
+                ...last,
+                // Every attempt's calls, in order: all of them happened.
+                toolCalls: [...earlier.flatMap((a) => a.toolCalls), ...last.toolCalls],
+                durationMs: Date.now() - startedAt,
+                tier,
+                model: tiers.ids[tier],
+                ...(escalations.length ? { escalations } : {}),
+              }
+              break
+            }
+            earlier.push({
+              tier,
+              reason,
+              summary: failure ? asError(failure.error).message : attempt!.result.summary,
+              toolCalls: failure ? calls : attempt!.result.toolCalls,
+            })
+            if (failure) {
+              proxiedCtx.emit({
+                type: 'log',
+                level: 'warn',
+                message: `[step] the ${tier} model failed on step "${step.id}", retrying on ${next}: ${clipText(asError(failure.error).message, 300)}`,
+              })
+            }
+            escalations.push({ from: tier, to: next, reason })
+            state.escalations = (state.escalations ?? 0) + 1
+            if (state.stepWrites) {
+              state.stepWrites.attempt++
+            }
+            proxiedCtx.emit({
+              type: 'step.escalated',
+              step,
+              from: tier,
+              to: next,
+              model: tiers.ids[next] ?? '',
+              reason,
+            })
+            tier = next
+          }
+        } finally {
+          state.stepWrites = undefined
+        }
+      }
     } catch (err) {
       // Distinguish run-level abort (propagate) from step-level abort
       // (treat as blocker so the replanner gets a chance to recover).

@@ -1,4 +1,4 @@
-import type { IStepResult } from './agent/loop-types.js'
+import type { EscalationConfig, IStepResult, ModelTier } from './agent/loop-types.js'
 import type { RunPersistence } from './agent/persistence.js'
 import type { PromptCachingSetting } from './caching.js'
 import type { TokenLimits } from './limits.js'
@@ -65,6 +65,27 @@ export interface BrowserAgentConfig {
   /** Optional per-stage model overrides. A partial override inherits base provider/creds. */
   planner?: StageInput
   synthesizer?: StageInput
+  /**
+   * Executor models by tier. Off unless `light` or `strong` is set: with neither, nothing about a
+   * run changes. Each is a stage input like `planner` (a model, a spec, or a partial override of
+   * the base); `standard` is `model` unless overridden here. With tiers on, the planner marks
+   * every step with a `complexity` and the executor runs it on that tier's model (low -> light,
+   * medium -> standard, high -> strong); a tier that is not configured falls back to the nearest
+   * configured one (the stronger of two equally near). Every step is fitted to the SMALLEST
+   * window among the models in play (a local model's is read from it; state a cloud model's in
+   * `compaction.contextWindowTokens`).
+   */
+  executorTiers?: Partial<Record<ModelTier, StageInput>>
+  /**
+   * When a step fails in a way a stronger model could fix (a blocker, no result, tool arguments
+   * that keep failing to parse, output cut by the cap, a failed model call), retry it on the next
+   * stronger configured tier BEFORE the replanner is consulted. The retry continues the step: it
+   * is shown what the first attempt already did, and a write that already succeeded is not
+   * executed again. Never on a stop, refused credentials (401 / 403), a rate limit (429), a spent
+   * budget or a tool the user denied. Default: on when `executorTiers` is on (`false` turns it
+   * off); without tiers it does nothing.
+   */
+  escalation?: boolean | EscalationConfig
   /** Fetches API keys for ProviderModelSpec models. Default: none (inline keys only). */
   credentials?: CredentialStore
   /** Propagated to the openai-compatible provider name and the MCP client. */

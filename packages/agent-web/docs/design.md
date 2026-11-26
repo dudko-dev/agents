@@ -242,6 +242,62 @@ truncated step is otherwise silent, and a default cap makes it something a host 
 ever having set a limit. Only the share sizes differ between the two packages (the browser ones
 are smaller: a page talks to small windows more often).
 
+## Model tiers and escalation
+
+**Why the planner rates, and nobody else.** A separate router model would be a fifth stage: one
+more call per step, one more prompt to keep stable, one more thing that can fail. The planner
+already reads the whole request and writes every step; rating each one costs a few output tokens
+in a call that happens anyway. The rating is a hint with a net under it (escalation), not a
+contract.
+
+**Why the schema is a second schema.** `TieredPlanSchema` is used only when tiers are on. Adding an
+optional field to `PlanSchema` would have changed the request of every agent, tiers or not - and
+"off means nothing changes" is checked against a recording of the calls made before the feature
+existed, on both tool-modes. The field is an optional enum: no bounds, nothing a provider's
+structured output rejects, and a plan without it is still a plan.
+
+**Why a tag on the prompted path.** A tiny local planner answers `{ reply, plan: string[] }`, often
+cut off or wrapped in prose; `parse.ts` salvages the strings it can. A `complexity` array next to
+`plan` would have to stay aligned with it through truncation, de-duplication and dropped empties.
+A `[high]` at the head of the string travels with the string. The same form serves a revised plan
+in both modes (the replanner's `plan` is a list of strings there).
+
+**Fallback: nearest, then stronger.** `standard` always exists (it is `model`), so in practice a
+missing `light` or `strong` means `standard`. "Nearest" keeps a `low` step off the strong model
+when only `strong` was added (the host added it for the hard steps, not to pay for every lookup);
+"the stronger of two equally near" is the tie rule that never under-powers a step.
+
+**The smallest window governs.** The run's window was already the smallest among the planner, the
+executor and the synthesizer; the tiers join that set. The alternative - compacting for the tier a
+step is routed to - breaks on escalation and on the plan itself: the step log is compacted after a
+step for the *next* one, before its tier is known. A prompt that overflows a local model is a hard
+failure, a prompt smaller than a cloud model could take is only a missed opportunity, so the safe
+side is the small one. What a call may *write* is different: the prompt is already fitted, so each
+tier's output cap is a share of its own window.
+
+**Escalation defaults on with tiers.** Tiers without it are a pure cost optimisation that fails
+harder: the step the planner under-rated fails on the light model and the replanner has to route
+around it. The host already named the stronger model; using it for the one step that needed it,
+once, capped per step and per run, is what the configuration plainly asks for. It cannot be on
+without tiers (there is nothing stronger to go to).
+
+**What escalates.** Only failures that read as "this model was not up to it": a blocker, nothing
+at all, arguments that keep failing to parse, output cut by the cap, a failed call. Never what a
+bigger model cannot fix or must not be given: a stop, a timeout, refused credentials, a rate limit
+(the same account, a costlier model), a spent budget, a denial by the user. A tool that failed for
+its own reasons stays the replanner's.
+
+**Side effects: continue, never restart - enforced, not requested.** A step that wrote something
+and then got stuck is the dangerous case: handing the same step to a stronger model "from the
+top" would write again. Two layers. The prompt: the stronger model gets every earlier call with
+its arguments and result, appended to the user prompt in `executeStep` itself so a host's own
+`prompts.executor` cannot drop it. The guard: while a step may be escalated, the tool wrapper
+records each successful call of a tool that is not read-only, and an identical call in a LATER
+attempt returns the recorded result instead of executing. It sits before the consent gate and the
+call budget (a call that is not made costs neither) and it is scoped to the step: within an
+attempt, and across steps, a model may repeat a call as it always could. It cannot recognise a
+write repeated with different arguments; that is what the prompt and read-only marks are for.
+
 ## Structured output: `generateText` + `Output.object`
 
 AI SDK v7 deprecates `generateObject` / `streamObject`. `generateStructured` is therefore
