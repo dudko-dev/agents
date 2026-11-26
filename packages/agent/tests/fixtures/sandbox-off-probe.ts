@@ -3,6 +3,7 @@
 import * as nodeModule from 'node:module'
 
 const seen: string[] = []
+const loaded: string[] = []
 const registerHooks = (
   nodeModule as unknown as {
     registerHooks?: (hooks: {
@@ -11,6 +12,7 @@ const registerHooks = (
         context: unknown,
         next: (s: string, c: unknown) => unknown,
       ) => unknown
+      load: (url: string, context: unknown, next: (u: string, c: unknown) => unknown) => unknown
     }) => void
   }
 ).registerHooks
@@ -18,6 +20,12 @@ registerHooks?.({
   resolve: (specifier, context, next) => {
     seen.push(specifier)
     return next(specifier, context)
+  },
+  // Resolving is not loading: with the sandbox on, the agent checks that the peer is installed
+  // (a resolve, which newer Node versions route through these hooks) and never evaluates it.
+  load: (url, context, next) => {
+    loaded.push(url)
+    return next(url, context)
   },
 })
 
@@ -44,6 +52,7 @@ console.log(
     tools: agent.listTools().map((t) => t.name),
     toolCalls: result.trace.flatMap((s) => s.toolCalls.map((c) => c.name)),
     engineResolved: seen.filter((s) => /quickjs/.test(s)),
+    engineLoaded: loaded.filter((s) => /quickjs/.test(s)),
     workerResolved: seen.filter((s) => /sandbox-worker/.test(s)),
     workers: sandboxStats.workers,
   }),

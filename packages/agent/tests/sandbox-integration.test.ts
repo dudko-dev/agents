@@ -159,6 +159,7 @@ test('sandbox off: the engine is never resolved and no worker starts (checked in
       tools: string[]
       toolCalls: string[]
       engineResolved: string[]
+      engineLoaded: string[]
       workerResolved: string[]
       workers: number
     }
@@ -171,6 +172,7 @@ test('sandbox off: the engine is never resolved and no worker starts (checked in
     }
     assert.deepEqual(off.tools, [])
     assert.deepEqual(off.engineResolved, [], 'quickjs-emscripten was never looked up')
+    assert.deepEqual(off.engineLoaded, [])
     assert.equal(off.workers, 0)
     // The same probe sees the difference when the sandbox is on, so its silence means something.
     const on = await runProbe('on')
@@ -178,7 +180,8 @@ test('sandbox off: the engine is never resolved and no worker starts (checked in
     assert.deepEqual(on.toolCalls, ['run_js'])
     assert.equal(on.workers, 1)
     // Even then the engine is imported by the worker only: the agent's thread never loads it.
-    assert.deepEqual(on.engineResolved, [])
+    // (It may be resolved there: that is the "is the peer installed" check at creation.)
+    assert.deepEqual(on.engineLoaded, [])
   } finally {
     await llm.close()
   }
