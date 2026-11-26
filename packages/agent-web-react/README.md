@@ -48,7 +48,7 @@ app with a single hook and (optionally) a set of pre-styled components:
 > local WebGPU, all in your browser. Settings turn on tool consent, thinking, token
 > and step limits, compaction, skills - the agent's own **notebook** (it writes down
 > what it figured out, in the workspace, across reloads) and **web access** limited
-> to hosts you list. Type to the agent while it works. Source in [`demo/`](demo/).
+> to hosts you list. Type to the agent while it works. Source in [`apps/demo`](https://github.com/dudko-dev/agents/tree/main/apps/demo).
 
 ## Install
 
@@ -291,7 +291,7 @@ const local = useLocalModel(option.model, option.builtIn ? builtIn : webllm, {
 ```
 
 The demo runs WebLLM, Chrome's Gemini Nano and transformers.js this way — see
-[`demo/src/local-engines.ts`](demo/src/local-engines.ts).
+[`apps/demo/src/local-engines.ts`](https://github.com/dudko-dev/agents/blob/main/apps/demo/src/local-engines.ts).
 
 ## Models in a bundler (Vite, Next, CRA)
 
@@ -334,8 +334,8 @@ function CloudAgent() {
 **Local** — pass a statically-imported `webLLM` factory via `useWebLLMModel`'s
 `create` option (see the WebLLM example above).
 
-The [`demo/`](demo/) app does exactly this — see
-[`demo/src/providers.ts`](demo/src/providers.ts).
+The [`apps/demo`](https://github.com/dudko-dev/agents/tree/main/apps/demo) app does exactly this — see
+[`apps/demo/src/providers.ts`](https://github.com/dudko-dev/agents/blob/main/apps/demo/src/providers.ts).
 
 ## MCP hooks live in their own subpath
 

@@ -1,0 +1,689 @@
+---
+import { Code } from 'astro-expressive-code/components'
+import Base from '../layouts/Base.astro'
+import AgentRun from '../components/AgentRun.astro'
+import { DESCRIPTION, PACKAGES, REPO, TITLE } from '../data/site'
+import { SNIPPETS } from '../data/snippets'
+
+const loop = [
+  {
+    name: 'Plan',
+    text: 'The planner turns the request into ordered steps and names the tools each step is likely to need.',
+  },
+  {
+    name: 'Execute',
+    text: 'The executor runs one step at a time, calling your tools and MCP servers, behind the consent rules you set.',
+  },
+  {
+    name: 'Replan',
+    text: 'After a step the replanner continues, revises the rest of the plan, or stops, also when you say something mid-run.',
+  },
+  {
+    name: 'Answer',
+    text: 'The synthesizer writes the answer from what the steps found. Every stage streams typed events you can render.',
+  },
+]
+
+const features = [
+  {
+    title: 'Tools over MCP, with OAuth',
+    text: 'Connect remote MCP servers over HTTP (and stdio in Node). OAuth 2.1 with dynamic registration, token refresh, paginated tool lists and tool search for catalogues of hundreds of tools.',
+    href: '/docs/node/#mcp-over-oauth-21',
+  },
+  {
+    title: 'Any model, also on the device',
+    text: 'OpenAI, Anthropic, Google, xAI, DeepSeek, Bedrock, Vertex, any OpenAI-compatible endpoint, or a local WebGPU model that needs no key and no server. A different model per stage if you want.',
+    href: '/docs/browser/providers/',
+  },
+  {
+    title: 'Consent before a tool runs',
+    text: 'Autopilot, ask before writes, ask every time, or read-only, with per-tool rules and a switch that works mid-run. Read-only tools are told apart from ones that change something.',
+    href: '/docs/browser/capabilities/#tool-consent-and-autopilot',
+  },
+  {
+    title: 'Context that fits the window',
+    text: 'History, the step log and stale tool results are compacted before the window fills, judged on the whole prompt. Per-run token limits stop a runaway loop and still produce an answer.',
+    href: '/docs/browser/capabilities/#context-management-and-compaction',
+  },
+  {
+    title: 'Subagents',
+    text: 'A whole agent as one tool, isolated in a worker thread or a Web Worker, with named profiles for other models and parameters. Stop one without stopping the run.',
+    href: '/docs/browser/capabilities/#subagents-in-process-or-web-workers',
+  },
+  {
+    title: 'Talk to it while it works',
+    text: 'A message sent mid-run reaches the model at the next boundary and makes the replanner look at the plan again. It never cuts a tool call short.',
+    href: '/docs/browser/capabilities/#steering-a-run-that-is-already-going',
+  },
+  {
+    title: 'A notebook of lessons',
+    text: 'Switched on, the agent writes down what it figured out as skills it loads later. Knowledge only: a lesson cannot grant a permission, and secrets are refused.',
+    href: '/docs/browser/capabilities/#learning-lessons-that-outlive-the-task',
+  },
+  {
+    title: 'Web access you bound',
+    text: 'Off by default. On, the model gets one fetch tool behind allow and deny lists. In Node it does its own DNS lookup and refuses private and metadata addresses.',
+    href: '/docs/browser/security/',
+  },
+]
+
+const faq = [
+  {
+    q: 'What is the difference between the three packages?',
+    a: '<code>@dudko.dev/agent</code> runs in Node and is meant for servers and CLIs. <code>@dudko.dev/agent-web</code> runs the same plan, execute, replan, answer loop inside a browser tab. <code>@dudko.dev/agent-web-react</code> is a React layer over the browser package: a hook and ready components. The two agents share config names, event names and behaviour, so moving between them is mostly a matter of where the code runs.',
+  },
+  {
+    q: 'Do I need a backend to use the browser agent?',
+    a: 'No. With a local WebGPU model nothing leaves the device. With a cloud model the page calls the provider directly using the visitor’s own API key, which is kept encrypted in IndexedDB. A key that belongs to your app must not be shipped to a browser: put it behind your own proxy and point the agent at that.',
+  },
+  {
+    q: 'Which models work?',
+    a: 'Anything the Vercel AI SDK can drive. Providers are optional peer dependencies, so you install only the ones you use. Small local models that cannot do native tool calling are driven through a prompted fallback that repairs their JSON.',
+  },
+  {
+    q: 'How does the agent get tools?',
+    a: 'Two ways, which mix freely: functions you define in code with a schema, and tools published by MCP servers. Tools a server marks read-only skip the “ask before changes” prompt.',
+  },
+  {
+    q: 'Can I see and control what it does?',
+    a: 'Yes. Every plan, step, tool call, thought, token count and compaction is a typed event. You can require consent per tool, cap tokens and tool calls per run, cancel with an AbortSignal, and resume an interrupted run from its last checkpoint.',
+  },
+  {
+    q: 'Is it production ready?',
+    a: 'The packages are pre-1.0 and versioned 0.0.x: the API can still change between releases. They are tested against a scripted model endpoint, a real MCP server and a real authorization server, and the Node package is smoke-tested against a real local model before every release.',
+  },
+  {
+    q: 'What does it cost?',
+    a: 'Nothing. The packages are MIT licensed. You pay your model provider for the tokens the agent uses, or nothing at all with a local model.',
+  },
+]
+
+const faqLd = {
+  '@context': 'https://schema.org',
+  '@type': 'FAQPage',
+  mainEntity: faq.map((f) => ({
+    '@type': 'Question',
+    name: f.q,
+    acceptedAnswer: { '@type': 'Answer', text: f.a.replace(/<[^>]+>/g, '') },
+  })),
+}
+const softwareLd = {
+  '@context': 'https://schema.org',
+  '@type': 'SoftwareSourceCode',
+  name: 'dudko.dev agents',
+  description: DESCRIPTION,
+  codeRepository: REPO,
+  programmingLanguage: 'TypeScript',
+  license: 'https://opensource.org/licenses/MIT',
+  author: { '@type': 'Person', name: 'Siarhei Dudko', url: 'https://dudko.dev' },
+}
+---
+
+<Base title={`${TITLE} · dudko.dev`} description={DESCRIPTION} path="/" jsonLd={[softwareLd, faqLd]}>
+  <section class="hero">
+    <div class="wrap hero__grid">
+      <div class="hero__copy">
+        <p class="eyebrow"><span class="dot" aria-hidden="true"></span>Open source · MIT · TypeScript</p>
+        <h1>Agents that plan, use your tools and answer.<br />In Node and in the browser.</h1>
+        <p class="lead">
+          One planning loop in three npm packages: a server agent over MCP, the same agent running
+          entirely in a browser tab, and React components to put it on a page.
+        </p>
+        <div class="cta">
+          <a class="btn btn--primary" href="/demo/" data-astro-reload>Try the live demo</a>
+          <a class="link-arrow" href="/docs/">Read the docs</a>
+        </div>
+        <p class="proof">
+          Runs in your browser with your own key or a local model. Nothing to sign up for.
+        </p>
+      </div>
+      <div class="hero__art">
+        <AgentRun />
+      </div>
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="packages-title">
+    <div class="wrap">
+      <h2 id="packages-title" class="section__title">Three packages, one loop</h2>
+      <p class="section__lead">
+        Pick where the agent runs. Config fields, events and behaviour carry over.
+      </p>
+      <ul class="packages" role="list">
+        {
+          PACKAGES.map((p) => (
+            <li class="card package reveal">
+              <p class="package__where">{p.where}</p>
+              <h3>
+                <a href={p.docs}>{p.name}</a>
+              </h3>
+              <p class="package__summary">{p.summary}</p>
+              <div class="install">
+                <code>{p.install}</code>
+                <button type="button" class="copy" data-copy={p.install} aria-label={`Copy: ${p.install}`}>
+                  Copy
+                </button>
+              </div>
+              <p class="package__meta">
+                v{p.version} · <a href={`https://www.npmjs.com/package/${p.name}`}>npm</a>
+              </p>
+            </li>
+          ))
+        }
+      </ul>
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="loop-title">
+    <div class="wrap">
+      <h2 id="loop-title" class="section__title">How a run goes</h2>
+      <p class="section__lead">Four stages, each one a separate model call you can point at a different model.</p>
+      <ol class="loop" role="list">
+        {
+          loop.map((s, i) => (
+            <li class="loop__step reveal" style={`--i:${i}`}>
+              <span class="loop__n" aria-hidden="true">
+                {i + 1}
+              </span>
+              <h3>{s.name}</h3>
+              <p>{s.text}</p>
+            </li>
+          ))
+        }
+      </ol>
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="features-title">
+    <div class="wrap">
+      <h2 id="features-title" class="section__title">What is in the box</h2>
+      <p class="section__lead">Everything is optional and configured in one object.</p>
+      <ul class="features" role="list">
+        {
+          features.map((f) => (
+            <li class="card feature reveal">
+              <h3>
+                <a href={f.href}>{f.title}</a>
+              </h3>
+              <p>{f.text}</p>
+            </li>
+          ))
+        }
+      </ul>
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="code-title">
+    <div class="wrap">
+      <h2 id="code-title" class="section__title">Start in a few lines</h2>
+      <p class="section__lead">The quick start of each package.</p>
+      <div class="tabs reveal" data-tabs>
+        <div class="tabs__list" role="tablist" aria-label="Package">
+          {
+            SNIPPETS.map((s, i) => (
+              <button
+                type="button"
+                role="tab"
+                id={`tab-${s.id}`}
+                aria-controls={`panel-${s.id}`}
+                aria-selected={i === 0 ? 'true' : 'false'}
+                tabindex={i === 0 ? 0 : -1}
+              >
+                {s.label}
+              </button>
+            ))
+          }
+        </div>
+        {
+          SNIPPETS.map((s, i) => (
+            <div
+              class="tabs__panel"
+              role="tabpanel"
+              id={`panel-${s.id}`}
+              aria-labelledby={`tab-${s.id}`}
+              tabindex="0"
+              hidden={i !== 0}
+            >
+              <Code code={s.code} lang={s.lang} frame="none" />
+            </div>
+          ))
+        }
+      </div>
+    </div>
+  </section>
+
+  <section class="section tagline" aria-label="The idea">
+    <div class="wrap">
+      <p class="tagline__text" data-words>
+        The model is the only seam. Tools, consent, memory and limits are yours to set.
+      </p>
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="faq-title">
+    <div class="wrap wrap--narrow">
+      <h2 id="faq-title" class="section__title">Questions</h2>
+      <div class="faq">
+        {
+          faq.map((f) => (
+            <details class="faq__item">
+              <summary>{f.q}</summary>
+              <p set:html={f.a} />
+            </details>
+          ))
+        }
+      </div>
+    </div>
+  </section>
+
+  <section class="section final">
+    <div class="wrap wrap--narrow final__box reveal">
+      <h2>See it run before you install anything</h2>
+      <p>
+        The demo is the React package with the browser agent behind it: tools, consent prompts,
+        subagents, a workspace and your own MCP servers.
+      </p>
+      <div class="cta cta--center">
+        <a class="btn btn--primary" href="/demo/" data-astro-reload>Try the live demo</a>
+        <a class="link-arrow" href={REPO}>Source on GitHub</a>
+      </div>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .hero {
+    padding: var(--space-16) 0 var(--space-20);
+  }
+  .hero__grid {
+    display: grid;
+    gap: var(--space-12);
+    align-items: center;
+  }
+  @media (min-width: 62rem) {
+    .hero__grid {
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr);
+      gap: var(--space-16);
+    }
+  }
+  .eyebrow {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin: 0 0 var(--space-6);
+    padding: var(--space-1) var(--space-3);
+    border: 1px solid var(--c-border-strong);
+    border-radius: var(--radius-pill);
+    color: var(--c-text-muted);
+    font-size: var(--text-sm);
+  }
+  .dot {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background: var(--c-ok);
+  }
+  h1 {
+    margin: 0;
+    max-width: var(--w-prose);
+    font-size: clamp(var(--text-4xl), 5vw, var(--text-6xl));
+    line-height: var(--leading-tight);
+    letter-spacing: -0.02em;
+    text-wrap: balance;
+  }
+  .lead {
+    margin: var(--space-6) 0 0;
+    max-width: 34rem;
+    color: var(--c-text-muted);
+    font-size: var(--text-lg);
+    line-height: var(--leading-normal);
+    text-wrap: pretty;
+  }
+  .cta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-6);
+    margin-top: var(--space-8);
+  }
+  .cta--center {
+    justify-content: center;
+  }
+  .proof {
+    margin: var(--space-6) 0 0;
+    color: var(--c-text-faint);
+    font-size: var(--text-sm);
+  }
+
+  .packages,
+  .features,
+  .loop {
+    display: grid;
+    gap: var(--space-4);
+    margin: var(--space-10) 0 0;
+    padding: 0;
+    list-style: none;
+  }
+  @media (min-width: 48rem) {
+    .packages {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+    .features {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .loop {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+  }
+  @media (min-width: 72rem) {
+    .features {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+  }
+  .package {
+    display: flex;
+    flex-direction: column;
+  }
+  .package__where {
+    margin: 0 0 var(--space-2);
+    color: var(--c-accent);
+    font-size: var(--text-sm);
+    font-weight: 600;
+  }
+  .package h3,
+  .feature h3,
+  .loop h3 {
+    margin: 0;
+    font-size: var(--text-lg);
+    line-height: var(--leading-snug);
+  }
+  .package h3 {
+    font-family: var(--font-mono);
+    font-size: var(--text-base);
+    overflow-wrap: anywhere;
+  }
+  .package__summary,
+  .feature p,
+  .loop p {
+    margin: var(--space-3) 0 0;
+    color: var(--c-text-muted);
+    font-size: var(--text-sm);
+    line-height: var(--leading-normal);
+  }
+  .package__summary {
+    flex: 1;
+  }
+  .install {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-top: var(--space-4);
+    padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
+    border: 1px solid var(--c-border);
+    border-radius: var(--radius-sm);
+    background: var(--c-code-bg);
+  }
+  .install code {
+    flex: 1;
+    overflow-x: auto;
+    white-space: nowrap;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--c-text);
+  }
+  .copy {
+    flex: none;
+    min-height: 1.75rem;
+    padding: 0 var(--space-2);
+    border: 1px solid var(--c-border-strong);
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--c-text-muted);
+    font: inherit;
+    font-size: var(--text-xs);
+    cursor: pointer;
+    transition:
+      color var(--dur-fast) var(--ease-settle),
+      border-color var(--dur-fast) var(--ease-settle);
+  }
+  .copy:hover {
+    color: var(--c-text);
+    border-color: var(--c-accent);
+  }
+  .package__meta {
+    margin: var(--space-3) 0 0;
+    color: var(--c-text-faint);
+    font-size: var(--text-xs);
+  }
+
+  .loop__step {
+    position: relative;
+    padding: var(--space-6);
+    border-top: 2px solid var(--c-border-strong);
+  }
+  .loop__n {
+    display: block;
+    margin-bottom: var(--space-3);
+    color: var(--c-accent);
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+  }
+
+  .tabs {
+    margin-top: var(--space-10);
+    border: 1px solid var(--c-border);
+    border-radius: var(--radius-md);
+    background: var(--c-code-bg);
+    overflow: hidden;
+  }
+  .tabs__list {
+    display: flex;
+    gap: var(--space-1);
+    padding: var(--space-2);
+    border-bottom: 1px solid var(--c-border);
+  }
+  .tabs__list button {
+    min-height: 2.25rem;
+    padding: 0 var(--space-4);
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--c-text-muted);
+    font: inherit;
+    font-size: var(--text-sm);
+    font-weight: 600;
+    cursor: pointer;
+    transition:
+      color var(--dur-fast) var(--ease-settle),
+      background-color var(--dur-fast) var(--ease-settle);
+  }
+  .tabs__list button:hover {
+    color: var(--c-text);
+  }
+  .tabs__list button[aria-selected='true'] {
+    background: var(--c-accent-soft);
+    color: var(--c-accent-strong);
+  }
+  .tabs__panel :global(pre) {
+    margin: 0;
+    padding: var(--space-6);
+    overflow-x: auto;
+    background: transparent !important;
+    font-size: var(--text-sm);
+    line-height: var(--leading-normal);
+  }
+
+  .tagline {
+    padding-block: var(--space-24);
+  }
+  .tagline__text {
+    margin: 0 auto;
+    max-width: 52rem;
+    font-size: clamp(var(--text-3xl), 4.6vw, var(--text-5xl));
+    font-weight: 700;
+    line-height: var(--leading-tight);
+    letter-spacing: -0.02em;
+    text-align: center;
+    text-wrap: balance;
+  }
+  .tagline__text :global(.w) {
+    color: var(--c-text-faint);
+    transition: color var(--dur-base) var(--ease-settle);
+  }
+  .tagline__text :global(.w.on) {
+    color: var(--c-text);
+  }
+
+  .faq {
+    margin-top: var(--space-8);
+    border-top: 1px solid var(--c-border);
+  }
+  .faq__item {
+    border-bottom: 1px solid var(--c-border);
+  }
+  .faq__item summary {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--space-4);
+    padding: var(--space-4) 0;
+    font-size: var(--text-lg);
+    font-weight: 600;
+    cursor: pointer;
+    list-style: none;
+  }
+  .faq__item summary::-webkit-details-marker {
+    display: none;
+  }
+  .faq__item summary::after {
+    content: '+';
+    flex: none;
+    color: var(--c-accent);
+    font-family: var(--font-mono);
+    transition: transform var(--dur-fast) var(--ease-settle);
+  }
+  .faq__item[open] summary::after {
+    transform: rotate(45deg);
+  }
+  .faq__item p {
+    margin: 0 0 var(--space-6);
+    max-width: var(--w-prose);
+    color: var(--c-text-muted);
+    line-height: var(--leading-normal);
+  }
+  .faq__item :global(code) {
+    font-family: var(--font-mono);
+    font-size: 0.9em;
+    color: var(--c-text);
+  }
+
+  .final__box {
+    padding: var(--space-12) var(--space-6);
+    border: 1px solid var(--c-border-strong);
+    border-radius: var(--radius-lg);
+    background: var(--c-surface);
+    text-align: center;
+  }
+  .final__box h2 {
+    margin: 0;
+    font-size: var(--text-3xl);
+    line-height: var(--leading-snug);
+    text-wrap: balance;
+  }
+  .final__box p {
+    margin: var(--space-4) auto 0;
+    max-width: 36rem;
+    color: var(--c-text-muted);
+    line-height: var(--leading-normal);
+  }
+</style>
+
+<script>
+  // Copy buttons.
+  for (const button of document.querySelectorAll<HTMLButtonElement>('[data-copy]')) {
+    button.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(button.dataset.copy ?? '')
+        const label = button.textContent
+        button.textContent = 'Copied'
+        setTimeout(() => (button.textContent = label), 1600)
+      } catch {
+        /* no clipboard permission: the command is selectable text next to the button */
+      }
+    })
+  }
+
+  // Tabs: click and arrow keys, as in the ARIA tabs pattern.
+  for (const root of document.querySelectorAll<HTMLElement>('[data-tabs]')) {
+    const tabs = [...root.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
+    const select = (tab: HTMLButtonElement, focus = false) => {
+      for (const t of tabs) {
+        const on = t === tab
+        t.setAttribute('aria-selected', String(on))
+        t.tabIndex = on ? 0 : -1
+        const panel = document.getElementById(t.getAttribute('aria-controls') ?? '')
+        if (panel) panel.hidden = !on
+      }
+      if (focus) tab.focus()
+    }
+    tabs.forEach((tab, i) => {
+      tab.addEventListener('click', () => select(tab))
+      tab.addEventListener('keydown', (e) => {
+        const step = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0
+        if (!step) return
+        e.preventDefault()
+        select(tabs[(i + step + tabs.length) % tabs.length]!, true)
+      })
+    })
+  }
+
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches
+
+  // Sections settle into place once, when they enter the viewport.
+  const revealed = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue
+        entry.target.classList.add('in')
+        revealed.unobserve(entry.target)
+      }
+    },
+    { rootMargin: '0px 0px -10% 0px' },
+  )
+  for (const el of document.querySelectorAll('.reveal')) {
+    if (reduce) el.classList.add('in')
+    else revealed.observe(el)
+  }
+
+  // The tagline: words turn to full colour one by one as the block crosses the middle of the
+  // screen. The text stays plain text for a screen reader (the spans carry no semantics).
+  for (const block of document.querySelectorAll<HTMLElement>('[data-words]')) {
+    const words = (block.textContent ?? '').trim().split(/\s+/)
+    block.textContent = ''
+    const spans = words.map((word, i) => {
+      const span = document.createElement('span')
+      span.className = reduce ? 'w on' : 'w'
+      span.textContent = word
+      block.append(span, i < words.length - 1 ? ' ' : '')
+      return span
+    })
+    if (reduce) continue
+    let queued = false
+    const paint = () => {
+      queued = false
+      const rect = block.getBoundingClientRect()
+      const start = innerHeight * 0.85
+      const end = innerHeight * 0.35
+      const progress = Math.min(1, Math.max(0, (start - rect.top) / (start - end)))
+      const lit = Math.round(progress * spans.length)
+      spans.forEach((span, i) => span.classList.toggle('on', i < lit))
+    }
+    const onScroll = () => {
+      if (queued) return
+      queued = true
+      requestAnimationFrame(paint)
+    }
+    addEventListener('scroll', onScroll, { passive: true })
+    addEventListener('resize', onScroll, { passive: true })
+    paint()
+  }
+</script>

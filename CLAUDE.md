@@ -1,11 +1,16 @@
 # agents — instructions for Claude
 
-Monorepo (pnpm workspaces + Nx) of three published packages and one private app:
+Monorepo (pnpm workspaces + Nx) of three published packages and two private apps:
 
 - `packages/agent` — `@dudko.dev/agent`, the Node / server agent.
 - `packages/agent-web` — `@dudko.dev/agent-web`, the in-browser agent (the core of the next two).
 - `packages/agent-web-react` — `@dudko.dev/agent-web-react`, React bindings; its `e2e/` drives the demo.
 - `apps/demo` — the Vite demo of the React package (private, never published).
+- `apps/site` — https://agent.dudko.dev: the landing page and the docs (Astro + Starlight), with the
+  built demo mounted under `/demo/`. The docs pages are **generated** from the packages' READMEs
+  and `docs/*.md` (`scripts/sync-docs.mjs`): edit the source file in the package, never the copy.
+  A new docs file needs an entry in that script's `PAGES` and in the sidebar (`astro.config.mjs`).
+  Dark theme only; colours, type and motion come from `src/styles/tokens.css`.
 
 **Each package has its own `CLAUDE.md`. Read it before changing that package** — layout, conventions
 and the reasons behind them live there. This file holds only what is shared.
@@ -22,7 +27,7 @@ pnpm test:e2e                # Playwright over the built demo
 pnpm nx <target> <project>   # e.g. pnpm nx test @dudko.dev/agent-web
 ```
 
-Projects: `@dudko.dev/agent`, `@dudko.dev/agent-web`, `@dudko.dev/agent-web-react`, `demo`.
+Projects: `@dudko.dev/agent`, `@dudko.dev/agent-web`, `@dudko.dev/agent-web-react`, `demo`, `site`.
 Targets come from each package's `scripts`: `typecheck`, `format:check`, `format`, `build`, `test`
 (and `test:e2e` in the React package).
 
@@ -70,7 +75,7 @@ tool. Do not infer success from "the change looks right".
   (the Node agent against a real local model: gates its publish, and runs on PRs that touch its
   dependencies). Do not edit `release.yml` unless asked: npm's Trusted Publisher setting names
   that file and the `release` environment.
-- The demo is built and deployed by Cloudflare (Workers Builds, `wrangler.jsonc`), not by a
-  workflow here.
-- The autoupdate and Claude workflows of the old repositories are kept for reference under
-  `.github/_imported/` until they are ported; they do not run from there.
+- The site and the demo are built and deployed by Cloudflare (Workers Builds: `pnpm nx build site`,
+  then `wrangler.jsonc` publishes `apps/site/dist`), not by a workflow here.
+- `autoupdate.yml` (weekly dependency update, merged and released when green) and `claude.yml`
+  (fixes a red autoupdate) are documented in the root README.
