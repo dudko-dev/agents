@@ -105,6 +105,7 @@
     "@ai-sdk/openai": "^4.0.0",
     "@ai-sdk/openai-compatible": "^3.0.0",
     "@ai-sdk/xai": "^4.0.0",
+    "quickjs-emscripten": "^0.32.0",
     "workers-ai-provider": "^4.0.0"
   },
   "peerDependenciesMeta": {
@@ -135,6 +136,9 @@
     "@ai-sdk/xai": {
       "optional": true
     },
+    "quickjs-emscripten": {
+      "optional": true
+    },
     "workers-ai-provider": {
       "optional": true
     }
@@ -152,6 +156,7 @@
     "@ai-sdk/xai": "^5.0.52",
     "@types/node": "^22.9.0",
     "prettier": "^3.10.1",
+    "quickjs-emscripten": "^0.32.0",
     "tsup": "^9.0.0",
     "typescript": "^6.0.3",
     "workers-ai-provider": "^4.0.1"

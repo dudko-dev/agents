@@ -41,6 +41,16 @@ export default defineConfig([
   },
   {
     ...shared,
+    // Worker-thread entry of the sandbox (config.sandbox / run_js): the only file that imports
+    // the optional peer quickjs-emscripten (left external). Resolved next to the library, like
+    // the subagent worker.
+    clean: false,
+    entry: { 'sandbox-worker': 'src/sandbox-worker.ts' },
+    format: ['esm'],
+    external: ['quickjs-emscripten'],
+  },
+  {
+    ...shared,
     // CLI is bundled standalone (it duplicates the library code) so the
     // installed `dd-agent` bin doesn't depend on dist/index.js layout.
     clean: false,

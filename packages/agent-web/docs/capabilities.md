@@ -23,6 +23,7 @@ implements the same features with the same field and event names.
 - [Steering a run that is already going](#steering-a-run-that-is-already-going)
 - [Learning: lessons that outlive the task](#learning-lessons-that-outlive-the-task)
 - [Egress: what the model may fetch](#egress-what-the-model-may-fetch)
+- [Running code: the sandbox](#running-code-the-sandbox)
 - [Pipelines: a graph of agents](#pipelines-a-graph-of-agents)
 - [Autonomy](#autonomy)
 - [Event reference](#event-reference)
@@ -877,6 +878,97 @@ What a page **cannot** do, and a server can:
 Approval: an open-internet `web_fetch` is a way to leak data through the URL, so it asks like a
 **write**; with an `allow` list it is **read-only**. Each request emits `egress.request`
 (`url` is origin and path only — no query string —, `allowed`, `status` or `reason`).
+
+## Running code: the sandbox
+
+Ask a model to "run it on the test data" and, with nothing to run it in, it writes the
+code and *describes* an output. Switch on `sandbox` and the run is a real tool call:
+
+```ts
+// npm install quickjs-emscripten   (an optional peer: only needed with `sandbox`)
+import SandboxWorker from '@dudko.dev/agent-web/sandbox-worker?worker' // Vite
+
+const agent = await createAgent({
+  model,
+  tools: createFileTools(vfs), // optional: binds the guest to the workspace
+  sandbox: {
+    worker: () => new SandboxWorker(),
+    // other bundlers:
+    // worker: () => new Worker(new URL('@dudko.dev/agent-web/sandbox-worker', import.meta.url), { type: 'module' }),
+    // timeoutMs: 5000, memoryLimitBytes: 32 * 1024 * 1024, maxOutputChars: 8000, maxCodeChars: 100_000, files: true,
+  },
+})
+```
+
+It registers one tool, `run_js({ code })` — or `run_js({ entry: '/main.js' })` to run a
+workspace file — returning `{ ok, stdout, result?, error?, truncated, durationMs }`:
+
+- `stdout`: what `console.log / info / warn / error` printed, in order.
+- `result`: the value of the **last expression** (a returned promise is awaited; for a
+  program written as an ES module, its `default` export), copied out as JSON-like data.
+- `error`: `{ name, message, stack }` when the program threw, timed out or ran out of
+  memory — the guest's frames only. A failing program is a result the model reads, not a
+  failed tool call.
+
+**Off by default**, and switched on only when the agent is created: without the flag
+there is no tool, not a word more in the prompts, and neither the sandbox code nor the
+engine is loaded. `sandbox: true` works too — see "Where it runs".
+
+**What the guest is.** QuickJS compiled to WebAssembly
+([`quickjs-emscripten`](https://github.com/justjake/quickjs-emscripten), MIT): standard
+JavaScript (ES2023, top-level `await`, `setTimeout` / `setInterval` bounded by the run)
+and nothing of the page — no `window`, `document`, `fetch`, `XMLHttpRequest`,
+`WebSocket`, `indexedDB`, `localStorage`, no network, no packages.
+
+**Where it runs.**
+
+- **`worker` given (recommended):** each run gets a fresh Web Worker, **terminated** when
+  the run is over or `timeoutMs` + 1 s has passed. The page never blocks. The worker
+  module is the package's `./sandbox-worker` entry, which serves by itself; it is the only
+  place the engine is imported by name, so your bundler puts `quickjs-emscripten` and its
+  `.wasm` (about 0.5 MB) into the worker's chunk and nowhere else. To build your own
+  worker module, call `serveSandboxWorker()` from that entry.
+- **no `worker` (or the factory throws — no `Worker` in this environment):** the guest
+  runs on the page's thread, with a warning in the log. It is isolated all the same and
+  QuickJS's interrupt handler still stops JavaScript that loops, but a single long native
+  call in the guest (a search in a 16 MiB string) cannot be interrupted and blocks the
+  page until it returns. In a bundled app pass `engine: () => import('quickjs-emscripten')`
+  for this mode so the bundler resolves the peer; the default is a runtime import (an
+  import map, or Node).
+
+**Limits** (`default / at most`): `timeoutMs` 5000 / 60000 — time waiting for a file
+operation, a consent prompt included, does not count; `memoryLimitBytes` 32 MiB /
+256 MiB — the hard maximum of the guest's WebAssembly memory, the engine's own 16 MiB
+included; `maxOutputChars` 8000 / 100000 — `stdout` and `result` together, `truncated`
+says when it was cut; `maxCodeChars` 100000 / 1000000. Nothing is shared between runs,
+and at most four run at once.
+
+**Files.** When the agent has the file tools (`createFileTools(vfs)`) and `files` is not
+`false`, the guest is bound to the same virtual file system:
+
+- `import` and `require()` load workspace files by relative (or absolute) path —
+  `.js`, `.mjs` and `.json` only, each at most `maxCodeChars`, at most 64 of them. A
+  `.js` file is an ES module when imported and CommonJS when required. The loader is
+  given the files a program names by a **literal** path (followed through their own
+  imports) before the run starts: a computed `require(name)` finds nothing, and a file
+  written during a run is a module of the *next* run.
+- `fs.readFile(path)`, `fs.writeFile(path, text)`, `fs.readdir(path)` — all **async**
+  (`await` them), text only, at most 1 000 000 characters a file and 500 calls a run.
+- The guest gets what the file tools grant and no more: a read-only mount
+  (`createFileTools(vfs, { readOnly: true })`) or an excluded `fs_write` means there is no
+  `fs.writeFile`. Every call passes the [consent gate](#tool-consent-and-autopilot) under
+  the file tool's own name, so a rule `{ fs_write: 'deny' }` denies the guest's writes
+  and `ask-writes` asks for each one.
+- A path cannot leave the workspace (`../` is refused), and there is nothing but the
+  workspace to reach: never the real file system.
+
+Without file tools the sandbox computes only (as it does in the Node sibling, which has
+no workspace).
+
+**Gates.** `run_js` is an ordinary tool: listed, searchable, counted against
+`maxToolCalls`, its output capped, and a **write** for consent — `ask-writes` shows the
+user the code before each run, `read-only` refuses it. A UI sees it as the usual
+`step.tool-call` / `step.tool-result` events; there is no separate event.
 
 ## Pipelines: a graph of agents
 

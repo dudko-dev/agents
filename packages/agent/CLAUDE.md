@@ -24,6 +24,15 @@
     as skills, `origin.kind: 'learned'`; Memory/Dir stores; secret scan, caps, operator skills
     never overwritten). Knowledge only, never policy: a lesson is loaded under `learnedPreamble`.
     Every guard has a test in `tests/learning*.test.ts` and a mutation check.
+  - `sandbox.ts` (`config.sandbox`: the `run_js` tool; one worker thread per run, killed at the
+    deadline) + `sandbox-worker.ts` (the worker entry, built to `dist/sandbox-worker.js`: the only
+    file that imports the optional peer `quickjs-emscripten`) + `sandbox-engine.ts` (limits, the
+    guest's runtime, the module resolver, the worker protocol, what may cross the boundary; pure,
+    no imports). The engine is a COPY of the browser sibling's `src/sandbox/engine.ts`, byte for
+    byte: change both (`tests/sandbox-engine.test.ts` compares them). The memory limit is the
+    WebAssembly memory's maximum, NOT QuickJS's `setMemoryLimit` (which undercounts in this build:
+    see the comment at `newBoundedModule`). Computation only here: the Node agent has no workspace.
+    Security boundary: every guard has a test in `tests/sandbox*.test.ts` and a mutation check.
   - `call-options.ts` also owns the per-call output caps (`stageOutputCap`): `limits.perCall` wins (0 = no
     cap), otherwise a share of the context window between a floor and a ceiling (`OUTPUT_CAP_SHARES`), and
     none for a stage that thinks (reasoning counts against the cap on OpenAI / Gemini). A call the cap cut

@@ -52,6 +52,9 @@ export interface IAgentInternalContext {
   // notebook's tool names: callable in every step whatever the strategy narrows to (they are still
   // wrapped and gated like any other tool).
   learning?: { nudge: boolean; tools: string[] }
+  // Set when config.sandbox is on and run_js is among the tools: the stage prompts say what it
+  // is and that code is never reported as run without it.
+  sandbox?: { files: boolean }
   approval?: IApprovalController
   // Per-run state; set by the runner on its per-run copy of the context.
   run?: IRunState

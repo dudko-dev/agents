@@ -87,6 +87,15 @@ export {
 } from './safe-fetch.ts'
 export type { EgressErrorCode, IEgressPolicy, IResolvedAddress, SafeFetch } from './safe-fetch.ts'
 export { createWebFetchTool, createEgressTools, htmlToText, WEB_FETCH_TOOL } from './web-fetch.ts'
+// Sandbox: the run_js tool (JavaScript in QuickJS/WebAssembly, in a worker thread).
+export {
+  createSandboxTool,
+  createSandboxTools,
+  resolveSandboxLimits,
+  RUN_JS_TOOL,
+  SandboxUnavailableError,
+} from './sandbox.ts'
+export type { ISandboxConfig, ISandboxError, ISandboxLimits, ISandboxResult } from './sandbox.ts'
 // Steer a run while it goes: send a message, stop one subagent.
 export { createRunControl } from './control.ts'
 export type { RunControl, SubagentInfo } from './control.ts'

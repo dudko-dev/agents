@@ -88,6 +88,7 @@ export const executeStep = async (
     searchMode: searchMode && Boolean(ctx.tools[FIND_TOOLS_NAME]),
     updates: ctx.userUpdates?.(),
     ...(ctx.learning?.nudge ? { learning: { fetch: Boolean(ctx.tools[WEB_FETCH_TOOL]) } } : {}),
+    ...(ctx.sandbox ? { sandbox: ctx.sandbox.executor } : {}),
   })
 
   const loop = await runToolLoop(ctx.executorModel, {
