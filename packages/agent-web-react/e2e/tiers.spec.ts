@@ -9,6 +9,7 @@ import { mockGemini, plan, type GeminiCall, type GeminiReply } from './gemini.ts
 
 const LIGHT = 'gemini-3.5-flash-lite'
 const STANDARD = 'gemini-3.8-flash'
+const STRONG = 'gemini-3.1-pro-preview'
 
 const openWithKey = async (page: Page) => {
   await page.goto('/')
@@ -46,10 +47,17 @@ test('a step the light model gives up on is escalated, and the two attempts are 
   })
   await openWithKey(page)
 
-  // Tiers are off until a light or a strong model is chosen.
+  // Tiers are on by default: "auto" takes the lightest and the strongest model of the chosen
+  // model's own provider (the key is the same one), and the panel names what it took.
   await page.getByText('Agent settings').click()
-  await expect(page.getByText('Off: every step runs on the model chosen above.')).toBeVisible()
-  await page.getByLabel('Light model').selectOption('google-flash-lite')
+  await expect(page.getByLabel('Light model')).toHaveValue('auto')
+  await expect(page.getByLabel('Strong model')).toHaveValue('auto')
+  await expect(page.locator('.agentset__state').filter({ hasText: 'Flash-Lite' })).toHaveText(
+    'on: Gemini 3.5 Flash-Lite',
+  )
+  await expect(page.locator('.agentset__state').filter({ hasText: 'Pro' })).toHaveText(
+    'on: Gemini 3.1 Pro',
+  )
   await expect(page.getByText('The planner rates each step')).toBeVisible()
 
   await send(page, 'Add a note')
@@ -85,26 +93,80 @@ test('a step the light model gives up on is escalated, and the two attempts are 
   expect(second.user).toContain('EARLIER ATTEMPT AT THIS STEP')
 })
 
-test('without tiers the steps show no tier, no model and no escalation', async ({ page }) => {
-  await mockGemini(page, (c) => {
-    if (c.stage === 'planner') return plan('Add the note')
+test('tiers switched off: every step runs on the chosen model, and shows no tier, no model and no escalation', async ({
+  page,
+}) => {
+  const calls = await mockGemini(page, (c) => {
+    if (c.stage === 'planner') {
+      // Rated easy and hard: with tiers these would go to the light and the strong model.
+      return {
+        text: JSON.stringify({
+          thought: 'Two steps.',
+          steps: [
+            { description: 'Add the note', complexity: 'low' },
+            { description: 'Check the board', complexity: 'high' },
+          ],
+        }),
+      }
+    }
     if (c.stage === 'executor') {
-      return c.functionResponses.length === 0
+      return c.user.includes('STEP 1/2') && c.functionResponses.length === 0
         ? { call: { name: 'add_note', args: { text: 'plain' } } }
         : { text: 'Done.' }
     }
+    if (c.stage === 'replanner')
+      return { text: JSON.stringify({ decision: 'continue', reason: 'ok' }) }
     return { text: 'Added.' }
   })
   await openWithKey(page)
+  await page.getByText('Agent settings').click()
+  await page.getByLabel('Light model').selectOption('')
+  await page.getByLabel('Strong model').selectOption('')
+  await expect(page.getByText('Off: every step runs on the model chosen above.')).toBeVisible()
+
   await send(page, 'Add a note')
   const answer = page.locator('.awr-msg--assistant').last()
   await expect(answer.locator('.awr-msg__bubble')).toHaveText('Added.')
-  await expect(answer.locator('.awr-activity__summary')).toHaveText('1 step · 1 tool call')
+  await expect(answer.locator('.awr-activity__summary')).toHaveText('2 steps · 1 tool call')
   await answer.locator('.awr-activity__summary').click()
-  await expect(answer.locator('.awr-step')).toHaveCount(1)
+  await expect(answer.locator('.awr-step')).toHaveCount(2)
   await expect(
     answer.locator('.awr-step__meta, .awr-step__tier, .awr-step__escalated, .awr-tool__tag'),
   ).toHaveCount(0)
+  // One model did all of it.
+  expect(new Set(calls.filter((c) => c.stage === 'executor').map((c) => c.model))).toEqual(
+    new Set([STANDARD]),
+  )
+})
+
+test('auto tiers: a step rated hard runs on the strongest model of the same provider, an unrated one on the chosen model', async ({
+  page,
+}) => {
+  const calls = await mockGemini(page, (c) => {
+    if (c.stage === 'planner') {
+      return {
+        text: JSON.stringify({
+          thought: 'Two steps.',
+          steps: [{ description: 'Think hard', complexity: 'high' }, { description: 'Wrap up' }],
+        }),
+      }
+    }
+    if (c.stage === 'executor') return { text: 'Done.' }
+    if (c.stage === 'replanner')
+      return { text: JSON.stringify({ decision: 'continue', reason: 'ok' }) }
+    return { text: 'All done.' }
+  })
+  await openWithKey(page)
+  await send(page, 'Do two things')
+  const answer = page.locator('.awr-msg--assistant').last()
+  await expect(answer.locator('.awr-msg__bubble')).toHaveText('All done.')
+  await answer.locator('.awr-activity__summary').click()
+  await expect(answer.locator('.awr-step__tier')).toHaveText(['strong', 'standard'])
+  await expect(answer.locator('.awr-step__model')).toHaveText([STRONG, STANDARD])
+  expect(calls.filter((c) => c.stage === 'executor').map((c) => c.model)).toEqual([
+    STRONG,
+    STANDARD,
+  ])
 })
 
 test('a replanner that fails is a warning on the step: the run goes on and ends with its answer', async ({

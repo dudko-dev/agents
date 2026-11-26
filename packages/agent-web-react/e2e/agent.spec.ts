@@ -239,7 +239,7 @@ test('a setting changed mid-run keeps the run going and applies to the next one'
   await send(page, 'hello')
   await expect(page.locator('.awr-sendbtn--stop')).toBeVisible()
   await page.locator('.agentset__title').click()
-  await page.locator('.agentset select').first().selectOption('high')
+  await page.locator('.agentset').getByLabel('Thinking').selectOption('high')
   // The rebuild doesn't flip the panel out of "running".
   await expect(page.locator('.awr-sendbtn--stop')).toBeVisible()
   await expect(page.locator('.awr-msg--assistant .awr-msg__bubble')).toHaveText('Hi there.')
@@ -316,11 +316,31 @@ test('fast answers: the step’s reply is the answer — no synthesizer call', a
   expect(calls.map((c) => c.stage)).toEqual(['planner', 'executor'])
 })
 
-test('labels: every text of the chat can be swapped (Russian)', async ({ page }) => {
+test('labels: every text of the chat can be swapped (Spanish, German)', async ({ page }) => {
   await mockGemini(page, () => ({ text: 'ok' }))
   await openWithKey(page)
   await page.locator('.agentset__title').click()
-  await page.getByLabel('Labels').selectOption('ru')
-  await expect(page.getByRole('button', { name: 'Отправить' })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Показать чаты' })).toBeVisible()
+  const lang = page.getByLabel('Chat language')
+  await expect(lang.locator('option')).toHaveText(['English', 'Español', 'Deutsch'])
+
+  await lang.selectOption('es')
+  await expect(page.getByRole('button', { name: 'Enviar' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Mostrar chats' })).toBeVisible()
+  await expect(page.getByRole('textbox', { name: 'Mensaje' })).toHaveAttribute(
+    'placeholder',
+    /Pida algo al agente/,
+  )
+
+  await lang.selectOption('de')
+  await expect(page.getByRole('button', { name: 'Senden' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Chats anzeigen' })).toBeVisible()
+  await expect(page.getByRole('textbox', { name: 'Nachricht' })).toHaveAttribute(
+    'placeholder',
+    /Geben Sie dem Agenten eine Aufgabe/,
+  )
+
+  // Back to English: the library's own labels and the tab's own placeholder.
+  await lang.selectOption('en')
+  await expect(page.getByRole('button', { name: 'Send' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Show chats' })).toBeVisible()
 })

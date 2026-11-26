@@ -457,13 +457,15 @@ model started says which helper asks - see [the tree](#subagents-and-helpers-the
 plurals work in any language:
 
 ```tsx
-<AgentChat labels={{ send: 'Отправить', steps: (n) => `${n} шаг(ов)` }} />
+<AgentChat
+  labels={{ send: 'Senden', steps: (n) => `${n} ${n === 1 ? 'Schritt' : 'Schritte'}` }}
+/>
 // or for a whole tree:
-<AgentLabelsProvider labels={ruLabels}>…</AgentLabelsProvider>
+<AgentLabelsProvider labels={deLabels}>…</AgentLabelsProvider>
 ```
 
-See `defaultLabels` for the full list (the demo ships a complete Russian set in
-`demo/src/i18n.ts`).
+See `defaultLabels` for the full list (the demo ships complete Spanish and German sets in
+`apps/demo/src/i18n.ts`).
 
 **Render props** — take over a part and keep the rest; each gets the built-in
 rendering as `fallback`:
