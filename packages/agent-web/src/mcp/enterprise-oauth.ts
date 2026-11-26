@@ -324,7 +324,7 @@ export const requestIdJag = async (req: IdJagRequest): Promise<string> => {
     'Content-Type': 'application/x-www-form-urlencoded',
     Accept: 'application/json',
   })
-  if (true) {
+  if (idp.clientSecret === undefined || idp.clientAuthMethod === 'client_secret_post') {
     params.set('client_id', idp.clientId)
     if (idp.clientSecret !== undefined) {
       params.set('client_secret', idp.clientSecret)

@@ -430,7 +430,7 @@ provider decides (ID-JAG; the README has the flow).
 createEnterpriseOAuthProvider({
   serverUrl,
   clientId, clientSecret,            // this client at the MCP authorization server
-  expectedIssuer,                    // that server's issuer; anything else gets nothing
+  expectedIssuer,                    // that server's issuer; required with clientSecret
   idp: { tokenEndpoint, clientId, clientSecret, clientAuthMethod },
   getIdToken: () => idToken,         // called each time a new ID-JAG is needed
   scope,                             // asked of the IdP
@@ -440,6 +440,15 @@ createEnterpriseOAuthProvider({
 })
 ```
 
+- **`expectedIssuer`**: when the MCP server points at any other authorization
+  server, nothing is sent. Required with `clientSecret` - the constructor throws
+  `clientSecret needs expectedIssuer`, because without it the MCP server's
+  metadata would choose who receives the secret. A client with no secret at the
+  authorization server may omit it: the only thing sent there is then the
+  ID-JAG, which is addressed to that one server.
+- **A `clientSecret` in a page** is readable by anyone who can open the page:
+  in a browser use a public client, or a `fetch` that routes the IdP call
+  through your backend.
 - **`idp.tokenEndpoint` is configured, not discovered**: it is where the ID
   token and the IdP credentials go, so nothing fetched at run time chooses it.
 - **`idp.clientAuthMethod`**: `'client_secret_basic'` (default) or

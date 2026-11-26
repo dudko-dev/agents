@@ -295,8 +295,8 @@ import { connectMcpHttp, createEnterpriseOAuthProvider } from '@dudko.dev/agent-
 
 const provider = createEnterpriseOAuthProvider({
   serverUrl: 'https://mcp.example.com/mcp',
-  clientId: 'agent-web',                        // at the MCP authorization server
-  expectedIssuer: 'https://auth.example.com',   // recommended
+  clientId: 'agent-web',                        // at the MCP authorization server, a public client
+  expectedIssuer: 'https://auth.example.com',   // required with a clientSecret, wise without
   idp: { tokenEndpoint: 'https://acme.idp.example/oauth2/token', clientId: 'agent-web-at-idp' },
   getIdToken: () => session.idToken,            // yours: called for every new ID-JAG
 })
@@ -313,11 +313,16 @@ const mcp = await connectMcpHttp({ docs: { url: 'https://mcp.example.com/mcp', a
 - Errors are `EnterpriseOAuthError` with `hop`: `'idp'`, `'authorization-server'`
   or `'discovery'`. A refusal fails that server's connect with the message in
   `results[].error`; `needsAuthorization` stays unset.
+- **`expectedIssuer` is required with `clientSecret`** (the constructor throws
+  otherwise): without it the MCP server's metadata would choose who receives the
+  secret. A client with no secret at the authorization server may omit it: the
+  only thing sent there is then the ID-JAG, which the IdP addressed to that one
+  server.
 - **In a browser:** the IdP's token endpoint must allow your origin (CORS), and
-  a `clientSecret` (yours or `idp.clientSecret`) shipped to a page is readable
-  by whoever opens it. The grant is meant for confidential clients: either both
-  servers accept your page as a public client, or pass a `fetch` that sends the
-  IdP request through your backend, which adds the secret. See
+  a `clientSecret` (yours or `idp.clientSecret`) in a page is readable by anyone
+  who can open the page. So this provider is for public clients, or for a
+  `fetch` that routes the IdP call through your backend, which holds the
+  secret. See
   [docs/security.md](docs/security.md#mcp-enterprise-managed-authorization-id-jag).
 - Verified against a test identity provider, not a commercial one. Options,
   checks and limits: [docs/capabilities.md](docs/capabilities.md#mcp-servers-behind-oauth).

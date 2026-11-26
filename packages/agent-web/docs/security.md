@@ -153,21 +153,24 @@ user step, on the word of the company's identity provider (IdP).
   name an honest authorization server as the audience and collect the ID-JAG at
   its own token endpoint.
 - **`expectedIssuer`** pins the authorization server: when the MCP server points
-  anywhere else, no ID token is asked for and nothing is sent.
+  anywhere else, no ID token is asked for and nothing is sent. It is required
+  with `clientSecret` (the constructor throws without it), because otherwise the
+  MCP server's metadata would choose who receives that secret.
 - **The IdP's answer is checked** before anything goes to the authorization
   server: `issued_token_type` must be the ID-JAG type and the token must be
   there. A redirect from the IdP token endpoint is refused, not followed.
 
 **What it does not protect against**
 
-- **A secret in a page.** `clientSecret` and `idp.clientSecret` given to browser
-  code can be read by whoever loads the page. This grant is meant for
-  confidential clients. In a browser, either both servers accept the page as a
-  public client (then a stolen ID token alone is enough to use it), or the IdP
-  request goes through your backend (pass `fetch`), which holds the secret.
-- **Without `expectedIssuer`**, the MCP server's metadata decides which
-  authorization server receives the client credentials and the ID-JAG. The IdP's
-  policy is then the only thing that stops an unknown audience.
+- **A secret in a page.** A `clientSecret` (or `idp.clientSecret`) in a page is
+  readable by anyone who can open the page. So the browser provider is for
+  public clients (then a stolen ID token alone is enough to use it), or for a
+  `fetch` that routes the IdP call through your backend, which holds the secret.
+- **A public client without `expectedIssuer`.** A client with no secret at the
+  authorization server may omit `expectedIssuer`. The MCP server's metadata then
+  decides which authorization server is asked, and the only thing sent there is
+  the ID-JAG - which the IdP addressed to that one server, so no other can use
+  it. The IdP's policy is what stops an audience it does not know.
 - **The ID token in your app.** How it is obtained, kept and renewed is yours;
   this provider only reads it. XSS on your origin reaches it, as it reaches the
   vault.
