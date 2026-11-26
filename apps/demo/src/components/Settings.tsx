@@ -21,6 +21,8 @@ export interface SettingsProps {
   onKeyChange: () => void
   /** A usable model is in hand (key stored / local model loaded): start collapsed. */
   ready: boolean
+  /** Something the person must know about the local model (the GPU dropped it). */
+  notice?: string
 }
 
 /**
@@ -38,6 +40,7 @@ export const Settings = ({
   onCustomModelId,
   onKeyChange,
   ready,
+  notice,
 }: SettingsProps) => {
   const local = isLocal(selected)
   const [userOpen, setUserOpen] = useState<boolean | undefined>(undefined)
@@ -94,6 +97,11 @@ export const Settings = ({
               {selected.runtime === 'built-in'
                 ? 'This browser has no built-in model — it’s Chrome’s Prompt API (Chrome 148+ on desktop).'
                 : 'WebGPU isn’t available in this browser. Try Chrome or Edge on desktop.'}
+            </p>
+          )}
+          {notice && !loader.loading && !loader.ready && (
+            <p className="settings__warn" role="alert">
+              {notice}
             </p>
           )}
           {loader.error && <p className="settings__warn">{loader.error}</p>}

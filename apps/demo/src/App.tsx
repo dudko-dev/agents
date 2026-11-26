@@ -96,8 +96,36 @@ const writeCustomModelId = (id: string) => {
   }
 }
 
+// The chosen model survives a reload (the weights of a local one are in the browser's cache, so
+// loading it again is quick - but only if the page still knows which one it was).
+const MODEL_KEY = 'agent-web-demo:model'
+const readModelId = (): string => {
+  try {
+    const id = localStorage.getItem(MODEL_KEY)
+    if (id && MODELS.some((m) => m.id === id)) return id
+  } catch {
+    /* private mode */
+  }
+  return 'google-flash'
+}
+
+// What a local runtime says once the GPU has dropped the model. The browser takes the device
+// away when memory runs out (a phone does it readily); WebLLM then disposes its objects and
+// unloads, and every later request fails with one of these.
+const GPU_LOST = /already been disposed|Model not loaded before|Device (was |is )?lost/i
+const GPU_LOST_NOTICE =
+  'The browser took the GPU away - most likely the device ran out of memory - and the model was dropped. Load it again, or pick a smaller model; a shorter chat needs less memory too.'
+
 export const App = () => {
-  const [modelId, setModelId] = useState('google-flash')
+  const [modelId, setModelIdState] = useState(readModelId)
+  const setModelId = (id: string) => {
+    setModelIdState(id)
+    try {
+      localStorage.setItem(MODEL_KEY, id)
+    } catch {
+      /* private mode */
+    }
+  }
   const model = MODELS.find((m) => m.id === modelId) ?? MODELS[0]
   const local = isLocal(model)
   // OpenRouter's "any model": the id the user typed (remembered).
@@ -311,6 +339,21 @@ export const App = () => {
     },
   )
 
+  // A local model the GPU dropped is not "loaded", whatever the page remembers: free what is
+  // left of it and say what happened, so the next step is a button and not another failed run.
+  const [gpuLost, setGpuLost] = useState(false)
+  const runError = notesAgent.error ?? mcpAgent.error ?? chessAgent.error
+  const unloadLocal = localModel.unload
+  useEffect(() => {
+    if (!local || !runError || !GPU_LOST.test(runError)) return
+    setGpuLost(true)
+    void unloadLocal()
+  }, [local, runError, unloadLocal])
+  useEffect(() => {
+    if (localModel.loading) setGpuLost(false)
+  }, [localModel.loading])
+  useEffect(() => setGpuLost(false), [modelId])
+
   // Whether the agent moved is read off the board, never off its words: a turn
   // that ends with Black still to move is a failed turn, and the board stays
   // locked until it does move (Retry, or the engine).
@@ -469,6 +512,7 @@ export const App = () => {
               onSelect={setModelId}
               credentials={credentials}
               local={localModel}
+              notice={gpuLost ? GPU_LOST_NOTICE : undefined}
               customModelId={customModelId}
               onCustomModelId={(id) => {
                 setCustomModelId(id)
