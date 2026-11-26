@@ -1,4 +1,5 @@
 import {
+  constants as cryptoConstants,
   createPublicKey,
   generateKeyPairSync,
   randomUUID,
@@ -51,41 +52,135 @@ export interface IVerifiedJwt {
   payload: Record<string, unknown>
 }
 
-/**
- * Verify a compact ES256 JWT against a JWKS (by `kid`). Returns undefined for
- * anything that is not a well-formed token signed by one of the keys - the
- * caller checks the claims.
- */
-export const verifyJwt = (jwt: string, jwks: { keys: JsonWebKey[] }): IVerifiedJwt | undefined => {
+const decodeJwt = (jwt: string): IVerifiedJwt | undefined => {
   const parts = jwt.split('.')
   if (parts.length !== 3) {
     return undefined
   }
   try {
-    const header = JSON.parse(Buffer.from(parts[0], 'base64url').toString()) as Record<
-      string,
-      unknown
-    >
-    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString()) as Record<
-      string,
-      unknown
-    >
-    if (header.alg !== 'ES256') {
-      return undefined
+    return {
+      header: JSON.parse(Buffer.from(parts[0], 'base64url').toString()) as Record<string, unknown>,
+      payload: JSON.parse(Buffer.from(parts[1], 'base64url').toString()) as Record<string, unknown>,
     }
-    const jwk = jwks.keys.find((k) => (k as { kid?: string }).kid === header.kid)
-    if (!jwk) {
-      return undefined
-    }
-    const ok = cryptoVerify(
-      'sha256',
-      Buffer.from(`${parts[0]}.${parts[1]}`),
-      { key: createPublicKey({ key: jwk, format: 'jwk' }), dsaEncoding: 'ieee-p1363' },
-      Buffer.from(parts[2], 'base64url'),
-    )
-    return ok ? { header, payload } : undefined
   } catch {
     return undefined
+  }
+}
+
+/** The claims of a JWT, NOT verified: for a test to look at what was sent. */
+export const peekJwt = (jwt: string): IVerifiedJwt => {
+  const decoded = decodeJwt(jwt)
+  if (!decoded) {
+    throw new Error('not a JWT')
+  }
+  return decoded
+}
+
+/**
+ * Verify a compact JWT (ES256/384/512, RS256/384/512, PS256/384/512) against a
+ * JWKS: by `kid` when the token names one, else against the only key. Returns
+ * undefined for anything that is not a well-formed token signed by one of the
+ * keys - the caller checks the claims.
+ */
+export const verifyJwt = (jwt: string, jwks: { keys: JsonWebKey[] }): IVerifiedJwt | undefined => {
+  const decoded = decodeJwt(jwt)
+  if (!decoded) {
+    return undefined
+  }
+  const { header } = decoded
+  const alg = typeof header.alg === 'string' ? header.alg : ''
+  if (!/^(ES|RS|PS)(256|384|512)$/.test(alg)) {
+    return undefined
+  }
+  const jwk =
+    header.kid === undefined && jwks.keys.length === 1
+      ? jwks.keys[0]
+      : jwks.keys.find((k) => (k as { kid?: string }).kid === header.kid)
+  if (!jwk) {
+    return undefined
+  }
+  // A key is only good for its own family: an RSA key never verifies "ES256".
+  if ((alg.startsWith('ES') ? 'EC' : 'RSA') !== jwk.kty) {
+    return undefined
+  }
+  try {
+    const parts = jwt.split('.')
+    const key = createPublicKey({ key: jwk, format: 'jwk' })
+    const ok = cryptoVerify(
+      `sha${alg.slice(2)}`,
+      Buffer.from(`${parts[0]}.${parts[1]}`),
+      alg.startsWith('ES')
+        ? { key, dsaEncoding: 'ieee-p1363' }
+        : alg.startsWith('PS')
+          ? {
+              key,
+              padding: cryptoConstants.RSA_PKCS1_PSS_PADDING,
+              saltLength: cryptoConstants.RSA_PSS_SALTLEN_DIGEST,
+            }
+          : key,
+      Buffer.from(parts[2], 'base64url'),
+    )
+    return ok ? decoded : undefined
+  } catch {
+    return undefined
+  }
+}
+
+export const CLIENT_ASSERTION_TYPE = 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer'
+
+/**
+ * Verify a `private_key_jwt` client assertion as RFC 7523 section 3 and
+ * draft-ietf-oauth-rfc7523bis ask: signed by a registered key, `iss` = `sub`,
+ * the server's issuer identifier as the SOLE audience (a token endpoint URL is
+ * not one), unexpired and not long-lived, and a `jti` not seen before.
+ * Returns the client id, or the reason it was refused.
+ */
+export const verifyClientAssertion = (
+  assertion: string,
+  opts: { jwks: { keys: JsonWebKey[] }; audience: string; seenJti: Set<string> },
+): { clientId: string } | { refused: string } => {
+  const verified = verifyJwt(assertion, opts.jwks)
+  if (!verified) {
+    return { refused: 'Client assertion signature validation failed' }
+  }
+  const { payload } = verified
+  const now = Math.floor(Date.now() / 1000)
+  if (typeof payload.iss !== 'string' || !payload.iss || payload.iss !== payload.sub) {
+    return { refused: 'Client assertion iss and sub must both be the client' }
+  }
+  const aud = Array.isArray(payload.aud) ? payload.aud : [payload.aud]
+  if (aud.length !== 1 || aud[0] !== opts.audience) {
+    return { refused: 'Client assertion audience is not this server' }
+  }
+  if (typeof payload.exp !== 'number' || payload.exp <= now) {
+    return { refused: 'Client assertion has expired' }
+  }
+  if (payload.exp - now > 300) {
+    return { refused: 'Client assertion lives too long' }
+  }
+  if (typeof payload.jti !== 'string' || !payload.jti || opts.seenJti.has(payload.jti)) {
+    return { refused: 'Client assertion was already used' }
+  }
+  opts.seenJti.add(payload.jti)
+  return { clientId: payload.iss }
+}
+
+/** A client key pair for `private_key_jwt`, in every form the providers take. */
+export const generateClientKey = (
+  kind: 'ES256' | 'ES384' | 'ES512' | 'RSA',
+  kid = `client-${randomUUID().slice(0, 8)}`,
+): { kid: string; privateJwk: JsonWebKey; privatePem: string; publicJwk: JsonWebKey } => {
+  const { privateKey, publicKey } =
+    kind === 'RSA'
+      ? generateKeyPairSync('rsa', { modulusLength: 2048 })
+      : generateKeyPairSync('ec', {
+          namedCurve: { ES256: 'P-256', ES384: 'P-384', ES512: 'P-521' }[kind],
+        })
+  return {
+    kid,
+    privateJwk: privateKey.export({ format: 'jwk' }),
+    privatePem: privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(),
+    publicJwk: { ...publicKey.export({ format: 'jwk' }), kid } as JsonWebKey,
   }
 }
 
@@ -93,7 +188,14 @@ export const verifyJwt = (jwt: string, jwks: { keys: JsonWebKey[] }): IVerifiedJ
 export const readClientAuth = (
   req: IncomingMessage,
   params: URLSearchParams,
-): { clientId?: string; clientSecret?: string; method: 'basic' | 'post' | 'none' } => {
+): {
+  clientId?: string
+  clientSecret?: string
+  method: 'basic' | 'post' | 'none' | 'assertion'
+} => {
+  if (params.get('client_assertion')) {
+    return { method: 'assertion' }
+  }
   const authorization = req.headers.authorization ?? ''
   if (/^Basic\s+/i.test(authorization)) {
     const decoded = Buffer.from(authorization.replace(/^Basic\s+/i, ''), 'base64').toString()
@@ -133,7 +235,10 @@ export interface IIdpMisbehaviour {
 export interface ILocalIdpOptions {
   /** The client as registered at the IdP. */
   clientId: string
-  clientSecret: string
+  /** Its secret, for a client that authenticates with one. */
+  clientSecret?: string
+  /** Its public keys, for a client that authenticates with `private_key_jwt`. */
+  clientJwks?: { keys: JsonWebKey[] }
   /**
    * The same client's identifier at the resource authorization server: what
    * goes in the ID-JAG's `client_id` claim (draft section 5).
@@ -146,7 +251,7 @@ export interface ILocalIdpOptions {
 /** One token-exchange request as the IdP received it. */
 export interface IIdpExchange {
   params: Record<string, string>
-  authMethod: 'basic' | 'post' | 'none'
+  authMethod: 'basic' | 'post' | 'none' | 'assertion'
   /** What was answered. */
   status: number
 }
@@ -191,6 +296,7 @@ export const startLocalIdp = async (opts: ILocalIdpOptions): Promise<ILocalIdp> 
   const exchanges: IIdpExchange[] = []
   const issuedIdJags: string[] = []
   const misbehave: IIdpMisbehaviour = {}
+  const seenClientJti = new Set<string>()
   const now = (): number => Math.floor(Date.now() / 1000)
 
   const server = createServer((req, res) => {
@@ -242,12 +348,31 @@ export const startLocalIdp = async (opts: ILocalIdpOptions): Promise<ILocalIdp> 
         answer(400, { error: 'invalid_request', error_description: `bad request: ${raw}` })
         return
       }
-      if (
-        misbehave.rejectClient ||
-        client.clientId !== opts.clientId ||
-        client.clientSecret !== opts.clientSecret
-      ) {
-        answer(401, { error: 'invalid_client', error_description: 'Client authentication failed' })
+      let authenticated = false
+      let refusal = 'Client authentication failed'
+      if (client.method === 'assertion') {
+        // private_key_jwt: the assertion must be for THIS issuer.
+        const checked =
+          opts.clientJwks && params.get('client_assertion_type') === CLIENT_ASSERTION_TYPE
+            ? verifyClientAssertion(params.get('client_assertion') ?? '', {
+                jwks: opts.clientJwks,
+                audience: issuer,
+                seenJti: seenClientJti,
+              })
+            : { refused: 'Client assertions are not accepted for this client' }
+        if ('refused' in checked) {
+          refusal = checked.refused
+        } else {
+          authenticated = checked.clientId === opts.clientId
+        }
+      } else {
+        authenticated =
+          opts.clientSecret !== undefined &&
+          client.clientId === opts.clientId &&
+          client.clientSecret === opts.clientSecret
+      }
+      if (misbehave.rejectClient || !authenticated) {
+        answer(401, { error: 'invalid_client', error_description: refusal })
         return
       }
       if (

@@ -130,12 +130,22 @@ interface IServerConnect {
  * The enterprise-managed provider (`mcp-enterprise-oauth.ts`), recognised by
  * shape so a host's own subclass or a copy from another realm still counts.
  */
+type EnterpriseLog = (level: 'info' | 'warn' | 'error', message: string) => void
+
+interface EnterpriseProviderShape {
+  extension: string
+  authorize: (opts: { fetch?: FetchLike; onLog?: EnterpriseLog }) => Promise<void>
+  transportFetch: (base?: FetchLike, log?: EnterpriseLog) => FetchLike
+}
+
 const asEnterpriseProvider = (
   provider: OAuthClientProvider,
-): { extension: string; authorize: (opts: { fetch?: FetchLike }) => Promise<void> } | undefined => {
-  const p = provider as { extension?: unknown; authorize?: unknown }
-  return typeof p.extension === 'string' && typeof p.authorize === 'function'
-    ? (provider as never)
+): EnterpriseProviderShape | undefined => {
+  const p = provider as Partial<Record<keyof EnterpriseProviderShape, unknown>>
+  return typeof p.extension === 'string' &&
+    typeof p.authorize === 'function' &&
+    typeof p.transportFetch === 'function'
+    ? (provider as unknown as EnterpriseProviderShape)
     : undefined
 }
 
@@ -219,7 +229,7 @@ const refreshIfExpired = async (
     // discovery failure is left to the transport: the server's 401 may say
     // where its metadata lives, or it may need no authorization at all.
     try {
-      await enterprise.authorize({ fetch: fetchFn })
+      await enterprise.authorize({ fetch: fetchFn, onLog: log })
     } catch (err) {
       if ((err as { hop?: unknown })?.hop !== 'discovery') {
         throw err
@@ -554,7 +564,12 @@ export const connectMcpServers = async (
           // it on a 401 and retries the request - the one thing a static
           // header can never do.
           authProvider: cfg.authProvider,
-          fetch: cfg.fetch,
+          // The enterprise provider reports a refused grant itself: a short
+          // typed error for the caller, the server's words (redacted) to the log.
+          fetch:
+            (cfg.authProvider &&
+              asEnterpriseProvider(cfg.authProvider)?.transportFetch(cfg.fetch, log)) ||
+            cfg.fetch,
           // Built-in reconnect for transient SSE drops. Defaults are conservative;
           // production deployments should tune via direct transport access if needed.
           reconnectionOptions: {

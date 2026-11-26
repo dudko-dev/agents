@@ -205,12 +205,22 @@ interface ServerConnect {
  * The enterprise-managed provider (`enterprise-oauth.ts`), recognised by shape
  * so a host's own subclass, or one from another bundle of this package, counts.
  */
+type EnterpriseLog = (level: 'info' | 'warn' | 'error', message: string) => void
+
+interface EnterpriseProviderShape {
+  extension: string
+  authorize: (opts: { fetch?: FetchLike; onLog?: EnterpriseLog }) => Promise<void>
+  transportFetch: (base?: FetchLike, log?: EnterpriseLog) => FetchLike
+}
+
 const asEnterpriseProvider = (
   provider: OAuthClientProvider,
-): { extension: string; authorize: (opts: { fetch?: FetchLike }) => Promise<void> } | undefined => {
-  const p = provider as { extension?: unknown; authorize?: unknown }
-  return typeof p.extension === 'string' && typeof p.authorize === 'function'
-    ? (provider as never)
+): EnterpriseProviderShape | undefined => {
+  const p = provider as Partial<Record<keyof EnterpriseProviderShape, unknown>>
+  return typeof p.extension === 'string' &&
+    typeof p.authorize === 'function' &&
+    typeof p.transportFetch === 'function'
+    ? (provider as unknown as EnterpriseProviderShape)
     : undefined
 }
 
@@ -289,7 +299,7 @@ const refreshIfExpired = async (
     // discovery failure is left to the transport: the server's 401 may say
     // where its metadata lives, or it may need no authorization at all.
     try {
-      await enterprise.authorize({ fetch: fetchFn })
+      await enterprise.authorize({ fetch: fetchFn, onLog: log })
     } catch (err) {
       if ((err as { hop?: unknown })?.hop !== 'discovery') throw err
       log('info', `[mcp] ${name}: ${err instanceof Error ? err.message : String(err)}; continuing`)
@@ -450,7 +460,11 @@ const connectAndList = async (
   const transport = new StreamableHTTPClientTransport(new URL(cfg.url), {
     requestInit: headers ? { headers } : undefined,
     authProvider: cfg.authProvider,
-    fetch: cfg.fetch,
+    // The enterprise provider reports a refused grant itself: a short typed
+    // error for the caller, the server's words (redacted) to the log.
+    fetch:
+      (cfg.authProvider && asEnterpriseProvider(cfg.authProvider)?.transportFetch(cfg.fetch, log)) ||
+      cfg.fetch,
     reconnectionOptions: { ...DEFAULT_RECONNECTION, ...cfg.reconnection },
   })
   // Without these, a dropped SSE stream or a transport-level protocol error

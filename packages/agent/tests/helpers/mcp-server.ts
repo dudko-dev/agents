@@ -3,7 +3,16 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { z } from 'zod'
-import { ID_JAG_TYP, JWT_BEARER_GRANT, readClientAuth, verifyJwt } from './idp-server.ts'
+import type { JsonWebKey } from 'node:crypto'
+import {
+  CLIENT_ASSERTION_TYPE,
+  ID_JAG_TYP,
+  JWT_BEARER_GRANT,
+  peekJwt,
+  readClientAuth,
+  verifyClientAssertion,
+  verifyJwt,
+} from './idp-server.ts'
 
 /**
  * A real MCP server and a real OAuth authorization server, both on loopback.
@@ -45,7 +54,17 @@ export interface ILocalMcpOptions {
      * sender-constrained ID-JAG then, which this server does not implement.
      */
     clientSecret?: string
-    /** Refuse every grant, quoting the assertion in the error (a careless server). */
+    /** The client's public keys, for `private_key_jwt`. */
+    clientJwks?: { keys: JsonWebKey[] }
+    /**
+     * Accept a client whose `client_id` is the https URL of a client ID
+     * metadata document: fetch the document (through `resolve`, which stands in
+     * for DNS and TLS and maps the https URL to the test server that hosts it),
+     * require `private_key_jwt`, and verify the assertion against the document's
+     * `jwks` or `jwks_uri`.
+     */
+    cimd?: { resolve: (url: string) => string }
+    /** Refuse every grant, quoting the request in the error (a careless server). */
     echoAssertion?: boolean
   }
 }
@@ -78,6 +97,14 @@ export interface ILocalMcp {
    */
   /** The `capabilities` of every `initialize` request the MCP server received. */
   initializeCapabilities: Record<string, unknown>[]
+  /**
+   * Mutable: make the token endpoint go wrong from now on. `refuseGrant`
+   * answers every grant with that OAuth error; `echoRequest` refuses and quotes
+   * the whole request body in the description (a careless server).
+   */
+  faults: { refuseGrant?: { error: string; description: string }; echoRequest?: boolean }
+  /** Every client ID metadata document URL the authorization server fetched. */
+  cimdFetches: string[]
   tokenRequests: () => { params: Record<string, string>; authMethod: string; error?: string }[]
   close: () => Promise<void>
 }
@@ -119,6 +146,9 @@ export const startLocalMcp = async (opts: ILocalMcpOptions = {}): Promise<ILocal
   const tokenClientIds: string[] = []
   const tokenRequests: { params: Record<string, string>; authMethod: string; error?: string }[] = []
   const seenJti = new Set<string>()
+  const seenClientJti = new Set<string>()
+  const cimdFetches: string[] = []
+  const faults: ILocalMcp['faults'] = { echoRequest: opts.enterprise?.echoAssertion }
   const initializeCapabilities: Record<string, unknown>[] = []
   let registrations = 0
   let issued = 0
@@ -138,9 +168,12 @@ export const startLocalMcp = async (opts: ILocalMcpOptions = {}): Promise<ILocal
             ? [JWT_BEARER_GRANT]
             : ['authorization_code', 'refresh_token'],
           code_challenge_methods_supported: ['S256'],
-          token_endpoint_auth_methods_supported: opts.enterprise?.clientSecret
-            ? ['client_secret_basic', 'client_secret_post']
-            : ['none'],
+          token_endpoint_auth_methods_supported: [
+            ...(opts.enterprise?.clientSecret ? ['client_secret_basic', 'client_secret_post'] : []),
+            ...(opts.enterprise?.clientJwks || opts.enterprise?.cimd ? ['private_key_jwt'] : []),
+            ...(opts.enterprise?.clientSecret || opts.enterprise?.clientJwks ? [] : ['none']),
+          ],
+          ...(opts.enterprise?.cimd ? { client_id_metadata_document_supported: true } : {}),
           ...(opts.enterprise
             ? {
                 authorization_grant_profiles_supported: [
@@ -160,7 +193,8 @@ export const startLocalMcp = async (opts: ILocalMcpOptions = {}): Promise<ILocal
         return
       }
       if (url.pathname === '/token') {
-        const params = new URLSearchParams(await readBody(req))
+        const rawBody = await readBody(req)
+        const params = new URLSearchParams(rawBody)
         const grant = params.get('grant_type') ?? ''
         grants.push(grant)
         tokenClientIds.push(params.get('client_id') ?? '')
@@ -178,16 +212,81 @@ export const startLocalMcp = async (opts: ILocalMcpOptions = {}): Promise<ILocal
             record.error = `${error}: ${description}`
             json(res, status, { error, error_description: description })
           }
-          if (client.clientId !== ent.clientId || client.clientSecret !== ent.clientSecret) {
-            refuse(401, 'invalid_client', 'Client authentication failed')
+          if (faults.echoRequest) {
+            refuse(400, 'invalid_request', `cannot accept ${rawBody}`)
+            return
+          }
+          if (faults.refuseGrant) {
+            refuse(400, faults.refuseGrant.error, faults.refuseGrant.description)
+            return
+          }
+          // Who is asking: a signed assertion, a secret, or (public) a bare id.
+          let clientId: string | undefined
+          let clientRefusal = 'Client authentication failed'
+          if (client.method === 'assertion') {
+            const assertion = params.get('client_assertion') ?? ''
+            let jwks = ent.clientJwks
+            let claimed: unknown
+            try {
+              claimed = peekJwt(assertion).payload.iss
+            } catch {
+              claimed = undefined
+            }
+            if (ent.cimd && typeof claimed === 'string' && claimed.startsWith('https://')) {
+              // CIMD: the client id is a URL; what is served there says how the
+              // client authenticates and with which keys.
+              jwks = undefined
+              try {
+                cimdFetches.push(claimed)
+                const doc = (await (await fetch(ent.cimd.resolve(claimed))).json()) as {
+                  client_id?: string
+                  token_endpoint_auth_method?: string
+                  jwks?: { keys: JsonWebKey[] }
+                  jwks_uri?: string
+                }
+                if (doc.client_id !== claimed) {
+                  clientRefusal = 'Client metadata document names another client'
+                } else if (doc.token_endpoint_auth_method !== 'private_key_jwt') {
+                  clientRefusal = 'Client metadata document does not allow private_key_jwt'
+                } else if (doc.jwks) {
+                  jwks = doc.jwks
+                } else if (doc.jwks_uri) {
+                  jwks = (await (await fetch(ent.cimd.resolve(doc.jwks_uri))).json()) as {
+                    keys: JsonWebKey[]
+                  }
+                }
+              } catch {
+                clientRefusal = 'Client metadata document could not be fetched'
+              }
+            } else if (claimed !== ent.clientId) {
+              jwks = undefined
+            }
+            const checked =
+              jwks && params.get('client_assertion_type') === CLIENT_ASSERTION_TYPE
+                ? verifyClientAssertion(assertion, {
+                    jwks,
+                    audience: asUrl,
+                    seenJti: seenClientJti,
+                  })
+                : { refused: clientRefusal }
+            if ('refused' in checked) {
+              clientRefusal = checked.refused
+            } else {
+              clientId = checked.clientId
+            }
+          } else if (
+            !ent.clientJwks &&
+            client.clientId === ent.clientId &&
+            client.clientSecret === ent.clientSecret
+          ) {
+            clientId = client.clientId
+          }
+          if (!clientId) {
+            refuse(401, 'invalid_client', clientRefusal)
             return
           }
           if (grant !== JWT_BEARER_GRANT) {
             refuse(400, 'unsupported_grant_type', 'Only the jwt-bearer grant is accepted')
-            return
-          }
-          if (ent.echoAssertion) {
-            refuse(400, 'invalid_request', `cannot accept assertion=${params.get('assertion')}`)
             return
           }
           const jwks = (await (await fetch(ent.jwksUri)).json()) as { keys: never[] }
@@ -214,7 +313,7 @@ export const startLocalMcp = async (opts: ILocalMcpOptions = {}): Promise<ILocal
             refuse(400, 'invalid_grant', 'Assertion has expired')
             return
           }
-          if (payload.client_id !== client.clientId) {
+          if (payload.client_id !== clientId) {
             refuse(400, 'invalid_grant', 'Assertion was issued to another client')
             return
           }
@@ -359,6 +458,8 @@ export const startLocalMcp = async (opts: ILocalMcpOptions = {}): Promise<ILocal
     tokenClientIds: () => tokenClientIds,
     tokenRequests: () => tokenRequests,
     initializeCapabilities,
+    faults,
+    cimdFetches,
     close: async () => {
       await close(httpServer)
       await close(as)
