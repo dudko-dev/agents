@@ -44,11 +44,14 @@ export {
   type ITokenRequest,
 } from './authorization-server.ts'
 export {
+  REPORT_IMAGE_BASE64,
+  REPORT_VALUE,
   startLocalMcp,
   startLocalMcpServer,
   type ILocalMcp,
   type ILocalMcpOptions,
   type ILocalMcpServer,
   type ILocalMcpServerOptions,
+  type StructuredFault,
 } from './mcp-server.ts'
 export { parseCliArgs, startFromCli, type ICliArgs, type ICliServers } from './cli.ts'

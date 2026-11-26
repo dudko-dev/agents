@@ -169,6 +169,7 @@ const streamPlanOnce = async (
       domain: ctx.config.systemPrompt,
       skills: ctx.skills,
       ...(ctx.sandbox ? { sandbox: ctx.sandbox } : {}),
+      ...(ctx.mcpInstructions ? { mcpInstructions: ctx.mcpInstructions } : {}),
     }),
   )
   const result = streamStructured({

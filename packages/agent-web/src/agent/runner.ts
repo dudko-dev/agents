@@ -63,6 +63,7 @@ import { createPlan, type PlanOutcome } from './planner.js'
 import { decideReplan } from './replanner.js'
 import { synthesizeAnswer } from './synthesizer.js'
 import { createLogger } from '../logger.js'
+import { collectMcpInstructions, renderMcpInstructions } from '../mcp/shared.js'
 import {
   AttachmentsNotSupportedError,
   attachmentKind,
@@ -322,6 +323,12 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
   const sandboxNotes =
     sandbox && baseTools.run_js === sandbox.tools.run_js ? sandbox.notes : undefined
 
+  // What the connected MCP servers said about using their tools, for the planner's and the
+  // executor's system prompts. Read from the mounted tools (each MCP tool carries its server), once:
+  // a host that reconnects mid-run cannot change a prompt under a run.
+  const mcpInstructions =
+    config.mcpInstructions === false ? '' : renderMcpInstructions(collectMcpInstructions(baseTools))
+
   const catalog = toolCatalogOf(baseTools)
   // 'auto' searches instead of listing once the catalogue is long, or once its
   // definitions would take a large share of the window (a few MCP tools with
@@ -355,6 +362,7 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
       systemPrompt: config.systemPrompt,
       toolTokens: toolDefTokens,
       searching: strategy === 'search',
+      mcpInstructions,
       skillsText: `${renderSkillIndex(skills)}\n${renderActiveSkills(active)}`,
     })
   // What the summariser is shown at most: a share of the window, so a long transcript is
@@ -632,6 +640,7 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
           }
         : {}),
       ...(sandboxNotes ? { sandbox: sandboxNotes } : {}),
+      ...(mcpInstructions ? { mcpInstructions } : {}),
       discovered: () => discovered,
       builtinTools,
       toolHint,

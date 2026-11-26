@@ -112,6 +112,12 @@ behind every decision.
   That suite mocks `fetch`; its last tests run over real sockets against `@dudko.dev/test-servers`
   (`packages/test-servers`, a dev dependency), whose IdP and authorization server each accept one form
   of client assertion (`assertionAudience` / `assertionType`) and refuse the other.
+  `shared` (pure, no imports; the core imports it too, so it must never import the SDK): how a
+  server's `instructions` become a prompt section (third-party preamble, every line quoted, caps)
+  and how `structuredContent` reaches the model. A COPY of the server's `src/mcp-shared.ts`, byte
+  for byte — change both (the server's `tests/mcp-shared.test.ts` compares them and tests every
+  cap and guard; each needs a mutation check). The section is appended in `stageCall`
+  (`agent/internal.ts`) for the planner and the executor only, from text fixed in `createAgent`.
 - `src/webmcp/` — optional `./webmcp` subpath: publish a ToolSet through the browser's WebMCP API
   and use a page's WebMCP tools as one. No dependency; a no-op where the browser has no WebMCP.
 - `src/{parse,prompts,events,config,index}.ts`.
