@@ -72,5 +72,13 @@ tool. Do not infer success from "the change looks right".
   that file and the `release` environment.
 - The demo is built and deployed by Cloudflare (Workers Builds, `wrangler.jsonc`), not by a
   workflow here.
-- The autoupdate and Claude workflows of the old repositories are kept for reference under
-  `.github/_imported/` until they are ported; they do not run from there.
+- `autoupdate.yml` (weekly): `.github/scripts/autoupdate.mjs` runs `pnpm update -r --latest`
+  (except `typescript` and `@types/node`), patch-bumps and changelogs the published packages whose
+  own `dependencies` changed, opens a PR, merges it when CI is green and dispatches the release.
+  When the checks are red it dispatches `claude.yml`, which fixes the branch (up to 3 attempts).
+  Events made with `GITHUB_TOKEN` start no workflows, which is why these two dispatch `ci.yml`,
+  `live-model.yml` and `release.yml` explicitly — do not replace the dispatches with comment
+  mentions or rely on `pull_request` / `push` triggers there.
+- On an autoupdate branch (`chore/autoupdate-<run_id>`): make the checks green with compatibility
+  fixes only, never change product behaviour or versions; if that is impossible, say so in a PR
+  comment instead of guessing.
