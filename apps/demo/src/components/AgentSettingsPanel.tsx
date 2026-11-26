@@ -15,6 +15,8 @@ import {
   type View,
 } from '../settings'
 import { BUILTIN_SKILLS, SKILL_TEMPLATE } from '../skills'
+import type { ModelOption } from '../models'
+import { TIER_MODELS } from '../use-model'
 
 export interface AgentSettingsPanelProps {
   settings: DemoSettings
@@ -24,6 +26,8 @@ export interface AgentSettingsPanelProps {
   controller?: UseAgentReturn
   /** The model's own window, when known ("auto" uses it). */
   modelWindow?: number
+  /** Tier models that are chosen but have no key saved yet (they stay off until it is). */
+  tiersMissingKey?: { tier: 'light' | 'strong'; model: ModelOption }[]
   update: (patch: Partial<DemoSettings>) => void
   onReset: () => void
 }
@@ -45,6 +49,7 @@ export const AgentSettingsPanel = ({
   view,
   controller,
   modelWindow,
+  tiersMissingKey = [],
   update,
   onReset,
 }: AgentSettingsPanelProps) => {
@@ -203,6 +208,45 @@ export const AgentSettingsPanel = ({
             ))}
           </select>
         </label>
+      </div>
+
+      <div className="agentset__group">
+        <span className="settings__label">Model tiers (optional)</span>
+        <div className="agentset__grid agentset__grid--two">
+          {(
+            [
+              ['tierLight', 'Light model'],
+              ['tierStrong', 'Strong model'],
+            ] as const
+          ).map(([key, label]) => (
+            <label key={key} className="settings__field">
+              <span className="settings__label">{label}</span>
+              <select
+                className="settings__select"
+                value={settings[key]}
+                onChange={(e) => update({ [key]: e.target.value })}
+              >
+                <option value="">none</option>
+                {TIER_MODELS.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.group} · {m.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ))}
+        </div>
+        <p className="settings__note">
+          {settings.tierLight || settings.tierStrong
+            ? 'The planner rates each step: easy ones run on the light model, hard ones on the strong one, the rest on the model chosen above. A step that fails is retried once on the next stronger model.'
+            : 'Off: every step runs on the model chosen above.'}
+        </p>
+        {tiersMissingKey.map(({ tier, model }) => (
+          <p key={tier} className="settings__warn">
+            The {tier} model is off: no {model.keyLabel ?? 'key'} saved yet. To use it, choose a
+            model of {model.group} above, save its key, then switch back.
+          </p>
+        ))}
       </div>
 
       <div className="agentset__checks">

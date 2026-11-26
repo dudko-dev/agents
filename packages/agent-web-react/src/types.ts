@@ -1,4 +1,13 @@
-import type { AgentEvent, IPlan, IPlanStep, IUsage, ReplanMode } from '@dudko.dev/agent-web'
+import type {
+  AgentEvent,
+  EscalationReason,
+  IPlan,
+  IPlanStep,
+  IUsage,
+  ModelTier,
+  ReplanMode,
+  TierReason,
+} from '@dudko.dev/agent-web'
 
 /** Why a run stopped early (a `budget.exceeded` event). */
 export interface BudgetView {
@@ -77,6 +86,30 @@ export interface ToolCallView {
   inputTokens?: number
   /** ≈ tokens of the result fed back to the model (chars / 4). */
   outputTokens?: number
+  /**
+   * Set on a call of an attempt that was escalated (model tiers): the attempt it belongs to,
+   * 1 for the step's first. A call of the attempt the step is on now (or finished on) has none.
+   */
+  attempt?: number
+  /**
+   * The core did NOT run this call again: the same write already succeeded in an earlier attempt
+   * at the step, and the model was handed that result (`output` carries the core's note).
+   */
+  replayed?: boolean
+}
+
+/**
+ * One escalation of a step (a `step.escalated` event): the attempt on tier `from` failed for
+ * `reason` and the step was retried on the stronger tier `to`.
+ */
+export interface StepEscalationView {
+  from: ModelTier
+  to: ModelTier
+  reason: EscalationReason
+  /** The model id of `to` (absent only when the escalation is known from the step's result alone). */
+  model?: string
+  /** What the failed attempt had written when it was escalated (its streamed text), if anything. */
+  text?: string
 }
 
 /**
@@ -182,6 +215,25 @@ export interface StepView {
   status: 'running' | 'done'
   summary?: string
   blocked: boolean
+  /**
+   * Model tiers (`config.executorTiers`) - all four are absent when tiers are off.
+   * `tier` / `model`: the tier the step is on NOW (where it started, then where an escalation
+   * took it, then where it finished) and that tier's model id.
+   */
+  tier?: ModelTier
+  model?: string
+  /** Why the step STARTED on its tier: the planner's rating, the default, or a fallback. */
+  tierReason?: TierReason
+  /**
+   * The step's escalations, in order. `text` / `reasoning` above hold the current attempt only;
+   * the calls of the attempts before it stay in `toolCalls`, marked with their `attempt`.
+   */
+  escalations?: StepEscalationView[]
+  /**
+   * The replanner call that followed this step failed (the provider's error): the run went on
+   * with the plan it had. A warning, not a failed step.
+   */
+  replanFailed?: string
 }
 
 /** WebLLM weight-download / engine-init progress (model.load events). */
@@ -195,6 +247,12 @@ export interface ReplanState {
   reason: string
   /** The replanner ran because the user sent a message, not because a step failed. */
   byUser?: boolean
+  /**
+   * The replanner call itself failed and `continue` is the fallback, not the model's decision.
+   * `error` is the failure (the `error` event of phase `replan` that came just before).
+   */
+  failed?: true
+  error?: string
 }
 
 /**
@@ -261,7 +319,11 @@ export interface AgentUiState {
   modelLoad?: ModelLoadState
   /** The most recent replan decision, if any. */
   replan?: ReplanState
-  /** Error message from the last run error / build failure. */
+  /**
+   * Error message from the last run error / build failure. A non-fatal `plan` / `execute` /
+   * `synthesize` error is kept here too while the run goes on; a replanner failure is not (see
+   * `replan.failed` and `StepView.replanFailed`).
+   */
   error?: string
   /** True when the last run was aborted via stop(). */
   stopped: boolean

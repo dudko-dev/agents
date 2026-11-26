@@ -220,6 +220,11 @@ const streamAssistant = (messages: ChatMessage[], content: string): ChatMessage[
   return messages
 }
 
+// How the core marks the result of a write it did not run again (its `REPLAY_NOTE`, which is not
+// exported): the call was answered from an earlier attempt at the step.
+const isReplayedOutput = (output: unknown): boolean =>
+  typeof output === 'string' && output.startsWith('[not run again:')
+
 const applyEvent = (state: AgentUiState, event: AgentEvent, ctx: EventContext): AgentUiState => {
   switch (event.type) {
     case 'run.start': {
@@ -289,9 +294,43 @@ const applyEvent = (state: AgentUiState, event: AgentEvent, ctx: EventContext): 
         toolCalls: [],
         status: 'running',
         blocked: false,
+        // Only with `config.executorTiers`: without it the view is what it always was.
+        ...(event.tier !== undefined ? { tier: event.tier } : {}),
+        ...(event.model !== undefined ? { model: event.model } : {}),
+        ...(event.tierReason !== undefined ? { tierReason: event.tierReason } : {}),
       }
       return { ...state, steps: [...state.steps, view] }
     }
+
+    case 'step.escalated':
+      // The attempt on `from` is over and the step CONTINUES on `to`. What the failed attempt
+      // wrote is not the next attempt's text: it moves onto the escalation. Its tool calls
+      // happened (the core keeps them in the step's result and shows them to the stronger
+      // model), so they stay, marked with the attempt they belong to.
+      return {
+        ...state,
+        steps: patchStep(state.steps, event.step.id, (s) => {
+          const attempt = (s.escalations?.length ?? 0) + 1
+          return {
+            ...s,
+            tier: event.to,
+            ...(event.model ? { model: event.model } : {}),
+            text: '',
+            reasoning: '',
+            toolCalls: s.toolCalls.map((c) => (c.attempt === undefined ? { ...c, attempt } : c)),
+            escalations: [
+              ...(s.escalations ?? []),
+              {
+                from: event.from,
+                to: event.to,
+                reason: event.reason,
+                ...(event.model ? { model: event.model } : {}),
+                ...(s.text.trim() ? { text: s.text } : {}),
+              },
+            ],
+          }
+        }),
+      }
 
     case 'step.reasoning-delta':
       return {
@@ -343,6 +382,7 @@ const applyEvent = (state: AgentUiState, event: AgentEvent, ctx: EventContext): 
                   ok: event.ok,
                   status: 'done' as const,
                   outputTokens: approxTokens(event.output),
+                  ...(isReplayedOutput(event.output) ? { replayed: true } : {}),
                   ...(ctx.at !== undefined && c.startedAt !== undefined
                     ? { durationMs: Math.max(0, ctx.at - c.startedAt) }
                     : {}),
@@ -362,6 +402,20 @@ const applyEvent = (state: AgentUiState, event: AgentEvent, ctx: EventContext): 
           ...s,
           status: 'done',
           summary: event.result.summary,
+          // With tiers: where the step finished and how it got there. The result's list is the
+          // authority; an escalation seen live keeps what only the event told (model, text).
+          ...(event.result.tier !== undefined ? { tier: event.result.tier } : {}),
+          ...(event.result.model !== undefined ? { model: event.result.model } : {}),
+          ...(event.result.escalations?.length
+            ? {
+                escalations: event.result.escalations.map((e, i) => {
+                  const live = s.escalations?.[i]
+                  return live && live.from === e.from && live.to === e.to
+                    ? { ...live, reason: e.reason }
+                    : { from: e.from, to: e.to, reason: e.reason }
+                }),
+              }
+            : {}),
           blocked: event.result.blocked,
           // The result carries the authoritative, ordered tool-call list; keep
           // the timing the streamed calls measured (matched in order per name).
@@ -381,21 +435,48 @@ const applyEvent = (state: AgentUiState, event: AgentEvent, ctx: EventContext): 
                 outputTokens: approxTokens(c.output),
                 ...(streamed?.startedAt !== undefined ? { startedAt: streamed.startedAt } : {}),
                 ...(streamed?.durationMs !== undefined ? { durationMs: streamed.durationMs } : {}),
+                // With tiers the list holds every attempt's calls, in the order they were made.
+                ...(streamed?.attempt !== undefined ? { attempt: streamed.attempt } : {}),
+                ...(isReplayedOutput(c.output) ? { replayed: true } : {}),
               }
             })
           })(),
         })),
       }
 
-    case 'replan.decision':
+    case 'replan.decision': {
+      if (!event.failed) {
+        return {
+          ...state,
+          replan: {
+            mode: event.mode,
+            reason: event.reason,
+            ...(event.byUser ? { byUser: true } : {}),
+          },
+        }
+      }
+      // The replanner could not decide: `continue` is the fallback and the run goes on. The
+      // failure itself came as the `error` event (phase 'replan') just before; it is pinned to
+      // the step the replanner ran after, so the warning stays in that turn's activity.
+      const error = state.replan?.failed ? state.replan.error : undefined
+      const last = state.steps[state.steps.length - 1]
       return {
         ...state,
         replan: {
           mode: event.mode,
           reason: event.reason,
           ...(event.byUser ? { byUser: true } : {}),
+          failed: true,
+          ...(error ? { error } : {}),
         },
+        steps: last
+          ? patchStep(state.steps, last.id, (s) => ({
+              ...s,
+              replanFailed: error ?? event.reason,
+            }))
+          : state.steps,
       }
+    }
 
     case 'message.queued':
       return state.queued.some((q) => q.id === event.id)
@@ -618,6 +699,14 @@ const applyEvent = (state: AgentUiState, event: AgentEvent, ctx: EventContext): 
     case 'error':
       // A per-step ('execute'/'plan'/...) error does not end the run — only a
       // top-level 'run' error does, and it arrives with no trailing `final`.
+      // A replanner that failed is not an error of the run at all: the run continues with its
+      // plan. It is held for the `replan.decision { failed }` that follows, never in `error`.
+      if (event.phase === 'replan') {
+        return {
+          ...state,
+          replan: { mode: 'continue', reason: '', failed: true, error: event.error },
+        }
+      }
       return event.phase === 'run'
         ? {
             ...state,

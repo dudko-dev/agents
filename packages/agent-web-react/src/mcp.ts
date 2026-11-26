@@ -16,6 +16,7 @@ export {
   claimOAuthCallback,
   describeMcpResult,
   isUnauthorizedError,
+  mcpInstructionsOf,
   mcpOAuthProviderOptions,
   readCallbackParams,
   stripOAuthParams,
@@ -40,6 +41,7 @@ export type {
   ConnectedMcp,
   McpCatalogEntry,
   McpOAuthCallback,
+  McpServerInstructions,
   McpServerResult,
   McpModule,
 } from './mcp-types.js'

@@ -370,6 +370,100 @@ test('StepList: a note sits under the step it reached; one without a step goes a
   assert.doesNotMatch(hidden, /during A|before the answer/)
 })
 
+test('StepList: tiers off renders the markup it always did; with tiers a badge, the escalation and the marks', () => {
+  const plain: StepView = {
+    id: 'a',
+    index: 1,
+    total: 1,
+    step: { id: 'a', description: 'Step a' },
+    text: 'Filed.',
+    reasoning: '',
+    toolCalls: [{ name: 'save', input: { n: 1 }, output: 'saved', ok: true, status: 'done' }],
+    status: 'done',
+    blocked: false,
+  }
+  const off = html(createElement(StepList, { steps: [plain] }))
+  assert.doesNotMatch(
+    off,
+    /awr-step__meta|awr-step__tier|awr-step__escalated|awr-tool__tag|awr-step__warn/,
+  )
+  // The props change nothing when the core sent no tier fields.
+  assert.equal(html(createElement(StepList, { steps: [plain], showTiers: false })), off)
+
+  const tiered: StepView = {
+    ...plain,
+    tier: 'strong',
+    model: 'big-1',
+    tierReason: 'planned',
+    escalations: [
+      { from: 'light', to: 'strong', reason: 'blocked', model: 'big-1', text: 'I cannot.' },
+    ],
+    toolCalls: [
+      { ...plain.toolCalls[0], attempt: 1 },
+      { ...plain.toolCalls[0], replayed: true },
+    ],
+    replanFailed: 'provider down',
+  }
+  const on = html(createElement(StepList, { steps: [tiered] }))
+  assert.match(on, /awr-step__tier awr-step__tier--strong[^>]*>strong</)
+  assert.match(on, /awr-step__model">big-1</)
+  assert.match(on, /Escalated: light → strong \(reported a blocker\)/)
+  assert.match(on, /I cannot\./)
+  assert.match(on, /awr-tool--earlier[\s\S]*attempt 1/)
+  assert.match(on, /not run again/)
+  assert.match(
+    on,
+    /awr-step__warn" title="provider down"[\s\S]*Replanning failed, continuing with the plan/,
+  )
+  assert.doesNotMatch(on, /awr-step--blocked/, 'a replanner failure is not a failed step')
+
+  // Hosts can hide each part, and relabel it.
+  const noTiers = html(createElement(StepList, { steps: [tiered], showTiers: false }))
+  assert.doesNotMatch(noTiers, /awr-step__tier|Escalated|attempt 1|not run again/)
+  assert.match(noTiers, /Replanning failed/)
+  const noWarn = html(createElement(StepList, { steps: [tiered], showReplanFailed: false }))
+  assert.doesNotMatch(noWarn, /Replanning failed/)
+  const ru = html(
+    createElement(StepList, {
+      steps: [tiered],
+      labels: {
+        tierNames: { strong: 'сильная' },
+        escalated: (from, to, reason) => `Повышено: ${from} → ${to} (${reason})`,
+      },
+    }),
+  )
+  assert.match(ru, /Повышено: light → сильная/)
+})
+
+test('MessageList: the activity summary counts escalations, and only when there are some', () => {
+  const st = (escalated: boolean): StepView => ({
+    id: 'a',
+    index: 1,
+    total: 1,
+    step: { id: 'a', description: 'Step a' },
+    text: '',
+    reasoning: '',
+    toolCalls: [],
+    status: 'done',
+    blocked: false,
+    ...(escalated
+      ? { tier: 'strong', escalations: [{ from: 'light', to: 'strong', reason: 'error' }] }
+      : {}),
+  })
+  const msg = (escalated: boolean) => [
+    { id: 'm', role: 'assistant' as const, content: 'ok', pending: false, steps: [st(escalated)] },
+  ]
+  assert.match(
+    html(createElement(MessageList, { messages: msg(true) })),
+    /1 step · 0 tool calls · 1 escalation</,
+  )
+  assert.match(html(createElement(MessageList, { messages: msg(false) })), /1 step · 0 tool calls</)
+  assert.match(
+    html(createElement(MessageList, { messages: msg(true), showTiers: false })),
+    /1 step · 0 tool calls</,
+  )
+})
+
 // ── the notebook and what was fetched ────────────────────────────────────────
 
 const lesson = (over: Partial<LessonView> = {}): LessonView => ({
