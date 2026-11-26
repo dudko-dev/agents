@@ -130,6 +130,10 @@ Status of the work. See [design.md](./design.md) for the architecture,
 - [x] **Search** — `search` / `web_search`: a search API the host names (Tavily, Brave
       through a gateway, SearXNG) or a function; the key in the credential store; the
       request pinned to that API, results cleaned, capped and filtered by `egress`.
+- [x] **Media** — `media`: `generate_image` / `generate_speech` / `transcribe_audio` on the AI
+      SDK's image / speech / transcription models, each mounted only when configured; files
+      in the virtual file system (never bytes in the context), types read from the bytes,
+      audio attachments as a marked transcript, media units in `usage` and a per-run call cap.
 - [x] **Learning** — `learning`: `save_skill` / `forget_skill`, lessons are skills
       (`VfsSkillStore` keeps them across sessions), secret scan, caps, provenance.
 - [x] **Compaction on the whole context** — the fixed prompt, transcript and step

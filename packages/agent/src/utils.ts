@@ -1,4 +1,8 @@
+import { addMediaUsage, type IMediaUsage } from './media-shared.ts'
 import type { IUsage } from './types.ts'
+
+// IUsage with every token detail filled in. The media fields stay optional: they exist only
+// once a media model was called.
 
 export interface IRetryOptions {
   maxRetries: number
@@ -118,7 +122,11 @@ export const redactHeaders = (
 
 // Every token detail filled in. `decisionCalls` stays optional: it is absent unless a decision
 // model was called, so a run without one reports exactly what it always did.
-export type IFilledUsage = Required<Omit<IUsage, 'decisionCalls'>> & Pick<IUsage, 'decisionCalls'>
+export type IFilledUsage = Required<Omit<IUsage, 'decisionCalls' | keyof IMediaUsage>> &
+  Pick<IUsage, 'decisionCalls'> &
+  Partial<IMediaUsage>
+// The same record under the name the media code uses.
+export type IFullUsage = IFilledUsage
 
 // A zeroed usage record with every optional detail filled in.
 export const emptyUsage = (): IFilledUsage => ({
@@ -144,6 +152,11 @@ export interface ISdkUsageLike {
   // Pre-v6 flat fields, still produced by some wrappers.
   reasoningTokens?: number
   cachedInputTokens?: number
+  // Ours, not the SDK's: carried over when a saved IUsage is normalised (a resumed run).
+  mediaCalls?: number
+  imagesGenerated?: number
+  speechCharacters?: number
+  transcriptionSeconds?: number
 }
 
 const n = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0)
@@ -163,6 +176,7 @@ export const normalizeUsage = (usage: ISdkUsageLike | undefined | null): IFilled
     reasoningTokens: n(usage.outputTokenDetails?.reasoningTokens ?? usage.reasoningTokens),
     cachedInputTokens: n(usage.inputTokenDetails?.cacheReadTokens ?? usage.cachedInputTokens),
     cacheWriteTokens: n(usage.inputTokenDetails?.cacheWriteTokens),
+    ...addMediaUsage(usage, undefined),
     ...(n(usage.decisionCalls) > 0 ? { decisionCalls: n(usage.decisionCalls) } : {}),
   }
 }
@@ -204,6 +218,7 @@ export const addUsage = (a: IUsage, b: IUsage): IFilledUsage => ({
   reasoningTokens: (a.reasoningTokens ?? 0) + (b.reasoningTokens ?? 0),
   cachedInputTokens: (a.cachedInputTokens ?? 0) + (b.cachedInputTokens ?? 0),
   cacheWriteTokens: (a.cacheWriteTokens ?? 0) + (b.cacheWriteTokens ?? 0),
+  ...addMediaUsage(a, b),
   ...((a.decisionCalls ?? 0) + (b.decisionCalls ?? 0) > 0
     ? { decisionCalls: (a.decisionCalls ?? 0) + (b.decisionCalls ?? 0) }
     : {}),

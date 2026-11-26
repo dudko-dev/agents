@@ -1,7 +1,7 @@
 import { asSchema, type Tool, type ToolSet } from 'ai'
 import type { IPlanStep, IUsage } from '../agent/loop-types.js'
 import type { RunControlPort } from '../agent/control.js'
-import type { AgentEvent } from '../events.js'
+import type { AgentEvent, UsagePhase } from '../events.js'
 import { ToolBudgetError } from '../limits.js'
 import {
   decideToolPermission,
@@ -22,8 +22,13 @@ export interface ToolRunContext {
   /** The plan step being executed, when there is one. */
   step?: IPlanStep
   signal?: AbortSignal
-  /** Add tokens spent on the parent's behalf (e.g. by a subagent) to the run. */
-  addUsage: (usage: IUsage) => void
+  /**
+   * Add what was spent on the parent's behalf to the run: a subagent's tokens (the default
+   * phase, 'subagent'), or a media model's call (phase 'media').
+   */
+  addUsage: (usage: IUsage, phase?: UsagePhase) => void
+  /** The run's usage so far (media tools read their per-run call count from it). */
+  usage?: () => IUsage
   /**
    * Run the agent's consent gate for a call made on its behalf (e.g. a host
    * tool a subagent calls). Resolves when allowed, throws ToolDeniedError.
@@ -90,7 +95,9 @@ export interface WrapToolsOptions {
   emit: (event: AgentEvent) => void
   step: () => IPlanStep | undefined
   signal?: AbortSignal
-  addUsage: (usage: IUsage) => void
+  addUsage: (usage: IUsage, phase?: UsagePhase) => void
+  /** The run's usage so far, handed to tools through their run context. */
+  usage?: () => IUsage
   /** Called before each counted call; throw to refuse it. */
   countCall: () => void
   maxToolOutputChars: number
@@ -180,6 +187,7 @@ export const wrapToolsForRun = (tools: ToolSet, o: WrapToolsOptions): ToolSet =>
             step: o.step(),
             signal: o.signal,
             addUsage: o.addUsage,
+            ...(o.usage ? { usage: o.usage } : {}),
             approve: (toolName, toolInput, ro) => gate(toolName, toolInput, ro),
             ...(o.control ? { control: o.control } : {}),
             ...(o.runId ? { runId: o.runId } : {}),

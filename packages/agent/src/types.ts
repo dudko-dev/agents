@@ -7,6 +7,7 @@ import type { PipelineEvent } from './pipeline-engine.ts'
 import type { IEgressPolicy } from './safe-fetch.ts'
 import type { ISearchConfig } from './web-search.ts'
 import type { ISandboxConfig } from './sandbox-engine.ts'
+import type { IMediaConfig, IRunFile } from './media.ts'
 
 export type ProviderType =
   | 'openai'
@@ -403,6 +404,15 @@ export interface IAgentConfig {
   // network, no files, no process and no host modules. A run is a write for tool approval.
   // See src/sandbox.ts.
   sandbox?: boolean | ISandboxConfig
+  // Image generation, speech and transcription, each as a tool that exists only when its model
+  // is set: `imageModel` -> generate_image, `speechModel` -> generate_speech,
+  // `transcriptionModel` -> transcribe_audio and audio attachments (`run({ files })`, transcribed
+  // once; the model reads the text). Off unless set. Generated files are written under the run's
+  // directory (or `media.dir`) and the model gets a path, never the bytes. Each call is a write
+  // for tool approval, counts in `usage.mediaCalls`, and a run may make `media.maxCalls` of them
+  // (default 8). Prompts, spoken text and audio leave for the provider of that model. See
+  // src/media.ts.
+  media?: IMediaConfig
   // Native AI-SDK tools registered alongside MCP-discovered tools. Names
   // must not collide with any MCP-prefixed tool ("server__tool"); createAgent
   // throws on conflict. Native tools bypass outputSanitizer/inputSanitizer
@@ -526,6 +536,13 @@ export interface IUsage {
   cachedInputTokens?: number
   // Input tokens written to the provider's prompt cache.
   cacheWriteTokens?: number
+  // What the media models (config.media) were asked for - calls (failed ones included), images
+  // written, characters sent to the speech model, seconds of audio transcribed. Not tokens and
+  // not part of the counts above. Absent until a media model is called (see IMediaUsage).
+  mediaCalls?: number
+  imagesGenerated?: number
+  speechCharacters?: number
+  transcriptionSeconds?: number
   // Calls made to `config.decisionModel`. A call is not a token: what the API billed for it
   // (when it says) is in the token fields, the number of calls is here. Absent when zero.
   decisionCalls?: number
@@ -591,6 +608,9 @@ export type UsagePhase =
   | 'subagent'
   // A call to `config.decisionModel` (usage.decisionCalls, plus the tokens its API reported).
   | 'decision'
+  // A call to an image / speech / transcription model (config.media): its `usage` carries the
+  // media fields and zero tokens.
+  | 'media'
 
 type AgentEventBody =
   | { type: 'plan.thought-delta'; delta: string }
@@ -713,6 +733,28 @@ type AgentEventBody =
       sources: string[]
     }
   | { type: 'skill.forgotten'; name: string }
+  // A media tool (config.media) wrote a file: `path` is where (absolute), `mediaType` what its
+  // bytes are, `bytes` its size. The bytes themselves are in the file, never in an event.
+  | {
+      type: 'media.generated'
+      kind: 'image' | 'speech'
+      path: string
+      mediaType: string
+      bytes: number
+      model: string
+      step?: IPlanStep
+    }
+  // An audio file was transcribed: one the user attached to the run ('attachment') or one the
+  // model asked about ('tool'). `text` is what the model reads of it (cleaned and capped).
+  | {
+      type: 'media.transcribed'
+      source: 'attachment' | 'tool'
+      name: string
+      text: string
+      language?: string
+      durationInSeconds?: number
+      model: string
+    }
   | { type: 'revisions.exceeded'; cap: number }
   | { type: 'error'; error: Error; phase: 'plan' | 'execute' | 'replan' | 'synthesize' | 'init' }
   // A pipeline's own events (createPipeline): the run, each node visit, each edge decision.
@@ -743,6 +785,10 @@ export interface IAgentRunOptions {
   // original prompt).
   input: string
   history?: IConversationTurn[]
+  // Audio the user attached (needs config.media.transcriptionModel; anything else is refused):
+  // each file is transcribed once and its text is put under the input, marked as the content of
+  // the user's file. Ignored on resume (the saved input already carries the transcripts).
+  files?: IRunFile[]
   signal?: AbortSignal
   onEvent?: EventHandler
   onStepStart?: (info: IStepStartInfo) => void

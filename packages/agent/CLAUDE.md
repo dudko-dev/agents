@@ -68,6 +68,22 @@
     `tests/helpers/search-server.ts`, the local imitation of the three APIs). Security boundary:
     every guard has a test in `tests/web-search*.test.ts` and a mutation check; the key must never
     reach an event, an error or a result. Tests never call a real search API.
+  - `media.ts` (`config.media`: `generate_image` / `generate_speech` / `transcribe_audio`, each
+    mounted only when its model is set, and `run({ files })` - audio attachments transcribed once
+    and put under the input as a fenced, marked transcript by `attachRunFiles`, called from
+    `runner.ts`) + `media-shared.ts` (pure, no imports: the caps, `sniffMediaType` / `acceptMedia` -
+    what a file is, is read from its bytes -, `mediaFileName`, `IMediaUsage`, the per-run budget,
+    the transcript wrapper, the descriptions). The shared file is a COPY of the browser sibling's
+    `src/tools/media-shared.ts`, byte for byte: change both (`tests/media-shared.test.ts` compares
+    them, and the two copies of `tests/helpers/media-models.ts`, the mock models). Models are the AI
+    SDK's (`generateImage` / `generateSpeech` / `transcribe`), given as objects or as a stage block
+    resolved by `buildMediaModelFromStage` in `provider.ts`. Bytes never reach the language model:
+    files go to `<sandboxRoot>/<runId>/media/` (or `media.dir`), the result is a path. A call is a
+    `usage` event of phase `'media'` (the flat `mediaCalls` / `imagesGenerated` / `speechCharacters` /
+    `transcriptionSeconds` fields of `IUsage`, never tokens - flat numbers so that every generic
+    usage sum, the pipeline's included, carries them), counted against
+    `media.maxCalls` per run; `maxRetries: 0` on purpose. Security boundary: every guard has a test
+    in `tests/media*.test.ts` and a mutation check. Tests never call a real provider.
   - `control.ts` (`createRunControl`: send a message into a running loop, stop one
     subagent). The runner drains it at round / step / final boundaries; messages are
     recorded in `IRunState.userUpdates` and in run snapshots.
