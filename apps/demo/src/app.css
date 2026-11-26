@@ -817,6 +817,58 @@ a:hover {
   flex-wrap: wrap;
   font-size: 13px;
 }
+/* A capability: its switch on the left, what is in effect on the right, its needs below. */
+.agentset__caps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  font-size: 13px;
+}
+.agentset__cap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+  min-width: 0;
+}
+.agentset__cap:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+.agentset__cap-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 10px;
+  flex-wrap: wrap;
+}
+.agentset__cap-row > label {
+  flex: 1 1 14em;
+  min-width: 0;
+}
+.agentset__state {
+  flex: none;
+  max-width: 100%;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--warn);
+  overflow-wrap: anywhere;
+}
+.agentset__state.is-on {
+  color: var(--ok);
+}
+.agentset__state.is-off {
+  color: var(--muted);
+}
+.agentset__can {
+  overflow-wrap: anywhere;
+}
+.agentset code {
+  overflow-wrap: anywhere;
+}
 .agentset__skills {
   list-style: none;
   margin: 0;
@@ -1107,4 +1159,17 @@ a:hover {
 
 .agentset__notebook {
   margin-top: 8px;
+}
+
+/* Why a tool call failed, under its row (see renderToolCall in App.tsx). */
+.tool-error {
+  list-style: none;
+  margin: 2px 0 4px 20px;
+  padding: 4px 8px;
+  border-left: 2px solid var(--danger);
+  color: var(--fg);
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }

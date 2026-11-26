@@ -17,8 +17,16 @@ import { DEMO_URL } from '../links'
 import { Markdown } from '../markdown'
 import markUrl from '../mark.svg'
 import { isLocal, MODELS } from '../models'
-import { allSkills, useDemoSettings, useSettingsConfig } from '../settings'
-import { GPU_LOST, GPU_LOST_NOTICE, useDemoModel } from '../use-model'
+import { allSkills, SEARCH_CREDENTIAL, useDemoSettings, useSettingsConfig } from '../settings'
+import { MEDIA_MODELS, useDemoDecision, useDemoMedia, useSavedKeys } from '../use-extras'
+import {
+  autoTiers,
+  GPU_LOST,
+  GPU_LOST_NOTICE,
+  tierChoice,
+  useDemoModel,
+  useDemoTiers,
+} from '../use-model'
 import { workspace } from '../workspace'
 import { EXAMPLES, STARTER } from './examples'
 
@@ -53,6 +61,16 @@ const same = (a: PipelineDefinition, b: PipelineDefinition) =>
 const exampleOf = (definition: PipelineDefinition): string =>
   EXAMPLES.find((e) => same(e.definition, definition))?.id ?? 'mine'
 
+const NO_KEYS: ReadonlySet<string> = new Set()
+
+/**
+ * The capabilities a node can tick besides the workspace files. Each is a part of the agent's
+ * config, not a set of tools, so the registry maps the name to nothing and `configure` switches
+ * the part on for the nodes that named it.
+ */
+const CAPABILITY_GROUPS = ['web', 'code', 'helpers', 'search', 'media'] as const
+const NO_TOOLS = {} as AgentToolSet
+
 const NO_MODEL =
   'No model yet: pick one in the Model panel and add its key (or load a local model).'
 
@@ -68,9 +86,26 @@ export const PipelineApp = () => {
     resolvedModel,
     modelWindow,
   } = useDemoModel()
-  // The limits, thinking and web access set in the demo's "Agent settings" apply here too.
+  // The demo's "Agent settings" apply here too. The loop settings (limits, thinking, compaction),
+  // the model tiers and the decision model go to every node; the capabilities that are tools
+  // (web, code, helpers, search, media) go to the nodes that tick them in the inspector.
   const { settings } = useDemoSettings()
-  const { config: settingsConfig } = useSettingsConfig(settings, modelWindow)
+  const savedKeys = useSavedKeys(credentials)
+  const { config: settingsConfig } = useSettingsConfig(
+    settings,
+    modelWindow,
+    Boolean(savedKeys?.has(SEARCH_CREDENTIAL)),
+  )
+  const auto = autoTiers(model)
+  const tiers = useDemoTiers(
+    {
+      light: tierChoice(settings.tierLight, auto.light),
+      strong: tierChoice(settings.tierStrong, auto.strong),
+    },
+    credentials,
+  )
+  const media = useDemoMedia(settings.media, model.provider, credentials, savedKeys)
+  const decision = useDemoDecision(settings.decision, credentials, savedKeys)
 
   // ── The definition: autosaved, with the visitor's own kept apart from the examples ──
   const [definition, setDefinition] = useState<PipelineDefinition>(
@@ -99,24 +134,7 @@ export const PipelineApp = () => {
   // ── What a node may name ───────────────────────────────────────────────────
   // Models: every cloud model whose key is in the vault (a node on the default model needs no
   // entry here). Which keys exist is asked of the vault, never read.
-  const [keyed, setKeyed] = useState<ReadonlySet<string>>(new Set())
-  useEffect(() => {
-    let active = true
-    const refs = [...new Set(MODELS.flatMap((m) => (m.credentialRef ? [m.credentialRef] : [])))]
-    void Promise.all(
-      refs.map((ref) =>
-        credentials.store
-          .getApiKey(ref)
-          .then((key) => (key ? ref : undefined))
-          .catch(() => undefined),
-      ),
-    ).then((found) => {
-      if (active) setKeyed(new Set(found.filter((r): r is string => Boolean(r))))
-    })
-    return () => {
-      active = false
-    }
-  }, [credentials.store, credentials.version])
+  const keyed = savedKeys ?? NO_KEYS
   const modelOptions = useMemo<PipelineOption[]>(
     () =>
       MODELS.filter(
@@ -133,7 +151,10 @@ export const PipelineApp = () => {
   const skillRegistry = useMemo(() => Object.fromEntries(skills.map((s) => [s.name, s])), [skills])
   const fileTools = useMemo(() => createFileTools(workspace), [])
   const toolRegistry = useMemo<Record<string, AgentToolSet>>(
-    () => ({ files: fileTools }),
+    () => ({
+      files: fileTools,
+      ...Object.fromEntries(CAPABILITY_GROUPS.map((id) => [id, NO_TOOLS])),
+    }),
     [fileTools],
   )
 
@@ -160,17 +181,35 @@ export const PipelineApp = () => {
   )
 
   // ── From a node to its agent ───────────────────────────────────────────────
+  // What the settings switch on as tools is held back from the base: a node gets it by a tick.
+  const { loop, perNode } = useMemo(() => {
+    const { egress, sandbox, subagents, search, ...rest } = settingsConfig
+    return {
+      loop: rest,
+      perNode: {
+        ...(egress ? { web: { egress } } : {}),
+        ...(sandbox ? { code: { sandbox } } : {}),
+        ...(subagents ? { helpers: { subagents } } : {}),
+        ...(search ? { search: { search } } : {}),
+        ...(media.config ? { media: { media: media.config } } : {}),
+      } as Record<string, Partial<BrowserAgentConfig>>,
+    }
+  }, [settingsConfig, media.config])
   const base = useMemo<BrowserAgentConfig>(
     () => ({
       model: resolvedModel as ModelInput,
       credentials: credentials.store,
-      ...settingsConfig,
+      ...loop,
+      // Model tiers of the chosen model (a node that names another model runs without them:
+      // the core's resolver drops them), and the decision model that answers a node's route.
+      ...(tiers.executorTiers ? { executorTiers: tiers.executorTiers } : {}),
+      ...(decision.model ? { decisionModel: decision.model } : {}),
       // Nobody is asked here: the tools a node can name are the workspace and the visitor's own
       // MCP servers, chosen node by node in the inspector.
       toolApproval: { mode: 'autopilot' },
       ...(model.vision ? { vision: true } : {}),
     }),
-    [resolvedModel, credentials.store, settingsConfig, model.vision],
+    [resolvedModel, credentials.store, loop, tiers.executorTiers, decision.model, model.vision],
   )
   const resolveNode = useCallback(
     async (node: PipelineNode) => {
@@ -193,9 +232,14 @@ export const PipelineApp = () => {
         skills: skillRegistry,
         tools: toolRegistry,
         mcpServers: mcpRegistry,
+        // A ticked capability that is in effect (its switch is on in the demo's Agent settings
+        // and its key, if it needs one, is saved) becomes that part of the node's config. One
+        // that is not in effect adds nothing: the node runs without it.
+        configure: (config, n) =>
+          Object.assign({}, config, ...(n.tools ?? []).map((id) => perNode[id] ?? {})),
       })(node)
     },
-    [base, resolvedModel, credentials.store, skillRegistry, toolRegistry, mcpRegistry],
+    [base, resolvedModel, credentials.store, skillRegistry, toolRegistry, mcpRegistry, perNode],
   )
   const pipeline = usePipeline(definition, { resolveNode })
 
@@ -229,8 +273,13 @@ export const PipelineApp = () => {
     resetRun()
   }
 
-  const options = useMemo(
-    () => ({
+  const inEffect = Object.keys(perNode).join('|')
+  const options = useMemo(() => {
+    const off = (id: string) =>
+      inEffect.split('|').includes(id)
+        ? ''
+        : ' Not in effect now: switched off in the demo’s Agent settings, or its key is not saved.'
+    return {
       skills: skills.map((s) => ({ id: s.name, description: s.description })),
       tools: [
         {
@@ -238,14 +287,38 @@ export const PipelineApp = () => {
           label: 'Workspace files',
           description: 'Read and write the files of the workspace (fs_* tools).',
         },
+        {
+          id: 'web',
+          label: 'Web pages',
+          description: `Read the web (web_fetch), only the hosts allowed in the demo's Agent settings.${off('web')}`,
+        },
+        {
+          id: 'code',
+          label: 'Run code',
+          description: `Run JavaScript it wrote (run_js) in a sandboxed worker.${off('code')}`,
+        },
+        {
+          id: 'helpers',
+          label: 'Helpers',
+          description: `Start helper agents for sub-tasks (spawn_subagent).${off('helpers')}`,
+        },
+        {
+          id: 'search',
+          label: 'Web search',
+          description: `Search the web (web_search) through Tavily, with your key.${off('search')}`,
+        },
+        {
+          id: 'media',
+          label: 'Media',
+          description: `Generate images and speech, transcribe audio${media.provider ? ` (${MEDIA_MODELS[media.provider].label}, billed to your key)` : ''}.${off('media')}`,
+        },
       ],
       mcpServers: connectedKey
         .split('|')
         .filter(Boolean)
         .map((name) => ({ id: name })),
-    }),
-    [skills, connectedKey],
-  )
+    }
+  }, [skills, connectedKey, inEffect, media.provider])
   const ready = Boolean(resolvedModel)
 
   return (

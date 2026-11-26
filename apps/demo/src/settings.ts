@@ -44,11 +44,26 @@ export interface DemoSettings {
   sandbox: boolean
   /** The model may start helpers of its own for sub-tasks (`spawn_subagent`). */
   helpers: boolean
-  /** The model may search the web (`web_search`) through Tavily, with the user's own key. */
+  /**
+   * The model may search the web (`web_search`) through Tavily, with the user's own key. On when
+   * possible: the switch is the wish, a saved Tavily key is what makes it so.
+   */
   search: boolean
   /**
+   * Media tools (`generate_image`, `generate_speech`, `transcribe_audio`) and the transcription of
+   * attached audio. On when possible: needs a Google or an OpenAI key in the vault.
+   */
+  media: boolean
+  /**
+   * The decision model (Google's `gemini-decision-1`) answers the replanner's continue / finish
+   * and a pipeline node's route. On when possible: needs a Google key in the vault.
+   */
+  decision: boolean
+  /**
    * Model tiers: the id (in `MODELS`) of a cheaper model for the steps the planner rates easy,
-   * and of a stronger one for the hard ones and for retries. '' = none; both empty = tiers off.
+   * and of a stronger one for the hard ones and for retries. 'auto' = the lightest / the
+   * strongest model of the chosen model's own provider (same key), when the list has one;
+   * '' = none; both none = tiers off.
    */
   tierLight: string
   tierStrong: string
@@ -59,9 +74,22 @@ export interface DemoSettings {
   history: boolean
   /** The workspace (virtual file system) panel. */
   filesPanel: boolean
-  lang: 'en' | 'ru'
+  /** The chat's labels: English is the library's own, the others come from `i18n.ts`. */
+  lang: ChatLang
 }
 
+/** The languages the chat's labels come in. */
+export const CHAT_LANGS = ['en', 'es', 'de'] as const
+export type ChatLang = (typeof CHAT_LANGS)[number]
+
+/** A tier setting that follows the chosen model: see `autoTiers` (use-model.ts). */
+export const TIER_AUTO = 'auto'
+
+/**
+ * The demo shows the most the library can do, so every capability is ON by default. The ones
+ * that need a key or a second model are "on when possible": the setting is on, and the panel says
+ * whether it is in effect and what is missing. Consent is the exception: it stays as it was.
+ */
 export const DEFAULT_SETTINGS: DemoSettings = {
   approvalMode: 'autopilot',
   thinking: 'off',
@@ -76,14 +104,16 @@ export const DEFAULT_SETTINGS: DemoSettings = {
   enabledSkills: BUILTIN_SKILLS.map((s) => s.name),
   customSkills: [],
   analysts: 'off',
-  learning: false,
-  egress: false,
+  learning: true,
+  egress: true,
   egressAllow: 'en.wikipedia.org, api.github.com',
-  sandbox: false,
-  helpers: false,
-  search: false,
-  tierLight: '',
-  tierStrong: '',
+  sandbox: true,
+  helpers: true,
+  search: true,
+  media: true,
+  decision: true,
+  tierLight: TIER_AUTO,
+  tierStrong: TIER_AUTO,
   showToolCalls: true,
   showUsage: true,
   history: true,
@@ -92,29 +122,90 @@ export const DEFAULT_SETTINGS: DemoSettings = {
 }
 
 const KEY = 'agent-web-demo:settings'
+/** The stored shape: `{ v: 2, set }`, where `set` holds only what the visitor changed. */
+export const SETTINGS_VERSION = 2
 
-const load = (): DemoSettings => {
-  try {
-    const raw = localStorage.getItem(KEY)
-    if (raw) return { ...DEFAULT_SETTINGS, ...(JSON.parse(raw) as Partial<DemoSettings>) }
-  } catch {
-    /* private mode */
-  }
-  return DEFAULT_SETTINGS
+/**
+ * What the defaults were when the whole settings object was stored (before version 2): the
+ * fields whose default has changed since. Used once, to tell a visitor's own choice from a
+ * default that was merely written down.
+ */
+export const LEGACY_DEFAULTS: DemoSettings = {
+  ...DEFAULT_SETTINGS,
+  learning: false,
+  egress: false,
+  sandbox: false,
+  helpers: false,
+  search: false,
+  tierLight: '',
+  tierStrong: '',
 }
 
-/** The settings, persisted in localStorage. */
+type Overrides = Partial<DemoSettings>
+
+const sameValue = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b)
+
+const knownOnly = (value: unknown): Overrides => {
+  if (!value || typeof value !== 'object') return {}
+  const out: Record<string, unknown> = {}
+  for (const key of Object.keys(DEFAULT_SETTINGS)) {
+    if (Object.prototype.hasOwnProperty.call(value, key)) {
+      out[key] = (value as Record<string, unknown>)[key]
+    }
+  }
+  // A language the demo no longer has (a stored 'ru'), or anything else that is not one of
+  // ours, is not a choice the page can honour: it follows the default.
+  if ('lang' in out && !(CHAT_LANGS as readonly unknown[]).includes(out.lang)) delete out.lang
+  return out as Overrides
+}
+
+/**
+ * The visitor's own choices out of what is stored.
+ *
+ * - Version 2 stores only the fields the visitor changed: everything else follows the defaults
+ *   of the day, so a later change of defaults reaches a returning visitor by itself.
+ * - Before that the WHOLE object was stored, defaults included, so a stored `false` does not say
+ *   whether it was chosen. The rule: a field that differs from the default of that time is a
+ *   choice and is kept; a field equal to it was never touched (or was put back) and follows the
+ *   new default. A switch someone turned on is therefore never turned off, and a list of allowed
+ *   hosts someone edited stays theirs.
+ */
+export const migrateSettings = (stored: unknown): Overrides => {
+  if (!stored || typeof stored !== 'object') return {}
+  const record = stored as { v?: unknown; set?: unknown }
+  if (record.v === SETTINGS_VERSION) return knownOnly(record.set)
+  const legacy = knownOnly(stored)
+  const kept: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(legacy)) {
+    if (!sameValue(value, LEGACY_DEFAULTS[key as keyof DemoSettings])) kept[key] = value
+  }
+  return kept as Overrides
+}
+
+const load = (): Overrides => {
+  try {
+    const raw = localStorage.getItem(KEY)
+    if (raw) return migrateSettings(JSON.parse(raw))
+  } catch {
+    /* private mode, or not JSON */
+  }
+  return {}
+}
+
+/** The settings, persisted in localStorage: the defaults with the visitor's own choices on top. */
 export const useDemoSettings = () => {
-  const [settings, setSettings] = useState<DemoSettings>(load)
+  const [overrides, setOverrides] = useState<Overrides>(load)
   useEffect(() => {
     try {
-      localStorage.setItem(KEY, JSON.stringify(settings))
+      localStorage.setItem(KEY, JSON.stringify({ v: SETTINGS_VERSION, set: overrides }))
     } catch {
       /* private mode */
     }
-  }, [settings])
-  const update = (patch: Partial<DemoSettings>) => setSettings((s) => ({ ...s, ...patch }))
-  return { settings, update, reset: () => setSettings(DEFAULT_SETTINGS) }
+  }, [overrides])
+  const settings = useMemo<DemoSettings>(() => ({ ...DEFAULT_SETTINGS, ...overrides }), [overrides])
+  const update = (patch: Partial<DemoSettings>) => setOverrides((s) => ({ ...s, ...patch }))
+  // Reset forgets every choice: the page is back on the defaults, today's and tomorrow's.
+  return { settings, update, reset: () => setOverrides({}) }
 }
 
 /** All skills the user can toggle: built-in examples + their own. */
@@ -146,7 +237,13 @@ export const DEFAULT_WINDOW = 128_000
 /** Where the search API's key is kept in the vault (next to the model keys). */
 export const SEARCH_CREDENTIAL = 'tavily'
 
-export const useSettingsConfig = (s: DemoSettings, modelWindow: number | undefined) => {
+export const useSettingsConfig = (
+  s: DemoSettings,
+  modelWindow: number | undefined,
+  /** Whether a search key is in the vault: `search` is on only then. */
+  searchKey = false,
+) => {
+  const search = s.search && searchKey
   // Auto = the model's window; the agent never goes above a local model's anyway.
   const window = s.contextWindowTokens || modelWindow || DEFAULT_WINDOW
   const baked = {
@@ -163,7 +260,7 @@ export const useSettingsConfig = (s: DemoSettings, modelWindow: number | undefin
     egressAllow: s.egressAllow,
     sandbox: s.sandbox,
     helpers: s.helpers,
-    search: s.search,
+    search,
   }
   const rebuildKey = JSON.stringify(baked)
   const config = useMemo<Partial<BrowserAgentConfig>>(
@@ -202,8 +299,9 @@ export const useSettingsConfig = (s: DemoSettings, modelWindow: number | undefin
       // this run's budget; the defaults bound depth (1), count (8) and how many run at once (3).
       ...(s.helpers ? { subagents: { dynamic: true } } : {}),
       // Web search: Tavily is the hosted API that answers a page directly (CORS). The key is the
-      // user's own, kept in the vault under SEARCH_CREDENTIAL and read at each call.
-      ...(s.search ? { search: { provider: 'tavily', credentialRef: SEARCH_CREDENTIAL } } : {}),
+      // user's own, kept in the vault under SEARCH_CREDENTIAL and read at each call. Without a
+      // key the tool is not mounted at all: a tool that can only fail is not a capability.
+      ...(search ? { search: { provider: 'tavily', credentialRef: SEARCH_CREDENTIAL } } : {}),
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [rebuildKey],

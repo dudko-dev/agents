@@ -23,11 +23,7 @@ const send = async (page: Page, text: string) => {
   await page.getByRole('button', { name: 'Send' }).click()
 }
 
-const turnOnHelpers = async (page: Page) => {
-  await page.locator('.agentset__title').click()
-  await page.getByLabel('Let it start helpers (spawn_subagent)').check()
-  await expect(page.getByRole('button', { name: 'Send' })).toBeVisible()
-}
+const HELPERS_SWITCH = 'Let it start helpers (spawn_subagent)'
 
 const ofHelper = (c: GeminiCall): boolean =>
   c.user.includes('HELPER-TASK') && !c.user.includes(GOAL)
@@ -52,7 +48,7 @@ const script =
     return { text: 'All read.' }
   }
 
-test('helpers: off by default; on, a helper the model started is a node of the tree with its status', async ({
+test('helpers: on by default - a helper the model started is a node of the tree with its status; switched off, the tool does not exist', async ({
   page,
 }) => {
   const calls = await mockGemini(
@@ -66,17 +62,11 @@ test('helpers: off by default; on, a helper the model started is a node of the t
   )
   await openWithKey(page)
 
-  // Off: the tool does not exist, and the turn has no tree.
-  await send(page, GOAL)
-  const first = page.locator('.awr-msg--assistant').last()
-  await expect(first.locator('.awr-msg__bubble')).toHaveText('All read.')
-  expect(calls.flatMap((c) => c.tools)).not.toContain('spawn_subagent')
-  await expect(first.locator('.awr-activity__summary')).toHaveText('1 step · 0 tool calls')
-  await first.locator('.awr-activity__summary').click()
-  await expect(first.locator('.awr-subagents, .awr-subagent')).toHaveCount(0)
+  // The default: the switch is on, and says so.
+  await page.locator('.agentset__title').click()
+  await expect(page.getByLabel(HELPERS_SWITCH)).toBeChecked()
+  await page.locator('.agentset__title').click()
 
-  await turnOnHelpers(page)
-  const before = calls.length
   await send(page, GOAL)
   const answer = page.locator('.awr-msg--assistant').last()
   await expect(answer.locator('.awr-msg__bubble')).toHaveText('All read.', { timeout: 45_000 })
@@ -102,12 +92,25 @@ test('helpers: off by default; on, a helper the model started is a node of the t
   await expect(node.getByRole('button', { name: 'Stop this subagent' })).toHaveCount(0)
 
   // It really was a run of its own, and the model got its answer as the tool result.
-  const mine = calls.slice(before)
-  expect(mine.filter(ofHelper).map((c) => c.stage)).toEqual(
+  expect(calls.filter(ofHelper).map((c) => c.stage)).toEqual(
     expect.arrayContaining(['planner', 'executor', 'synthesizer']),
   )
-  const back = mine.filter((c) => !ofHelper(c) && c.stage === 'executor').at(-1)
+  const back = calls.filter((c) => !ofHelper(c) && c.stage === 'executor').at(-1)
   expect(JSON.stringify(back?.functionResponses)).toContain('HELPER-ANSWER')
+
+  // Off: the tool does not exist, and the turn has no tree.
+  await page.locator('.agentset__title').click()
+  await page.getByLabel(HELPERS_SWITCH).uncheck()
+  await expect(page.getByRole('button', { name: 'Send' })).toBeVisible()
+  const before = calls.length
+  await send(page, GOAL)
+  const second = page.locator('.awr-msg--assistant').last()
+  await expect(second.locator('.awr-msg__bubble')).toHaveText('All read.')
+  expect(calls.slice(before).length).toBeGreaterThan(0)
+  expect(calls.slice(before).flatMap((c) => c.tools)).not.toContain('spawn_subagent')
+  await expect(second.locator('.awr-activity__summary')).toHaveText('1 step · 0 tool calls')
+  await second.locator('.awr-activity__summary').click()
+  await expect(second.locator('.awr-subagents, .awr-subagent')).toHaveCount(0)
 })
 
 test('helpers: Stop on a slow helper stops that helper only - the run goes on and answers', async ({
@@ -124,7 +127,6 @@ test('helpers: Stop on a slow helper stops that helper only - the run goes on an
     }),
   )
   await openWithKey(page)
-  await turnOnHelpers(page)
   await send(page, GOAL)
 
   const answer = page.locator('.awr-msg--assistant').last()
@@ -167,7 +169,6 @@ test("helpers: a helper's write asks the user, and the prompt says a helper is a
     ),
   )
   await openWithKey(page)
-  await turnOnHelpers(page)
   await page.getByRole('button', { name: /^Tool consent/ }).click()
   await page.getByRole('menuitemradio', { name: /^Ask Run read-only/ }).click()
   await expect(page.getByRole('button', { name: 'Tool consent: Ask' })).toBeVisible()
