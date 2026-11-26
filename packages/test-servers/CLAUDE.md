@@ -40,8 +40,11 @@ published**, never a runtime dependency of anything.
 - `src/http.ts` — binding (`listen`, `assertLoopbackHost`), CORS (`corsHeaders`, `applyCors`), and
   the plain `node:http` helpers. The CORS header set is the browser package's README ("CORS") and
   `packages/agent-web-react/e2e/servers.ts` plus `Mcp-Method` / `Mcp-Name`, which 2026-07-28
-  adds (`CORS_ALLOW_HEADERS_2025` is the list without them): those two files still have the 2025
-  list and must get the two headers when the browser client learns the modern era.
+  adds (`CORS_ALLOW_HEADERS_2025` is the list without them). The browser client speaks the modern
+  era as a per-server opt-in (`protocol`); its README lists both sets, and
+  `packages/agent-web/tests/mcp-protocol-cors.test.ts` plays a browser's preflight against the
+  `cors` probe fault. The React e2e servers keep the 2025 list: nothing there connects with
+  `protocol` set, and they must get the two headers when something does.
 - `src/jwt.ts` — sign / verify (`node:crypto`), `verifyClientAssertion` with its two profiles
   (`'rfc7523bis'`: `aud` = issuer, `typ: client-authentication+jwt`; `'rfc7523'`: `aud` = token
   endpoint, `typ: JWT`), `generateClientKey`, `readClientAuth`, the grant and token-type constants.

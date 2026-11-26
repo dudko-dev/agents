@@ -257,6 +257,37 @@ Use `getHeaders` on a server config to inject fresh credentials at connect time,
 
 `getHeaders` is resolved **once per connect**, so it cannot save a token that expires mid-run — for that, use OAuth.
 
+### MCP protocol revision
+
+Per server, `protocol` says which revisions of the protocol the connection may use:
+
+```ts
+mcpServers: {
+  docs: { url: 'https://docs.example.com/mcp' },                       // 'legacy', the default
+  crm: { url: 'https://crm.example.com/mcp', protocol: 'auto' },
+  files: { command: 'files-mcp', protocol: 'modern' },
+}
+```
+
+| `protocol` | What is spoken | Against a server of the other kind |
+| --- | --- | --- |
+| `'legacy'` (default, same as leaving it out) | The 2025 revisions: the `initialize` handshake, exactly the requests this package sent before the option existed (a test compares them, headers and bodies, with a recording made before it). | A server that speaks only 2026-07-28: the connect fails at once with `Unsupported protocol version: 2025-11-25`. |
+| `'auto'` | The server is asked first (`server/discover`). One that answers with 2026-07-28 is spoken to that way; any other gets the 2025 handshake on the same connection. | Works with both. A probe that goes wrong in another way (HTTP 5xx, an answer that is not JSON-RPC, no answer over HTTP) fails the connect: an outage is not read as "an old server". |
+| `'modern'` | 2026-07-28 only. | A 2025 server: the connect fails at once with `the server did not offer pinned protocol version 2026-07-28 …`. |
+
+The revision is decided **once, at connect**, by that one probe. No tool call is ever sent again in another revision. What was negotiated is on the log: `[mcp] crm: protocol 2026-07-28 (modern: stateless, no session; configured 'auto')`, or `… protocol 2025-11-25 (legacy: the initialize handshake; configured 'auto')` after a fall back - level `info`, one line per server whose `protocol` is `auto` or `modern` (a server without the option logs what it always did). The modes are the SDK's `versionNegotiation` (`'auto'`, and a pin to `2026-07-28` for `'modern'`): `'modern'` stays on the revision this package is tested against when the SDK learns a newer one, `'auto'` takes the newest the SDK and the server share.
+
+What is different on 2026-07-28:
+
+- **No session and no handshake.** Every request carries the revision, the client's name and its capabilities, and the HTTP headers `MCP-Protocol-Version`, `Mcp-Method` and (for a tool call) `Mcp-Name`. There is no `Mcp-Session-Id`, no GET stream and nothing to reconnect; `agent.reconnect()` works as before. This package does not send `Mcp-Param-*` headers (the mirror of tool arguments a server may ask for with `x-mcp-header`).
+- **Tool list changes.** A server cannot write to the client unasked, so the connector opens a `subscriptions/listen` stream at connect - when the server advertises `tools.listChanged` - and `notifications/tools/list_changed` arrives there; the agent re-lists as before. If that stream ends, **it is not opened again**: a `warn` line says so, and changes are not announced until `agent.reconnect()`.
+- **`input_required` is not supported.** A tool that asks the user something (elicitation) or asks for the call to be sent again with a state fails with `MCP tool "x" did not finish: the server asked for more input …`; the call is not repeated. The client declares no elicitation capability, so a server that checks answers `-32021` instead.
+- **Results and errors** reach the model as they always did: `isError` is a failed call, `structuredContent` and the `outputSchema` note work the same way.
+- **OAuth** is unchanged: the probe is simply the first request to get the 401.
+- **stdio.** `'auto'` and `'modern'` ask on a **second, short-lived process** started from the same `command` (a 2025 server may exit on a request it does not know; that must not cost the session its process): the command runs twice per connect. A server that does not answer the probe at all is taken for a 2025 one after 5 s (half the connect timeout, if that is less).
+
+`MCP_SERVERS` (the CLI) takes the field as it is: `{"crm":{"url":"https://…","protocol":"auto"}}`.
+
 ### MCP over OAuth 2.1
 
 Point `authProvider` at an `OAuthClientProvider` and the SDK discovers the authorization server (RFC 9728), registers this client dynamically when it has no `client_id` yet (RFC 7591), runs PKCE, and — the part a header cannot do — **refreshes the access token on a 401 and retries the request**. `createNodeOAuthProvider` persists tokens and the registration in a `0600` JSON file, so a restarted process picks up where it left off.
@@ -1183,7 +1214,7 @@ Consent is the host's job ([tool approval](#tool-approval-and-autopilot)) — th
 | `decisionModel` | Off by default. A [decision model](#decision-models): an object with `decide(question, { abortSignal })` that answers a closed question with `{ choice, confidence }` (`decisionModelFromAiSdk(...)` adapts Gemini Decision 1, TypeSafe's Jev or any AI SDK decision model). Where it is confident it replaces the replanner's continue / finish call and a pipeline node's route call. Never consulted for tool approval or egress. |
 | `decision` | `{ confidenceThreshold?, timeoutMs?, replan?, route? }` (defaults `0.8`, `5000`, `true`, `true`). Below the threshold, on an error, a timeout or an answer that is not an option, the ordinary model call runs unchanged. |
 | `plannerModel` / `synthesizerModel` | **Deprecated** model-only shortcuts. Equivalent to `planner: { model }` / `synthesizer: { model }`. The override block, if present, wins. |
-| `mcpServers` | `Record<name, { url, headers?, getHeaders?, authProvider?, fetch?, connectTimeoutMs? } \| { command, args?, env?, cwd?, connectTimeoutMs? }>` — StreamableHTTP for remote (legacy HTTP+SSE servers are **not** supported), stdio for locally-spawned servers. |
+| `mcpServers` | `Record<name, { url, headers?, getHeaders?, authProvider?, fetch?, connectTimeoutMs?, protocol? } \| { command, args?, env?, cwd?, connectTimeoutMs?, protocol? }>` — StreamableHTTP for remote (legacy HTTP+SSE servers are **not** supported), stdio for locally-spawned servers. `protocol`: `'legacy'` (default) \| `'auto'` \| `'modern'` - the 2025 revisions, 2026-07-28 when the server offers it, or 2026-07-28 only; see [MCP protocol revision](#mcp-protocol-revision). |
 | `tools` | Optional `ToolSet` of native AI-SDK tools registered alongside MCP-discovered ones. Names must not collide with MCP-prefixed names or the built-in tools (`createAgent` throws on conflict). Mark read-only tools with `markReadOnly(tool)`. |
 | `availableTools` / `excludedTools` | Whitelist / blacklist applied to **all** tools (MCP and native). |
 | `maxIterations` | Cap on **executed steps** across the run (every step counts, including those run after a `revise`). |
@@ -1463,7 +1494,7 @@ This package moved from `@modelcontextprotocol/sdk` 1.x to `@modelcontextprotoco
 
 - **Module formats.** ESM is the primary target; the CJS build (`dist/index.cjs`) is best-effort and depends on upstream deps (`ai`, `@ai-sdk/*`, `@modelcontextprotocol/client`) keeping their CJS fallbacks. If they go pure-ESM, CJS will break — the dual-format guard in [`tests/dist-loadable.test.ts`](./tests/dist-loadable.test.ts) catches the regression on the next build.
 - **MCP connect failures.** By default `createAgent` is fail-tolerant: a server that can't connect is logged at `error` level and skipped. The agent still starts with whatever tools did mount. Set `failOnNoTools: true` to throw when **every** configured server failed. Servers connect concurrently, so one slow server no longer delays the ones declared after it; tools still mount in declaration order.
-- **MCP SDK.** The MCP client is the official 2.x SDK, `@modelcontextprotocol/client` (a dependency; `@modelcontextprotocol/sdk` 1.x is no longer used). It negotiates the 2025 protocol revisions with the unchanged `initialize` handshake, so servers see the same requests as before; a server that speaks **only** the 2026-07-28 revision fails to connect with `Unsupported protocol version: 2025-11-25` in `results[].error`. See [upgrading](#upgrading-to-the-2x-mcp-sdk) if you pass your own `authProvider` or `fetch`.
+- **MCP SDK.** The MCP client is the official 2.x SDK, `@modelcontextprotocol/client` (a dependency; `@modelcontextprotocol/sdk` 1.x is no longer used). By default it negotiates the 2025 protocol revisions with the unchanged `initialize` handshake, so servers see the same requests as before; a server that speaks **only** the 2026-07-28 revision then fails to connect with `Unsupported protocol version: 2025-11-25` in `results[].error`. Set `protocol: 'auto'` or `'modern'` on a server to speak 2026-07-28 to it ([MCP protocol revision](#mcp-protocol-revision)). See [upgrading](#upgrading-to-the-2x-mcp-sdk) if you pass your own `authProvider` or `fetch`.
 - **MCP tool errors.** A tool result carrying `isError: true` is surfaced as a **thrown** tool error, so the step records `ok: false` and `replanAfter: 'failure'` sees it. The error text the server returned becomes the error message (after `outputSanitizer`, if you set one). A JSON-RPC error answered to `tools/call` (what a 2.x server sends for an unknown tool, `-32602`) is a failed call too; its message is the server's, without the `MCP error <code>: ` prefix the 1.x SDK added - read `error.code` for the number. A result that only breaks the tool's declared `outputSchema` is **not** an error: it is passed on with a note (see [structured results](#mcp-server-instructions-and-structured-results)).
 - **MCP tool names.** Server and tool names are sanitized into `[a-zA-Z0-9_-]` (what OpenAI, Anthropic and Gemini accept) before being joined as `server__tool`, and a collision produced by that mapping gets a `_2` suffix rather than being dropped. `callTool` always uses the server's original name. If you pin `availableTools` / `excludedTools`, use the sanitized names.
 - **Tool-output cap.** Since compaction landed, the model sees at most `compaction.maxToolOutputChars` (default 20 000) of each tool result; set it to `0` for the old unlimited behaviour. The trace and events keep the full output.

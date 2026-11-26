@@ -8,9 +8,11 @@ export { UnauthorizedError } from '@modelcontextprotocol/client'
 export {
   MCP_INSTRUCTIONS_MAX_CHARS_PER_SERVER,
   MCP_INSTRUCTIONS_MAX_CHARS_TOTAL,
+  MCP_MODERN_PROTOCOL_VERSION,
+  MCP_MODERN_REQUEST_HEADERS,
   renderMcpInstructions,
 } from './shared.js'
-export type { McpServerInstructions } from './shared.js'
+export type { McpProtocolMode, McpServerInstructions, McpServerProtocol } from './shared.js'
 export type {
   McpHttpServerConfig,
   McpCatalogEntry,

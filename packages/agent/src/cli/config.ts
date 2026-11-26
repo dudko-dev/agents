@@ -15,6 +15,7 @@ import type {
   ToolPermission,
 } from '../index.ts'
 import { DirSkillStore } from '../learning.ts'
+import { mcpProtocolMode } from '../mcp-shared.ts'
 import type { ISandboxConfig } from '../sandbox.ts'
 import type { ISubagentsConfig } from '../subagent-dynamic-shared.ts'
 import type { ISearchConfig } from '../web-search.ts'
@@ -708,7 +709,7 @@ const parseMcpServers = (raw: string | undefined): Record<string, IMcpServerConf
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new Error(
-      'MCP_SERVERS must be a JSON object: Record<name, { url, headers? } | { command, args?, env?, cwd? }>',
+      'MCP_SERVERS must be a JSON object: Record<name, { url, headers?, protocol? } | { command, args?, env?, cwd?, protocol? }>',
     )
   }
   const result: Record<string, IMcpServerConfig> = {}
@@ -723,7 +724,12 @@ const parseMcpServers = (raw: string | undefined): Record<string, IMcpServerConf
       args?: unknown
       env?: unknown
       cwd?: unknown
+      protocol?: unknown
     }
+    // 'legacy' (default) | 'auto' | 'modern': anything else is refused here,
+    // by name, instead of at connect.
+    const protocol =
+      v.protocol === undefined ? undefined : mcpProtocolMode(v.protocol, `MCP_SERVERS.${name}`)
     const hasUrl = typeof v.url === 'string' && v.url.length > 0
     const hasCommand = typeof v.command === 'string' && v.command.length > 0
     if (hasUrl && hasCommand) {
@@ -739,7 +745,7 @@ const parseMcpServers = (raw: string | undefined): Record<string, IMcpServerConf
         v.headers && typeof v.headers === 'object' && !Array.isArray(v.headers)
           ? (v.headers as Record<string, string>)
           : undefined
-      result[name] = { url: v.url as string, headers }
+      result[name] = { url: v.url as string, headers, ...(protocol ? { protocol } : {}) }
       continue
     }
     // stdio path
@@ -757,6 +763,7 @@ const parseMcpServers = (raw: string | undefined): Record<string, IMcpServerConf
       args: v.args as string[] | undefined,
       env: v.env as Record<string, string> | undefined,
       cwd: v.cwd as string | undefined,
+      ...(protocol ? { protocol } : {}),
     }
   }
   return result

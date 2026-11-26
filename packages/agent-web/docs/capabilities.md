@@ -478,13 +478,64 @@ connect at all). A schema the validator only trips over while validating (a `$re
 nowhere) is found after the call ran, so it is a note, not a failure. The Node sibling validates
 with Ajv: the wording of the detail differs, and Ajv refuses a dangling `$ref` up front.
 
-**The client.** The connector runs on the official 2.x SDK, `@modelcontextprotocol/client`, with
-`versionNegotiation` at its default, `'legacy'`: the 2025 `initialize` handshake, the same wire as
-with the 1.x SDK. `tools/list` is read page by page (up to 100 pages; a repeated cursor ends the
+**The client.** The connector runs on the official 2.x SDK, `@modelcontextprotocol/client`. Without
+a `protocol` on the server's config no `versionNegotiation` is passed to it: the 2025 `initialize`
+handshake, the same wire as with the 1.x SDK. `tools/list` is read page by page (up to 100 pages; a repeated cursor ends the
 walk, and past the cap a `warn` line says the rest is not mounted), also from a server that did
 not advertise the `tools` capability. A `tools/call` answered with a JSON-RPC error is a failed
 call whose message is the server's own (`error.code` has the number). A server that speaks only
 the 2026-07-28 revision fails to connect with `Unsupported protocol version: 2025-11-25`.
+
+### The protocol revision: `protocol`
+
+`McpHttpServerConfig.protocol` is `'legacy'` (default), `'auto'` or `'modern'`; any other value
+fails that server with `protocol must be 'legacy', 'auto' or 'modern'`. It maps to the SDK's
+`versionNegotiation`: nothing at all for `'legacy'`, `{ mode: 'auto' }`, and a pin to `2026-07-28`
+for `'modern'` (so `'modern'` stays on the revision this package is tested against when the SDK
+learns a newer one, while `'auto'` takes the newest the SDK and the server share). The Node
+sibling has the same field with the same meaning.
+
+| Client \ server speaks | 2025 only | both | 2026-07-28 only |
+| --- | --- | --- | --- |
+| `'legacy'` / unset | 2025-11-25 | 2025-11-25 | error: `Unsupported protocol version: 2025-11-25` |
+| `'auto'` | 2025-11-25 (one `server/discover` first, answered "no") | 2026-07-28 | 2026-07-28 |
+| `'modern'` | error: `… did not offer pinned protocol version 2026-07-28 … - protocol: 'modern' accepts only …` | 2026-07-28 | 2026-07-28 |
+
+Both errors come in one exchange, not after a timeout. `ConnectedMcp.protocols` lists
+`{ server, version, era }` for every connected server (`era` is `'modern'` from 2026-07-28 on).
+
+- **Decided once.** The probe is one request at connect. A tool call is one request in the
+  negotiated revision and is never tried again in the other. `'auto'` falls back only on a
+  definite "no" (a JSON-RPC error, an HTTP 4xx): an HTTP 5xx, an answer that is not JSON-RPC or a
+  timeout fails the connect.
+- **Headers.** On 2026-07-28 the SDK's transport derives `MCP-Protocol-Version`, `Mcp-Method` and
+  `Mcp-Name` from each message, so the calls made through `client.request` carry them. The
+  `Mcp-Param-*` headers belong to the SDK's `callTool`, which this connector does not use: they
+  are not sent. `MCP_MODERN_REQUEST_HEADERS` (`['Mcp-Method', 'Mcp-Name']`) is exported for a UI
+  that wants to tell an operator what to allow; see the README's CORS section.
+- **CORS, and what `'auto'` cannot know.** In a page a blocked request is a bare `TypeError`, and
+  the SDK reads a blocked probe as "a 2025 server". So against a server whose
+  `Access-Control-Allow-Headers` lacks the two headers, `'auto'` connects on 2025-11-25 (if the
+  server speaks it) and this connector logs `warn`: `the version probe (server/discover) was
+  blocked before it reached the server, so the connection uses 2025-11-25 - … one carrying
+  Mcp-Method / Mcp-Name was blocked …`; `'modern'` fails with the same explanation. Outside a
+  page (a worker has no `window`) the SDK treats a blocked probe as an error in both modes; the
+  explanation is attached there too. `diagnoseMcpCors(url, fetch, { protocol })` finds the
+  headers by sending one request per header, only after a failure.
+- **Tool list changes.** 2026-07-28 has no stream a server may write to unasked.
+  With `onToolsChanged` set and `tools.listChanged` advertised, the connector opens a
+  `subscriptions/listen` stream before the first `tools/list` (it waits up to 10 s for the
+  acknowledgement, then goes on without and logs `warn`). When the stream ends for any reason
+  other than `close()`, a `warn` line says so and it is **not** opened again - the SDK does not
+  re-listen and neither does this connector. Without `onToolsChanged` no stream is opened.
+- **Sessions and reconnection** do not exist in that revision: no `mcp-session-id`, no GET
+  stream, no `Last-Event-ID`; `reconnection` on the config applies to 2025 connections only.
+- **`input_required`.** The SDK is told not to answer it (`inputRequired.autoFulfill: false`), so
+  nothing is retried; the call fails with `MCP tool "x" did not finish: the server asked for more
+  input …`. The client declares no elicitation capability, and a server that checks refuses such
+  a tool with `-32021` before it runs. Elicitation is not implemented yet.
+- **OAuth** works as on 2025: the probe is the first request to be answered 401, and the token
+  is refreshed on a 401 in the middle of a session.
 
 ## MCP servers behind OAuth
 

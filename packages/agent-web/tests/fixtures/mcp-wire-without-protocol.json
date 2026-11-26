@@ -1,0 +1,108 @@
+[
+  {
+    "method": "GET",
+    "headers": {
+      "accept": "text/event-stream",
+      "mcp-protocol-version": "2025-11-25"
+    },
+    "body": null
+  },
+  {
+    "method": "POST",
+    "headers": {
+      "accept": "application/json, text/event-stream",
+      "content-type": "application/json",
+      "mcp-protocol-version": "2025-11-25"
+    },
+    "body": {
+      "jsonrpc": "2.0",
+      "method": "notifications/initialized"
+    }
+  },
+  {
+    "method": "POST",
+    "headers": {
+      "accept": "application/json, text/event-stream",
+      "content-type": "application/json",
+      "mcp-protocol-version": "2025-11-25"
+    },
+    "body": {
+      "method": "tools/call",
+      "params": {
+        "name": "boom",
+        "arguments": {}
+      },
+      "jsonrpc": "2.0",
+      "id": 4
+    }
+  },
+  {
+    "method": "POST",
+    "headers": {
+      "accept": "application/json, text/event-stream",
+      "content-type": "application/json",
+      "mcp-protocol-version": "2025-11-25"
+    },
+    "body": {
+      "method": "tools/call",
+      "params": {
+        "name": "echo",
+        "arguments": {
+          "text": "hi"
+        }
+      },
+      "jsonrpc": "2.0",
+      "id": 2
+    }
+  },
+  {
+    "method": "POST",
+    "headers": {
+      "accept": "application/json, text/event-stream",
+      "content-type": "application/json",
+      "mcp-protocol-version": "2025-11-25"
+    },
+    "body": {
+      "method": "tools/call",
+      "params": {
+        "name": "report",
+        "arguments": {}
+      },
+      "jsonrpc": "2.0",
+      "id": 3
+    }
+  },
+  {
+    "method": "POST",
+    "headers": {
+      "accept": "application/json, text/event-stream",
+      "content-type": "application/json",
+      "mcp-protocol-version": "2025-11-25"
+    },
+    "body": {
+      "method": "tools/list",
+      "jsonrpc": "2.0",
+      "id": 1
+    }
+  },
+  {
+    "method": "POST",
+    "headers": {
+      "accept": "application/json, text/event-stream",
+      "content-type": "application/json"
+    },
+    "body": {
+      "method": "initialize",
+      "params": {
+        "protocolVersion": "2025-11-25",
+        "capabilities": {},
+        "clientInfo": {
+          "name": "agent-web-test",
+          "version": "<version>"
+        }
+      },
+      "jsonrpc": "2.0",
+      "id": 0
+    }
+  }
+]

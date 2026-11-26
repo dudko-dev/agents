@@ -364,7 +364,7 @@ subpath the decision is yours:
   next to the core (it is bundled into an async chunk, loaded when you connect).
 
 > **The MCP SDK is the core's peer, and it was renamed.** A core on the 2.x MCP
-> SDK (later than `@dudko.dev/agent-web@0.0.39`) imports
+> SDK (`@dudko.dev/agent-web@0.0.40` and later) imports
 > `@modelcontextprotocol/client` (`^2.4.0`); cores up to 0.0.39 import
 > `@modelcontextprotocol/sdk` 1.x. Install the one your core asks for — when you
 > upgrade the core: `npm uninstall @modelcontextprotocol/sdk && npm install

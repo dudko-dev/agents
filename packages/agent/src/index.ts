@@ -14,8 +14,11 @@ export {
 export {
   MCP_INSTRUCTIONS_MAX_CHARS_PER_SERVER,
   MCP_INSTRUCTIONS_MAX_CHARS_TOTAL,
+  MCP_MODERN_PROTOCOL_VERSION,
   renderMcpInstructions,
+  type McpProtocolMode,
   type McpServerInstructions,
+  type McpServerProtocol,
 } from './mcp-shared.ts'
 export type { INodeOAuthProviderOptions, IOAuthRequestOptions, IOAuthStore } from './mcp-oauth.ts'
 export {
