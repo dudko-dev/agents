@@ -73,6 +73,7 @@ test('readCallbackParams: reads a query-string callback', () => {
   assert.deepEqual(readCallbackParams('https://app.test/demo/?code=abc&state=xyz'), {
     code: 'abc',
     state: 'xyz',
+    iss: undefined,
     error: undefined,
     errorDescription: undefined,
   })
@@ -82,6 +83,7 @@ test('readCallbackParams: reads a callback carried in a hash route', () => {
   assert.deepEqual(readCallbackParams('https://app.test/#/cb?code=abc&state=xyz'), {
     code: 'abc',
     state: 'xyz',
+    iss: undefined,
     error: undefined,
     errorDescription: undefined,
   })
@@ -137,4 +139,17 @@ test('isUnauthorizedError: a tool whose own error mentions "unauthorized" is not
   assert.equal(isUnauthorizedError(new Error('unauthorized: quota exceeded')), false)
   assert.equal(isUnauthorizedError('not an error'), false)
   assert.equal(isUnauthorizedError(undefined), false)
+})
+
+test('readCallbackParams: carries iss (RFC 9207) for the core to check', () => {
+  const iss = 'https://as.example.test'
+  const q = encodeURIComponent(iss)
+  assert.equal(readCallbackParams(`https://app.test/?code=abc&state=xyz&iss=${q}`)?.iss, iss)
+  assert.equal(readCallbackParams(`https://app.test/#/cb?code=abc&state=xyz&iss=${q}`)?.iss, iss)
+  assert.equal(readCallbackParams(`https://app.test/?error=access_denied&iss=${q}`)?.iss, iss)
+  // ...and it leaves the address bar with the rest of the response.
+  assert.equal(
+    stripOAuthParams(`https://app.test/#/cb?code=abc&state=xyz&iss=${q}&tab=tools`),
+    'https://app.test/#/cb?tab=tools',
+  )
 })

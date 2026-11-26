@@ -1,4 +1,8 @@
-import { auth, type OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js'
+import {
+  auth,
+  type OAuthClientProvider,
+  type OAuthDiscoveryState,
+} from '@modelcontextprotocol/sdk/client/auth.js'
 import type {
   OAuthClientInformationMixed,
   OAuthClientMetadata,
@@ -9,7 +13,8 @@ import { IndexedDBVault, type VaultOptions } from '../secrets/vault.js'
 
 /**
  * Browser-side OAuth 2.1 for remote MCP servers: Dynamic Client Registration
- * (RFC 7591), PKCE authorization-code flow, and refresh-token rotation.
+ * (RFC 7591) or a client ID metadata document (CIMD), PKCE authorization-code
+ * flow, refresh-token rotation, and the `iss` check on the way back (RFC 9207).
  *
  * The heavy lifting lives in the MCP SDK — `auth()` discovers the protected
  * resource (RFC 9728), registers the client if we have no client_id yet,
@@ -85,8 +90,17 @@ export interface BrowserOAuthProviderOptions {
   clientName?: string
   /** Fallback scope when the server's metadata advertises none. */
   scope?: string
-  /** Merged over the defaults; use it for `software_id`, `contacts`, … */
-  clientMetadata?: Partial<OAuthClientMetadata>
+  /** Merged over the defaults; use it for `software_id`, `contacts`, `application_type`, … */
+  clientMetadata?: Partial<OAuthClientMetadata> & { application_type?: string }
+  /**
+   * URL of a client ID metadata document (CIMD) you host. When the
+   * authorization server advertises `client_id_metadata_document_supported`,
+   * this URL is used as the `client_id` and no dynamic registration is made;
+   * otherwise registration runs as before. A registration already in storage
+   * wins over both. Must be https with a non-root path, and the document served
+   * there must list the same `redirect_uris` as `redirectUrl`.
+   */
+  clientMetadataUrl?: string
   /** Defaults to the encrypted IndexedDB vault. */
   storage?: McpOAuthStorage
   /** Treat an access token as expired this many seconds early. Default 30. */
@@ -132,10 +146,92 @@ export const assertSecureOAuthUrl = (url: string, label = 'MCP server'): void =>
   )
 }
 
+/**
+ * A client ID metadata document URL is used as the `client_id`, and the
+ * authorization server fetches it: it has to be https with a path of its own
+ * (a bare origin identifies a site, not a client). Checked when the provider is
+ * built, so a bad value fails at start-up and not in the middle of a flow.
+ */
+const assertClientMetadataUrl = (url: string, label = 'MCP OAuth'): void => {
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    throw new Error(`${label}: clientMetadataUrl "${url}" is not a valid URL`)
+  }
+  if (parsed.protocol === 'https:' && parsed.pathname !== '/') return
+  throw new Error(
+    `${label}: clientMetadataUrl requires https and a non-root path - refusing "${url}"`,
+  )
+}
+
+/**
+ * RFC 9207: is the `iss` parameter of an authorization response the
+ * authorization server this flow was started with? Throws when it is not; the
+ * caller must not exchange the code then (a mix-up attack hands the code of an
+ * honest server to another one's token endpoint).
+ *
+ * - expected issuer: the `issuer` of the stored authorization server metadata,
+ *   else the authorization server URL discovery used;
+ * - `iss` present: it must equal the expected issuer, compared as plain strings
+ *   (RFC 9207 section 2.4: no normalization);
+ * - `iss` absent: refused when the metadata says
+ *   `authorization_response_iss_parameter_supported: true`;
+ * - no stored discovery state (storage written by an older version): `iss` is
+ *   compared with the issuer stamped on the stored client information, and with
+ *   nothing to compare against the response is accepted.
+ *
+ * The Node package carries the same function; change both.
+ */
+export const checkAuthorizationResponseIssuer = (
+  iss: string | undefined,
+  discoveryState: OAuthDiscoveryState | undefined,
+  clientIssuer?: string,
+): void => {
+  // The flag is not in the SDK's types. It is kept for a document served as
+  // `oauth-authorization-server` (a loose schema); the SDK drops it from one
+  // served only as `openid-configuration`, and then only a present `iss` is checked.
+  const metadata = discoveryState?.authorizationServerMetadata as
+    { issuer?: string; authorization_response_iss_parameter_supported?: unknown } | undefined
+  const expected = discoveryState
+    ? (metadata?.issuer ?? String(discoveryState.authorizationServerUrl))
+    : clientIssuer
+  if (iss === undefined) {
+    if (metadata?.authorization_response_iss_parameter_supported === true) {
+      throw new Error(
+        'Authorization response carried no "iss", which this authorization server says it always sends; refusing to exchange the code (possible mix-up attack)',
+      )
+    }
+    return
+  }
+  if (expected !== undefined && iss !== expected) {
+    throw new Error(
+      `Authorization response came from issuer "${iss}", expected "${expected}"; refusing to exchange the code (possible mix-up attack)`,
+    )
+  }
+}
+
 const randomToken = (): string => {
   const bytes = new Uint8Array(32)
   globalThis.crypto.getRandomValues(bytes)
   return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+/**
+ * `application_type` for dynamic registration, read off the redirect URL: a
+ * loopback address or a private-use scheme is how a native client is called
+ * back, an https page is a web client. Said explicitly because a server that
+ * tells the two apart assumes "web" when the field is absent, and then refuses
+ * a loopback redirect - and one that is told "native" refuses an https one.
+ * The browser and the Node package carry the same function; change both.
+ */
+const applicationTypeFor = (redirectUrl: string): 'native' | 'web' => {
+  try {
+    const u = new URL(redirectUrl)
+    return u.protocol === 'https:' && !LOOPBACK_HOSTS.has(u.hostname) ? 'web' : 'native'
+  } catch {
+    return 'native'
+  }
 }
 
 /**
@@ -152,11 +248,16 @@ export class BrowserOAuthProvider implements OAuthClientProvider {
   private readonly ns: string
   private readonly _redirectUrl: string
   private readonly _clientMetadata: OAuthClientMetadata
+  private readonly _clientMetadataUrl?: string
   private readonly skewMs: number
   private readonly onRedirect?: (url: URL) => void | Promise<void>
 
   constructor(opts: BrowserOAuthProviderOptions) {
     assertSecureOAuthUrl(opts.serverUrl)
+    if (opts.clientMetadataUrl !== undefined) {
+      assertClientMetadataUrl(opts.clientMetadataUrl)
+      this._clientMetadataUrl = opts.clientMetadataUrl
+    }
     this.serverUrl = opts.serverUrl
     this.storage = opts.storage ?? new VaultOAuthStorage()
     this.ns = namespaceFor(opts.serverUrl)
@@ -171,6 +272,8 @@ export class BrowserOAuthProvider implements OAuthClientProvider {
       // Public client: a browser cannot hold a client_secret. PKCE is what
       // actually protects the code exchange.
       token_endpoint_auth_method: 'none',
+      // By the redirect: an https page is 'web', a loopback one (local dev) is 'native'.
+      application_type: applicationTypeFor(this._redirectUrl),
       ...(opts.scope ? { scope: opts.scope } : {}),
       ...opts.clientMetadata,
     } as OAuthClientMetadata
@@ -182,6 +285,11 @@ export class BrowserOAuthProvider implements OAuthClientProvider {
 
   get clientMetadata(): OAuthClientMetadata {
     return this._clientMetadata
+  }
+
+  /** The client ID metadata document URL (CIMD), when one was configured. */
+  get clientMetadataUrl(): string | undefined {
+    return this._clientMetadataUrl
   }
 
   private key(suffix: string): string {
@@ -255,6 +363,24 @@ export class BrowserOAuthProvider implements OAuthClientProvider {
     return v
   }
 
+  /**
+   * What discovery found (the authorization server, its metadata, the resource
+   * metadata). The SDK reuses it instead of discovering again - after the
+   * redirect back too - and {@link finishMcpOAuth} reads the expected issuer
+   * from it.
+   */
+  async saveDiscoveryState(state: OAuthDiscoveryState): Promise<void> {
+    await this.storage.set(this.key('discovery'), JSON.stringify(state))
+  }
+
+  async discoveryState(): Promise<OAuthDiscoveryState | undefined> {
+    const state = await this.readJSON<OAuthDiscoveryState>('discovery')
+    if (!state || typeof state !== 'object' || typeof state.authorizationServerUrl !== 'string') {
+      return undefined
+    }
+    return state
+  }
+
   async redirectToAuthorization(url: URL): Promise<void> {
     this.authorizationUrl = url
     await this.onRedirect?.(url)
@@ -262,14 +388,17 @@ export class BrowserOAuthProvider implements OAuthClientProvider {
 
   /**
    * Called by the SDK when the server rejects what we hold: `'tokens'` after an
-   * `invalid_grant` (dead refresh token), `'client'` / `'all'` after an
-   * `invalid_client` (the AS forgot our dynamic registration). Clearing lets
-   * the SDK re-register and re-authorize without the user clearing site data.
+   * `invalid_grant` (dead refresh token), `'all'` after an `invalid_client`
+   * (the AS forgot our dynamic registration). `'client'`, `'verifier'` and
+   * `'discovery'` are in its type and handled the same way: one key each.
+   * Clearing lets the SDK re-discover, re-register and re-authorize without the
+   * user clearing site data.
    */
   async invalidateCredentials(
     scope: 'all' | 'client' | 'tokens' | 'verifier' | 'discovery',
   ): Promise<void> {
-    const targets = scope === 'all' ? ['tokens', 'client', 'verifier', 'state'] : [scope]
+    const targets =
+      scope === 'all' ? ['tokens', 'client', 'verifier', 'state', 'discovery'] : [scope]
     await Promise.all(targets.map((t) => this.storage.delete(this.key(t))))
   }
 
@@ -288,7 +417,7 @@ export class BrowserOAuthProvider implements OAuthClientProvider {
     return (await this.tokens()) !== undefined
   }
 
-  /** Forget tokens, registration, verifier and state for this server. */
+  /** Forget tokens, registration, verifier, state and discovery for this server. */
   async reset(): Promise<void> {
     this.authorizationUrl = undefined
     await this.invalidateCredentials('all')
@@ -307,6 +436,8 @@ export interface McpOAuthRequestOptions {
 export interface McpOAuthCallback {
   code?: string
   state?: string
+  /** The `iss` parameter of the response (RFC 9207), when the server sent one. */
+  iss?: string
   error?: string
   errorDescription?: string
 }
@@ -345,6 +476,7 @@ export const readOAuthCallback = (input?: string | URL): McpOAuthCallback | unde
   return {
     code,
     state: params.get('state') ?? undefined,
+    iss: params.get('iss') ?? undefined,
     error,
     errorDescription: params.get('error_description') ?? undefined,
   }
@@ -352,9 +484,11 @@ export const readOAuthCallback = (input?: string | URL): McpOAuthCallback | unde
 
 /**
  * Finish the flow after the authorization server redirected back: verify the
- * `state`, exchange the code (PKCE) and persist the tokens. Throws when the AS
- * returned an error, when `state` doesn't match what we issued, or when the
- * exchange fails — never resolves on a half-finished authorization.
+ * `state`, then the issuer (RFC 9207, {@link checkAuthorizationResponseIssuer}),
+ * exchange the code (PKCE) and persist the tokens. Throws when the AS returned
+ * an error, when `state` doesn't match what we issued, when `iss` names another
+ * authorization server, or when the exchange fails — never resolves on a
+ * half-finished authorization.
  */
 export const finishMcpOAuth = async (
   provider: BrowserOAuthProvider,
@@ -374,6 +508,13 @@ export const finishMcpOAuth = async (
   if (!(await provider.verifyState(callback.state))) {
     throw new Error('Authorization state mismatch; refusing to exchange the code (possible CSRF)')
   }
+  // Before the exchange: a code that came from another authorization server
+  // must never reach this one's token endpoint.
+  checkAuthorizationResponseIssuer(
+    callback.iss,
+    await provider.discoveryState(),
+    (await provider.clientInformation())?.issuer,
+  )
   const result = await auth(provider, {
     serverUrl: provider.serverUrl,
     authorizationCode: callback.code,

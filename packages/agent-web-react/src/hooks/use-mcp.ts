@@ -146,6 +146,9 @@ export const readCallbackParams = (href?: string): McpOAuthCallback | undefined 
   return {
     code,
     state: params.get('state') ?? undefined,
+    // RFC 9207: the core's `finishMcpOAuth` checks it against the authorization
+    // server the flow was started with, before the code is exchanged.
+    iss: params.get('iss') ?? undefined,
     error,
     errorDescription: params.get('error_description') ?? undefined,
   }

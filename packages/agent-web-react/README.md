@@ -388,8 +388,9 @@ forgetAuthorization, checkOAuthSupport }`. `status` is
 `idle | connecting | connected | needs-authorization | error`.
 
 The OAuth round-trip navigates away from your app, so the hook persists what it
-needs and, on the way back, finishes the code exchange, strips `?code=…` from
-the address bar and reconnects before rendering — `completingAuthorization`
+needs and, on the way back, finishes the code exchange (passing `iss` to the
+core, which refuses a response from another authorization server - RFC 9207),
+strips `?code=…` from the address bar and reconnects before rendering — `completingAuthorization`
 covers that window.
 
 Two notes:

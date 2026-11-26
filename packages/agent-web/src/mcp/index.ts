@@ -16,6 +16,7 @@ export {
   MemoryOAuthStorage,
   VaultOAuthStorage,
   beginMcpOAuth,
+  checkAuthorizationResponseIssuer,
   finishMcpOAuth,
   readOAuthCallback,
 } from './oauth.js'

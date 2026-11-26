@@ -45,6 +45,8 @@ export interface McpHttpServerConfig {
 export interface McpOAuthCallback {
   code?: string
   state?: string
+  /** The `iss` parameter of the response (RFC 9207); the core checks it. */
+  iss?: string
   error?: string
   errorDescription?: string
 }

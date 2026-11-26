@@ -4,6 +4,7 @@ import test from 'node:test'
 import {
   beginMcpOAuth,
   BrowserOAuthProvider,
+  checkAuthorizationResponseIssuer,
   connectMcpHttp,
   diagnoseMcpCors,
   finishMcpOAuth,
@@ -34,6 +35,10 @@ interface RpcMessage {
 
 interface MockOptions {
   requireAuth?: boolean
+  /** Advertise `client_id_metadata_document_supported` (CIMD). */
+  cimd?: boolean
+  /** Advertise `authorization_response_iss_parameter_supported` (RFC 9207). */
+  issParameter?: boolean
   tools?: { name: string; description?: string; inputSchema?: unknown; annotations?: unknown }[]
   failListTools?: boolean
   /** Paginate tools/list with this many tools per page. */
@@ -69,6 +74,7 @@ const createMockServer = (opts: MockOptions = {}) => {
     grants: [] as string[],
     issued: 1,
     lastCodeVerifier: undefined as string | undefined,
+    lastTokenClientId: undefined as string | undefined,
     toolCalls: 0,
     lastRegistration: undefined as Record<string, unknown> | undefined,
     /** Set to answer the next token request with invalid_client. */
@@ -173,6 +179,8 @@ const createMockServer = (opts: MockOptions = {}) => {
         grant_types_supported: ['authorization_code', 'refresh_token'],
         code_challenge_methods_supported: ['S256'],
         token_endpoint_auth_methods_supported: ['none'],
+        ...(opts.cimd ? { client_id_metadata_document_supported: true } : {}),
+        ...(opts.issParameter ? { authorization_response_iss_parameter_supported: true } : {}),
       })
     }
 
@@ -196,6 +204,7 @@ const createMockServer = (opts: MockOptions = {}) => {
       const params = new URLSearchParams(String(init.body ?? ''))
       const grant = params.get('grant_type') ?? ''
       state.grants.push(grant)
+      state.lastTokenClientId = params.get('client_id') ?? undefined
       // "The client you claim to be is not registered here" — what an AS says
       // after it has forgotten (or rotated away) a dynamic registration.
       if (state.rejectClient) {
@@ -574,12 +583,14 @@ test('readOAuthCallback: reads query params, hash routes, and errors', () => {
   assert.deepEqual(readOAuthCallback('https://app.test/cb?code=abc&state=xyz'), {
     code: 'abc',
     state: 'xyz',
+    iss: undefined,
     error: undefined,
     errorDescription: undefined,
   })
   assert.deepEqual(readOAuthCallback('https://app.test/#/cb?code=abc&state=xyz'), {
     code: 'abc',
     state: 'xyz',
+    iss: undefined,
     error: undefined,
     errorDescription: undefined,
   })
@@ -1025,4 +1036,370 @@ test('connectMcpHttp: readOnlyHint marks tools read-only for the consent gate', 
     ],
   )
   await mcp.close()
+})
+
+// ── OAuth hardening: CIMD, application_type, discovery state, RFC 9207 ──────
+// The same block lives in the sibling package's suite (packages/agent/tests/mcp-connect.test.ts): the two
+// providers share names and semantics, so they share the tests.
+
+const CIMD_URL = 'https://app.example.test/oauth/client.json'
+
+const hardened = (extra: Record<string, unknown> = {}, store = new MemoryOAuthStorage()) =>
+  new BrowserOAuthProvider({
+    serverUrl: MCP_URL,
+    redirectUrl: REDIRECT_URL,
+    storage: store,
+    ...extra,
+  })
+
+const begin = (provider: BrowserOAuthProvider, mock: ReturnType<typeof createMockServer>) =>
+  connectMcpHttp({ docs: { url: MCP_URL, authProvider: provider, fetch: mock.fetchFn } })
+
+const issuedState = (provider: BrowserOAuthProvider): string | undefined =>
+  provider.authorizationUrl?.searchParams.get('state') ?? undefined
+
+test('CIMD: the metadata URL is the client_id when the AS supports it, with no registration', async () => {
+  const mock = createMockServer({ requireAuth: true, cimd: true })
+  const provider = hardened({ clientMetadataUrl: CIMD_URL })
+  assert.equal(provider.clientMetadataUrl, CIMD_URL)
+
+  await begin(provider, mock)
+
+  assert.equal(mock.state.registrations, 0, 'no dynamic registration request was made')
+  assert.equal(provider.authorizationUrl?.searchParams.get('client_id'), CIMD_URL)
+  assert.equal((await provider.clientInformation())?.client_id, CIMD_URL)
+
+  await finishMcpOAuth(
+    provider,
+    { code: 'auth-code-1', state: issuedState(provider) },
+    { fetch: mock.fetchFn },
+  )
+  assert.equal(mock.state.lastTokenClientId, CIMD_URL, 'the exchange names the same client')
+  assert.equal(mock.state.registrations, 0)
+})
+
+test('CIMD: falls back to dynamic registration when the AS does not support it', async () => {
+  const mock = createMockServer({ requireAuth: true })
+  const provider = hardened({ clientMetadataUrl: CIMD_URL })
+
+  await begin(provider, mock)
+
+  assert.equal(mock.state.registrations, 1)
+  assert.equal(provider.authorizationUrl?.searchParams.get('client_id'), 'dcr-client-1')
+})
+
+test('CIMD: a registration already in the store wins over the metadata URL', async () => {
+  const mock = createMockServer({ requireAuth: true, cimd: true })
+  const provider = hardened({ clientMetadataUrl: CIMD_URL })
+  await provider.saveClientInformation({ client_id: 'pre-registered' })
+
+  await begin(provider, mock)
+
+  assert.equal(mock.state.registrations, 0)
+  assert.equal(provider.authorizationUrl?.searchParams.get('client_id'), 'pre-registered')
+})
+
+test('CIMD: clientMetadataUrl must be https with a non-root path', () => {
+  const refused = /clientMetadataUrl requires https and a non-root path/
+  assert.throws(
+    () => hardened({ clientMetadataUrl: 'http://app.example.test/client.json' }),
+    refused,
+  )
+  // Loopback is fine for the MCP server itself, never for a document the
+  // authorization server has to fetch.
+  assert.throws(() => hardened({ clientMetadataUrl: 'http://localhost/client.json' }), refused)
+  assert.throws(() => hardened({ clientMetadataUrl: 'https://app.example.test' }), refused)
+  assert.throws(() => hardened({ clientMetadataUrl: 'https://app.example.test/' }), refused)
+  assert.throws(() => hardened({ clientMetadataUrl: 'client.json' }), /is not a valid URL/)
+  assert.throws(() => hardened({ clientMetadataUrl: '' }), /is not a valid URL/)
+  assert.equal(hardened().clientMetadataUrl, undefined)
+})
+
+test('DCR: application_type follows the redirect - loopback is native, an https page is web', () => {
+  assert.equal((hardened().clientMetadata as { application_type?: string }).application_type, 'web')
+  assert.equal(
+    (
+      hardened({ redirectUrl: 'http://localhost:5173/callback' }).clientMetadata as {
+        application_type?: string
+      }
+    ).application_type,
+    'native',
+  )
+})
+
+test('DCR: the registration request carries application_type, and clientMetadata overrides it', async () => {
+  const mock = createMockServer({ requireAuth: true })
+  await begin(hardened(), mock)
+  assert.equal(mock.state.lastRegistration?.application_type, 'web')
+
+  const other = createMockServer({ requireAuth: true })
+  await begin(hardened({ clientMetadata: { application_type: 'native' } }), other)
+  assert.equal(other.state.lastRegistration?.application_type, 'native')
+})
+
+test('issuer stamp: what the SDK stamps on the client and the tokens survives the store', async () => {
+  const mock = createMockServer({ requireAuth: true })
+  const store = new MemoryOAuthStorage()
+  const provider = hardened({}, store)
+
+  await begin(provider, mock)
+  await finishMcpOAuth(
+    provider,
+    { code: 'auth-code-1', state: issuedState(provider) },
+    { fetch: mock.fetchFn },
+  )
+
+  // A second provider over the same store is what a restart / reload reads.
+  const reloaded = hardened({}, store)
+  assert.equal((await reloaded.clientInformation())?.issuer, AS_URL)
+  assert.equal((await reloaded.tokens())?.issuer, AS_URL)
+  assert.equal((await reloaded.tokens())?.access_token, 'access-2')
+})
+
+test('discovery state: saved, reused instead of discovering again, cleared with the rest', async () => {
+  const mock = createMockServer({ requireAuth: true })
+  const provider = hardened()
+  const asMetadataRequests = () =>
+    mock.requests.filter((r) => r.url.startsWith(AS_URL) && r.url.includes('/.well-known/')).length
+
+  await begin(provider, mock)
+  const saved = await provider.discoveryState()
+  assert.equal(saved?.authorizationServerUrl, AS_URL)
+  assert.equal(saved?.authorizationServerMetadata?.issuer, AS_URL)
+  assert.equal(saved?.resourceMetadata?.resource, MCP_URL)
+
+  const before = asMetadataRequests()
+  assert.ok(before > 0)
+  await begin(provider, mock)
+  assert.equal(asMetadataRequests(), before, 'the second flow read the stored state')
+
+  await provider.saveTokens({ access_token: 'a', token_type: 'Bearer' })
+  await provider.invalidateCredentials('discovery')
+  assert.equal(await provider.discoveryState(), undefined)
+  assert.equal((await provider.tokens())?.access_token, 'a', 'only the named scope goes')
+
+  await provider.saveDiscoveryState(saved!)
+  await provider.invalidateCredentials('all')
+  assert.equal(await provider.discoveryState(), undefined)
+
+  await provider.saveDiscoveryState(saved!)
+  await provider.reset()
+  assert.equal(await provider.discoveryState(), undefined)
+})
+
+test('RFC 9207: an iss that names another server is refused before any token request', async () => {
+  const mock = createMockServer({ requireAuth: true, issParameter: true })
+  const provider = hardened()
+  await begin(provider, mock)
+
+  await assert.rejects(
+    () =>
+      finishMcpOAuth(
+        provider,
+        { code: 'auth-code-1', state: issuedState(provider), iss: 'https://evil.example.test' },
+        { fetch: mock.fetchFn },
+      ),
+    /expected "https:\/\/as\.example\.test".*mix-up/,
+  )
+  assert.deepEqual(mock.state.grants, [], 'the token endpoint saw nothing')
+  assert.equal(mock.requests.filter((r) => r.url === `${AS_URL}/token`).length, 0)
+  assert.equal(await provider.tokens(), undefined)
+})
+
+test('RFC 9207: the comparison is exact - a trailing slash or another case is another issuer', async () => {
+  for (const iss of [`${AS_URL}/`, AS_URL.toUpperCase(), `${AS_URL}?x=1`, '']) {
+    const mock = createMockServer({ requireAuth: true })
+    const provider = hardened()
+    await begin(provider, mock)
+    await assert.rejects(
+      () =>
+        finishMcpOAuth(
+          provider,
+          { code: 'auth-code-1', state: issuedState(provider), iss },
+          { fetch: mock.fetchFn },
+        ),
+      /mix-up/,
+      `iss "${iss}" must be refused`,
+    )
+    assert.deepEqual(mock.state.grants, [])
+  }
+})
+
+test('RFC 9207: a response without iss is refused when the AS says it always sends one', async () => {
+  const mock = createMockServer({ requireAuth: true, issParameter: true })
+  const provider = hardened()
+  await begin(provider, mock)
+
+  await assert.rejects(
+    () =>
+      finishMcpOAuth(
+        provider,
+        { code: 'auth-code-1', state: issuedState(provider) },
+        { fetch: mock.fetchFn },
+      ),
+    /carried no "iss".*mix-up/,
+  )
+  assert.deepEqual(mock.state.grants, [], 'the token endpoint saw nothing')
+})
+
+test('RFC 9207: a matching iss passes, and so does no iss from an AS that never promised one', async () => {
+  const advertised = createMockServer({ requireAuth: true, issParameter: true })
+  const a = hardened()
+  await begin(a, advertised)
+  await finishMcpOAuth(
+    a,
+    { code: 'auth-code-1', state: issuedState(a), iss: AS_URL },
+    { fetch: advertised.fetchFn },
+  )
+  assert.deepEqual(advertised.state.grants, ['authorization_code'])
+  assert.equal((await a.tokens())?.access_token, 'access-2')
+
+  // Not advertised, but sent anyway: still checked, still accepted when right.
+  const quiet = createMockServer({ requireAuth: true })
+  const b = hardened()
+  await begin(b, quiet)
+  await finishMcpOAuth(
+    b,
+    { code: 'auth-code-1', state: issuedState(b), iss: AS_URL },
+    { fetch: quiet.fetchFn },
+  )
+  assert.equal((await b.tokens())?.access_token, 'access-2')
+
+  const silent9207 = createMockServer({ requireAuth: true })
+  const c = hardened()
+  await begin(c, silent9207)
+  await finishMcpOAuth(
+    c,
+    { code: 'auth-code-1', state: issuedState(c) },
+    { fetch: silent9207.fetchFn },
+  )
+  assert.equal((await c.tokens())?.access_token, 'access-2')
+})
+
+test('RFC 9207: the state is checked first, so a forged callback never reaches the issuer check', async () => {
+  const mock = createMockServer({ requireAuth: true, issParameter: true })
+  const provider = hardened()
+  await begin(provider, mock)
+  await assert.rejects(
+    () =>
+      finishMcpOAuth(
+        provider,
+        { code: 'auth-code-1', state: 'forged', iss: 'https://evil.example.test' },
+        { fetch: mock.fetchFn },
+      ),
+    /state mismatch/,
+  )
+  assert.deepEqual(mock.state.grants, [])
+})
+
+test('RFC 9207: a store without discovery state (older version) keeps working', async () => {
+  // Stamped client, no discovery state: iss is compared with the stamp.
+  const mock = createMockServer({ requireAuth: true })
+  const provider = hardened()
+  await begin(provider, mock)
+  await provider.invalidateCredentials('discovery')
+  await assert.rejects(
+    () =>
+      finishMcpOAuth(
+        provider,
+        { code: 'auth-code-1', state: issuedState(provider), iss: 'https://evil.example.test' },
+        { fetch: mock.fetchFn },
+      ),
+    /mix-up/,
+  )
+  assert.deepEqual(mock.state.grants, [])
+
+  const again = createMockServer({ requireAuth: true })
+  const second = hardened()
+  await begin(second, again)
+  await second.invalidateCredentials('discovery')
+  await finishMcpOAuth(
+    second,
+    { code: 'auth-code-1', state: issuedState(second), iss: AS_URL },
+    { fetch: again.fetchFn },
+  )
+  assert.equal((await second.tokens())?.access_token, 'access-2')
+
+  // Nothing to compare against at all: an unstamped registration, no discovery
+  // state. With or without iss the exchange goes ahead, as it did before.
+  for (const iss of [undefined, 'https://whoever.example.test']) {
+    const old = createMockServer({ requireAuth: true })
+    const legacy = hardened()
+    await legacy.saveClientInformation({ client_id: 'old-client' })
+    await legacy.saveCodeVerifier('verifier-from-an-older-version')
+    const state = await legacy.state()
+    await finishMcpOAuth(legacy, { code: 'auth-code-1', state, iss }, { fetch: old.fetchFn })
+    assert.deepEqual(old.state.grants, ['authorization_code'])
+    assert.equal((await legacy.tokens())?.access_token, 'access-2')
+  }
+})
+
+test('checkAuthorizationResponseIssuer: the rule, case by case', () => {
+  const metadata = {
+    issuer: 'https://as.example.test',
+    authorization_endpoint: 'https://as.example.test/authorize',
+    token_endpoint: 'https://as.example.test/token',
+    response_types_supported: ['code'],
+  }
+  const discovered = {
+    authorizationServerUrl: 'https://as.example.test',
+    authorizationServerMetadata: metadata,
+  }
+  const promised = {
+    authorizationServerUrl: 'https://as.example.test',
+    authorizationServerMetadata: {
+      ...metadata,
+      authorization_response_iss_parameter_supported: true,
+    },
+  }
+  const ok = (...args: Parameters<typeof checkAuthorizationResponseIssuer>) =>
+    assert.doesNotThrow(() => checkAuthorizationResponseIssuer(...args))
+  const refused = (...args: Parameters<typeof checkAuthorizationResponseIssuer>) =>
+    assert.throws(() => checkAuthorizationResponseIssuer(...args), /mix-up/)
+
+  ok('https://as.example.test', discovered)
+  ok(undefined, discovered)
+  refused('https://evil.example.test', discovered)
+  refused('https://as.example.test/', discovered)
+
+  ok('https://as.example.test', promised)
+  refused(undefined, promised)
+  // Only a literal `true` is a promise.
+  ok(undefined, {
+    ...promised,
+    authorizationServerMetadata: {
+      ...metadata,
+      authorization_response_iss_parameter_supported: 'true',
+    },
+  })
+
+  // The metadata's issuer wins over the URL discovery used...
+  const moved = { ...discovered, authorizationServerUrl: 'https://alias.example.test' }
+  ok('https://as.example.test', moved)
+  refused('https://alias.example.test', moved)
+  // ...which is the fallback when there is no metadata document.
+  const bare = { authorizationServerUrl: 'https://legacy.example.test/' }
+  ok('https://legacy.example.test/', bare)
+  refused('https://as.example.test', bare)
+  ok(undefined, bare)
+
+  // The discovery state wins over the stamp on the client.
+  refused('https://stamp.example.test', discovered, 'https://stamp.example.test')
+
+  // No discovery state: the stamp on the stored client, else nothing to check.
+  ok('https://as.example.test', undefined, 'https://as.example.test')
+  refused('https://evil.example.test', undefined, 'https://as.example.test')
+  ok(undefined, undefined, 'https://as.example.test')
+  ok('https://anything.example.test', undefined, undefined)
+  ok(undefined, undefined, undefined)
+})
+
+test('readOAuthCallback: reads iss from the query string and from a hash route', () => {
+  const iss = 'https://as.example.test'
+  const q = encodeURIComponent(iss)
+  assert.equal(readOAuthCallback(`https://app.test/cb?code=abc&state=xyz&iss=${q}`)?.iss, iss)
+  assert.equal(readOAuthCallback(`https://app.test/#/cb?code=abc&state=xyz&iss=${q}`)?.iss, iss)
+  assert.equal(readOAuthCallback('https://app.test/cb?code=abc&state=xyz')?.iss, undefined)
+  // An error response carries it too (RFC 9207 section 2).
+  assert.equal(readOAuthCallback(`https://app.test/cb?error=access_denied&iss=${q}`)?.iss, iss)
 })

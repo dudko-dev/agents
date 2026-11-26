@@ -74,6 +74,42 @@ rest regardless of key ownership.
 
 ---
 
+# MCP OAuth: the authorization response
+
+Tokens for remote MCP servers live in the same vault, so the section above
+applies to them. This part is about the redirect back from the authorization
+server, which is a URL anybody can make the browser open.
+
+**What is enforced** (`finishMcpOAuth`, in this order, all before the code is
+exchanged)
+
+- **`state`** must be the value this provider issued; it is single-use.
+- **`iss` (RFC 9207).** In a mix-up attack a client that talks to several
+  authorization servers is tricked into sending the code of an honest one to
+  another one's token endpoint. The `iss` parameter of the response is compared
+  with the issuer of the authorization server the flow was started with (its
+  stored metadata) - exactly, with no normalization. A different value is
+  refused. A response with no `iss` is refused when that server's metadata says
+  `authorization_response_iss_parameter_supported: true`.
+- **Credentials are bound to their issuer.** The SDK stamps the registration and
+  the tokens with the authorization server they came from and never presents
+  them to another; the provider stores the stamp as it is.
+- **`clientMetadataUrl` (CIMD)** must be https with a non-root path. With it the
+  `client_id` is a URL you control, and the authorization server reads the
+  allowed `redirect_uris` from the document there - keep that list exact.
+
+**What it does not protect against**
+
+- An authorization server that does not send `iss` and does not promise to: the
+  response is accepted on `state` alone, as before. The same when storage holds
+  nothing to compare with (written by an older version).
+- A server that publishes its metadata only as `openid-configuration`: the MCP
+  SDK drops the "always sends `iss`" flag from that document, so a missing `iss`
+  is not refused there; a present one is still checked.
+- XSS on your origin, as with every key in the vault.
+
+---
+
 # Egress and learning: the threat model
 
 The vault above is about a key at rest. The two features below are about what the

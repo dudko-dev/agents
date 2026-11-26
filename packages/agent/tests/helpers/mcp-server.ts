@@ -18,11 +18,21 @@ export interface ILocalMcpOptions {
   requireAuth?: boolean
   /** Seconds until an issued access token expires. Default 3600. */
   expiresIn?: number
+  /** Advertise `client_id_metadata_document_supported` (CIMD). */
+  clientIdMetadataDocument?: boolean
+  /**
+   * Advertise `authorization_response_iss_parameter_supported` (RFC 9207). There
+   * is no browser in these tests, so nothing redirects: a test plays the
+   * redirect by passing `issuer` (or a wrong value) as the callback's `iss`.
+   */
+  issParameter?: boolean
 }
 
 export interface ILocalMcp {
   /** The MCP endpoint to hand to `mcpServers[name].url`. */
   url: string
+  /** The authorization server's issuer: what an honest redirect carries as `iss`. */
+  issuer: string
   /**
    * A value only this server knows, returned by the `secret` tool. A task that
    * asks for it cannot be answered from the model's own knowledge, so "did the
@@ -38,6 +48,8 @@ export interface ILocalMcp {
   registrations: () => number
   /** grant_type values seen at the token endpoint, in order. */
   grants: () => string[]
+  /** client_id values seen at the token endpoint, in order. */
+  tokenClientIds: () => string[]
   close: () => Promise<void>
 }
 
@@ -75,6 +87,7 @@ export const startLocalMcp = async (opts: ILocalMcpOptions = {}): Promise<ILocal
   const secret = `zq-${Math.random().toString(36).slice(2, 8)}`
   const validTokens = new Set<string>()
   const grants: string[] = []
+  const tokenClientIds: string[] = []
   let registrations = 0
   let issued = 0
 
@@ -92,6 +105,8 @@ export const startLocalMcp = async (opts: ILocalMcpOptions = {}): Promise<ILocal
           grant_types_supported: ['authorization_code', 'refresh_token'],
           code_challenge_methods_supported: ['S256'],
           token_endpoint_auth_methods_supported: ['none'],
+          ...(opts.clientIdMetadataDocument ? { client_id_metadata_document_supported: true } : {}),
+          ...(opts.issParameter ? { authorization_response_iss_parameter_supported: true } : {}),
         })
         return
       }
@@ -105,6 +120,7 @@ export const startLocalMcp = async (opts: ILocalMcpOptions = {}): Promise<ILocal
         const params = new URLSearchParams(await readBody(req))
         const grant = params.get('grant_type') ?? ''
         grants.push(grant)
+        tokenClientIds.push(params.get('client_id') ?? '')
         if (grant === 'authorization_code' && !params.get('code_verifier')) {
           json(res, 400, { error: 'invalid_request' })
           return
@@ -202,11 +218,13 @@ export const startLocalMcp = async (opts: ILocalMcpOptions = {}): Promise<ILocal
 
   return {
     url: mcpUrl,
+    issuer: asUrl,
     secret,
     calls,
     validTokens,
     registrations: () => registrations,
     grants: () => grants,
+    tokenClientIds: () => tokenClientIds,
     close: async () => {
       await close(httpServer)
       await close(as)

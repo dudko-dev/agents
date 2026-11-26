@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createAgent, type IAgent } from '../src/index.ts'
-import { createNodeOAuthProvider, finishMcpOAuth, MemoryOAuthStore } from '../src/mcp-oauth.ts'
+import {
+  beginMcpOAuth,
+  createNodeOAuthProvider,
+  finishMcpOAuth,
+  MemoryOAuthStore,
+} from '../src/mcp-oauth.ts'
 import { startLocalMcp } from './helpers/mcp-server.ts'
 import {
   hasToolResult,
@@ -251,4 +256,75 @@ test('OAuth: a token that dies mid-run is refreshed and the tool call retried', 
     )
     assert.equal(prompts.length, 1, 'no second authorization was demanded')
   })
+})
+
+// The two below need no model: they are the authorization alone, over real
+// sockets, against the same authorization server as the tests above.
+
+test('OAuth: a client ID metadata document replaces registration when the AS supports it', async () => {
+  const mcp = await startLocalMcp({ requireAuth: true, clientIdMetadataDocument: true })
+  try {
+    const clientMetadataUrl = 'https://app.example.test/oauth/client.json'
+    const provider = createNodeOAuthProvider({
+      serverUrl: mcp.url,
+      redirectUrl: 'http://127.0.0.1:9999/callback',
+      store: new MemoryOAuthStore(),
+      clientMetadataUrl,
+    })
+
+    assert.equal(await beginMcpOAuth(provider), 'REDIRECT')
+    assert.equal(mcp.registrations(), 0, 'no registration request reached the server')
+    assert.equal(provider.authorizationUrl?.searchParams.get('client_id'), clientMetadataUrl)
+
+    await finishMcpOAuth(provider, {
+      code: 'auth-code-1',
+      state: provider.authorizationUrl?.searchParams.get('state') ?? undefined,
+    })
+    assert.deepEqual(mcp.tokenClientIds(), [clientMetadataUrl])
+    assert.equal(await provider.isAuthorized(), true)
+  } finally {
+    await mcp.close()
+  }
+})
+
+test('OAuth: the iss of the redirect is checked before the code is exchanged (RFC 9207)', async () => {
+  const mcp = await startLocalMcp({ requireAuth: true, issParameter: true })
+  try {
+    const provider = createNodeOAuthProvider({
+      serverUrl: mcp.url,
+      redirectUrl: 'http://127.0.0.1:9999/callback',
+      store: new MemoryOAuthStore(),
+    })
+    const state = (): string | undefined =>
+      provider.authorizationUrl?.searchParams.get('state') ?? undefined
+
+    // Another server's issuer: refused, and the token endpoint saw nothing.
+    await beginMcpOAuth(provider)
+    await assert.rejects(
+      () =>
+        finishMcpOAuth(provider, {
+          code: 'auth-code-1',
+          state: state(),
+          iss: 'http://127.0.0.1:1',
+        }),
+      /mix-up/,
+    )
+    assert.deepEqual(mcp.grants(), [])
+
+    // No iss at all, from a server that says it always sends one: refused too.
+    await beginMcpOAuth(provider)
+    await assert.rejects(
+      () => finishMcpOAuth(provider, { code: 'auth-code-1', state: state() }),
+      /carried no "iss"/,
+    )
+    assert.deepEqual(mcp.grants(), [])
+
+    // The honest redirect.
+    await beginMcpOAuth(provider)
+    await finishMcpOAuth(provider, { code: 'auth-code-1', state: state(), iss: mcp.issuer })
+    assert.deepEqual(mcp.grants(), ['authorization_code'])
+    assert.equal(await provider.isAuthorized(), true)
+  } finally {
+    await mcp.close()
+  }
 })
