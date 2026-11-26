@@ -65,6 +65,12 @@ export interface UseMcpReturn {
   /** Merge into `BrowserAgentConfig.tools` once `status === 'connected'`. */
   tools?: AgentToolSet
   catalog: McpCatalogEntry[]
+  /**
+   * What the connected server told the agent in its handshake (its MCP `instructions`), when it
+   * sent any. Third-party text that the core puts in the agent's system prompt: show it to the
+   * user as the server's words, never as your own.
+   */
+  instructions?: string
   error?: string
   /** Where to send the user when `status === 'needs-authorization'`. */
   authorizationUrl?: string
@@ -84,6 +90,19 @@ export interface UseMcpReturn {
   forgetAuthorization: () => Promise<void>
   /** Load the optional subpath and report whether it can do OAuth. */
   checkOAuthSupport: () => Promise<boolean>
+}
+
+/**
+ * The instructions the server `name` sent, or undefined when it sent none (or the core is too
+ * old to report them). The text is the server's, not the host's: show it as such.
+ */
+export const mcpInstructionsOf = (
+  connection: Pick<ConnectedMcp, 'instructions'>,
+  name: string,
+): string | undefined => {
+  const list = Array.isArray(connection.instructions) ? connection.instructions : []
+  const text = list.find((i) => i?.server === name)?.instructions
+  return typeof text === 'string' && text.trim() ? text : undefined
 }
 
 export const OAUTH_UNSUPPORTED =
@@ -338,6 +357,7 @@ export const useMcp = (options: UseMcpOptions = {}): UseMcpReturn => {
   const [status, setStatus] = useState<McpStatus>('idle')
   const [tools, setTools] = useState<AgentToolSet | undefined>(undefined)
   const [catalog, setCatalog] = useState<McpCatalogEntry[]>([])
+  const [instructions, setInstructions] = useState<string | undefined>(undefined)
   const [error, setError] = useState<string | undefined>(undefined)
   const [authorizationUrl, setAuthorizationUrl] = useState<string | undefined>(undefined)
   const [oauthSupported, setOauthSupported] = useState<boolean | undefined>(undefined)
@@ -385,6 +405,7 @@ export const useMcp = (options: UseMcpOptions = {}): UseMcpReturn => {
       setAuthorizationUrl(undefined)
       setTools(undefined)
       setCatalog([])
+      setInstructions(undefined)
 
       try {
         const mod = await loadMcp()
@@ -462,6 +483,7 @@ export const useMcp = (options: UseMcpOptions = {}): UseMcpReturn => {
           }),
         )
         setCatalog(connection.catalog)
+        setInstructions(mcpInstructionsOf(connection, name))
         setStatus('connected')
       } catch (err) {
         if (!current()) return
@@ -477,6 +499,7 @@ export const useMcp = (options: UseMcpOptions = {}): UseMcpReturn => {
     await closeConnection()
     setTools(undefined)
     setCatalog([])
+    setInstructions(undefined)
     setAuthorizationUrl(undefined)
     setError(undefined)
     setStatus('idle')
@@ -599,6 +622,7 @@ export const useMcp = (options: UseMcpOptions = {}): UseMcpReturn => {
     status,
     tools,
     catalog,
+    instructions,
     error,
     authorizationUrl,
     oauthSupported,

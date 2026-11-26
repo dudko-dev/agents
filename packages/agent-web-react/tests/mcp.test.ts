@@ -4,6 +4,7 @@ import {
   claimOAuthCallback,
   describeMcpResult,
   isUnauthorizedError,
+  mcpInstructionsOf,
   mcpOAuthProviderOptions,
   readCallbackParams,
   stripOAuthParams,
@@ -218,4 +219,24 @@ test("clientMetadataUrl: the core's provider takes what the hooks hand it, and r
   // The hooks catch this and report it as the server's error; nothing is requested.
   assert.throws(() => build('http://app.example.test/oauth/client.json'), /clientMetadataUrl/)
   assert.throws(() => build('https://app.example.test/'), /clientMetadataUrl/)
+})
+
+test('mcpInstructionsOf: the text one server sent, by its name', () => {
+  const connection = {
+    instructions: [
+      { server: 'docs', instructions: 'Search before you answer.' },
+      { server: 'crm', instructions: 'Never delete.' },
+    ],
+  }
+  assert.equal(mcpInstructionsOf(connection, 'crm'), 'Never delete.')
+  assert.equal(mcpInstructionsOf(connection, 'other'), undefined)
+})
+
+test('mcpInstructionsOf: an older core (no field), an empty text and a malformed list are "none"', () => {
+  assert.equal(mcpInstructionsOf({}, 'docs'), undefined)
+  assert.equal(
+    mcpInstructionsOf({ instructions: [{ server: 'docs', instructions: '  ' }] }, 'docs'),
+    undefined,
+  )
+  assert.equal(mcpInstructionsOf({ instructions: 'nope' as unknown as [] }, 'docs'), undefined)
 })

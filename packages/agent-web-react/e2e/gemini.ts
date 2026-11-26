@@ -21,6 +21,8 @@ export interface GeminiCall {
   /** generationConfig.thinkingConfig.thinkingLevel, when the call asked for thinking. */
   thinkingLevel?: string
   streaming: boolean
+  /** The model the request was sent to (from its URL): tells the executor tiers apart. */
+  model: string
 }
 
 export type GeminiReply = (
@@ -90,6 +92,7 @@ export const mockGemini = async (
       tools: (body.tools ?? []).flatMap((t) => (t.functionDeclarations ?? []).map((d) => d.name)),
       thinkingLevel: body.generationConfig?.thinkingConfig?.thinkingLevel,
       streaming: req.url().includes(':streamGenerateContent'),
+      model: /\/models\/([^:/?]+)/.exec(req.url())?.[1] ?? '',
     }
     calls.push(call)
     const reply = script(call)

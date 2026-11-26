@@ -42,6 +42,12 @@ export interface DemoSettings {
   egressAllow: string
   /** The model may run JavaScript it wrote (`run_js`), in a QuickJS sandbox inside a Web Worker. */
   sandbox: boolean
+  /**
+   * Model tiers: the id (in `MODELS`) of a cheaper model for the steps the planner rates easy,
+   * and of a stronger one for the hard ones and for retries. '' = none; both empty = tiers off.
+   */
+  tierLight: string
+  tierStrong: string
   // ── chat UI (props of <AgentChat>) ──
   showToolCalls: boolean
   showUsage: boolean
@@ -70,6 +76,8 @@ export const DEFAULT_SETTINGS: DemoSettings = {
   egress: false,
   egressAllow: 'en.wikipedia.org, api.github.com',
   sandbox: false,
+  tierLight: '',
+  tierStrong: '',
   showToolCalls: true,
   showUsage: true,
   history: true,

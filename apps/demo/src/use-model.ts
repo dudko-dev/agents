@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useCredentials, useLocalModel } from '@dudko.dev/agent-web-react'
+import type { ModelInput } from '@dudko.dev/agent-web'
 import type { LanguageModel } from 'ai'
 import { buildCloudModel } from './cloud'
 import { engineFor } from './local-engines'
-import { isLocal, MODELS } from './models'
+import { isLocal, MODELS, type ModelOption } from './models'
 
 // The model a visitor chose, the key it needs and the model object built from the two. One hook
 // for every page of the demo (the chat tabs at /demo/, the pipeline editor at /pipeline/): they
@@ -116,4 +117,82 @@ export const useDemoModel = () => {
     resolvedModel,
     modelWindow,
   }
+}
+
+// ── model tiers ─────────────────────────────────────────────────────────────
+
+/**
+ * What can be a light or a strong executor: the cloud models with a fixed id. A local model is
+ * left out on purpose - loading a second set of weights next to the chosen one is how a browser
+ * tab loses its GPU - and so is OpenRouter's "any model" (its id is typed in the model picker).
+ */
+export const TIER_MODELS: ModelOption[] = MODELS.filter(
+  (m) => m.runtime === 'cloud' && m.provider && !m.customModel,
+)
+
+type TierName = 'light' | 'strong'
+
+export interface DemoTiers {
+  /** `config.executorTiers`, or undefined when no tier model could be built (tiers off). */
+  executorTiers?: Partial<Record<TierName, ModelInput>>
+  /** Changes when the tier models do: a dependency of the agents. */
+  key: string
+  /** Tiers that are chosen but have no key in the vault yet (they stay off until it is saved). */
+  missingKey: { tier: TierName; model: ModelOption }[]
+}
+
+/**
+ * The light / strong executor models of the "Agent settings" panel, built like the main cloud
+ * model: in the app, from the key in the vault (the same key as the model picker's, per provider).
+ */
+export const useDemoTiers = (
+  choice: { light: string; strong: string },
+  credentials: ReturnType<typeof useCredentials>,
+): DemoTiers => {
+  const [built, setBuilt] = useState<{
+    models: Partial<Record<TierName, LanguageModel>>
+    missing: TierName[]
+    key: string
+  }>({ models: {}, missing: [], key: '' })
+  useEffect(() => {
+    let active = true
+    const tiers: TierName[] = ['light', 'strong']
+    void Promise.all(
+      tiers.map(async (tier) => {
+        const option = TIER_MODELS.find((m) => m.id === choice[tier])
+        if (!option) return { tier, option }
+        const apiKey = await credentials.store
+          .getApiKey(option.credentialRef!)
+          .catch(() => undefined)
+        const model = apiKey
+          ? await buildCloudModel(option.provider!, option.model, apiKey).catch(() => undefined)
+          : undefined
+        return { tier, option, model }
+      }),
+    ).then((results) => {
+      if (!active) return
+      const models: Partial<Record<TierName, LanguageModel>> = {}
+      for (const r of results) if (r.model) models[r.tier] = r.model
+      setBuilt({
+        models,
+        missing: results.filter((r) => r.option && !r.model).map((r) => r.tier),
+        key:
+          results.map((r) => (r.model ? r.option!.id : '')).join('|') + `#${credentials.version}`,
+      })
+    })
+    return () => {
+      active = false
+    }
+  }, [choice.light, choice.strong, credentials.store, credentials.version])
+  return useMemo(() => {
+    const has = Object.keys(built.models).length > 0
+    return {
+      executorTiers: has ? (built.models as Partial<Record<TierName, ModelInput>>) : undefined,
+      key: has ? built.key : '',
+      missingKey: built.missing.flatMap((tier) => {
+        const model = TIER_MODELS.find((m) => m.id === choice[tier])
+        return model ? [{ tier, model }] : []
+      }),
+    }
+  }, [built, choice.light, choice.strong])
 }

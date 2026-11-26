@@ -22,6 +22,10 @@ export interface MessageListProps {
   showNotes?: boolean
   /** The lessons the agent wrote down during the answer, and the pages it fetched (default true). */
   showLearned?: boolean
+  /** Model tiers: the tier badges, escalation lines and the escalation count (default true). */
+  showTiers?: boolean
+  /** The "replanning failed, continuing with the plan" warning under a step (default true). */
+  showReplanFailed?: boolean
   /** Give a running subagent a stop button (`useAgent().stopSubagent`). */
   onStopSubagent?: (id: string) => void
   /** Open the activity of finished answers too (default: only while it runs). */
@@ -74,11 +78,14 @@ const activitySummary = (
   m: ChatMessage,
   showToolCalls: boolean,
   showLearned: boolean,
+  showTiers: boolean,
   L: AgentLabels,
 ): string => {
   const steps = m.steps ?? []
   const parts = [L.steps(steps.length)]
   if (showToolCalls) parts.push(L.toolCalls(toolCallCount(m)))
+  const escalations = steps.reduce((n, s) => n + (s.escalations?.length ?? 0), 0)
+  if (showTiers && escalations > 0) parts.push(L.escalations(escalations))
   if (m.subagents?.length) parts.push(L.subagents(m.subagents.length))
   if (m.skills?.length) parts.push(L.skillsUsed(m.skills.join(', ')))
   if (showLearned && m.learned?.length) parts.push(L.learnedNow(m.learned.join(', ')))
@@ -102,6 +109,8 @@ export const MessageList = ({
   showThoughts = true,
   showNotes = true,
   showLearned = true,
+  showTiers = true,
+  showReplanFailed = true,
   onStopSubagent,
   activityOpen = false,
   liveExtra,
@@ -133,7 +142,7 @@ export const MessageList = ({
               {m.role === 'assistant' && hasActivity && (
                 <details className="awr-activity" open={m.pending || activityOpen}>
                   <summary className="awr-activity__summary">
-                    {activitySummary(m, showToolCalls, showLearned, L)}
+                    {activitySummary(m, showToolCalls, showLearned, showTiers, L)}
                   </summary>
                   {m.pending && liveExtra}
                   <StepList
@@ -146,6 +155,8 @@ export const MessageList = ({
                     showToolCalls={showToolCalls}
                     showUsage={showUsage}
                     showThoughts={showThoughts}
+                    showTiers={showTiers}
+                    showReplanFailed={showReplanFailed}
                     renderToolCall={renderToolCall}
                     labels={labels}
                   />
