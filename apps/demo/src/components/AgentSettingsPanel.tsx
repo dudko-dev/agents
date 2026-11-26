@@ -255,18 +255,6 @@ export const AgentSettingsPanel = ({
         </div>
         <div className="agentset__grid">
           <label className="settings__field">
-            <span className="settings__label">Theme</span>
-            <select
-              className="settings__select"
-              value={settings.theme}
-              onChange={(e) => update({ theme: e.target.value as DemoSettings['theme'] })}
-            >
-              <option value="auto">auto</option>
-              <option value="light">light</option>
-              <option value="dark">dark</option>
-            </select>
-          </label>
-          <label className="settings__field">
             <span className="settings__label">Labels</span>
             <select
               className="settings__select"

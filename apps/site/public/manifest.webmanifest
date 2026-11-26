@@ -1,0 +1,17 @@
+{
+  "id": "/",
+  "name": "dudko.dev agents",
+  "short_name": "agents",
+  "description": "Planning AI agents in TypeScript for Node and the browser.",
+  "lang": "en",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "theme_color": "#04070e",
+  "background_color": "#04070e",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

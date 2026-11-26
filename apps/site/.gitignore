@@ -1,0 +1,5 @@
+dist
+.astro
+src/content/docs/docs/node
+src/content/docs/docs/browser
+src/content/docs/docs/react

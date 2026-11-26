@@ -1,20 +1,43 @@
+/*
+ * The demo is dark only and wears the tokens of agent.dudko.dev (apps/site/src/styles/tokens.css):
+ * the same near-black, the same blue, the same status colours. Change them in both places.
+ */
 :root {
-  --bg: #f5f6f8;
-  --panel: #ffffff;
-  --fg: #14161a;
-  --muted: #6b7280;
-  --border: #e5e7eb;
-  --accent: #4f46e5;
+  --bg: #04070e;
+  --panel: #0b101a;
+  --panel-2: #111827;
+  --fg: #e8ecf3;
+  --muted: #9aa6b8;
+  --border: #1c2536;
+  --border-strong: #2a3650;
+  --accent: #2f9fe0;
+  --accent-strong: #5bb7ee;
+  --on-accent: #04121f;
+  --accent-soft: rgb(47 159 224 / 0.12);
+  --ok: #4ade80;
+  --warn: #fbbf24;
+  --danger: #f87171;
+  --focus: #8fd0f7;
+  --radius: 14px;
+  --radius-sm: 9px;
+  --ease-settle: cubic-bezier(0.22, 1, 0.36, 1);
+  color-scheme: dark;
 }
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #0b0d11;
-    --panel: #12151b;
-    --fg: #e6e7ea;
-    --muted: #9aa1ab;
-    --border: #262a33;
-    --accent: #6366f1;
-  }
+/* The chat components read their own variables: the same palette, so the two never part. */
+:root,
+:root :where(.awr-chat, .awr-theme) {
+  --awr-bg: var(--panel);
+  --awr-fg: var(--fg);
+  --awr-muted: var(--muted);
+  --awr-border: var(--border);
+  --awr-subtle: var(--panel-2);
+  --awr-accent: var(--accent);
+  --awr-accent-fg: var(--on-accent);
+  --awr-assistant-bg: var(--panel-2);
+  --awr-danger: var(--danger);
+  --awr-warn: var(--warn);
+  --awr-ok: var(--ok);
+  --awr-radius: var(--radius);
 }
 
 * {
@@ -27,27 +50,46 @@ body,
   margin: 0;
 }
 body {
-  background: var(--bg);
+  /* A faint glow of the brand blue behind the header, as on the landing page. */
+  background:
+    radial-gradient(60rem 24rem at 50% -12rem, rgb(47 159 224 / 0.1), transparent 70%), var(--bg);
+  background-attachment: fixed;
   color: var(--fg);
   font-family:
     system-ui,
     -apple-system,
-    Segoe UI,
+    'Segoe UI',
     Roboto,
     Helvetica,
     Arial,
     sans-serif;
   font-size: 15px;
+  -webkit-font-smoothing: antialiased;
 }
 a {
-  color: var(--accent);
+  color: var(--accent-strong);
+  text-underline-offset: 0.2em;
+}
+a:hover {
+  color: var(--fg);
+}
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+::selection {
+  background: rgb(47 159 224 / 0.35);
+}
+* {
+  scrollbar-color: var(--border-strong) transparent;
+  scrollbar-width: thin;
 }
 
 /* ── App shell ──────────────────────────────────────────────────────────────
- * Desktop: the app is exactly one screen tall. Header and tabs keep their
- * height; below them the chat column (settings folded on top, the chat taking
- * the rest) and the workspace column (board / servers / chess) scroll on their
- * own. Phone: one column in the page's own scroll, ordered per tab.
+ * Desktop: the app is exactly one screen tall. The header (brand, the three views, links) keeps
+ * its height; below it the chat column (settings folded on top, the chat taking the rest) and the
+ * workspace column (board / servers / chess) scroll on their own. Phone: one column in the page's
+ * own scroll, ordered per view.
  */
 .app {
   display: flex;
@@ -57,47 +99,75 @@ a {
   max-width: 1440px;
   margin: 0 auto;
   padding: 12px 20px;
-  gap: 10px;
+  gap: 12px;
 }
 
 .app__header {
   flex: none;
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  justify-content: space-between;
   gap: 16px;
+  padding: 8px 10px 8px 16px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: rgb(11 16 26 / 0.8);
+  backdrop-filter: blur(12px);
 }
 .app__brand {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 12px;
-  min-width: 0;
-}
-.app__brand > div {
-  min-width: 0;
+  gap: 10px;
+  justify-self: start;
+  color: var(--fg);
+  font-weight: 700;
+  font-size: 17px;
+  text-decoration: none;
 }
 .app__logo {
-  font-size: 30px;
-  line-height: 1;
   flex: none;
+  width: 28px;
+  height: 28px;
 }
-.app__title {
-  margin: 0;
-  font-size: 20px;
-}
-.app__subtitle {
-  margin: 2px 0 0;
+.app__badge {
+  padding: 2px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
   color: var(--muted);
-  font-size: 13px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 .app__links {
   display: flex;
-  gap: 14px;
+  gap: 4px;
+  justify-self: end;
   font-weight: 500;
-  flex: none;
+  font-size: 14px;
+}
+.app__links a {
+  padding: 7px 12px;
+  border-radius: 999px;
+  color: var(--muted);
+  text-decoration: none;
+  transition:
+    color 200ms var(--ease-settle),
+    background-color 200ms var(--ease-settle);
+}
+.app__links a:hover {
+  color: var(--fg);
+  background: var(--panel-2);
+}
+/* The page's one heading: for a screen reader and a crawler, not for the eye. */
+.app__sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 .app__main {
@@ -142,14 +212,23 @@ a {
     min-height: 100dvh;
     padding: 10px 12px;
   }
-  .app__subtitle {
-    white-space: normal;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
+  /* Brand and links on the first row, the views on a row of their own. */
+  .app__header {
+    grid-template-columns: 1fr auto;
+    border-radius: 22px;
+    padding: 10px 12px;
+    row-gap: 10px;
   }
-  .app__links {
-    display: none;
+  .app__tabs {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    justify-self: stretch;
+  }
+  .app__tab {
+    flex: 1 0 auto;
+  }
+  .app__links a {
+    padding: 7px 8px;
   }
   .app__main {
     display: flex;
@@ -184,7 +263,7 @@ a {
 .settings {
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius);
   padding: 10px 14px;
   flex: none;
 }
@@ -215,10 +294,10 @@ a {
   flex: none;
   font-weight: 500;
   font-size: 12px;
-  color: #b45309;
+  color: var(--warn);
 }
 .settings__summary-status.is-ok {
-  color: #16a34a;
+  color: var(--ok);
 }
 .settings__field {
   display: flex;
@@ -235,7 +314,7 @@ a {
 .settings__select {
   padding: 9px 10px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: var(--bg);
   color: var(--fg);
   font: inherit;
@@ -256,11 +335,16 @@ a {
 .settings__btn {
   padding: 9px 12px;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   font: inherit;
+  font-weight: 600;
   cursor: pointer;
+  transition: background-color 200ms var(--ease-settle);
+}
+.settings__btn:hover:not(:disabled) {
+  background: var(--accent-strong);
 }
 .settings__btn:disabled {
   opacity: 0.5;
@@ -268,12 +352,12 @@ a {
 }
 .settings__warn {
   margin: 0;
-  color: #dc2626;
+  color: var(--danger);
   font-size: 13px;
 }
 .settings__ok {
   margin: 0;
-  color: #16a34a;
+  color: var(--ok);
   font-size: 13px;
 }
 .settings__row {
@@ -287,7 +371,7 @@ a {
 .board {
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius);
   padding: 16px;
   height: 100%;
   display: flex;
@@ -311,7 +395,7 @@ a {
   margin-left: auto;
   padding: 5px 10px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--muted);
   cursor: pointer;
@@ -383,33 +467,41 @@ a {
   padding-bottom: 4px;
 }
 
-/* ── View tabs ────────────────────────────────────────────────────────────── */
+/* ── View tabs: a segmented control in the header ─────────────────────────── */
 .app__tabs {
-  /* Never squeezed by the content below; scrolls sideways on a narrow screen. */
-  flex: none;
   display: flex;
-  gap: 6px;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 999px;
+  background: var(--bg);
+  border: 1px solid var(--border);
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: none;
-  padding: 1px;
 }
 .app__tab {
   flex: none;
   white-space: nowrap;
-  padding: 8px 14px;
-  border: 1px solid var(--border);
+  padding: 7px 14px;
+  border: none;
   border-radius: 999px;
-  background: var(--panel);
+  background: transparent;
   color: var(--muted);
   font: inherit;
+  font-size: 14px;
   font-weight: 500;
   cursor: pointer;
+  transition:
+    color 200ms var(--ease-settle),
+    background-color 200ms var(--ease-settle);
+}
+.app__tab:hover {
+  color: var(--fg);
 }
 .app__tab.is-active {
   background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
+  font-weight: 600;
 }
 .app__empty {
   height: 100%;
@@ -420,7 +512,7 @@ a {
   color: var(--muted);
   background: var(--panel);
   border: 1px dashed var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius);
   font-size: 14px;
 }
 
@@ -428,7 +520,7 @@ a {
 .mcp {
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius);
   padding: 14px;
   display: flex;
   flex-direction: column;
@@ -444,7 +536,7 @@ a {
 .mcp__input {
   padding: 9px 10px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: var(--bg);
   color: var(--fg);
   font: inherit;
@@ -478,7 +570,7 @@ a {
 .mcp__btn-ghost {
   padding: 9px 12px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--muted);
   font: inherit;
@@ -499,16 +591,16 @@ a {
   background: var(--border);
 }
 .mcp__status--connected .mcp__dot {
-  background: #16a34a;
+  background: var(--ok);
 }
 .mcp__status--connecting .mcp__dot {
-  background: #f59e0b;
+  background: var(--warn);
 }
 .mcp__status--needs-authorization .mcp__dot {
-  background: #6366f1;
+  background: var(--accent);
 }
 .mcp__status--error .mcp__dot {
-  background: #dc2626;
+  background: var(--danger);
 }
 .mcp__auth {
   display: flex;
@@ -537,7 +629,7 @@ a {
   gap: 2px;
   padding: 8px 10px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   font-size: 13px;
 }
 .mcp__tool code {
@@ -620,16 +712,16 @@ a {
   word-break: break-all;
 }
 .mcp__server--connected .mcp__dot {
-  background: #16a34a;
+  background: var(--ok);
 }
 .mcp__server--connecting .mcp__dot {
-  background: #f59e0b;
+  background: var(--warn);
 }
 .mcp__server--needs-authorization .mcp__dot {
-  background: #6366f1;
+  background: var(--accent);
 }
 .mcp__server--error .mcp__dot {
-  background: #dc2626;
+  background: var(--danger);
 }
 .mcp__tools-toggle {
   cursor: pointer;
@@ -638,7 +730,7 @@ a {
 }
 .mcp__ro {
   font-size: 11px;
-  color: #16a34a !important;
+  color: var(--ok) !important;
 }
 .mcp__form-row {
   display: flex;
@@ -670,7 +762,7 @@ a {
   display: block;
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius);
   padding: 10px 14px;
 }
 .agentset > *:not(summary) {
@@ -735,7 +827,7 @@ a {
   font-size: 12px;
   padding: 8px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: var(--bg);
   color: var(--fg);
   resize: vertical;
@@ -745,7 +837,7 @@ a {
 .chess {
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius);
   padding: 14px;
   display: flex;
   flex-direction: column;
@@ -805,7 +897,7 @@ a {
   min-width: 240px;
   aspect-ratio: 1;
   container-type: inline-size;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   overflow: hidden;
   border: 1px solid var(--border);
   user-select: none;
@@ -897,7 +989,7 @@ a {
   flex-wrap: wrap;
 }
 .chess__agent-turn--issue > [role='alert'] {
-  color: #b45309;
+  color: var(--warn);
 }
 /* The game's verdict in the chat, after the model's last words. */
 /* Inside the chat, so it follows the chat's theme tokens (light / dark). */
@@ -977,7 +1069,7 @@ a {
   font-family: var(--awr-mono);
   font-size: 12px;
   background: color-mix(in srgb, var(--awr-fg) 6%, transparent);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   padding: 8px;
   overflow-x: auto;
   white-space: pre;
