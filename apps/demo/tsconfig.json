@@ -16,7 +16,8 @@
     "noEmit": true,
     "paths": {
       "@dudko.dev/agent-web-react": ["../../packages/agent-web-react/dist/index.d.ts"],
-      "@dudko.dev/agent-web-react/mcp": ["../../packages/agent-web-react/dist/mcp.d.ts"]
+      "@dudko.dev/agent-web-react/mcp": ["../../packages/agent-web-react/dist/mcp.d.ts"],
+      "@dudko.dev/agent-web-react/pipeline": ["../../packages/agent-web-react/dist/pipeline.d.ts"]
     }
   },
   "include": ["src", "vite.config.ts"]

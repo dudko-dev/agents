@@ -3,9 +3,12 @@ import type { McpAuthMode, UseMcpServersReturn } from '@dudko.dev/agent-web-reac
 
 export interface McpPanelProps {
   mcp: UseMcpServersReturn
-  /** The demo's synthetic 185-tool catalogue (shows tool search). */
-  mockCatalog: boolean
-  onMockCatalog: (on: boolean) => void
+  /**
+   * The demo's synthetic 185-tool catalogue (shows tool search). A page that has no use for it
+   * (the pipeline editor) leaves both out, and the switch is not drawn.
+   */
+  mockCatalog?: boolean
+  onMockCatalog?: (on: boolean) => void
   /** Tools the agent can see in total, and whether tool search is active. */
   toolCount: number
   searchMode: boolean
@@ -252,16 +255,18 @@ export const McpPanel = ({
         </div>
       </form>
 
-      <label className="mcp__mock">
-        <input
-          type="checkbox"
-          checked={mockCatalog}
-          onChange={(e) => onMockCatalog(e.target.checked)}
-        />
-        Add a mock catalogue of 185 tools on 6 pretend servers (CRM, billing, calendar, support,
-        docs, analytics) — try “How many open support tickets are there?” and watch the agent search
-        for the right tool.
-      </label>
+      {onMockCatalog && (
+        <label className="mcp__mock">
+          <input
+            type="checkbox"
+            checked={mockCatalog ?? false}
+            onChange={(e) => onMockCatalog(e.target.checked)}
+          />
+          Add a mock catalogue of 185 tools on 6 pretend servers (CRM, billing, calendar, support,
+          docs, analytics) — try “How many open support tickets are there?” and watch the agent
+          search for the right tool.
+        </label>
+      )}
 
       <p className="mcp__hint">
         Servers connect in parallel, each with its own 30 s deadline; paginated tool lists are read

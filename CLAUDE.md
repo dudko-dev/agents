@@ -10,9 +10,11 @@ private apps:
   enterprise IdP, MCP authorization server and MCP server the packages' tests run against, as
   functions and as a CLI. TypeScript run directly by Node (type stripping), no build. Loopback
   only. Not in `.github/scripts/release-plan.mjs`'s list, and must stay out of it.
-- `apps/demo` — the Vite demo of the React package (private, never published).
+- `apps/demo` — the Vite demo of the React package (private, never published). One project, two
+  pages: the demo (`/demo/`) and the pipeline editor (`/pipeline/`).
 - `apps/site` — https://agent.dudko.dev: the landing page and the docs (Astro + Starlight), with the
-  built demo mounted under `/demo/`. The docs pages are **generated** from the packages' READMEs
+  built demo mounted under `/demo/` and the pipeline editor under `/pipeline/` (`scripts/assemble.mjs`
+  copies both from `apps/demo/dist` and adds `/pipeline/` to the sitemap). The docs pages are **generated** from the packages' READMEs
   and `docs/*.md` (`scripts/sync-docs.mjs`): edit the source file in the package, never the copy.
   A new docs file needs an entry in that script's `PAGES` and in the sidebar (`astro.config.mjs`).
   Dark theme only; colours, type and motion come from `src/styles/tokens.css`.

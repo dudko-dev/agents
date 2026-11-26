@@ -159,6 +159,13 @@ a:hover {
   color: var(--fg);
   background: var(--panel-2);
 }
+/* A phone has room for the brand and three links: the badge and the least needed link go. */
+@media (max-width: 520px) {
+  .app__badge,
+  .app__links .app__link--wide {
+    display: none;
+  }
+}
 /* The page's one heading: for a screen reader and a crawler, not for the eye. */
 .app__sr {
   position: absolute;
