@@ -421,7 +421,100 @@ new BrowserOAuthProvider({
   (RFC 9207, `checkAuthorizationResponseIssuer`), then exchanges the code. See
   [security.md](./security.md#mcp-oauth-the-authorization-response).
 
-The Node package has the same options and functions (`createNodeOAuthProvider`).
+### Enterprise-managed authorization
+
+`createEnterpriseOAuthProvider` (class `BrowserEnterpriseOAuthProvider`) is the
+non-interactive provider for servers whose access the company's identity
+provider decides (ID-JAG; the README has the flow).
+
+```ts
+createEnterpriseOAuthProvider({
+  serverUrl,
+  clientId, clientSecret,            // this client at the MCP authorization server
+  clientAuthMethod,                  // 'client_secret_basic' | 'client_secret_post' | 'private_key_jwt' | 'none'
+  privateKey, algorithm, keyId,      // for 'private_key_jwt'
+  expectedIssuer,                    // that server's issuer; required with a secret or a key
+  idp: {
+    tokenEndpoint, clientId, clientSecret,
+    clientAuthMethod,                // 'client_secret_basic' | 'client_secret_post' | 'private_key_jwt'
+    privateKey, algorithm, keyId, issuer, // for 'private_key_jwt'
+  },
+  getIdToken: () => idToken,         // called each time a new ID-JAG is needed
+  scope,                             // asked of the IdP
+  storage,                           // default: the encrypted vault
+  expirySkewSeconds,                 // default 30
+  fetch,                             // for the request to the IdP
+  onLog,                             // (level, message): the redacted detail of a refusal
+})
+```
+
+- **`expectedIssuer`**: when the MCP server points at any other authorization
+  server, nothing is sent. Required with `clientSecret` and with
+  `private_key_jwt` - the constructor throws (`clientSecret needs
+  expectedIssuer`, `private_key_jwt needs expectedIssuer`), because without it
+  the MCP server's metadata would choose who receives the secret, or the
+  audience of the signed assertion. A client with no credential at the
+  authorization server may omit it: the only thing sent there is then the
+  ID-JAG, which is addressed to that one server.
+- **A `clientSecret` in a page** is readable by anyone who can open the page:
+  in a browser use a public client, or a `fetch` that routes the IdP call
+  through your backend.
+- **`idp.tokenEndpoint` is configured, not discovered**: it is where the ID
+  token and the IdP credentials go, so nothing fetched at run time chooses it.
+- **Client authentication, per hop.** At the IdP, `idp.clientAuthMethod`:
+  `'client_secret_basic'` (default with a secret), `'client_secret_post'` or
+  `'private_key_jwt'`; with no secret only `client_id` is sent. At the
+  authorization server, `clientAuthMethod`: one of those or `'none'`; left out,
+  the SDK picks from the server's metadata.
+- **`private_key_jwt`** (RFC 7523 section 2.2): `privateKey` is a `CryptoKey`
+  (import or generate it non-extractable, so page script can use it but not
+  read it) or a JWK object; `algorithm` is `ES256` or `RS256` (also `ES384`,
+  `ES512`, `RS384`, `RS512`, `PS256`, `PS384`, `PS512`, where the browser's
+  WebCrypto has the curve); `keyId` becomes the `kid` header. The key must be
+  one for that algorithm (scheme, curve, hash), or signing is refused. The
+  assertion: `iss` = `sub` = the client id, `aud` = the **issuer identifier** of
+  the server it is for and nothing else (`idp.issuer`, or the authorization
+  server's issuer after it matched `expectedIssuer`; never a token endpoint
+  URL, as `draft-ietf-oauth-rfc7523bis` requires), a random `jti`, `iat`, `exp` 60 seconds
+  later, header `typ: client-authentication+jwt`. Signed with WebCrypto; no
+  dependency. The key and the assertions are never stored, logged, put in an
+  error or shown when the provider is printed or serialized.
+- **`clientId` as a client ID metadata document (CIMD)**: an https URL with a
+  path of its own. It takes no `clientSecret`; use `private_key_jwt` (the
+  document lists the keys in `jwks` / `jwks_uri` and says
+  `token_endpoint_auth_method: 'private_key_jwt'`) or no credential. The IdP
+  must know the client by the same URL: it is the ID-JAG's `client_id`.
+- **The request to the IdP** (RFC 8693): `grant_type` token-exchange,
+  `requested_token_type` `urn:ietf:params:oauth:token-type:id-jag`, `audience`
+  = the issuer of the MCP server's authorization server, `resource` = the
+  resource the server published (else its URL), `subject_token` = the ID token,
+  optional `scope`. The answer must carry `issued_token_type` id-jag and the
+  token in `access_token`.
+- **The request to the authorization server** (RFC 7523): `grant_type`
+  jwt-bearer, `assertion` = the ID-JAG, the client authenticated as configured.
+- **Stored per server URL**: the access token and the discovery state. Not the
+  client (it is configuration), not the ID token, not the ID-JAG.
+- **Methods**: `authorize({ fetch, onLog })` runs the flow now;
+  `isAccessTokenExpired()`, `isAuthorized()`, `reset()` as on
+  `BrowserOAuthProvider`; `transportFetch(fetch, log)` is the fetch the
+  connector gives the transport (use it if you build a transport yourself).
+  `connectMcpHttp` calls `authorize` before connecting when there is no usable
+  token, and declares the extension in the client's capabilities.
+- **`EnterpriseOAuthError`**: `hop` (`'discovery' | 'idp' | 'authorization-server'`)
+  and `code` (the OAuth error). A refusal by the authorization server has a
+  short message - `MCP authorization server refused the ID-JAG grant:
+  access_denied (HTTP 400)` - at connect and mid-session alike (a token that
+  died during a run and could not be replaced fails the tool call with it). The
+  server's own text goes to `onLog` at `warn`, or to the package logger
+  (`[agent-web]`, `warn`) when no `onLog` was given, after every token,
+  assertion, secret and key is cut out. A refusal is not retried.
+- **Not supported**: SAML assertions, a refresh token as the subject token,
+  DPoP-bound ID-JAGs, `client_secret_jwt`.
+- Verified against a test identity provider (the Node package's
+  `tests/mcp-enterprise-oauth.test.ts`), not a commercial one.
+
+The Node package has the same options and functions (`createNodeOAuthProvider`,
+`createEnterpriseOAuthProvider`; `store` there is `storage` here).
 
 ## Subagents (in-process or Web Workers)
 
