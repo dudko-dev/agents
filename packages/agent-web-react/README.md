@@ -479,10 +479,11 @@ Two notes:
   core — importing these hooks is what puts it in your build.
 - `oauthSupported` is `false` on cores older than `@dudko.dev/agent-web@0.0.9`,
   which introduced `BrowserOAuthProvider`; header auth still works there. The
-  peer floor is `>=0.0.38` — the first core with pipelines (`createPipeline`,
-  which the `./pipeline` entry builds on) and `clientMetadataUrl`, on top of the
-  learning notebook, the virtual file system, attachments, consent, tool search,
-  subagents, steering and context editing this package's chat builds on.
+  peer floor is `>=0.0.39` — the first core with model tiers, dynamic subagents,
+  media and decision models, whose helpers and constants this package imports
+  (`isReplayedToolOutput`, the media type lists), on top of pipelines, the learning
+  notebook, the virtual file system, attachments, consent, tool search, subagents,
+  steering and context editing this package's chat builds on.
 
 ## Several MCP servers — `useMcpServers`
 
