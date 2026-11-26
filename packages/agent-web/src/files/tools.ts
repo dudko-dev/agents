@@ -11,6 +11,23 @@ export interface FileToolsOptions {
   maxReadChars?: number
 }
 
+const FILE_TOOL = Symbol.for('@dudko.dev/agent-web:file-tool')
+
+/** What one of these tools does, and on which file system (read by `config.sandbox`). */
+export interface FileToolBinding {
+  vfs: VirtualFileSystem
+  op: 'list' | 'read' | 'write' | 'delete'
+}
+
+const bind = <T extends object>(t: T, binding: FileToolBinding): T => {
+  Object.defineProperty(t, FILE_TOOL, { value: binding, enumerable: false })
+  return t
+}
+
+/** The file-system binding of a tool made by `createFileTools` (undefined for any other tool). */
+export const fileToolBindingOf = (t: unknown): FileToolBinding | undefined =>
+  t && typeof t === 'object' ? (t as { [FILE_TOOL]?: FileToolBinding })[FILE_TOOL] : undefined
+
 /**
  * Tools that give the agent the virtual file system: list, read, write and
  * delete. Listing and reading are marked read-only, so the `ask-writes`
@@ -63,6 +80,8 @@ export const createFileTools = (vfs: VirtualFileSystem, opts: FileToolsOptions =
       }),
     ),
   }
+  bind(tools[`${p}list`], { vfs, op: 'list' })
+  bind(tools[`${p}read`], { vfs, op: 'read' })
   if (opts.readOnly) return tools
   tools[`${p}write`] = tool({
     description:
@@ -92,5 +111,7 @@ export const createFileTools = (vfs: VirtualFileSystem, opts: FileToolsOptions =
     }),
     execute: async ({ path }) => ({ deleted: await vfs.delete(path) }),
   })
+  bind(tools[`${p}write`], { vfs, op: 'write' })
+  bind(tools[`${p}delete`], { vfs, op: 'delete' })
   return tools
 }

@@ -13,6 +13,7 @@ const OPTIONAL_PEERS = [
   '@browser-ai/core',
   '@mlc-ai/web-llm',
   '@modelcontextprotocol/sdk',
+  'quickjs-emscripten',
 ]
 
 export default defineConfig([
@@ -29,6 +30,9 @@ export default defineConfig([
       index: 'src/index.ts',
       mcp: 'src/mcp/index.ts',
       webmcp: 'src/webmcp/index.ts',
+      // The Web Worker side of `config.sandbox` (run_js): the only entry that imports the
+      // optional peer quickjs-emscripten by name, so a host bundles the engine into its worker.
+      'sandbox-worker': 'src/sandbox/worker.ts',
     },
     format: ['esm', 'cjs'],
     dts: true,

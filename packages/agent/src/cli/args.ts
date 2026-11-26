@@ -52,6 +52,9 @@ Optional env vars (see env.example for the full list):
   AGENT_EGRESS_ALLOW / _DENY  comma lists: host, *.host, IP or CIDR (deny wins; allow limits to these)
   AGENT_EGRESS_PROTOCOLS      https (default) | http | https,http
   AGENT_EGRESS_ALLOW_PRIVATE  on lets it reach private networks (cloud metadata stays refused)
+  AGENT_SANDBOX               on lets the model run JavaScript it wrote (run_js; needs quickjs-emscripten)
+  AGENT_SANDBOX_TIMEOUT_MS    time limit of one run (default 5000, at most 60000)
+  AGENT_SANDBOX_MEMORY_MB     heap of one run in MiB (default 32, at most 256)
   AGENT_CONTEXT_WINDOW_TOKENS model window (default 128000)
   AGENT_COMPACTION_THRESHOLD  percent of the window at which auto-compaction starts (default 85)
   AGENT_COMPACTION            off disables automatic compaction

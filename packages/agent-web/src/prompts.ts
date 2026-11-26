@@ -41,6 +41,8 @@ export interface PlannerPromptContext {
   skills?: string
   /** The catalogue is condensed and the executor can search the rest (large catalogues). */
   searchMode?: boolean
+  /** Set when `config.sandbox` is on: when to plan a `run_js` step. */
+  sandbox?: string
 }
 export interface ExecutorPromptContext {
   goal: string
@@ -62,6 +64,8 @@ export interface ExecutorPromptContext {
   updates?: string[]
   /** Set when `config.learning` is on (and not muted): the executor is told to keep a notebook. */
   learning?: { fetch: boolean }
+  /** Set when `config.sandbox` is on: what `run_js` is, and never to report code as run without it. */
+  sandbox?: string
 }
 export interface ReplannerPromptContext {
   goal: string
@@ -84,6 +88,8 @@ export interface SynthesizerPromptContext {
   activeSkills?: string
   /** What the user said while the run was going, oldest first. */
   updates?: string[]
+  /** Set when `config.sandbox` is on: the output of code is reported only when `run_js` returned it. */
+  sandbox?: string
 }
 
 export interface Prompts {
@@ -228,6 +234,7 @@ export const defaultPrompts: Prompts = {
       (ctx.mode === 'prompted' ? PLANNER_PROMPTED : PLANNER_NATIVE) +
       (ctx.skills ? PLANNER_SKILLS : '') +
       (ctx.searchMode ? PLANNER_SEARCH : '') +
+      (ctx.sandbox ? `\n${ctx.sandbox}` : '') +
       section('SKILLS', ctx.skills) +
       `\n\nTOOLS:\n${ctx.toolCatalog}`,
     prompt: `GOAL: ${ctx.goal}${historyBlock(ctx.history)}${stateBlock(ctx.state)}`,
@@ -238,6 +245,7 @@ export const defaultPrompts: Prompts = {
       (ctx.searchMode ? EXECUTOR_SEARCH : '') +
       (ctx.skills ? EXECUTOR_SKILLS : '') +
       (ctx.learning ? executorLearning(ctx.learning.fetch) : '') +
+      (ctx.sandbox ? `\n- ${ctx.sandbox}` : '') +
       section('SKILLS', ctx.skills) +
       section('ACTIVE SKILL INSTRUCTIONS', ctx.activeSkills),
     prompt: [
@@ -267,7 +275,10 @@ export const defaultPrompts: Prompts = {
       .join('\n\n'),
   }),
   synthesizer: (ctx) => ({
-    system: SYNTHESIZER_SYSTEM + section('ACTIVE SKILL INSTRUCTIONS', ctx.activeSkills),
+    system:
+      SYNTHESIZER_SYSTEM +
+      (ctx.sandbox ? `\n- ${ctx.sandbox}` : '') +
+      section('ACTIVE SKILL INSTRUCTIONS', ctx.activeSkills),
     prompt: [
       `GOAL: ${ctx.goal}`,
       stateBlock(ctx.state).trimStart(),

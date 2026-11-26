@@ -89,6 +89,11 @@ src/
 ├── files/               vfs.ts (VirtualFileSystem on IndexedDB) + tools.ts (the fs_* tools)
 ├── subagent/            tool.ts (createSubagentTool), worker.ts (serveSubagentWorker), protocol.ts
 ├── tools/egress.ts      `egress` / `web_fetch`: the model's one way to make a request
+├── sandbox/             `sandbox` / `run_js`: the model's code in QuickJS-in-wasm
+│   ├── engine.ts        limits, guest runtime, worker protocol - pure, a COPY of the Node sibling's
+│   ├── index.ts         the tool: worker or page thread, loaded only when switched on
+│   ├── files.ts         the workspace binding: fs calls and modules through the file tools' VFS
+│   └── worker.ts        the `./sandbox-worker` entry (serveSandboxWorker)
 ├── learning.ts          `learning`: save_skill / forget_skill, the skill stores, the secret scan
 ├── pipeline/            `createPipeline`: a graph of agents described in JSON
 │   ├── engine.ts        validation, conditions, the scheduler - pure, a COPY of the Node sibling's
@@ -267,6 +272,58 @@ exists: it appears in the planner's `SKILLS:` index at once and loads with
   or a notebook would silently stop working on large catalogues.
 - **Off by default**: no extra tools and not a word more in the prompts.
 
+## Sandbox: QuickJS in WebAssembly, in a worker
+
+`sandbox` gives the model `run_js` (`src/sandbox/`). Without it a model asked to "run it
+on test data" writes a file and claims an output; with it the run is a visible tool call.
+
+- **Why an interpreter in wasm, and not the host's engine.** Isolation by construction:
+  the guest's realm contains the language and what we pass in, so there is nothing to
+  forget to remove. The alternatives all start from a full environment and subtract:
+  `node:vm` shares the heap and intrinsics with the host and is documented as not a
+  security mechanism; `isolated-vm` is a native addon (a build step per platform, no
+  browser, and it has needed maintenance rescue more than once); a sandboxed `<iframe>`
+  or a bare Web Worker runs the browser's real engine with `fetch`, timers and
+  same-origin storage to be stripped one by one, differs from Node's semantics, and has
+  no memory limit at all; a child process is Node-only and inherits the user's file
+  system and network unless an OS sandbox is added. QuickJS-in-wasm is the same engine,
+  the same language level and the same limits in Node and in every browser, in one MIT
+  package (`quickjs-emscripten`) of about 0.5 MB of wasm.
+- **Why a worker as well.** The interrupt handler stops JavaScript at loop edges and
+  calls; it cannot stop one long native call (measured: 40 `indexOf` over a 16 MiB string
+  take 2.5 s with a single check). So the guest never runs on the agent's thread where
+  that can be helped: Node always uses a `worker_threads` worker, the browser a Web
+  Worker the host supplies, and `terminate()` is the hard stop. One worker and one wasm
+  instance per run: no state survives, a killed run cannot poison the next.
+- **Why the host supplies the browser worker.** A `new Worker(new URL(...))` inside this
+  package would be followed by every bundler into every host build - with an import of an
+  optional peer that most hosts have not installed. The pattern is the subagent's: the
+  host passes a factory; the package ships the worker module as its own entry
+  (`./sandbox-worker`), the only place that names the peer. Without a factory the guest
+  runs on the page thread (soft stop only), with a warning.
+- **Why the memory limit is the wasm memory.** QuickJS's `JS_SetMemoryLimit` counts
+  allocation sizes through `malloc_usable_size`, which this build lacks: it counts 8
+  bytes per allocation, and a "2 MiB" guest took 490 MB before it was refused (measured).
+  The engine is therefore instantiated on a `WebAssembly.Memory` whose `maximum` is the
+  limit; growth past it fails in the wasm runtime, which no guest can argue with.
+- **Why the sync build, with async `fs`.** Host calls that look synchronous to the guest
+  need the asyncify build: twice the wasm, a second stack to overflow, one suspended call
+  at a time. Instead `fs.*` returns promises (top-level `await` is on), and the module
+  loader - which must answer synchronously - is fed before the run with the files a
+  program names literally. The cost: a computed `require(name)` finds nothing.
+- **Result convention.** The last expression of a script (evaluated with top-level
+  await), or the `default` export when the program is written as a module - what a REPL
+  and a module would each give. A program that does not compile as a script has run
+  nothing, so retrying it as a module is free of side effects.
+- **The engine file is shared.** `src/sandbox/engine.ts` is a byte-for-byte copy of the
+  Node sibling's `sandbox-engine.ts` (limits, the guest runtime, the resolver, the worker
+  protocol, the result sanitiser); the Node package's tests compare the two and test the
+  guards. What differs per package is small: how a worker is made, and the workspace -
+  the browser binds the virtual file system the file tools use, Node has none and
+  computes only.
+- **Off costs nothing at run time.** The runner imports `sandbox/index.js` dynamically
+  when the flag is set; the ESM build keeps it in a chunk of its own.
+
 ## Pipelines: waves, a join rule, caps
 
 `createPipeline` runs a graph of agents described in JSON (`src/pipeline/`). The
@@ -344,9 +401,10 @@ model.
 
 ## Build & packaging
 
-**tsup** → `dist/` as ESM + CJS + `.d.ts`, three entries: `.` (core), `./mcp`
+**tsup** → `dist/` as ESM + CJS + `.d.ts`, four entries: `.` (core), `./mcp`
 (the MCP connector, isolated so `@modelcontextprotocol/sdk` never enters the core
-bundle) and `./webmcp` (the WebMCP bridge), plus a standalone browser bundle
+bundle), `./webmcp` (the WebMCP bridge) and `./sandbox-worker` (the Web Worker side of
+`sandbox`, the only entry that names `quickjs-emscripten`), plus a standalone browser bundle
 `dist/agent-web.js` for a `<script type="module">` tag or a CDN. All model providers, WebLLM, and the MCP SDK are **optional peers**,
 imported dynamically — a consumer installs only what they use, and the core
 bundle contains **no `node:*`**. Target ES2022, `moduleResolution: Bundler`.

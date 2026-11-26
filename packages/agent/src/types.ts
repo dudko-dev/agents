@@ -4,6 +4,7 @@ import type { ToolSet } from 'ai'
 import type { RunControl } from './control.ts'
 import type { PipelineEvent } from './pipeline-engine.ts'
 import type { IEgressPolicy } from './safe-fetch.ts'
+import type { ISandboxConfig } from './sandbox-engine.ts'
 
 export type ProviderType =
   | 'openai'
@@ -329,6 +330,14 @@ export interface IAgentConfig {
   // long as the agent lives); give a store to keep them (DirSkillStore). Saving is a write for
   // tool approval. Knowledge only - never policy. See src/learning.ts.
   learning?: boolean | ILearningConfig
+  // Let the agent RUN JavaScript it wrote (the `run_js` tool) and read the output. Off unless set:
+  // with it off the tool does not exist, the engine is never loaded and no worker is started.
+  // `true` = the defaults; an object sets the limits - see ISandboxConfig. The guest runs in
+  // QuickJS compiled to WebAssembly (the optional peer `quickjs-emscripten`: createAgent throws
+  // when it is not installed) inside a worker thread that is killed at the deadline. It has no
+  // network, no files, no process and no host modules. A run is a write for tool approval.
+  // See src/sandbox.ts.
+  sandbox?: boolean | ISandboxConfig
   // Native AI-SDK tools registered alongside MCP-discovered tools. Names
   // must not collide with any MCP-prefixed tool ("server__tool"); createAgent
   // throws on conflict. Native tools bypass outputSanitizer/inputSanitizer

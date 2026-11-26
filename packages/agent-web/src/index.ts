@@ -89,8 +89,17 @@ export type {
   VirtualFileSystemOptions,
   VfsListener,
 } from './files/vfs.js'
-export { createFileTools } from './files/tools.js'
-export type { FileToolsOptions } from './files/tools.js'
+export { createFileTools, fileToolBindingOf } from './files/tools.js'
+export type { FileToolBinding, FileToolsOptions } from './files/tools.js'
+// Sandbox (`config.sandbox`, the run_js tool): types only - its code is loaded when it is
+// switched on, and the worker side is the `./sandbox-worker` entry.
+export type { SandboxConfig, SandboxWorkerLike } from './sandbox/index.js'
+export type {
+  ISandboxConfig,
+  ISandboxError,
+  ISandboxLimits,
+  ISandboxResult,
+} from './sandbox/engine.js'
 
 // ── Thinking, limits, caching ────────────────────────────────────────────────
 export { resolveThinking, thinkingFor, mergeProviderOptions } from './thinking.js'
