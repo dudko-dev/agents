@@ -1,7 +1,8 @@
 /*
  * Design tokens of agent.dudko.dev. One source for the landing page and the documentation.
  *
- * Brand: the dudko.dev mark and its blue (#036ac2 on light, #2f9fe0 on dark) over the site's
+ * Brand: the agents mark (drawn in the manner of the dudko.dev one: a triangle outline, here in
+ * three parts around a core - the stages of a run) and the dudko.dev blue (#036ac2 on light, #2f9fe0 on dark) over the site's
  * near-black (#04070e). Radius, type roles and the status colours continue the tokens of the
  * chat components (`--awr-*` in @dudko.dev/agent-web-react/styles.css), so the live widget and
  * the demo look like one product.

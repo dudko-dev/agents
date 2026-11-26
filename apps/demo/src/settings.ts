@@ -47,7 +47,6 @@ export interface DemoSettings {
   history: boolean
   /** The workspace (virtual file system) panel. */
   filesPanel: boolean
-  theme: 'auto' | 'light' | 'dark'
   lang: 'en' | 'ru'
 }
 
@@ -72,7 +71,6 @@ export const DEFAULT_SETTINGS: DemoSettings = {
   showUsage: true,
   history: true,
   filesPanel: true,
-  theme: 'auto',
   lang: 'en',
 }
 
