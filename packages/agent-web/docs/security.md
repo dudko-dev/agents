@@ -140,9 +140,15 @@ user step, on the word of the company's identity provider (IdP).
 - **Neither token is kept.** The ID token is asked from `getIdToken` for each
   exchange and the ID-JAG is used once; neither is written to storage, logged or
   put in an error message. Only the access token is stored (in the vault, like
-  the other MCP tokens). Error texts from the IdP and the authorization server
-  are passed on with the tokens and the client secrets cut out, even when a
-  server echoes the request back.
+  the other MCP tokens).
+- **What an application is shown is short.** A refusal by the authorization
+  server is an `EnterpriseOAuthError` with the OAuth error code and the status,
+  at connect and in the middle of a session - never the server's own text,
+  which could be anything. That text goes to the log (`onLog`, else the package
+  logger at `warn`), and a log is not a safe place either: the ID token, the
+  ID-JAG, the client assertion, the client secrets and the private key are cut
+  out before anything is written, also when a server echoes the request back.
+  IdP errors carry the IdP's `error` and `error_description`, cut the same way.
 - **https or loopback** for the MCP server, the IdP token endpoint, the
   authorization server and its token endpoint.
 - **The ID-JAG is asked for this server only.** Its audience is the issuer of
@@ -154,8 +160,20 @@ user step, on the word of the company's identity provider (IdP).
   its own token endpoint.
 - **`expectedIssuer`** pins the authorization server: when the MCP server points
   anywhere else, no ID token is asked for and nothing is sent. It is required
-  with `clientSecret` (the constructor throws without it), because otherwise the
-  MCP server's metadata would choose who receives that secret.
+  with `clientSecret` and with `private_key_jwt` (the constructor throws without
+  it), because otherwise the MCP server's metadata would choose who receives
+  that secret, or the audience a signed assertion is made for.
+- **A signed client assertion is for one server.** With `private_key_jwt` the
+  assertion's only audience is the issuer identifier of the server it is sent to
+  (`idp.issuer`; the authorization server's issuer once it matched
+  `expectedIssuer`) - not a token endpoint URL, which a hostile server can
+  choose. An assertion made for the IdP is refused by the authorization server
+  and the other way round. It lives 60 seconds and has a new `jti` each time, so
+  a captured one is hard to replay. The private key is never stored, logged or
+  put in an error; a `CryptoKey` imported as non-extractable cannot be read by
+  page script at all, only used.
+- **A client ID metadata document** (`clientId` as a URL) must be https with a
+  path of its own and cannot be combined with a `clientSecret`.
 - **The IdP's answer is checked** before anything goes to the authorization
   server: `issued_token_type` must be the ID-JAG type and the token must be
   there. A redirect from the IdP token endpoint is refused, not followed.
@@ -166,8 +184,11 @@ user step, on the word of the company's identity provider (IdP).
   readable by anyone who can open the page. So the browser provider is for
   public clients (then a stolen ID token alone is enough to use it), or for a
   `fetch` that routes the IdP call through your backend, which holds the secret.
-- **A public client without `expectedIssuer`.** A client with no secret at the
-  authorization server may omit `expectedIssuer`. The MCP server's metadata then
+- **A key in a page.** A non-extractable `CryptoKey` cannot be copied, but
+  script on your origin (XSS included) can ask it to sign for as long as the
+  page is open. A JWK held in page code is as readable as a secret.
+- **A public client without `expectedIssuer`.** A client with no credential at
+  the authorization server may omit `expectedIssuer`. The MCP server's metadata then
   decides which authorization server is asked, and the only thing sent there is
   the ID-JAG - which the IdP addressed to that one server, so no other can use
   it. The IdP's policy is what stops an audience it does not know.

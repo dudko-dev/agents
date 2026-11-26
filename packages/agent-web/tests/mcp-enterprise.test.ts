@@ -971,13 +971,30 @@ test('client assertion: a key that does not fit, or is broken, fails without des
     false,
     ['sign'],
   )
+  const rsaSha384 = await globalThis.crypto.subtle.importKey(
+    'jwk',
+    RSA_KEY.privateJwk as never,
+    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-384' },
+    false,
+    ['sign'],
+  )
+  const ecP384 = await globalThis.crypto.subtle.importKey(
+    'jwk',
+    makeKey('P-384').privateJwk as never,
+    { name: 'ECDSA', namedCurve: 'P-384' },
+    false,
+    ['sign'],
+  )
   const cases: [string, unknown, string[]][] = [
     ['ES256', RSA_KEY.privateJwk, keyMaterial(RSA_KEY)],
     ['RS256', EC_KEY.privateJwk, keyMaterial(EC_KEY)],
     ['ES384', EC_KEY.privateJwk, keyMaterial(EC_KEY)],
     ['ES256', EC_KEY.publicJwk, []],
-    // A CryptoKey made for another scheme must not sign under this name.
+    // A CryptoKey made for another scheme, hash or curve must not sign under
+    // this name - WebCrypto itself would sign the last two without complaint.
     ['RS256', rsaForPss, []],
+    ['RS256', rsaSha384, []],
+    ['ES256', ecP384, []],
     [
       'ES256',
       { kty: 'EC', crv: 'P-256', d: 'bWFya2VyLWluLWEtYnJva2VuLWp3aw', x: 'AA', y: 'AA' },
@@ -1031,15 +1048,29 @@ test('private_key_jwt: the key and the assertions are never printed, serialized 
     jsonResponse(
       {
         error: 'invalid_client',
-        error_description: `bad ${String(echoing.calls.at(-1)?.init.body)}`,
+        error_description: `bad client_assertion=${echoing.calls.at(-1)?.params.get('client_assertion')}`,
       },
       401,
     ),
   )
   const err = await rejection(() => echoProvider.prepareTokenRequest())
   const sent = echoing.calls[0].params.get('client_assertion') ?? ''
+  // Nor does the key itself survive in an error, should anything ever quote it.
+  const quoting = makeProvider({
+    ...idpJwt({ privateKey: EC_KEY.privateJwk, algorithm: 'ES256' }),
+    fetch: async () => {
+      throw new Error(`debug dump: ${JSON.stringify(EC_KEY.privateJwk)}`)
+    },
+  })
+  await quoting.saveDiscoveryState(STORED_DISCOVERY)
+  const quoted = await rejection(() => quoting.prepareTokenRequest())
+  for (const secret of keyMaterial(EC_KEY)) {
+    assert.ok(!quoted.message.includes(secret), 'no private member of the key')
+  }
   assert.ok(sent.length > 100)
   assert.ok(!err.message.includes(sent))
+  assert.ok(!err.message.includes(sent.slice(0, 48)), 'not even its beginning')
+  assert.match(err.message, /client_assertion=\[redacted\]/)
   assert.ok(!err.message.includes(ID_TOKEN))
 })
 

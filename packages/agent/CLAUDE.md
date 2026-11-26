@@ -43,7 +43,9 @@
   - `provider.ts` (`resolveStage` / model factory per provider), `mcp.ts` (stdio + streamable-HTTP
     MCP connections, reconnect, paginated `tools/list`) + `mcp-oauth.ts` (OAuth 2.1 / DCR provider,
     file-backed tokens) + `mcp-enterprise-oauth.ts` (enterprise-managed authorization / ID-JAG: token
-    exchange at the IdP, then the SDK's `jwt-bearer` grant; non-interactive. Security boundary: every
+    exchange at the IdP, then the SDK's `jwt-bearer` grant; non-interactive; client secret or
+    `private_key_jwt` signed with `node:crypto`; `transportFetch` turns a refused grant into a short
+    `EnterpriseOAuthError` and sends the redacted detail to the log. Security boundary: every
     guard has a test in `tests/mcp-enterprise-oauth.test.ts`, which runs the flow against the test IdP
     in `tests/helpers/idp-server.ts`, and a mutation check. The browser package carries a copy:
     change both), `tracing.ts` (OpenTelemetry spans, a no-op without an SDK), `utils.ts`

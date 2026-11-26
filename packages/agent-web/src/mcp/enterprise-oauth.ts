@@ -651,7 +651,7 @@ const checkOptions = (opts: EnterpriseOAuthProviderOptions): void => {
       )
     }
   }
-  if (false) {
+  if (opts.clientSecret && (method === 'private_key_jwt' || method === 'none')) {
     throw configError(`clientSecret is not used with clientAuthMethod '${method}': remove one`)
   }
   if ((method === 'client_secret_basic' || method === 'client_secret_post') && !opts.clientSecret) {

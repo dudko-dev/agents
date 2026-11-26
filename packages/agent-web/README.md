@@ -311,13 +311,27 @@ const mcp = await connectMcpHttp({ docs: { url: 'https://mcp.example.com/mcp', a
   default (`storage`). The ID token and the ID-JAG are never stored, logged or
   put in an error.
 - Errors are `EnterpriseOAuthError` with `hop`: `'idp'`, `'authorization-server'`
-  or `'discovery'`. A refusal fails that server's connect with the message in
-  `results[].error`; `needsAuthorization` stays unset.
-- **`expectedIssuer` is required with `clientSecret`** (the constructor throws
-  otherwise): without it the MCP server's metadata would choose who receives the
-  secret. A client with no secret at the authorization server may omit it: the
+  or `'discovery'`. A refusal by the authorization server reads `MCP
+  authorization server refused the ID-JAG grant: invalid_grant (HTTP 400)` - the
+  code and the status, never the server's own text - at connect
+  (`results[].error`, `needsAuthorization` unset) and in the middle of a session
+  (the tool call fails with it). What the server said goes to `onLog` at `warn`
+  (to the package logger when there is none), with every token, assertion,
+  secret and key cut out first.
+- **`expectedIssuer` is required with `clientSecret` and with `private_key_jwt`**
+  (the constructor throws otherwise): without it the MCP server's metadata would
+  choose who receives the secret, or which audience a signed assertion is made
+  for. A client with no credential at the authorization server may omit it: the
   only thing sent there is then the ID-JAG, which the IdP addressed to that one
   server.
+- **`private_key_jwt`** (`clientAuthMethod` / `idp.clientAuthMethod`) signs a
+  client assertion with WebCrypto instead of sending a secret: `privateKey` (a
+  `CryptoKey` - make it non-extractable - or a JWK), `algorithm` (`ES256`,
+  `RS256`, ...), optional `keyId`, and `idp.issuer` for the IdP. The assertion's
+  only audience is the issuer of the server it is for, it lives 60 seconds and
+  carries a new `jti` each time.
+- **`clientId` may be the https URL of a client ID metadata document** (CIMD),
+  with `private_key_jwt` or no credential, never with a `clientSecret`.
 - **In a browser:** the IdP's token endpoint must allow your origin (CORS), and
   a `clientSecret` (yours or `idp.clientSecret`) in a page is readable by anyone
   who can open the page. So this provider is for public clients, or for a

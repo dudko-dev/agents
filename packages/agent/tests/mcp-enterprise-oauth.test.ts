@@ -1275,6 +1275,14 @@ test('requestIdJag: private_key_jwt sends the assertion and no other credential'
   const err = await rejection(() => exchange(echo.fetchFn, { idp: pkjwt, clientAssertion }))
   assert.ok(!err.message.includes(clientAssertion))
   assert.match(err.message, /\[redacted\]/)
+  // Nor does the key itself survive in an error, should anything ever quote it.
+  const quoting = async (): Promise<Response> => {
+    throw new Error(`debug dump: ${JSON.stringify(EC_KEY.privateJwk)}`)
+  }
+  const quoted = await rejection(() => exchange(quoting, { idp: pkjwt, clientAssertion }))
+  for (const secret of keyMaterial(EC_KEY).filter((v) => v.length < 60)) {
+    assert.ok(!quoted.message.includes(secret), 'no private member of the key')
+  }
   // Without an assertion nothing is sent at all.
   const silent = mockIdp(goodExchange)
   await assert.rejects(() => exchange(silent.fetchFn, { idp: pkjwt }), /no client assertion/)
