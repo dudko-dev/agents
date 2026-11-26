@@ -38,7 +38,7 @@ import {
   type ThinkingChoice,
   type View,
 } from './settings'
-import { GPU_LOST, GPU_LOST_NOTICE, useDemoModel } from './use-model'
+import { GPU_LOST, GPU_LOST_NOTICE, useDemoModel, useDemoTiers } from './use-model'
 import { pdfToMarkdown, workspace } from './workspace'
 
 const NOTES_PROMPT = `You manage a sticky-notes board through the provided tools.
@@ -96,6 +96,11 @@ export const App = () => {
   // ── Agent settings shared by every tab ─────────────────────────────────────
   const { settings, update, reset: resetSettings } = useDemoSettings()
   const { config: settingsConfig, rebuildKey } = useSettingsConfig(settings, modelWindow)
+  // Model tiers: an optional lighter and stronger executor next to the chosen model.
+  const tiers = useDemoTiers(
+    { light: settings.tierLight, strong: settings.tierStrong },
+    credentials,
+  )
   // The model's memory per conversation. With saved chats it lives in
   // IndexedDB too (keyed by the chat id), so a reopened chat continues with its
   // context; the chess game is not saved, so its memory isn't either.
@@ -146,6 +151,8 @@ export const App = () => {
     ...settingsConfig,
     skills: skillsByTab[tab],
     ...(settings.learning ? { learning: { store: notebooks[tab] } } : {}),
+    // `standard` is the chosen model; nothing is passed when no tier is set (tiers off).
+    ...(tiers.executorTiers ? { executorTiers: tiers.executorTiers } : {}),
     // The consent mode is applied live by useAgent — no rebuild on a switch.
     toolApproval: { mode: settings.approvalMode },
     // Images, where the core can't tell from the model (built-in, Gemma 4).
@@ -153,7 +160,7 @@ export const App = () => {
     // Stream the agent's internal phases to the console — handy for poking.
     logLevel: 'debug',
   })
-  const deps = [modelId, resolvedModel, rebuildKey, memories]
+  const deps = [modelId, resolvedModel, rebuildKey, memories, tiers.key]
 
   // ── Tab 1: sticky notes ─────────────────────────────────────────────────────
   const board = useNotesBoard()
@@ -452,6 +459,7 @@ export const App = () => {
               view={view}
               controller={{ notes: notesAgent, mcp: mcpAgent, chess: chessAgent }[view]}
               modelWindow={modelWindow}
+              tiersMissingKey={tiers.missingKey}
               update={update}
               onReset={resetSettings}
             />

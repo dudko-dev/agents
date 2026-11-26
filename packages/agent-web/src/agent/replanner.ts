@@ -1,3 +1,9 @@
+import {
+  askDecisionModel,
+  decisionEventOf,
+  decisionUsageOf,
+  replanDecisionQuestion,
+} from '../decision.js'
 import { generate, generateStructured } from '../llm/generate.js'
 import { clip, normalizeUsage, usageOfError } from '../llm/util.js'
 import { parseReplannerResponse, type ReplanDecision } from '../parse.js'
@@ -21,6 +27,11 @@ export interface ReplanOutcome {
   failed?: true
   /** The failure, when `failed`. */
   error?: string
+  /**
+   * Set when `config.decisionModel` made the decision (the replanner was not called): the
+   * probability it gave its choice.
+   */
+  confidence?: number
 }
 
 /**
@@ -107,6 +118,56 @@ export const decideReplan = async (
       failed: true,
       error,
     }
+  }
+}
+
+/**
+ * `config.decisionModel`, asked before the replanner: "continue or finish?". Returns the outcome
+ * when the model is confident of one of those two, and undefined when the replanner must be
+ * called as ever - no decision model, a low confidence, an error, a timeout, an answer that is
+ * not an option, or `revise` (a revised plan is text; a decision model does not write). Either
+ * way a `decision` event says what happened; `onUsage` is told what the question cost. Throws
+ * only when the run is stopped.
+ */
+export const decideReplanWithDecisionModel = async (
+  ctx: AgentContext,
+  goal: string,
+  done: string[],
+  remaining: string[],
+  onUsage: (usage: IUsage) => void,
+): Promise<ReplanOutcome | undefined> => {
+  const model = ctx.decisionModel
+  if (!model || ctx.raw.decision?.replan === false) return undefined
+  const active = ctx.activeSkills?.() ?? []
+  const parts = ctx.prompts.replanner({
+    goal,
+    state: await ctx.state(),
+    done,
+    remaining,
+    mode: 'native',
+    activeSkills: active.length ? renderActiveSkills(active) : undefined,
+  })
+  let outcome = await askDecisionModel(
+    model,
+    replanDecisionQuestion(parts.prompt),
+    ctx.raw.decision,
+    ctx.signal,
+  )
+  onUsage(decisionUsageOf(outcome))
+  if (outcome.accepted && outcome.choice === 'revise') {
+    outcome = { ...outcome, accepted: false, reason: 'needs-model' }
+  }
+  ctx.emit(decisionEventOf('replan', outcome, model))
+  if (!outcome.accepted || (outcome.choice !== 'continue' && outcome.choice !== 'finish')) {
+    return undefined
+  }
+  const confidence = outcome.confidence ?? 0
+  return {
+    decision: outcome.choice,
+    reason: `decision model: ${outcome.choice} (confidence ${confidence.toFixed(2)})`,
+    plan: [],
+    usage: normalizeUsage(),
+    confidence,
   }
 }
 

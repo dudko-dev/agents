@@ -75,6 +75,11 @@ export interface IUsage {
   imagesGenerated?: number
   speechCharacters?: number
   transcriptionSeconds?: number
+  /**
+   * Calls made to `config.decisionModel`. A call is not a token: what the API billed for it (when
+   * it says) is in the token fields, the number of calls is here. Absent when zero.
+   */
+  decisionCalls?: number
 }
 
 export interface IToolCall {
@@ -123,4 +128,7 @@ export const addUsage = (a: IUsage, b: IUsage): IUsage => ({
   cachedInputTokens: (a.cachedInputTokens ?? 0) + (b.cachedInputTokens ?? 0),
   cacheWriteTokens: (a.cacheWriteTokens ?? 0) + (b.cacheWriteTokens ?? 0),
   ...addMediaUsage(a, b),
+  ...((a.decisionCalls ?? 0) + (b.decisionCalls ?? 0) > 0
+    ? { decisionCalls: (a.decisionCalls ?? 0) + (b.decisionCalls ?? 0) }
+    : {}),
 })

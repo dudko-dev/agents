@@ -370,6 +370,36 @@ the three exists only when the host configures its model.
 - An audio attachment given as an http(s) link is not downloaded or transcribed by the agent:
   it goes to the language model as before (the provider fetches it, or refuses).
 
+## Decision models
+
+`decisionModel` (off by default) asks a small model closed questions: the replanner's continue /
+finish, a pipeline node's route. What it is, and is not, allowed to be:
+
+- **Not a security control, and not consulted as one.** Tool approval, the egress policy, the
+  search policy and the sandbox are decided in code. The decision model is never asked about any
+  of them, so an answer of "approve" with confidence 1 approves nothing
+  (`tests/decision.test.ts`: a decision model that says yes to everything, a denied tool that
+  does not run, a host outside the allow list that is not requested). Do not build a gate on it
+  in your own code either: it is a statistical model reading text an attacker may have written.
+- **What a wrong answer can do:** end a plan early (`finish`), keep a plan that should have been
+  revised (`continue`), or take the wrong route of a pipeline. If a route leads to a node with
+  write tools, that node's own consent gate still stands; set `decision.route: false` or a high
+  `confidenceThreshold` where a wrong route is expensive.
+- **The text it reads is untrusted** (tool results, fetched pages, a step's answer): prompt
+  injection can push a decision as it can push a language model. The threshold limits the damage
+  to the two questions above; it does not make the answer trustworthy.
+- **The key** of a hosted decision API is the user's own (BYOK), named by `credentialRef` and read
+  from the `CredentialStore`; an `apiKey` written into the spec is refused. It is sent in a header
+  to that API only: the request goes through the guarded fetch under `decisionEgressPolicy`
+  (allow list = the API's host, its scheme and port, `POST` only, no redirect, no cookies, no
+  referrer). It is in no event, error, log line or result (tested).
+- **What leaves the page:** the request, the plan and the step results (replan), or a node's
+  answer (route), go to the decision API's vendor - the same text the planner model would have
+  been sent, to a possibly different company. Say so where you tell users where their data goes.
+- **CORS** decides which API a page can call at all: see
+  [capabilities.md](capabilities.md#decision-models). An API that refuses cross-origin calls
+  needs a gateway of yours, which then also holds the key.
+
 ## Learning (`save_skill`)
 
 With `learning` on, the agent writes lessons it can read in later runs. A notebook

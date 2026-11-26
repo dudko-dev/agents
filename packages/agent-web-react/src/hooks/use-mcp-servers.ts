@@ -11,6 +11,7 @@ import {
   defaultRedirectUrl,
   describeMcpResult,
   loadMcp,
+  mcpInstructionsOf,
   mcpOAuthProviderOptions,
   OAUTH_UNSUPPORTED,
   PENDING_TTL_MS,
@@ -52,6 +53,12 @@ export interface McpServerView {
   /** Where to send the user when `status === 'needs-authorization'`. */
   authorizationUrl?: string
   catalog: McpCatalogEntry[]
+  /**
+   * What the server told the agent in its handshake (its MCP `instructions`), while it is
+   * connected and if it sent any. Third-party text that the core puts in the agent's system
+   * prompt: show it to the user as the server's words.
+   */
+  instructions?: string
 }
 
 export interface UseMcpServersOptions extends UseMcpOptions {
@@ -242,6 +249,7 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
         error: undefined,
         authorizationUrl: undefined,
         catalog: [],
+        instructions: undefined,
       })
       try {
         const mod = await loadMcp()
@@ -296,7 +304,11 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
           })
         })
         setToolsVersion((v) => v + 1)
-        patch(name, { status: 'connected', catalog: connection.catalog })
+        patch(name, {
+          status: 'connected',
+          catalog: connection.catalog,
+          instructions: mcpInstructionsOf(connection, name),
+        })
       } catch (err) {
         if (!current()) return
         patch(name, { status: 'error', error: err instanceof Error ? err.message : String(err) })
@@ -398,7 +410,13 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
       const pending = readRecord<PendingRecord>(pendingKey)
       if (pending?.name === name) writeRecord(pendingKey, undefined)
       await closeServer(name)
-      patch(name, { status: 'idle', authorizationUrl: undefined, catalog: [], error: undefined })
+      patch(name, {
+        status: 'idle',
+        authorizationUrl: undefined,
+        catalog: [],
+        instructions: undefined,
+        error: undefined,
+      })
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [closeServer, patch, pendingKey],

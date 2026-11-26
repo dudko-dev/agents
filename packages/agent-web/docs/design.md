@@ -298,6 +298,40 @@ call budget (a call that is not made costs neither) and it is scoped to the step
 attempt, and across steps, a model may repeat a call as it always could. It cannot recognise a
 write repeated with different arguments; that is what the prompt and read-only marks are for.
 
+## Decision models: a fast path with the old path underneath
+
+Some model calls in the loop do not need text: "continue or finish?", "which route?". Decision
+models (TypeSafe's Jev, Google's Gemini Decision 1) answer such a question with an option and a
+probability for a fraction of the latency and price. `decisionModel` uses one there.
+
+- **Our own small interface, `decide(question) -> { choice, confidence }`.** One question per
+  call, options with descriptions, an optional context. The vendors' APIs take many questions of
+  several types per request; the agent has one closed question at a time, and an interface this
+  small is what a host can implement in ten lines over anything (a gateway, a local classifier).
+- **No HTTP client of ours.** The AI SDK ships `experimental_decide` and provider decision models
+  (`@ai-sdk/google`, `@ai-sdk/typesafe-ai`); `decisionModelFromAiSdk` adapts them. That keeps the
+  model the only seam. The price: the AI SDK API is experimental, so the adapter is thin and the
+  interface is ours - if theirs changes, one function changes.
+- **Confidence is the probability of the chosen option**, taken from the API's distribution. Not
+  a vendor's separate "confidence" statistic (TypeSafe's is a different formula), and not a
+  language model's self-reported number: a model that returns no distribution gets 0 and is never
+  used. That is also why there is no "cheap LLM as a decision model" adapter: its confidence would
+  be a guess, and a threshold on a guess protects nothing.
+- **The fallback is the code that was already there.** `askDecisionModel` turns everything that
+  is not a confident, valid answer into "not accepted", and the caller then makes the ordinary
+  call - not a copy of it. Off, and on-but-rejected, send the same requests as before
+  (`tests/decision.test.ts`, and the golden requests of `tests/model-tiers.test.ts`).
+- **`revise` is an option the model cannot be given.** The replanner's third answer needs a plan.
+  The question still offers it, so the decision model can say "neither of the cheap answers":
+  that hands over to the replanner (`needs-model`).
+- **A call is not a token.** `usage.decisionCalls` counts calls; the token fields carry only what
+  the API reported. Nothing is estimated.
+- **In the page, a spec, not a client.** `{ providerType: 'google', ... }` resolves like a model
+  spec (key from the `CredentialStore`), but its request is pinned to the API's host by the
+  guarded fetch, as `web_search`'s is. Only an API whose CORS lets a page in gets a spec.
+- **Never a gate.** See security.md. `src/decision.ts` is a byte-for-byte copy of the Node
+  sibling's; `src/decision-provider.ts` is this package's own.
+
 ## Structured output: `generateText` + `Output.object`
 
 AI SDK v7 deprecates `generateObject` / `streamObject`. `generateStructured` is therefore

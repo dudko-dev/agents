@@ -203,8 +203,9 @@ function Custom() {
 | `sessionId` / `loadChat(chat)` | the memory session; switch conversations |
 | `subagents`, `skills`, `discoveredTools`, `compactions`, `budget` | the rest of the run, folded |
 | `learned`, `learnedNow`, `fetches` | the agent's notebook (`LessonView[]`, survives `reset`), what it wrote this run, and the `web_fetch` requests this run made (`FetchView[]`) |
-| `queued`, `notes`, `undelivered`, `replan` | steering: messages waiting, shown (and where), left over; the last replan decision (`byUser` when a message caused it) |
-| `error`, `stopped`, `events`, `seq` | the run's error text, whether it was stopped, the raw event log and its counter |
+| `queued`, `notes`, `undelivered`, `replan` | steering: messages waiting, shown (and where), left over; the last replan decision (`byUser` when a message caused it; `failed` + `error` when the replanner call itself failed and the run went on with its plan) |
+| `steps[i].tier`, `.model`, `.tierReason`, `.escalations`, `.replanFailed` | with the core's `executorTiers`: the tier and model a step is on, why it started there, and its escalations (`StepEscalationView[]`); a tool call of an escalated attempt has `attempt`, a write that was not run twice `replayed`. `replanFailed`: the replanner failed after this step (a warning). All absent when tiers are off — see [docs/chat.md](docs/chat.md#model-tiers-escalation-and-a-replanner-that-failed) |
+| `error`, `stopped`, `events`, `seq` | the run's error text (a replanner failure is not one: see `replan.failed`), whether it was stopped, the raw event log and its counter |
 | `modelLoad` | WebLLM download progress, when loading |
 
 **Options:** `deps` (rebuild the agent when these change — e.g. on a model
@@ -417,10 +418,16 @@ await mcp.connect({ url, oauth: true })       // or { url, headers: { Authorizat
 const config = { model, tools: { ...myTools, ...mcp.tools } }
 ```
 
-`useMcp` returns `{ status, tools, catalog, error, authorizationUrl,
+`useMcp` returns `{ status, tools, catalog, instructions, error, authorizationUrl,
 oauthSupported, completingAuthorization, connect, disconnect, authorize,
 forgetAuthorization, checkOAuthSupport }`. `status` is
 `idle | connecting | connected | needs-authorization | error`.
+
+`instructions` is what the connected server told the agent in its handshake (MCP `instructions`),
+when it sent any. The core puts that text into the system prompt of an agent that uses the
+server's tools, and it is **third-party text**: with bring-your-own servers, show it to the user,
+labelled as the server's words (`useMcpServers().servers[i].instructions` is the same per server;
+`mcpInstructionsOf(connection, name)` reads it from a `ConnectedMcp`).
 
 The OAuth round-trip navigates away from your app, so the hook persists what it
 needs and, on the way back, finishes the code exchange (passing `iss` to the
@@ -483,7 +490,7 @@ import { useMcpServers } from '@dudko.dev/agent-web-react/mcp'
 
 const mcp = useMcpServers({ clientName: 'my-app' }) // the list persists; reconnects on load
 await mcp.add({ name: 'docs', url, auth: 'oauth' }) // 'none' | 'bearer' (+ token) | 'oauth'
-mcp.servers  // [{ name, url, status, catalog, error, … }]
+mcp.servers  // [{ name, url, status, catalog, instructions, error, … }]
 const config = { model, tools: { ...myTools, ...mcp.tools } } // "<name>__<tool>"
 ```
 
@@ -515,7 +522,7 @@ use them standalone. The full guide: [docs/chat.md](docs/chat.md).
 | `<AgentChat>` | Full panel: transcript with per-answer activity + composer + optional history and files panels. Reads a `controller` prop or the `<AgentProvider>` context. |
 | `<AgentComposer>` | The input and its toolbar: attachments, commands, timer, agents, model/thinking, consent, mic, send/stop. |
 | `<MessageList>` | The transcript; each answer with its steps, tool calls, thoughts, usage. |
-| `<StepList>` / `<ToolCallRow>` | Execution steps / one tool call with its cost and images. |
+| `<StepList>` / `<ToolCallRow>` | Execution steps / one tool call with its cost and images. With model tiers: the tier / model badge, the escalation line, the earlier attempt's calls (`showTiers`); a replanner failure as a warning (`showReplanFailed`). |
 | `<ToolApprovalPrompt>` | Consent cards (Allow once / Always / Deny). |
 | `<ApprovalModeSwitch>` | Segmented consent-mode switch. |
 | `<ChatHistoryList>` | Saved chats (from `useChatHistory`). |
@@ -542,7 +549,7 @@ state = agentStateReducer(state, { type: 'event', event }) // fold each AgentEve
 ```
 
 The state is made of plain, exported view types you can render with your own components:
-`StepView` (a step and its `ToolCallView`s), `ApprovalView`, `SubagentView`, `UserNoteView` /
+`StepView` (a step and its `ToolCallView`s; `StepEscalationView` for its escalations), `ApprovalView`, `SubagentView`, `UserNoteView` /
 `QueuedMessageView` (steering), `LessonView` / `FetchView` (the notebook and the pages fetched),
 `BudgetView`, `CompactionView`, `AttachmentView`, `ChatMessage` (a transcript entry that keeps its
 own steps, usage and duration). Outside `<AgentChat>`, `useAgentContext()` returns the controller of

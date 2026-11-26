@@ -96,6 +96,25 @@ export {
 export type { EgressErrorCode, IEgressPolicy, IResolvedAddress, SafeFetch } from './safe-fetch.ts'
 export { createWebFetchTool, createEgressTools, htmlToText, WEB_FETCH_TOOL } from './web-fetch.ts'
 // Search: the web_search tool (a hosted search API through the safe fetch, or the host's function).
+export {
+  askDecisionModel,
+  decisionModelFromAiSdk,
+  DEFAULT_DECISION_CONFIDENCE_THRESHOLD,
+  DEFAULT_DECISION_TIMEOUT_MS,
+} from './decision.ts'
+export type {
+  DecisionFallbackReason,
+  DecisionPoint,
+  IAiSdkDecisionOptions,
+  IDecisionAnswer,
+  IDecisionCallOptions,
+  IDecisionConfig,
+  IDecisionEvent,
+  IDecisionModel,
+  IDecisionOption,
+  IDecisionOutcome,
+  IDecisionQuestion,
+} from './decision.ts'
 export { createWebSearchTool, createSearchTools, searchEgressPolicy } from './web-search.ts'
 export type { ISearchConfig, IWebSearchOptions } from './web-search.ts'
 export {

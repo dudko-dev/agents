@@ -26,10 +26,23 @@ export interface McpServerResult {
   needsAuthorization?: boolean
 }
 
+/** The `instructions` one connected server returned in its `initialize` result. */
+export interface McpServerInstructions {
+  /** The server's name: its key in the configuration. */
+  server: string
+  instructions: string
+}
+
 export interface ConnectedMcp {
   tools: AgentToolSet
   catalog: McpCatalogEntry[]
   results: McpServerResult[]
+  /**
+   * What each connected server told the agent in its handshake (newer cores; absent on older
+   * ones). THIRD-PARTY text: the core puts it in the system prompt of an agent that uses the
+   * server's tools, so a host should let the user see it.
+   */
+  instructions?: McpServerInstructions[]
   refreshServer?: (name: string) => Promise<void>
   close: () => Promise<void>
 }

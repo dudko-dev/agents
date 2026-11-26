@@ -77,6 +77,7 @@ export type {
   CompactionView,
   FetchView,
   LessonView,
+  StepEscalationView,
   StepView,
   SubagentView,
   ToolCallView,

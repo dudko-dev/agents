@@ -273,6 +273,31 @@ export type {
   IWebFetchOptions,
 } from './tools/egress.js'
 // Search: the web_search tool (a hosted search API through the guarded fetch, or the host's function).
+export {
+  askDecisionModel,
+  decisionModelFromAiSdk,
+  DEFAULT_DECISION_CONFIDENCE_THRESHOLD,
+  DEFAULT_DECISION_TIMEOUT_MS,
+} from './decision.js'
+export type {
+  DecisionFallbackReason,
+  DecisionPoint,
+  IAiSdkDecisionOptions,
+  IDecisionAnswer,
+  IDecisionCallOptions,
+  IDecisionConfig,
+  IDecisionEvent,
+  IDecisionModel,
+  IDecisionOption,
+  IDecisionOutcome,
+  IDecisionQuestion,
+} from './decision.js'
+export {
+  decisionEgressPolicy,
+  resolveDecisionModel,
+  DECISION_PROVIDERS,
+} from './decision-provider.js'
+export type { IDecisionModelSpec } from './decision-provider.js'
 export { createWebSearchTool, createSearchTools, searchEgressPolicy } from './tools/web-search.js'
 export type { ISearchConfig, IWebSearchOptions } from './tools/web-search.js'
 export {

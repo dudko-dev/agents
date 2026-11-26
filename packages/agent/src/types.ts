@@ -2,6 +2,7 @@ import type { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.
 import type { FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js'
 import type { ToolSet } from 'ai'
 import type { RunControl } from './control.ts'
+import type { IDecisionConfig, IDecisionEvent, IDecisionModel } from './decision.ts'
 import type { PipelineEvent } from './pipeline-engine.ts'
 import type { IEgressPolicy } from './safe-fetch.ts'
 import type { ISearchConfig } from './web-search.ts'
@@ -381,6 +382,15 @@ export interface IAgentConfig {
   // host only, through createSafeFetch; with `egress` set, results the model could not fetch are
   // left out. Works without `egress` (then there is no web_fetch to open a link). See ISearchConfig.
   search?: ISearchConfig
+  // A decision model: a small, fast model that answers a closed question with one option and a
+  // probability instead of writing text (see decision.ts). Off unless set. Where it is confident
+  // it replaces the replanner's continue / finish call and a pipeline node's route call; below
+  // `decision.confidenceThreshold`, on an error, a timeout or an answer that is not an option,
+  // the ordinary model call runs exactly as without it. Never consulted for tool approval or
+  // egress.
+  decisionModel?: IDecisionModel
+  // The threshold (default 0.8), the timeout (default 5000 ms) and which questions it is asked.
+  decision?: IDecisionConfig
   // Let the agent keep a notebook: it writes lessons it learned (problem -> what worked) as skills,
   // visible in the SKILLS index and loadable for the rest of the session. `true` = in memory (as
   // long as the agent lives); give a store to keep them (DirSkillStore). Saving is a write for
@@ -533,6 +543,9 @@ export interface IUsage {
   imagesGenerated?: number
   speechCharacters?: number
   transcriptionSeconds?: number
+  // Calls made to `config.decisionModel`. A call is not a token: what the API billed for it
+  // (when it says) is in the token fields, the number of calls is here. Absent when zero.
+  decisionCalls?: number
 }
 
 export interface IPlanStep {
@@ -579,14 +592,25 @@ export type ReplanTrigger =
 
 // 'user-message': the replanner ran because the user sent a message mid-run (RunControl.send),
 // not because a step failed or the replan trigger fired.
-export type ReplanCause = 'last-step' | 'clean-step' | 'llm-decision' | 'user-message'
+// 'decision-model': `config.decisionModel` decided, and the replanner was not called.
+export type ReplanCause =
+  'last-step' | 'clean-step' | 'llm-decision' | 'user-message' | 'decision-model'
 
 // Phase of a `usage` event. 'compact' is a compaction summary call;
 // 'subagent' is usage a subagent tool spent (it counts against this run's
-// limits like any other). 'media' is a call to an image / speech / transcription model
-// (config.media): its `usage` carries the media fields and zero tokens.
+// limits like any other).
 export type UsagePhase =
-  'plan' | 'execute' | 'replan' | 'synthesize' | 'compact' | 'subagent' | 'media'
+  | 'plan'
+  | 'execute'
+  | 'replan'
+  | 'synthesize'
+  | 'compact'
+  | 'subagent'
+  // A call to `config.decisionModel` (usage.decisionCalls, plus the tokens its API reported).
+  | 'decision'
+  // A call to an image / speech / transcription model (config.media): its `usage` carries the
+  // media fields and zero tokens.
+  | 'media'
 
 type AgentEventBody =
   | { type: 'plan.thought-delta'; delta: string }
@@ -632,7 +656,12 @@ type AgentEventBody =
       // provider down after its retries) and `mode: 'continue'` is the fallback, not the model's
       // decision. The failure is the `error` event (phase 'replan') just before this one.
       failed?: true
+      // Set with cause 'decision-model': the probability the decision model gave its choice.
+      confidence?: number
     }
+  // `config.decisionModel` was asked a question: its answer was used (`accepted`), or the
+  // ordinary model call ran and `reason` says why.
+  | IDecisionEvent
   | { type: 'final.text-delta'; delta: string }
   | { type: 'final.reasoning-delta'; delta: string }
   | { type: 'final'; text: string }
