@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { AgentToolSet } from '@dudko.dev/agent-web'
 import type {
   BrowserOAuthProvider,
+  BrowserOAuthProviderOptions,
   ConnectedMcp,
   McpCatalogEntry,
   McpModule,
@@ -10,6 +11,27 @@ import type {
 } from '../mcp-types.js'
 
 export type McpStatus = 'idle' | 'connecting' | 'connected' | 'needs-authorization' | 'error'
+
+/** The OAuth details of one server. Everything is optional. */
+export interface McpOAuthOptions {
+  /** Where the authorization server sends the user back (default: this page, without query or hash). */
+  redirectUrl?: string
+  /** Fallback scope when the server's metadata advertises none. */
+  scope?: string
+  /** `client_name` for dynamic registration (default: the hook's `clientName`). */
+  clientName?: string
+  /**
+   * URL of a client ID metadata document (CIMD) your app hosts (default: the
+   * hook's `clientMetadataUrl`). An authorization server that advertises
+   * `client_id_metadata_document_supported` takes it as the `client_id` and no
+   * dynamic registration is made; any other server is registered with as
+   * before. Must be https with a non-root path, and the document must list the
+   * `redirectUrl` in its `redirect_uris` - the core refuses anything else and
+   * the server ends in `status: 'error'`. A core that does not know the option
+   * ignores it and registers dynamically.
+   */
+  clientMetadataUrl?: string
+}
 
 export interface McpConnectOptions {
   /** The server's StreamableHTTP endpoint. */
@@ -22,12 +44,18 @@ export interface McpConnectOptions {
    * Authenticate with OAuth 2.1 + dynamic client registration. Requires a core
    * that ships the OAuth provider; check `oauthSupported` before offering it.
    */
-  oauth?: boolean | { redirectUrl?: string; scope?: string; clientName?: string }
+  oauth?: boolean | McpOAuthOptions
 }
 
 export interface UseMcpOptions {
   /** Client name reported to the MCP server during initialize. */
   clientName?: string
+  /**
+   * URL of the client ID metadata document (CIMD) this app hosts, used for
+   * every OAuth server unless its own `oauth.clientMetadataUrl` says otherwise.
+   * See `McpOAuthOptions.clientMetadataUrl`.
+   */
+  clientMetadataUrl?: string
   /** Called with connector log lines — handy while debugging a server. */
   onLog?: (level: string, message: string) => void
 }
@@ -70,6 +98,7 @@ interface OAuthRecord {
   redirectUrl: string
   scope?: string
   clientName?: string
+  clientMetadataUrl?: string
   /** When the redirect was started, so a stale record can't claim a callback. */
   startedAt?: number
 }
@@ -213,6 +242,29 @@ export const defaultRedirectUrl = (): string =>
     : `${globalThis.location.origin}${globalThis.location.pathname}`
 
 /**
+ * The options of the core's OAuth provider for one server: the server's own
+ * `oauth` details first, then the hook-level defaults (`clientName`,
+ * `clientMetadataUrl`), then this page as the redirect. Pure - both hooks build
+ * every provider through it, on connect, on the way back from the redirect and
+ * when forgetting, so the three always describe the same client.
+ */
+export const mcpOAuthProviderOptions = (
+  serverUrl: string,
+  oauth: McpOAuthOptions = {},
+  defaults: Pick<McpOAuthOptions, 'clientName' | 'clientMetadataUrl'> = {},
+): BrowserOAuthProviderOptions => {
+  const clientMetadataUrl = oauth.clientMetadataUrl ?? defaults.clientMetadataUrl
+  return {
+    serverUrl,
+    redirectUrl: oauth.redirectUrl ?? defaultRedirectUrl(),
+    clientName: oauth.clientName ?? defaults.clientName,
+    scope: oauth.scope,
+    // Left out when unset: a provider built without it keeps registering dynamically.
+    ...(clientMetadataUrl !== undefined ? { clientMetadataUrl } : {}),
+  }
+}
+
+/**
  * Did this error come from the server refusing our authorization?
  *
  * Identity, not strings: the SDK's `UnauthorizedError` never assigns
@@ -342,21 +394,23 @@ export const useMcp = (options: UseMcpOptions = {}): UseMcpReturn => {
 
         if (opts.oauth) {
           if (!mod.BrowserOAuthProvider) throw new Error(OAUTH_UNSUPPORTED)
-          const oauth = typeof opts.oauth === 'object' ? opts.oauth : {}
+          const providerOptions = mcpOAuthProviderOptions(
+            opts.url,
+            typeof opts.oauth === 'object' ? opts.oauth : {},
+            optionsRef.current,
+          )
           const record: OAuthRecord = {
             url: opts.url,
             name,
-            redirectUrl: oauth.redirectUrl ?? defaultRedirectUrl(),
-            scope: oauth.scope,
-            clientName: oauth.clientName ?? optionsRef.current.clientName,
+            redirectUrl: providerOptions.redirectUrl,
+            scope: providerOptions.scope,
+            clientName: providerOptions.clientName,
+            clientMetadataUrl: providerOptions.clientMetadataUrl,
             startedAt: Date.now(),
           }
-          authProvider = new mod.BrowserOAuthProvider({
-            serverUrl: record.url,
-            redirectUrl: record.redirectUrl,
-            clientName: record.clientName,
-            scope: record.scope,
-          })
+          // Throws on a clientMetadataUrl the core refuses (not https, or a bare
+          // origin): reported below as this server's error, before any request.
+          authProvider = new mod.BrowserOAuthProvider(providerOptions)
           providerRef.current = authProvider
           // `pending` resumes the redirect; `oauth` outlives it so tokens stay
           // addressable for forgetAuthorization() after a reload.
@@ -445,12 +499,11 @@ export const useMcp = (options: UseMcpOptions = {}): UseMcpReturn => {
     if (!provider && record) {
       const mod = await loadMcp().catch(() => undefined)
       if (mod?.BrowserOAuthProvider) {
-        provider = new mod.BrowserOAuthProvider({
-          serverUrl: record.url,
-          redirectUrl: record.redirectUrl,
-          clientName: record.clientName,
-          scope: record.scope,
-        })
+        try {
+          provider = new mod.BrowserOAuthProvider(mcpOAuthProviderOptions(record.url, record))
+        } catch {
+          // Options the core refuses never built a provider, so nothing was stored for them.
+        }
       }
     }
     await provider?.reset().catch(() => {})
@@ -497,12 +550,7 @@ export const useMcp = (options: UseMcpOptions = {}): UseMcpReturn => {
         const mod = await loadMcp()
         setOauthSupported(typeof mod.BrowserOAuthProvider === 'function')
         if (!mod.BrowserOAuthProvider || !mod.finishMcpOAuth) throw new Error(OAUTH_UNSUPPORTED)
-        const provider = new mod.BrowserOAuthProvider({
-          serverUrl: pending.url,
-          redirectUrl: pending.redirectUrl ?? defaultRedirectUrl(),
-          clientName: pending.clientName,
-          scope: pending.scope,
-        })
+        const provider = new mod.BrowserOAuthProvider(mcpOAuthProviderOptions(pending.url, pending))
         providerRef.current = provider
         await mod.finishMcpOAuth(provider, callback)
         writeRecord(PENDING_KEY, undefined)
@@ -516,7 +564,18 @@ export const useMcp = (options: UseMcpOptions = {}): UseMcpReturn => {
         // Hand back to `connect`, which owns the status from here — a slow or
         // hung handshake must not leave the UI stuck on "finishing".
         setCompletingAuthorization(false)
-        await connect({ url: pending.url, name: pending.name, oauth: true })
+        // With the details the flow was started with: the same redirect, scope,
+        // client name and client ID metadata document, not the hook's defaults.
+        await connect({
+          url: pending.url,
+          name: pending.name,
+          oauth: {
+            redirectUrl: pending.redirectUrl,
+            scope: pending.scope,
+            clientName: pending.clientName,
+            clientMetadataUrl: pending.clientMetadataUrl,
+          },
+        })
       } catch (err) {
         writeRecord(PENDING_KEY, undefined)
         setError(err instanceof Error ? err.message : String(err))

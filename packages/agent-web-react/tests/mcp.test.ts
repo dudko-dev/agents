@@ -4,6 +4,7 @@ import {
   claimOAuthCallback,
   describeMcpResult,
   isUnauthorizedError,
+  mcpOAuthProviderOptions,
   readCallbackParams,
   stripOAuthParams,
 } from '../dist/mcp.js'
@@ -152,4 +153,69 @@ test('readCallbackParams: carries iss (RFC 9207) for the core to check', () => {
     stripOAuthParams(`https://app.test/#/cb?code=abc&state=xyz&iss=${q}&tab=tools`),
     'https://app.test/#/cb?tab=tools',
   )
+})
+
+// clientMetadataUrl (CIMD). Both hooks build every OAuth provider - on connect, on the way back
+// from the redirect, when forgetting - from this one function, so what it returns is what the
+// core is given.
+
+const CIMD_URL = 'https://app.example.test/oauth/client.json'
+
+test("mcpOAuthProviderOptions: the server's own clientMetadataUrl is passed through", () => {
+  assert.deepEqual(
+    mcpOAuthProviderOptions('https://mcp.example.test/mcp', {
+      redirectUrl: 'https://app.example.test/',
+      scope: 'mcp:tools',
+      clientName: 'my-app',
+      clientMetadataUrl: CIMD_URL,
+    }),
+    {
+      serverUrl: 'https://mcp.example.test/mcp',
+      redirectUrl: 'https://app.example.test/',
+      scope: 'mcp:tools',
+      clientName: 'my-app',
+      clientMetadataUrl: CIMD_URL,
+    },
+  )
+})
+
+test("mcpOAuthProviderOptions: the hook-level clientMetadataUrl is the default, a server's own wins", () => {
+  const defaults = { clientName: 'my-app', clientMetadataUrl: CIMD_URL }
+  const fromHook = mcpOAuthProviderOptions('https://mcp.example.test/mcp', {}, defaults)
+  assert.equal(fromHook.clientMetadataUrl, CIMD_URL)
+  assert.equal(fromHook.clientName, 'my-app')
+
+  const own = 'https://app.example.test/oauth/other-client.json'
+  const fromServer = mcpOAuthProviderOptions(
+    'https://mcp.example.test/mcp',
+    { clientMetadataUrl: own, clientName: 'other' },
+    defaults,
+  )
+  assert.equal(fromServer.clientMetadataUrl, own)
+  assert.equal(fromServer.clientName, 'other')
+})
+
+test('mcpOAuthProviderOptions: with no clientMetadataUrl the field is absent, not undefined', () => {
+  const opts = mcpOAuthProviderOptions('https://mcp.example.test/mcp', undefined, {
+    clientName: 'my-app',
+  })
+  assert.equal('clientMetadataUrl' in opts, false)
+})
+
+test("clientMetadataUrl: the core's provider takes what the hooks hand it, and refuses a bad URL", async () => {
+  // The real class from the core this package is built against: the structural type in
+  // mcp-types.ts is only a claim until the constructor has seen the object.
+  const { BrowserOAuthProvider } = await import('@dudko.dev/agent-web/mcp')
+  const build = (clientMetadataUrl: string) =>
+    new BrowserOAuthProvider(
+      mcpOAuthProviderOptions(
+        'https://mcp.example.test/mcp',
+        { redirectUrl: 'https://app.example.test/' },
+        { clientMetadataUrl },
+      ),
+    )
+  assert.equal(build(CIMD_URL).clientMetadataUrl, CIMD_URL)
+  // The hooks catch this and report it as the server's error; nothing is requested.
+  assert.throws(() => build('http://app.example.test/oauth/client.json'), /clientMetadataUrl/)
+  assert.throws(() => build('https://app.example.test/'), /clientMetadataUrl/)
 })

@@ -428,6 +428,41 @@ core, which refuses a response from another authorization server - RFC 9207),
 strips `?code=…` from the address bar and reconnects before rendering — `completingAuthorization`
 covers that window.
 
+Options:
+
+| | |
+| --- | --- |
+| `useMcp({ clientName })` | the MCP client name, and the `client_name` of a dynamic registration |
+| `useMcp({ clientMetadataUrl })` | the URL of a **client ID metadata document** (CIMD) your app hosts, for every OAuth server - see below |
+| `useMcp({ onLog })` | connector log lines |
+| `connect({ url, name, headers })` | the endpoint, the tool prefix (`"<name>__<tool>"`, default `mcp`), static headers |
+| `connect({ oauth })` | `true`, or `{ redirectUrl, scope, clientName, clientMetadataUrl }` (`McpOAuthOptions`) - each overrides the hook-level value for this server |
+
+**`clientMetadataUrl` (CIMD).** Instead of registering itself with every authorization server, an
+app can publish one JSON document that describes it and use that document's URL as its
+`client_id`:
+
+```tsx
+const mcp = useMcp({
+  clientName: 'my-app',
+  clientMetadataUrl: 'https://my-app.example/oauth/client.json',
+})
+await mcp.connect({ url, oauth: true })
+// or for one server only: connect({ url, oauth: { clientMetadataUrl: '…' } })
+```
+
+The hooks pass the URL to the core's OAuth provider unchanged. An authorization server that
+advertises `client_id_metadata_document_supported` takes it as the `client_id` and no registration
+request is made; any other server gets dynamic registration as before, and a registration already
+stored for the server wins over both (`forgetAuthorization` drops it). The URL must be https with a
+path of its own, and the document served there must list the `redirectUrl` (by default this page,
+without query or hash) in its `redirect_uris` - the core refuses any other URL before a request is
+made, and the server ends in `status: 'error'` with the reason. The URL is public and is remembered
+with the rest of the server's OAuth details across the redirect and reloads. The core's
+[README](https://github.com/dudko-dev/agents/blob/main/packages/agent-web/README.md) and
+[security notes](https://github.com/dudko-dev/agents/blob/main/packages/agent-web/docs/security.md)
+say what the document must contain.
+
 Two notes:
 
 - The connector lives in the core's optional `@dudko.dev/agent-web/mcp` subpath
@@ -451,6 +486,16 @@ const mcp = useMcpServers({ clientName: 'my-app' }) // the list persists; reconn
 await mcp.add({ name: 'docs', url, auth: 'oauth' }) // 'none' | 'bearer' (+ token) | 'oauth'
 mcp.servers  // [{ name, url, status, catalog, error, … }]
 const config = { model, tools: { ...myTools, ...mcp.tools } } // "<name>__<tool>"
+```
+
+`useMcpServers` takes the options of `useMcp` (`clientName`, `clientMetadataUrl`, `onLog`) plus
+`persist`, `storageKey`, `autoConnect` and `connectTimeoutMs`. A server added with
+`auth: 'oauth'` may carry its own `oauth: { redirectUrl, scope, clientName, clientMetadataUrl }`,
+which wins over the hook-level values and is remembered with the list:
+
+```tsx
+const mcp = useMcpServers({ clientMetadataUrl: 'https://my-app.example/oauth/client.json' })
+await mcp.add({ name: 'docs', url, auth: 'oauth' }) // CIMD where the server supports it, DCR elsewhere
 ```
 
 Servers connect in parallel, each with its own deadline; paginated tool lists

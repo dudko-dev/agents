@@ -63,6 +63,8 @@ export interface BrowserOAuthProviderOptions {
   redirectUrl: string
   clientName?: string
   scope?: string
+  /** Client ID metadata document URL (CIMD). Cores without it ignore the field. */
+  clientMetadataUrl?: string
 }
 
 /** The shape of the subpath module, as far as this package uses it. */
