@@ -1,9 +1,12 @@
 import {
   auth,
   Client,
+  SdkError,
+  SdkErrorCode,
   StreamableHTTPClientTransport,
   UnauthorizedError,
   type CallToolResult,
+  type ClientOptions,
   type FetchLike,
   type JsonSchemaType,
   type JsonSchemaValidator,
@@ -26,9 +29,14 @@ import {
   dropStructuredDuplicates,
   isStructuredContent,
   markMcpTool,
+  MCP_MODERN_REFUSED_HINT,
+  mcpInputRequiredMessage,
+  mcpProtocolMode,
+  mcpVersionNegotiation,
   outputSchemaNote,
   withStructuredContent,
   type McpServerInstructions,
+  type McpServerProtocol,
 } from './mcp-shared.ts'
 import { ATTR, withSpan } from './tracing.ts'
 import type { IMcpServerConfig } from './types.ts'
@@ -103,6 +111,19 @@ export const DEFAULT_MCP_CONNECT_TIMEOUT_MS = 30_000
 // tools/list pagination cap: a server returning a cursor forever must not
 // hang the connect.
 export const MAX_TOOL_LIST_PAGES = 100
+// `protocol: 'auto' | 'modern'` over stdio: how long the `server/discover`
+// probe waits. A 2025 stdio server may never answer a request it does not know
+// before `initialize`; the SDK reads that silence as "legacy" - after this long
+// (its own default is the request timeout, a minute: past the connect budget).
+export const MCP_STDIO_PROBE_TIMEOUT_MS = 5_000
+// 2026-07-28: how long the `subscriptions/listen` stream may take to be
+// acknowledged before the connect goes on without tool-list change notices.
+export const MCP_LISTEN_ACK_TIMEOUT_MS = 10_000
+
+/** The SDK's typed error with this code (by name too: a second copy of the SDK is another class). */
+const isSdkError = (err: unknown, code: SdkErrorCode): boolean =>
+  (err instanceof SdkError || (err instanceof Error && err.name === 'SdkError')) &&
+  (err as { code?: unknown }).code === code
 
 /**
  * Every tool of a server, following `nextCursor` (up to MAX_TOOL_LIST_PAGES
@@ -179,6 +200,8 @@ interface IServerConnect {
   client?: Client
   // What the server said in its initialize result ('' when nothing).
   instructions?: string
+  // The revision the connection negotiated.
+  protocol?: Omit<McpServerProtocol, 'server'>
   listed?: IMcpToolDescriptor[]
   error?: string
   needsAuthorization?: boolean
@@ -339,6 +362,12 @@ export interface IConnectedMcp {
   // per connection: a transport-level reconnect does not change it. Third-party
   // text - render it with renderMcpInstructions, never as the operator's own.
   instructions: McpServerInstructions[]
+  // The protocol revision negotiated with each connected server, in
+  // declaration order: `2025-…` after the `initialize` handshake (always, for
+  // a server without `protocol`), `2026-07-28` when `protocol: 'auto'` or
+  // `'modern'` found a server that offers it. Fixed for the life of the
+  // connection.
+  protocols: McpServerProtocol[]
   // Re-fetch one server's tool list and rewrite its entries in tools/catalog.
   // Throws if the server is not connected.
   refreshServer: (name: string) => Promise<void>
@@ -370,6 +399,8 @@ export const connectMcpServers = async (
   const results: IConnectedMcp['results'] = []
   const instructions: McpServerInstructions[] = []
   const instructionsOf = new Map<string, string>()
+  const protocols: McpServerProtocol[] = []
+  let closing = false
   // server name -> the tool keys it currently owns, so a refresh removes
   // exactly its own entries.
   const mountedKeys = new Map<string, string[]>()
@@ -478,9 +509,12 @@ export const connectMcpServers = async (
                 // `client.request`, not `client.callTool`: the typed verb also
                 // checks the result against the tool's outputSchema and throws
                 // when it does not fit - taking with it a result that DID
-                // arrive. The request is the same on the wire. (On the
-                // 2026-07-28 revision `callTool` also mirrors arguments into
-                // `Mcp-Param-*` headers; this client negotiates the 2025 one.)
+                // arrive. The request is the same on the wire, in both eras:
+                // on 2026-07-28 the transport derives `Mcp-Method` and
+                // `Mcp-Name` from the message itself, whoever built it. Only
+                // the `Mcp-Param-*` headers are the typed verb's own - a
+                // mirror of arguments a tool marked with `x-mcp-header`, for
+                // intermediaries; this client does not send them.
                 result = await client.request(
                   { method: 'tools/call', params: { name: t.name, arguments: toSend } },
                   opts?.abortSignal ? { signal: opts.abortSignal } : undefined,
@@ -490,6 +524,12 @@ export const connectMcpServers = async (
                 // was never sent: there is no result. The AI SDK records the
                 // throw as a failed call.
                 span.setAttribute(ATTR.TOOL_OK, false)
+                // 2026-07-28: the server answered `input_required` (it wants
+                // the user asked something, or the call sent again with a
+                // state). Not supported here, and the call is not repeated.
+                if (isSdkError(err, SdkErrorCode.UnsupportedResultType)) {
+                  throw new McpToolError(mcpInputRequiredMessage(t.name))
+                }
                 throw err
               }
               // A result arrived. When it does not follow the tool's
@@ -627,6 +667,7 @@ export const connectMcpServers = async (
         client = c
       },
       () => timedOut,
+      timeoutMs,
     )
     try {
       return await (timeoutMs > 0
@@ -642,7 +683,16 @@ export const connectMcpServers = async (
       if (client) {
         await (client as Client).close().catch(() => {})
       }
-      const message = timedOut ? `connect timed out after ${timeoutMs}ms` : (err as Error).message
+      let message = timedOut ? `connect timed out after ${timeoutMs}ms` : (err as Error).message
+      // `protocol: 'modern'` against a server that did not offer the revision:
+      // the SDK's sentence, plus which option to turn.
+      if (
+        !timedOut &&
+        cfg.protocol === 'modern' &&
+        isSdkError(err, SdkErrorCode.EraNegotiationFailed)
+      ) {
+        message = `${message} - ${MCP_MODERN_REFUSED_HINT}`
+      }
       const needsAuthorization = !timedOut && err instanceof UnauthorizedError
       log(
         'error',
@@ -654,12 +704,47 @@ export const connectMcpServers = async (
     }
   }
 
+  // 2026-07-28: ask the server for tool-list change notices. Best effort - a
+  // server that does not announce them, or a stream that cannot be opened,
+  // leaves a connection whose tools still work; `refreshServer` still re-lists.
+  const listenForToolChanges = async (name: string, client: Client): Promise<void> => {
+    if (!client.getServerCapabilities()?.tools?.listChanged) {
+      log('info', `[mcp] ${name}: the server does not announce tool list changes`)
+      return
+    }
+    try {
+      const subscription = await client.listen(
+        { toolsListChanged: true },
+        { timeout: MCP_LISTEN_ACK_TIMEOUT_MS },
+      )
+      // The SDK does not open the stream again, and neither does this
+      // connector: say so, or the silence reads as "nothing changed".
+      void subscription.closed.then((cause) => {
+        if (cause !== 'local' && !closing) {
+          log(
+            'warn',
+            `[mcp] ${name}: the tool list change stream ended (${cause === 'graceful' ? 'closed by the server' : 'dropped'}); changes are not announced until the server is connected again`,
+          )
+        }
+      })
+    } catch (err) {
+      log(
+        'warn',
+        `[mcp] ${name}: could not subscribe to tool list changes - ${(err as Error).message}`,
+      )
+    }
+  }
+
   const connectOnce = async (
     name: string,
     cfg: IMcpServerConfig,
     onClient: (client: Client) => void,
     isTimedOut: () => boolean,
+    timeoutMs: number,
   ): Promise<IServerConnect> => {
+    // Read first: a `protocol` that is none of the three names is a
+    // configuration error, said before anything is started.
+    const mode = mcpProtocolMode(cfg.protocol, name)
     let client: Client | undefined
     const bail = async (): Promise<void> => {
       if (isTimedOut()) {
@@ -738,20 +823,58 @@ export const connectMcpServers = async (
           `MCP server "${name}": config must specify either { url } (HTTP) or { command } (stdio)`,
         )
       }
-      transport.onerror = (err) => log('warn', `[mcp] ${name}: transport error - ${err.message}`)
+      // 'auto' asks a question a 2025 server answers with an HTTP error: that
+      // answer is the expected "no", not a fault of the connection.
+      let probing = mode === 'auto'
+      transport.onerror = (err) =>
+        probing
+          ? log('info', `[mcp] ${name}: version probe (server/discover) - ${err.message}`)
+          : log('warn', `[mcp] ${name}: transport error - ${err.message}`)
       transport.onclose = () => log('warn', `[mcp] ${name}: transport closed`)
 
       await bail()
       const enterprise =
         isHttpConfig(cfg) && cfg.authProvider ? asEnterpriseProvider(cfg.authProvider) : undefined
-      client = new Client(
-        { name: clientName, version: CLIENT_VERSION },
-        // An extension is opt-in: it is declared only by the client that uses it.
-        enterprise ? { capabilities: { extensions: { [enterprise.extension]: {} } } } : undefined,
+      // Without `protocol` (or with 'legacy') nothing is added here: the
+      // client is built with exactly the options it always had.
+      const negotiation = mcpVersionNegotiation(
+        mode,
+        // Over stdio a silent server is a 2025 one, after this long.
+        isStdioConfig(cfg)
+          ? Math.min(MCP_STDIO_PROBE_TIMEOUT_MS, timeoutMs > 0 ? timeoutMs / 2 : Infinity)
+          : undefined,
       )
+      const clientOptions: ClientOptions | undefined =
+        enterprise || negotiation
+          ? {
+              // An extension is opt-in: it is declared only by the client that uses it.
+              ...(enterprise
+                ? { capabilities: { extensions: { [enterprise.extension]: {} } } }
+                : {}),
+              ...(negotiation
+                ? {
+                    versionNegotiation: negotiation,
+                    // 2026-07-28: an `input_required` result is NOT answered and
+                    // the call is NOT sent again by the SDK (its default would
+                    // try both); it fails the tool call, see `execute`.
+                    inputRequired: { autoFulfill: false },
+                  }
+                : {}),
+            }
+          : undefined
+      client = new Client({ name: clientName, version: CLIENT_VERSION }, clientOptions)
       onClient(client)
       await client.connect(transport)
+      probing = false
       await bail()
+      const era = client.getProtocolEra() ?? 'legacy'
+      const version = client.getNegotiatedProtocolVersion() ?? ''
+      if (mode !== 'legacy') {
+        log(
+          'info',
+          `[mcp] ${name}: protocol ${version} (${era === 'modern' ? 'modern: stateless, no session' : 'legacy: the initialize handshake'}; configured '${mode}')`,
+        )
+      }
 
       // Subscribe BEFORE the first list call: a server that mutates its tool
       // set during init would otherwise lose the notification in the small
@@ -760,6 +883,14 @@ export const connectMcpServers = async (
         client.setNotificationHandler('notifications/tools/list_changed', () => {
           onToolsChanged(name)
         })
+        // 2026-07-28 has no stream a server may write to unasked: the notice
+        // above arrives only on a `subscriptions/listen` stream the client
+        // opens. (The 2025 revisions send it on the GET stream the transport
+        // opens by itself.)
+        if (era === 'modern') {
+          await listenForToolChanges(name, client)
+          await bail()
+        }
       }
 
       const listed = await listServerTools(name, client)
@@ -770,6 +901,7 @@ export const connectMcpServers = async (
         client,
         listed,
         instructions: cleanMcpInstructions(client.getInstructions()),
+        protocol: { version, era },
       }
     } catch (err) {
       if (client) {
@@ -805,6 +937,9 @@ export const connectMcpServers = async (
       instructions.push({ server: server.name, instructions: server.instructions })
       instructionsOf.set(server.name, server.instructions)
     }
+    if (server.protocol) {
+      protocols.push({ server: server.name, ...server.protocol })
+    }
     mountServerTools(server.name, server.client, server.listed)
     results.push({ name: server.name, connected: true })
   }
@@ -814,7 +949,9 @@ export const connectMcpServers = async (
     catalog,
     results,
     instructions,
+    protocols,
     close: async () => {
+      closing = true
       await Promise.allSettled([...clients.values()].map((c) => c.close()))
     },
     refreshServer: async (name: string) => {

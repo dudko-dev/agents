@@ -40,8 +40,11 @@ export type {
   BrowserOAuthProviderOptions,
   ConnectedMcp,
   McpCatalogEntry,
+  McpHttpServerConfig,
   McpOAuthCallback,
+  McpProtocolMode,
   McpServerInstructions,
+  McpServerProtocol,
   McpServerResult,
   McpModule,
 } from './mcp-types.js'

@@ -33,6 +33,22 @@ export interface McpServerInstructions {
   instructions: string
 }
 
+/**
+ * Which revisions of the MCP protocol a connection may use (the core's per-server `protocol`):
+ * `'legacy'` (default) the 2025 revisions, `'auto'` 2026-07-28 when the server offers it and the
+ * 2025 ones otherwise, `'modern'` 2026-07-28 only.
+ */
+export type McpProtocolMode = 'legacy' | 'auto' | 'modern'
+
+/** What a connection negotiated with one server. */
+export interface McpServerProtocol {
+  /** The server's name: its key in the configuration. */
+  server: string
+  /** The protocol revision in use, e.g. `2025-11-25` or `2026-07-28`. */
+  version: string
+  era: 'legacy' | 'modern'
+}
+
 export interface ConnectedMcp {
   tools: AgentToolSet
   catalog: McpCatalogEntry[]
@@ -43,6 +59,8 @@ export interface ConnectedMcp {
    * server's tools, so a host should let the user see it.
    */
   instructions?: McpServerInstructions[]
+  /** The protocol revision negotiated with each connected server (cores with `protocol`). */
+  protocols?: McpServerProtocol[]
   refreshServer?: (name: string) => Promise<void>
   close: () => Promise<void>
 }
@@ -53,6 +71,13 @@ export interface McpHttpServerConfig {
   authProvider?: unknown
   /** Per-server connect deadline (newer cores; ignored by older ones). */
   connectTimeoutMs?: number
+  /**
+   * The MCP protocol revisions this connection may use (newer cores; an older one ignores the
+   * field and speaks the 2025 revisions). The hooks do not set it: it is here for a host that
+   * calls the core's `connectMcpHttp` through these types. From a page, `'auto'` and `'modern'`
+   * need `Mcp-Method` and `Mcp-Name` in the server's `Access-Control-Allow-Headers`.
+   */
+  protocol?: McpProtocolMode
 }
 
 export interface McpOAuthCallback {

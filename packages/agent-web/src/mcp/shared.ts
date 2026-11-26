@@ -1,6 +1,7 @@
 /**
  * What the MCP connectors of the two agent packages share: how a server's `instructions` reach a
- * system prompt, and how a tool result's `structuredContent` reaches the model. Pure, no imports.
+ * system prompt, how a tool result's `structuredContent` reaches the model, and what the
+ * per-server `protocol` option means. Pure, no imports.
  *
  * This file is a COPY, byte for byte, in `@dudko.dev/agent` (`src/mcp-shared.ts`) and
  * `@dudko.dev/agent-web` (`src/mcp/shared.ts`): change both. The Node package's
@@ -235,3 +236,94 @@ export const outputSchemaNote = (toolName: string, detail: unknown): string => {
     `care, and do not call the tool again only because of this note.`
   )
 }
+
+// ── protocol revision ────────────────────────────────────────────────────
+
+/**
+ * Which revisions of the protocol a connection to one server may use (the server config's
+ * `protocol`):
+ *
+ * - `'legacy'` (default): the 2025 revisions, the `initialize` handshake. Nothing of the 2026
+ *   revision is sent.
+ * - `'auto'`: ask first (`server/discover`); a server that answers with 2026-07-28 is spoken to
+ *   that way, any other is given the 2025 handshake. Decided once, at connect.
+ * - `'modern'`: 2026-07-28 only. A server that does not offer it fails the connect.
+ */
+export type McpProtocolMode = 'legacy' | 'auto' | 'modern'
+
+export const MCP_PROTOCOL_MODES: readonly McpProtocolMode[] = ['legacy', 'auto', 'modern']
+
+/** The revision `protocol: 'modern'` pins: the one this connector is tested against. */
+export const MCP_MODERN_PROTOCOL_VERSION = '2026-07-28'
+
+/** What a connection negotiated with one server. */
+export interface McpServerProtocol {
+  /** The server's name: its key in the host's configuration. */
+  server: string
+  /** The protocol revision in use, e.g. `2025-11-25` or `2026-07-28`. */
+  version: string
+  /** `modern` from 2026-07-28 on (stateless, `server/discover`), `legacy` before. */
+  era: 'legacy' | 'modern'
+}
+
+/**
+ * The request headers the 2026-07-28 revision adds to every POST (its Streamable HTTP "request
+ * metadata"), beside `MCP-Protocol-Version`, which the 2025 revisions already send after
+ * `initialize`. A page can send them only to a server whose `Access-Control-Allow-Headers` lists
+ * them.
+ */
+export const MCP_MODERN_REQUEST_HEADERS: readonly string[] = ['Mcp-Method', 'Mcp-Name']
+
+/** A server config's `protocol` as a mode. Anything but the three names is a configuration error. */
+export const mcpProtocolMode = (protocol: unknown, server: string): McpProtocolMode => {
+  if (protocol === undefined || protocol === null) {
+    return 'legacy'
+  }
+  if (
+    typeof protocol === 'string' &&
+    (MCP_PROTOCOL_MODES as readonly string[]).includes(protocol)
+  ) {
+    return protocol as McpProtocolMode
+  }
+  throw new Error(
+    `MCP server "${server}": protocol must be 'legacy', 'auto' or 'modern' (got ${JSON.stringify(protocol) ?? String(protocol)})`,
+  )
+}
+
+/**
+ * The SDK client's `versionNegotiation` for a mode, or `undefined` for `'legacy'`: the option is
+ * then left out altogether, so a connection without `protocol` is built exactly as before.
+ * `probeTimeoutMs` bounds the `server/discover` exchange (the SDK's default is its request
+ * timeout, a minute).
+ */
+export const mcpVersionNegotiation = (
+  mode: McpProtocolMode,
+  probeTimeoutMs?: number,
+): { mode: 'auto' | { pin: string }; probe?: { timeoutMs: number } } | undefined => {
+  if (mode === 'legacy') {
+    return undefined
+  }
+  const probe =
+    typeof probeTimeoutMs === 'number' && Number.isFinite(probeTimeoutMs) && probeTimeoutMs > 0
+      ? { probe: { timeoutMs: probeTimeoutMs } }
+      : {}
+  return {
+    mode: mode === 'auto' ? 'auto' : { pin: MCP_MODERN_PROTOCOL_VERSION },
+    ...probe,
+  }
+}
+
+/** Added to the error of a `protocol: 'modern'` connect that the server did not accept. */
+export const MCP_MODERN_REFUSED_HINT =
+  `protocol: 'modern' accepts only a server that offers ${MCP_MODERN_PROTOCOL_VERSION}; ` +
+  `use 'auto' to fall back to the 2025 revisions, or leave the option out`
+
+/**
+ * What a tool call fails with when a 2026-07-28 server answers `input_required` (it wants the
+ * user asked something, or the call repeated with a state): this connector does not answer such
+ * requests, and never repeats a call on its own.
+ */
+export const mcpInputRequiredMessage = (toolName: string): string =>
+  `MCP tool "${toolName}" did not finish: the server asked for more input (an "input_required" ` +
+  `result: an elicitation, or a retry of the call), which this client does not support. ` +
+  `The call was not repeated.`

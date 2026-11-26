@@ -7,6 +7,7 @@ import type { IEgressPolicy } from './safe-fetch.ts'
 import type { ISearchConfig } from './web-search.ts'
 import type { ISandboxConfig } from './sandbox-engine.ts'
 import type { IMediaConfig, IRunFile } from './media.ts'
+import type { McpProtocolMode } from './mcp-shared.ts'
 import type { ISubagentsConfig } from './subagent-dynamic-shared.ts'
 
 export type ProviderType =
@@ -288,6 +289,16 @@ export interface IMcpHttpServerConfig {
   // is reported as failed and closed; the others still mount. Overrides the
   // top-level mcpConnectTimeoutMs. Default 30_000; 0 disables.
   connectTimeoutMs?: number
+  // Which revisions of the protocol this connection may use. Default 'legacy': the 2025
+  // revisions (the `initialize` handshake), exactly what was sent before this option existed.
+  // 'auto' asks the server first (`server/discover`) and speaks 2026-07-28 to one that offers it,
+  // the 2025 handshake to any other; 'modern' is 2026-07-28 only, and a server that does not
+  // offer it fails the connect. Decided once, at connect: a tool call is never retried in another
+  // revision. On 2026-07-28 there is no session, a tool-list change arrives over a
+  // `subscriptions/listen` stream this connector opens (no automatic re-listen when it drops),
+  // and an `input_required` result (elicitation) fails the call. See the README, "MCP protocol
+  // revision".
+  protocol?: McpProtocolMode
 }
 
 // Local MCP server spawned as a child process. The transport speaks JSON-RPC
@@ -300,6 +311,10 @@ export interface IMcpStdioServerConfig {
   cwd?: string
   // See IMcpHttpServerConfig.connectTimeoutMs.
   connectTimeoutMs?: number
+  // See IMcpHttpServerConfig.protocol. Over stdio, 'auto' and 'modern' ask on a SECOND,
+  // short-lived process started from the same command (a server that exits on a request it does
+  // not know must not take the session's process with it): the command runs twice per connect.
+  protocol?: McpProtocolMode
 }
 
 // Discriminated union: callers pick HTTP or stdio per server. Existing
