@@ -26,3 +26,17 @@ export type {
   McpOAuthRequestOptions,
   McpOAuthStorage,
 } from './oauth.js'
+export {
+  BrowserEnterpriseOAuthProvider,
+  createEnterpriseOAuthProvider,
+  ENTERPRISE_MANAGED_AUTHORIZATION_EXTENSION,
+  EnterpriseOAuthError,
+} from './enterprise-oauth.js'
+export type {
+  EnterpriseAssertionAlgorithm,
+  EnterpriseIdpOptions,
+  EnterpriseOAuthHop,
+  EnterpriseOAuthLog,
+  EnterpriseOAuthProviderOptions,
+  EnterprisePrivateKey,
+} from './enterprise-oauth.js'

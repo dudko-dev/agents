@@ -262,6 +262,70 @@ Nothing is printed or opened on your behalf; `onAuthorizationUrl` and the loopba
 - **Registration** describes a public PKCE client. `application_type` follows the redirect URL: `'native'` for a loopback address (the usual CLI callback), `'web'` for an https one. Change any field through `clientMetadata`.
 - **Discovery is stored** next to the tokens (the authorization server and its metadata), so later calls skip it and the issuer check has something to compare with. `auth.reset()` forgets it with everything else - use it when a server moved to another authorization server.
 
+### MCP with enterprise-managed authorization (ID-JAG)
+
+When the company's identity provider decides who may use which MCP server (the MCP extension `io.modelcontextprotocol/enterprise-managed-authorization`, also called Cross App Access), there is no consent page and nobody to send anywhere. Your application already holds the user's OpenID Connect ID token from single sign-on; the provider turns it into an access token in two POSTs:
+
+1. **at the IdP** - an RFC 8693 token exchange: the ID token goes in, an Identity Assertion JWT Authorization Grant (**ID-JAG**) addressed to the MCP server's authorization server comes out;
+2. **at the MCP server's authorization server** - an RFC 7523 `jwt-bearer` grant: the ID-JAG goes in, an ordinary access token comes out.
+
+```ts
+import { createAgent, createEnterpriseOAuthProvider } from '@dudko.dev/agent'
+
+const auth = createEnterpriseOAuthProvider({
+  serverUrl: 'https://mcp.example.com/mcp',
+  // This client as registered at the MCP server's authorization server.
+  clientId: 'agent',
+  clientSecret: process.env.MCP_AS_CLIENT_SECRET,
+  expectedIssuer: 'https://auth.example.com', // required with clientSecret: nothing goes to any other
+  // This client as registered at the IdP (the audience of the ID token).
+  idp: {
+    tokenEndpoint: 'https://acme.idp.example/oauth2/token',
+    clientId: 'agent-at-idp',
+    clientSecret: process.env.IDP_CLIENT_SECRET,
+  },
+  getIdToken: () => session.idToken, // yours: called each time a new ID-JAG is needed
+  scope: 'mcp:tools', // optional
+})
+
+const agent = await createAgent({
+  ...config,
+  mcpServers: { docs: { url: 'https://mcp.example.com/mcp', authProvider: auth } },
+})
+```
+
+- **When it runs.** Before the first request when there is no usable token, and again whenever the token expires or the server answers 401. Each time is a fresh ID token from `getIdToken` and a fresh exchange: the ID-JAG takes the place of a refresh token, and a refresh token the authorization server returns anyway is not used.
+- **What is stored.** The access token and what discovery found, in the same kind of store as the interactive provider (`store`, default the `0600` file). The ID token, the ID-JAG, the client assertions and the private key are never stored, logged or put in an error. Use one store per user.
+- **What is checked before anything is sent.** `serverUrl`, the IdP token endpoint, the authorization server and its token endpoint must be https (or loopback). The ID-JAG is requested for the issuer and the resource that discovery found for this server - never for a value you pass - and the authorization server's metadata must name the URL it was fetched from as its issuer. With `expectedIssuer`, any other authorization server gets nothing. The IdP's answer must be a 200 with `issued_token_type` `urn:ietf:params:oauth:token-type:id-jag` and a token; otherwise nothing reaches the authorization server. A redirect from the IdP is refused.
+- **`expectedIssuer` is required with `clientSecret` and with `private_key_jwt`.** Without it the MCP server's metadata would choose who receives the secret, or which audience a signed assertion is made for, so the provider throws when it is built (`clientSecret needs expectedIssuer`, `private_key_jwt needs expectedIssuer`). A client with no credential at the authorization server may omit it: the only thing sent there is then the ID-JAG, which the IdP addressed to that one server and which no other can use. (The latest draft lets an authorization server accept such a client only with a key-bound ID-JAG, which is not supported here, so expect most servers to want a credential.)
+- **Client authentication, per hop.** At the IdP: `idp.clientAuthMethod` is `'client_secret_basic'` (the default with a secret), `'client_secret_post'` or `'private_key_jwt'`; no secret sends `client_id` alone. At the authorization server: `clientAuthMethod` is one of those or `'none'`; left out, the SDK picks from the server's metadata.
+- **`private_key_jwt`** (RFC 7523 section 2.2) signs a client assertion instead of sending a secret. Give `privateKey` (a PEM string, a JWK object or a `KeyObject`), `algorithm` (`ES256`, `RS256`; also `ES384`, `ES512`, `RS384`, `RS512`, `PS256`, `PS384`, `PS512`) and optionally `keyId` - on the provider for the authorization server, inside `idp` (with `idp.issuer`) for the IdP. The key must be one for that algorithm, or signing is refused. Each assertion has `iss` = `sub` = the client id, a random `jti`, an `exp` 60 seconds away, the header `typ: client-authentication+jwt`, and as its only `aud` the **issuer identifier** of the server it is for (`idp.issuer`, or the authorization server's issuer once it matched `expectedIssuer`) - not the token endpoint URL. That is the rule of `draft-ietf-oauth-rfc7523bis`: an assertion made for the IdP is useless at the authorization server and the other way round. The key and the assertions are never stored, logged or put in an error, and the provider does not show them when printed or serialized. Signing uses `node:crypto`; there is no new dependency.
+
+  ```ts
+  createEnterpriseOAuthProvider({
+    serverUrl: 'https://mcp.example.com/mcp',
+    clientId: 'agent',
+    clientAuthMethod: 'private_key_jwt',
+    privateKey: process.env.MCP_AS_PRIVATE_KEY_PEM,
+    algorithm: 'ES256',
+    keyId: 'agent-2026',
+    expectedIssuer: 'https://auth.example.com',
+    idp: {
+      tokenEndpoint: 'https://acme.idp.example/oauth2/token',
+      issuer: 'https://acme.idp.example',
+      clientId: 'agent-at-idp',
+      clientAuthMethod: 'private_key_jwt',
+      privateKey: idpJwk,
+      algorithm: 'RS256',
+    },
+    getIdToken: () => session.idToken,
+  })
+  ```
+- **A client ID metadata document as `clientId`.** `clientId` may be the https URL of a client ID metadata document (CIMD) you host, for an authorization server that resolves clients that way instead of pre-registering them. The URL must be https with a path of its own, and takes no `clientSecret` (a public document establishes no shared secret): such a client uses `private_key_jwt`, with the keys the document lists in `jwks` / `jwks_uri` and `token_endpoint_auth_method: 'private_key_jwt'`, or no credential. The IdP must know the client by the same URL, because it goes into the ID-JAG's `client_id`.
+- **Errors say who refused, and say it briefly.** `EnterpriseOAuthError` has `hop`: `'idp'` (the exchange: `Enterprise IdP token exchange failed: ...`), `'authorization-server'` (the grant) or `'discovery'`, and `code` with the OAuth error. A refusal by the authorization server reads `MCP authorization server refused the ID-JAG grant: invalid_grant (HTTP 400)` - the code and the status, never the server's own text. What the server said goes to the log (`connectMcpServers`' log at `warn`, or the provider's `onLog`), with the ID token, the ID-JAG, the client assertion, the secrets and the key cut out first. This holds at connect and in the middle of a session: when a token dies during a run and the server refuses a new one, the tool call fails with the same `EnterpriseOAuthError`. A refusal fails that server's connect (`results[].error`) with no `needsAuthorization` - there is nobody to ask - and is not retried, since every grant is already a fresh one. `auth.authorize()` runs the flow on its own if you want to fail early. If you hand the provider to an SDK transport yourself, give that transport `auth.transportFetch(fetch, log)` as its `fetch` to get the same behaviour.
+- **Not supported:** SAML assertions or a refresh token as the subject token, key-bound (DPoP) ID-JAGs, `client_secret_jwt`.
+- **How it was verified.** Against a test identity provider that signs real tokens and an authorization server that verifies them (`tests/mcp-enterprise-oauth.test.ts`, over real sockets), following `draft-ietf-oauth-identity-assertion-authz-grant` and the extension's 2026-07-28 revision; both test servers verify client assertions (signature, `iss`/`sub`, audience, expiry, `jti` replay) and the test authorization server resolves a CIMD client by fetching its document. It has **not** been run against a commercial IdP (Okta, Ping, ...); expect to find differences there.
+
 ## Thinking (reasoning)
 
 Turn on the model's reasoning for every stage with `thinking`, and override it per stage with `stageThinking` (a stage entry — even `false` — wins over the top-level value):

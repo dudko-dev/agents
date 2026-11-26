@@ -110,6 +110,97 @@ exchanged)
 
 ---
 
+# MCP: enterprise-managed authorization (ID-JAG)
+
+`createEnterpriseOAuthProvider` gets an access token for an MCP server with no
+user step, on the word of the company's identity provider (IdP).
+
+**The tokens**
+
+- The **ID token** is what your app received when the user signed in through the
+  IdP. It proves who the user is to *your app*. Whoever holds it, together with
+  your client's IdP credentials, can ask the IdP for access to every MCP server
+  the IdP's policy allows that user - treat it like a password.
+- The **ID-JAG** (Identity Assertion JWT Authorization Grant) is a short-lived
+  JWT the IdP signs in exchange for the ID token. It names one user, one client
+  and one authorization server, and is good for one thing: asking that server
+  for an access token.
+
+**The two trust hops**
+
+1. *Your app → the IdP.* The IdP checks the ID token and the client, applies the
+   organization's policy and decides whether to issue an ID-JAG for the
+   requested authorization server and resource.
+2. *Your app → the MCP server's authorization server.* It trusts that IdP,
+   verifies the ID-JAG (signature, audience, client, expiry) and issues the
+   access token. The MCP server itself only ever sees that access token.
+
+**What is enforced**
+
+- **Neither token is kept.** The ID token is asked from `getIdToken` for each
+  exchange and the ID-JAG is used once; neither is written to storage, logged or
+  put in an error message. Only the access token is stored (in the vault, like
+  the other MCP tokens).
+- **What an application is shown is short.** A refusal by the authorization
+  server is an `EnterpriseOAuthError` with the OAuth error code and the status,
+  at connect and in the middle of a session - never the server's own text,
+  which could be anything. That text goes to the log (`onLog`, else the package
+  logger at `warn`), and a log is not a safe place either: the ID token, the
+  ID-JAG, the client assertion, the client secrets and the private key are cut
+  out before anything is written, also when a server echoes the request back.
+  IdP errors carry the IdP's `error` and `error_description`, cut the same way.
+- **https or loopback** for the MCP server, the IdP token endpoint, the
+  authorization server and its token endpoint.
+- **The ID-JAG is asked for this server only.** Its audience is the issuer of
+  the authorization server that discovery found for `serverUrl`, and its
+  resource is the one that server published (which must cover `serverUrl`);
+  neither can be passed in. The authorization server's metadata must name, as
+  its issuer, the URL it was fetched from - otherwise a hostile MCP server could
+  name an honest authorization server as the audience and collect the ID-JAG at
+  its own token endpoint.
+- **`expectedIssuer`** pins the authorization server: when the MCP server points
+  anywhere else, no ID token is asked for and nothing is sent. It is required
+  with `clientSecret` and with `private_key_jwt` (the constructor throws without
+  it), because otherwise the MCP server's metadata would choose who receives
+  that secret, or the audience a signed assertion is made for.
+- **A signed client assertion is for one server.** With `private_key_jwt` the
+  assertion's only audience is the issuer identifier of the server it is sent to
+  (`idp.issuer`; the authorization server's issuer once it matched
+  `expectedIssuer`) - not a token endpoint URL, which a hostile server can
+  choose. An assertion made for the IdP is refused by the authorization server
+  and the other way round. It lives 60 seconds and has a new `jti` each time, so
+  a captured one is hard to replay. The private key is never stored, logged or
+  put in an error; a `CryptoKey` imported as non-extractable cannot be read by
+  page script at all, only used.
+- **A client ID metadata document** (`clientId` as a URL) must be https with a
+  path of its own and cannot be combined with a `clientSecret`.
+- **The IdP's answer is checked** before anything goes to the authorization
+  server: `issued_token_type` must be the ID-JAG type and the token must be
+  there. A redirect from the IdP token endpoint is refused, not followed.
+
+**What it does not protect against**
+
+- **A secret in a page.** A `clientSecret` (or `idp.clientSecret`) in a page is
+  readable by anyone who can open the page. So the browser provider is for
+  public clients (then a stolen ID token alone is enough to use it), or for a
+  `fetch` that routes the IdP call through your backend, which holds the secret.
+- **A key in a page.** A non-extractable `CryptoKey` cannot be copied, but
+  script on your origin (XSS included) can ask it to sign for as long as the
+  page is open. A JWK held in page code is as readable as a secret.
+- **A public client without `expectedIssuer`.** A client with no credential at
+  the authorization server may omit `expectedIssuer`. The MCP server's metadata then
+  decides which authorization server is asked, and the only thing sent there is
+  the ID-JAG - which the IdP addressed to that one server, so no other can use
+  it. The IdP's policy is what stops an audience it does not know.
+- **The ID token in your app.** How it is obtained, kept and renewed is yours;
+  this provider only reads it. XSS on your origin reaches it, as it reaches the
+  vault.
+- **A commercial IdP's behaviour.** This was verified against a test identity
+  provider written from `draft-ietf-oauth-identity-assertion-authz-grant`, not
+  against Okta, Ping or another product.
+
+---
+
 # Egress and learning: the threat model
 
 The vault above is about a key at rest. The two features below are about what the

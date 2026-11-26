@@ -126,6 +126,29 @@ interface IServerConnect {
   needsAuthorization?: boolean
 }
 
+/**
+ * The enterprise-managed provider (`mcp-enterprise-oauth.ts`), recognised by
+ * shape so a host's own subclass or a copy from another realm still counts.
+ */
+type EnterpriseLog = (level: 'info' | 'warn' | 'error', message: string) => void
+
+interface EnterpriseProviderShape {
+  extension: string
+  authorize: (opts: { fetch?: FetchLike; onLog?: EnterpriseLog }) => Promise<void>
+  transportFetch: (base?: FetchLike, log?: EnterpriseLog) => FetchLike
+}
+
+const asEnterpriseProvider = (
+  provider: OAuthClientProvider,
+): EnterpriseProviderShape | undefined => {
+  const p = provider as Partial<Record<keyof EnterpriseProviderShape, unknown>>
+  return typeof p.extension === 'string' &&
+    typeof p.authorize === 'function' &&
+    typeof p.transportFetch === 'function'
+    ? (provider as unknown as EnterpriseProviderShape)
+    : undefined
+}
+
 /** Thrown by the refresh-only view when the SDK reaches for a redirect. */
 class RefreshOnlyAbort extends Error {}
 
@@ -195,6 +218,24 @@ const refreshIfExpired = async (
     return
   }
   if (!(await check.call(provider))) {
+    return
+  }
+  const enterprise = asEnterpriseProvider(provider)
+  if (enterprise) {
+    // No human step and no refresh token (the ID-JAG replaces it): get the
+    // token now. A refusal by the IdP or the authorization server is final -
+    // asking again through the 401 path would only repeat the exchange - so it
+    // fails this server with the error that names who refused. Only a
+    // discovery failure is left to the transport: the server's 401 may say
+    // where its metadata lives, or it may need no authorization at all.
+    try {
+      await enterprise.authorize({ fetch: fetchFn, onLog: log })
+    } catch (err) {
+      if ((err as { hop?: unknown })?.hop !== 'discovery') {
+        throw err
+      }
+      log('info', `[mcp] ${name}: ${(err as Error).message}; continuing`)
+    }
     return
   }
   const tokens = await provider.tokens()
@@ -523,7 +564,12 @@ export const connectMcpServers = async (
           // it on a 401 and retries the request - the one thing a static
           // header can never do.
           authProvider: cfg.authProvider,
-          fetch: cfg.fetch,
+          // The enterprise provider reports a refused grant itself: a short
+          // typed error for the caller, the server's words (redacted) to the log.
+          fetch:
+            (cfg.authProvider &&
+              asEnterpriseProvider(cfg.authProvider)?.transportFetch(cfg.fetch, log)) ||
+            cfg.fetch,
           // Built-in reconnect for transient SSE drops. Defaults are conservative;
           // production deployments should tune via direct transport access if needed.
           reconnectionOptions: {
@@ -542,7 +588,13 @@ export const connectMcpServers = async (
       transport.onclose = () => log('warn', `[mcp] ${name}: transport closed`)
 
       await bail()
-      client = new Client({ name: clientName, version: CLIENT_VERSION })
+      const enterprise =
+        isHttpConfig(cfg) && cfg.authProvider ? asEnterpriseProvider(cfg.authProvider) : undefined
+      client = new Client(
+        { name: clientName, version: CLIENT_VERSION },
+        // An extension is opt-in: it is declared only by the client that uses it.
+        enterprise ? { capabilities: { extensions: { [enterprise.extension]: {} } } } : undefined,
+      )
       onClient(client)
       await client.connect(transport)
       await bail()
