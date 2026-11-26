@@ -1,0 +1,12 @@
+// Cloudflare Workers (static assets): serves the demo built by `pnpm nx build demo`.
+// The build runs on Cloudflare (Workers Builds); there is no Worker script, only files.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "agents",
+  "compatibility_date": "2026-11-01",
+  "assets": {
+    "directory": "./apps/demo/dist",
+    // A single-page app: an unknown path gets index.html.
+    "not_found_handling": "single-page-application"
+  }
+}
