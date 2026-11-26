@@ -1,3 +1,11 @@
+# 0.0.46 / 2026-11-26
+
+### :tada: Enhancements
+- Pipelines: `createPipeline` runs a graph of agents with conditions and loops, described in plain JSON
+- Sandbox: `config.sandbox` gives the model `run_js` - its JavaScript runs in QuickJS (WebAssembly) in a worker thread with time and memory limits (optional peer `quickjs-emscripten`); CLI: `AGENT_SANDBOX`
+- MCP OAuth: client ID metadata documents (`clientMetadataUrl`), `application_type`, the `iss` of the authorization response is checked (RFC 9207)
+- MCP OAuth: enterprise-managed authorization (ID-JAG) with `createEnterpriseOAuthProvider` - client secret or `private_key_jwt`, `assertionAudience` / `assertionType`
+
 # 0.0.45 / 2026-11-26
 
 ### :tada: Enhancements
