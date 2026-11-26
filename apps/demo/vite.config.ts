@@ -173,6 +173,7 @@ export default defineConfig({
       '@browser-ai/transformers-js',
       '@huggingface/transformers',
       '@dudko.dev/pdf-to-md-core',
+      'quickjs-emscripten',
     ],
   },
 })
