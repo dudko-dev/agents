@@ -4,6 +4,7 @@ import type { ToolSet } from 'ai'
 import type { RunControl } from './control.ts'
 import type { PipelineEvent } from './pipeline-engine.ts'
 import type { IEgressPolicy } from './safe-fetch.ts'
+import type { ISearchConfig } from './web-search.ts'
 import type { ISandboxConfig } from './sandbox-engine.ts'
 
 export type ProviderType =
@@ -373,6 +374,12 @@ export interface IAgentConfig {
   // ranges refused, redirects re-checked, size and time bounded. It does not govern the provider's
   // own API calls or the MCP servers you configure - those are your configuration, not the model's.
   egress?: boolean | IEgressPolicy
+  // Let the model SEARCH the web (the web_search tool: a short list of title / url / snippet). Off
+  // unless set. The library ships no key: name a hosted search API (`provider` + `apiKey`, or a
+  // SearXNG `baseURL`) or pass a function (`engine`). The adapter's request reaches that API's
+  // host only, through createSafeFetch; with `egress` set, results the model could not fetch are
+  // left out. Works without `egress` (then there is no web_fetch to open a link). See ISearchConfig.
+  search?: ISearchConfig
   // Let the agent keep a notebook: it writes lessons it learned (problem -> what worked) as skills,
   // visible in the SKILLS index and loadable for the rest of the session. `true` = in memory (as
   // long as the agent lives); give a store to keep them (DirSkillStore). Saving is a write for
@@ -665,8 +672,8 @@ type AgentEventBody =
   // 'step' = at a step boundary, where it forces the replanner to look at the plan;
   // 'final' = just before the answer is written.
   | { type: 'message.delivered'; id: string; text: string; at: 'round' | 'step' | 'final' }
-  // A request of the web_fetch tool: allowed or refused by the egress policy. `url` is origin and
-  // path only (a query string can carry a secret).
+  // A request of the web_fetch tool, or of web_search to its search API: allowed or refused by the
+  // egress policy. `url` is origin and path only (a query string can carry a secret or the query).
   | { type: 'egress.request'; url: string; allowed: boolean; status?: number; reason?: string }
   // The agent wrote (or rewrote) a lesson. `sources` = what it named plus the pages fetched that run.
   | {

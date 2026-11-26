@@ -89,6 +89,8 @@ src/
 ├── files/               vfs.ts (VirtualFileSystem on IndexedDB) + tools.ts (the fs_* tools)
 ├── subagent/            tool.ts (createSubagentTool), worker.ts (serveSubagentWorker), protocol.ts
 ├── tools/egress.ts      `egress` / `web_fetch`: the model's one way to make a request
+├── tools/web-search.ts  `search` / `web_search`: a search API behind the guarded fetch
+│                        (+ web-search-shared.ts: caps, cleaning, adapters - a COPY of the Node sibling's)
 ├── sandbox/             `sandbox` / `run_js`: the model's code in QuickJS-in-wasm
 │   ├── engine.ts        limits, guest runtime, worker protocol - pure, a COPY of the Node sibling's
 │   ├── index.ts         the tool: worker or page thread, loaded only when switched on
@@ -337,6 +339,45 @@ treat the result as `untrusted`; and make an open-internet fetch ask like a
 write, because the URL itself is a way to leak data. CORS and Private Network
 Access are the backstop, and `egress.fetch` lets a host route the request through
 a gateway running the real safe fetch. See [security.md](./security.md).
+
+## Search: an engine you bring, a request that cannot wander
+
+`web_fetch` needs an address; a model without search invents one. `search` adds `web_search`,
+and four decisions shape it.
+
+**No engine and no key ship with the library.** A search API costs money and has terms; the
+host picks one (`provider`) or passes a function (`engine`). The built-in adapters are
+deliberately thin - one documented HTTP call each, written as pure request builders and response
+parsers in `web-search-shared.ts`, a byte-for-byte copy of the Node sibling's file, so the two
+packages cannot drift on a parameter or a cap. Three were chosen: Tavily (an API made for
+agents, and the one that answers cross-origin calls), Brave (an independent index; no CORS, so a
+gateway from a page) and SearXNG (self-hosted, keyless - the option with no third party).
+
+**The key follows the providers' rule.** It is never in the config: `credentialRef` names it in
+the `CredentialStore`, it is read at each call and put into one header. An inline `apiKey` is an
+error, not a warning - there is no development shortcut to grow into a habit. Errors carry the
+status and never the API's body (which may echo the request), and are redacted before they are
+thrown.
+
+**`search` and `egress` are independent, and neither loosens the other.** The tempting design -
+"add the search host to the egress allow list" - would make the search API fetchable by
+`web_fetch` and would make `search` unusable without opening `egress`. Instead the adapter's
+request runs under its own policy (`searchEgressPolicy`): the allow list is exactly the API's
+host, scheme and port, redirects are never followed, and only the host's `deny` list is
+inherited. In the other direction, results are filtered by the model's egress policy: with an
+allow list, a snippet from another host is text read around that list, so it is dropped along
+with its link. Without `egress` there is no list and no `web_fetch`; the snippets are leads.
+
+**A search is read-only for consent, and says why.** `web_fetch` is read-only only when the
+policy names the hosts, because an open GET can carry data to anyone. A search reaches one host
+and the operator named it - the same rule gives read-only. The query still leaves for that
+party, so the description tells the model not to put private data into one, and `readOnly: false`
+turns the default around for hosts that want every query reviewed.
+
+Results are third-party text like a fetched page: reduced to four fields, each one line, stripped
+of invisible characters, capped per field and in total, flagged `untrusted`. The provider-native
+search tools (server-side, inside the model call) are a different mechanism with none of these
+controls and are left for a separate change.
 
 ## Learning: a notebook, knowledge never policy
 

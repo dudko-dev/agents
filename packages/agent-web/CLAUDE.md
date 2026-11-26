@@ -61,6 +61,16 @@ behind every decision.
 - `src/tools/egress.ts` — `config.egress` / `web_fetch`: the browser sibling of the server's
   `createSafeFetch` (same policy shape; the pure address/pattern core is a COPY of the server's —
   change both, with tests). Security boundary: a change needs a test and a mutation check.
+- `src/tools/web-search.ts` — `config.search` / `web_search`: a hosted search API (brave, tavily,
+  searxng) or the host's `engine` function. The adapter's request goes through the guarded fetch
+  under `searchEgressPolicy` (allow list = the search API's host only, no redirect); results are
+  filtered by the model's `egress` policy. The key is never in the config: `credentialRef` into
+  `config.credentials`, read at each call. `web-search-shared.ts` (pure, no imports: caps, result
+  cleaning, the adapters as request builders / response parsers, redaction, the description) is a
+  COPY of the server's `src/web-search-shared.ts`, byte for byte — change both (the server's
+  `tests/web-search-shared.test.ts` compares them and `tests/helpers/search-server.ts`). Security
+  boundary: every guard has a test in `tests/web-search.test.ts` and a mutation check. CORS decides
+  which API works from a page (docs/capabilities.md says which); tests never call a real API.
 - `src/learning.ts` — `config.learning`: `save_skill` / `forget_skill` write the agent's own lessons
   as skills (`origin.kind: 'learned'`); `MemorySkillStore` / `VfsSkillStore`; secret scan, caps, host
   skills never overwritten. Knowledge only, never policy: a lesson is loaded under `learnedPreamble`.

@@ -95,6 +95,33 @@ export {
 } from './safe-fetch.ts'
 export type { EgressErrorCode, IEgressPolicy, IResolvedAddress, SafeFetch } from './safe-fetch.ts'
 export { createWebFetchTool, createEgressTools, htmlToText, WEB_FETCH_TOOL } from './web-fetch.ts'
+// Search: the web_search tool (a hosted search API through the safe fetch, or the host's function).
+export { createWebSearchTool, createSearchTools, searchEgressPolicy } from './web-search.ts'
+export type { ISearchConfig, IWebSearchOptions } from './web-search.ts'
+export {
+  buildSearchRequest,
+  parseSearchResponse,
+  sanitizeSearchResults,
+  SEARCH_API_BASE_URL,
+  SEARCH_DEFAULT_MAX_RESULTS,
+  SEARCH_MAX_QUERY_CHARS,
+  SEARCH_MAX_RESULTS,
+  SEARCH_MAX_SNIPPET_CHARS,
+  SEARCH_MAX_TITLE_CHARS,
+  SEARCH_MAX_TOTAL_CHARS,
+  SEARCH_MAX_URL_CHARS,
+  SEARCH_PROVIDERS,
+  WEB_SEARCH_TOOL,
+} from './web-search-shared.ts'
+export type {
+  ISanitizedSearch,
+  ISearchOptions,
+  ISearchRequest,
+  ISearchResult,
+  SearchEngine,
+  SearchFreshness,
+  SearchProvider,
+} from './web-search-shared.ts'
 // Sandbox: the run_js tool (JavaScript in QuickJS/WebAssembly, in a worker thread).
 export {
   createSandboxTool,

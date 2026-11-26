@@ -23,6 +23,7 @@ implements the same features with the same field and event names.
 - [Steering a run that is already going](#steering-a-run-that-is-already-going)
 - [Learning: lessons that outlive the task](#learning-lessons-that-outlive-the-task)
 - [Egress: what the model may fetch](#egress-what-the-model-may-fetch)
+- [Search: finding the page to fetch](#search-finding-the-page-to-fetch)
 - [Running code: the sandbox](#running-code-the-sandbox)
 - [Pipelines: a graph of agents](#pipelines-a-graph-of-agents)
 - [Autonomy](#autonomy)
@@ -1070,6 +1071,90 @@ Approval: an open-internet `web_fetch` is a way to leak data through the URL, so
 **write**; with an `allow` list it is **read-only**. Each request emits `egress.request`
 (`url` is origin and path only — no query string —, `allowed`, `status` or `reason`).
 
+## Search: finding the page to fetch
+
+`web_fetch` reads a page the model already knows the address of. `search` is its companion: one
+tool, `web_search({ query, maxResults?, freshness? })`, that returns a short list of
+`{ title, url, snippet, date? }`. **Off by default**, and the library ships **no key and no
+engine**: you name a hosted search API, or pass a function. Same names and semantics as the Node
+sibling's `search` - except that a key is never written into the config.
+
+```ts
+const credentials = new VaultCredentialStore()
+await credentials.setApiKey('search', keyTheUserTyped) // encrypted at rest, like a model key
+
+createAgent({
+  model,
+  credentials,
+  search: { provider: 'tavily', credentialRef: 'search' },
+  // search: { provider: 'searxng', baseURL: 'https://search.example.com' }, // your instance, no key
+  // search: { provider: 'brave', baseURL: 'https://my-gateway.example.com/brave' }, // gateway holds the key
+  // search: { engine: async (query, { maxResults, freshness, signal }) => mySearch(query) },
+  egress: { allow: ['docs.example.com'] }, // optional: web_fetch, and the filter below
+})
+```
+
+| `search` field | |
+|---|---|
+| `provider` | a built-in adapter, one HTTP call each: `'brave'`, `'tavily'`, `'searxng'` (see the table below) |
+| `credentialRef` | where the provider's key is kept in `config.credentials`. Read at each call (a rotated key is picked up), sent in a header to that API only. An inline `apiKey` is refused. |
+| `baseURL` | required for `searxng` (the instance); for the others it replaces the public endpoint with a gateway of yours (`credentialRef` is then optional) |
+| `engine` | instead of `provider`: your own `(query, { maxResults, freshness, signal }) => Promise<{ title, url, snippet, date? }[]>`. Its requests are yours; its results get the same cleaning, caps and filter. |
+| `maxResults` | results per call when the model does not say. Default 5, never more than 10. |
+| `allowPrivateNetwork` | let the **search API itself** be on a private address or an internal-looking name (a SearXNG on your network). Widens nothing else. |
+| `timeoutMs` | whole request to the search API (default 15 s) |
+| `readOnly` | how the consent gate sees a search. Default `true`; `false` makes it ask like a write. |
+| `fetch` | the fetch the adapter uses (default `globalThis.fetch`); it stays bound to the search policy |
+
+**Which API works from a page.** A browser only lets a page read an API that allows cross-origin
+requests, and a key in a page is a key the user can read - so it must be *the user's own* key
+(BYOK), or the call goes through your gateway:
+
+| provider | request | cross-origin from a page? |
+|---|---|---|
+| `tavily` | `POST https://api.tavily.com/search`, `Authorization: Bearer` ([docs](https://docs.tavily.com/documentation/api-reference/endpoint/search)) | **Yes** - its preflight answers `Access-Control-Allow-Origin: *` and allows the `authorization` header (checked 2026-11; not a documented promise). |
+| `brave` | `GET https://api.search.brave.com/res/v1/web/search`, `X-Subscription-Token` ([docs](https://api-dashboard.search.brave.com/app/documentation/web-search/get-started)) | **No** - the API answers a preflight with 405 and no CORS headers (checked 2026-11), and a custom header always triggers one. Use it through a gateway of yours: `baseURL: 'https://your-gateway/...'` (the gateway adds the key), or from the Node package. |
+| `searxng` | `GET {baseURL}/search?format=json`, no key ([docs](https://docs.searxng.org/dev/search_api.html)) | **Only if you make it so** - SearXNG sends no CORS headers of its own: serve the instance from your page's origin or have your reverse proxy add them. The instance must list `json` under `search.formats` (else 403). |
+
+A refused cross-origin call surfaces as the egress error `network` ("the server may not allow
+cross-origin reads, or is unreachable").
+
+**How it relates to `egress`.** Independent switches; neither loosens the other:
+
+- **The adapter's own request is pinned.** It goes through the guarded fetch under a policy of its
+  own (`searchEgressPolicy`), not the model's: the allow list is exactly the search API's host,
+  with its scheme and port; a redirect is never followed; no cookies, credentials or referrer;
+  capped at 1 MB and 15 s. You never add the search API to `egress.allow`, and the tool cannot be
+  steered to another host. From `egress` it inherits only the `deny` list (deny still wins) - not
+  `allow`, not `allowPrivateNetwork`, not `followRedirects`, not `fetch`.
+- **Results are filtered by the model's egress policy.** With `egress` set, a result `web_fetch`
+  would refuse (not on the allow list, on the deny list, plain http, a private IP, an
+  internal-looking name) is left out - title and snippet too - and counted in `filtered`.
+- **`search` works without `egress`.** Then there is no `web_fetch`: the model gets the snippets as
+  leads (the tool's description says so) and nothing is filtered.
+
+**Results are untrusted third-party text.** Only `title`, `url`, `snippet`, `date` survive; a
+result needs a valid `http(s)` URL without credentials; every field is one line with control,
+zero-width and bidirectional-override characters and highlight markup removed, and capped (title
+200, snippet 500, URL 2000 characters; 6000 for one call; a query 400). The result carries
+`untrusted: true`, and the description tells the model that snippets are never instructions and
+to read the page with `web_fetch` before relying on it. The caps hold on the prompted tool path
+too, where no schema validates the arguments.
+
+**Consent.** A search reaches exactly one host and you named it, so - by the rule that makes an
+allow-listed `web_fetch` read-only - it is **read-only**. That host still sees the query: set
+`readOnly: false` (it then asks like a write) or `toolApproval: { rules: { web_search: 'ask' } }`
+when queries must not leave unreviewed. Otherwise an ordinary tool: `maxToolCalls`, the output
+cap, `excludedTools` and tool search apply; a tool of your own named `web_search` wins.
+
+**Events.** The adapter's request emits `egress.request` (`url` is the API's origin and path -
+never the query string). The query is in the ordinary tool-call event. A function `engine` emits
+none. The key appears in no event, error, log line or result: an API error is reported by status
+only, and error text is redacted before it is thrown.
+
+The providers' server-side search tools (Anthropic, OpenAI, Google) are not wired here: they run
+inside the provider's API call, outside this policy.
+
 ## Running code: the sandbox
 
 Ask a model to "run it on the test data" and, with nothing to run it in, it writes the
@@ -1370,7 +1455,7 @@ Subscribe with `onEvent` (per run) or the handler you pass to `createAgent`; ren
 | `tools.discovered` | `step?, query, names` — `find_tools` activated more tools |
 | `tool.approval-requested` | `id, name, input, readOnly, step?` |
 | `tool.approval-resolved` | `id, name, approved, reason?, automatic` |
-| `egress.request` | `url` (origin + path), `allowed`, `status?`, `reason?` — a `web_fetch` request, allowed or refused ([egress](#egress-what-the-model-may-fetch)) |
+| `egress.request` | `url` (origin + path), `allowed`, `status?`, `reason?` — a `web_fetch` request (or `web_search`'s call to its [search API](#search-finding-the-page-to-fetch)), allowed or refused ([egress](#egress-what-the-model-may-fetch)) |
 | `skill.learned` | `name, description, update, chars, sources` — the agent wrote a lesson down ([learning](#learning-lessons-that-outlive-the-task)) |
 | `skill.forgotten` | `name` — a lesson was deleted |
 

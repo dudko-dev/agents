@@ -16,6 +16,8 @@ import type {
 } from '../index.ts'
 import { DirSkillStore } from '../learning.ts'
 import type { ISandboxConfig } from '../sandbox.ts'
+import type { ISearchConfig } from '../web-search.ts'
+import { SEARCH_MAX_RESULTS, SEARCH_PROVIDERS } from '../web-search-shared.ts'
 
 const PROVIDERS: readonly ProviderType[] = [
   'openai',
@@ -99,6 +101,7 @@ export const loadConfig = (): IAgentConfig => {
     toolApproval: parseApproval(process.env.AGENT_TOOL_APPROVAL, process.env.AGENT_TOOL_RULES),
     compaction: parseCompaction(),
     egress: parseEgress(),
+    search: parseSearch(),
     sandbox: parseSandbox(),
     learning: parseLearning(),
     llmTimeoutMs: parseOptionalInt(process.env.AGENT_LLM_TIMEOUT_MS),
@@ -373,6 +376,65 @@ export const parseEgress = (env: NodeJS.ProcessEnv = process.env): IEgressPolicy
     ...(allow ? { allow } : {}),
     ...(deny ? { deny } : {}),
     ...(protocols ? { protocols: protocols as ('https' | 'http')[] } : {}),
+    ...(priv && ['on', 'true', '1', 'yes'].includes(priv) ? { allowPrivateNetwork: true } : {}),
+  }
+}
+
+// AGENT_SEARCH=brave | tavily | searxng lets the model search the web (the web_search tool); off
+// (the default) means no tool. AGENT_SEARCH_API_KEY is the API's key (brave, tavily),
+// AGENT_SEARCH_BASE_URL the SearXNG instance (or a gateway for the others),
+// AGENT_SEARCH_MAX_RESULTS the results per call, AGENT_SEARCH_ALLOW_PRIVATE=on lets the search API
+// itself be on a private address. Setting any of them while AGENT_SEARCH is off is an error.
+export const parseSearch = (env: NodeJS.ProcessEnv = process.env): ISearchConfig | undefined => {
+  const raw = env.AGENT_SEARCH?.trim().toLowerCase()
+  const on = Boolean(raw) && !['off', 'false', '0', 'no'].includes(raw as string)
+  const apiKey = env.AGENT_SEARCH_API_KEY?.trim()
+  const baseURL = env.AGENT_SEARCH_BASE_URL?.trim()
+  const max = env.AGENT_SEARCH_MAX_RESULTS?.trim()
+  const priv = env.AGENT_SEARCH_ALLOW_PRIVATE?.trim().toLowerCase()
+  if (!on) {
+    const stray = [
+      apiKey && 'AGENT_SEARCH_API_KEY',
+      baseURL && 'AGENT_SEARCH_BASE_URL',
+      max && 'AGENT_SEARCH_MAX_RESULTS',
+      priv && 'AGENT_SEARCH_ALLOW_PRIVATE',
+    ].filter(Boolean)
+    if (stray.length) {
+      throw new Error(
+        `${stray.join(', ')} set but AGENT_SEARCH is off - set AGENT_SEARCH=<provider> to use it`,
+      )
+    }
+    return undefined
+  }
+  const provider = SEARCH_PROVIDERS.find((p) => p === raw)
+  if (!provider) {
+    throw new Error(
+      `AGENT_SEARCH must be ${SEARCH_PROVIDERS.join(' | ')} | off, got: ${env.AGENT_SEARCH}`,
+    )
+  }
+  if (provider === 'searxng' && !baseURL) {
+    throw new Error('AGENT_SEARCH=searxng needs AGENT_SEARCH_BASE_URL (your instance)')
+  }
+  if (provider !== 'searxng' && !apiKey && !baseURL) {
+    throw new Error(`AGENT_SEARCH=${provider} needs AGENT_SEARCH_API_KEY`)
+  }
+  const maxResults = max ? Number(max) : undefined
+  if (
+    maxResults !== undefined &&
+    !(Number.isInteger(maxResults) && maxResults >= 1 && maxResults <= SEARCH_MAX_RESULTS)
+  ) {
+    throw new Error(`AGENT_SEARCH_MAX_RESULTS must be 1..${SEARCH_MAX_RESULTS}, got: ${max}`)
+  }
+  if (priv && !['on', 'true', '1', 'yes', 'off', 'false', '0', 'no'].includes(priv)) {
+    throw new Error(
+      `AGENT_SEARCH_ALLOW_PRIVATE must be on | off, got: ${env.AGENT_SEARCH_ALLOW_PRIVATE}`,
+    )
+  }
+  return {
+    provider,
+    ...(apiKey ? { apiKey } : {}),
+    ...(baseURL ? { baseURL } : {}),
+    ...(maxResults ? { maxResults } : {}),
     ...(priv && ['on', 'true', '1', 'yes'].includes(priv) ? { allowPrivateNetwork: true } : {}),
   }
 }
