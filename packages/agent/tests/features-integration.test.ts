@@ -15,7 +15,7 @@ import {
   type IToolApprovalRequest,
 } from '../src/index.ts'
 import { runContext } from '../src/context.ts'
-import { startLocalMcp } from './helpers/mcp-server.ts'
+import { startLocalMcp } from '@dudko.dev/test-servers'
 import {
   hasToolResult,
   startLocalOpenAI,

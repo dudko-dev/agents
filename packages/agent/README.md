@@ -299,7 +299,7 @@ const agent = await createAgent({
 - **What is checked before anything is sent.** `serverUrl`, the IdP token endpoint, the authorization server and its token endpoint must be https (or loopback). The ID-JAG is requested for the issuer and the resource that discovery found for this server - never for a value you pass - and the authorization server's metadata must name the URL it was fetched from as its issuer. With `expectedIssuer`, any other authorization server gets nothing. The IdP's answer must be a 200 with `issued_token_type` `urn:ietf:params:oauth:token-type:id-jag` and a token; otherwise nothing reaches the authorization server. A redirect from the IdP is refused.
 - **`expectedIssuer` is required with `clientSecret` and with `private_key_jwt`.** Without it the MCP server's metadata would choose who receives the secret, or which audience a signed assertion is made for, so the provider throws when it is built (`clientSecret needs expectedIssuer`, `private_key_jwt needs expectedIssuer`). A client with no credential at the authorization server may omit it: the only thing sent there is then the ID-JAG, which the IdP addressed to that one server and which no other can use. (The latest draft lets an authorization server accept such a client only with a key-bound ID-JAG, which is not supported here, so expect most servers to want a credential.)
 - **Client authentication, per hop.** At the IdP: `idp.clientAuthMethod` is `'client_secret_basic'` (the default with a secret), `'client_secret_post'` or `'private_key_jwt'`; no secret sends `client_id` alone. At the authorization server: `clientAuthMethod` is one of those or `'none'`; left out, the SDK picks from the server's metadata.
-- **`private_key_jwt`** (RFC 7523 section 2.2) signs a client assertion instead of sending a secret. Give `privateKey` (a PEM string, a JWK object or a `KeyObject`), `algorithm` (`ES256`, `RS256`; also `ES384`, `ES512`, `RS384`, `RS512`, `PS256`, `PS384`, `PS512`) and optionally `keyId` - on the provider for the authorization server, inside `idp` (with `idp.issuer`) for the IdP. The key must be one for that algorithm, or signing is refused. Each assertion has `iss` = `sub` = the client id, a random `jti`, an `exp` 60 seconds away, the header `typ: client-authentication+jwt`, and as its only `aud` the **issuer identifier** of the server it is for (`idp.issuer`, or the authorization server's issuer once it matched `expectedIssuer`) - not the token endpoint URL. That is the rule of `draft-ietf-oauth-rfc7523bis`: an assertion made for the IdP is useless at the authorization server and the other way round. The key and the assertions are never stored, logged or put in an error, and the provider does not show them when printed or serialized. Signing uses `node:crypto`; there is no new dependency.
+- **`private_key_jwt`** (RFC 7523 section 2.2) signs a client assertion instead of sending a secret. Give `privateKey` (a PEM string, a JWK object or a `KeyObject`), `algorithm` (`ES256`, `RS256`; also `ES384`, `ES512`, `RS384`, `RS512`, `PS256`, `PS384`, `PS512`) and optionally `keyId` - on the provider for the authorization server, inside `idp` (with `idp.issuer`) for the IdP. The key must be one for that algorithm, or signing is refused. Each assertion has `iss` = `sub` = the client id, a random `jti`, an `exp` 60 seconds away, the header `typ: client-authentication+jwt`, and as its only `aud` the **issuer identifier** of the server it is for (`idp.issuer`, or the authorization server's issuer once it matched `expectedIssuer`) - not the token endpoint URL, unless `assertionAudience` says so (below). That is the rule of `draft-ietf-oauth-rfc7523bis`: an assertion made for the IdP is useless at the authorization server and the other way round. The key and the assertions are never stored, logged or put in an error, and the provider does not show them when printed or serialized. Signing uses `node:crypto`; there is no new dependency.
 
   ```ts
   createEnterpriseOAuthProvider({
@@ -319,6 +319,34 @@ const agent = await createAgent({
       algorithm: 'RS256',
     },
     getIdToken: () => session.idToken,
+  })
+  ```
+- **`assertionAudience` and `assertionType`: for a server built to RFC 7523.** The assertion above follows `draft-ietf-oauth-rfc7523bis`. Many deployed identity providers were built to RFC 7523 as published: they expect the **token endpoint URL** as `aud` and may refuse a `typ` they do not know. Two options, each available on the provider (for the authorization server) and inside `idp` (for the IdP), each only with `private_key_jwt`, and independent of each other and of the other hop:
+
+  | Option | Values | Default |
+  | --- | --- | --- |
+  | `assertionAudience` / `idp.assertionAudience` | `'issuer'`: the server's issuer identifier. `'token-endpoint'`: its token endpoint URL - `idp.tokenEndpoint` for the IdP; for the authorization server the `token_endpoint` of the discovered metadata, used only after that metadata matched `expectedIssuer` and the endpoint passed the https-or-loopback check | `'issuer'` |
+  | `assertionType` / `idp.assertionType` | `'client-authentication+jwt'` or `'JWT'`: the `typ` header | `'client-authentication+jwt'` |
+
+  With `idp.assertionAudience: 'token-endpoint'`, `idp.issuer` is no longer required. The default stays the issuer because an assertion addressed to a token endpoint URL is what the bis draft forbids: the token endpoint is one field of a metadata document, and a client that takes its audience from metadata can be handed a document naming an honest server's endpoint (audience injection) and made to sign an assertion that is valid there. Here neither value ever comes from the MCP server alone, so `'token-endpoint'` gives up the defence in depth and not the check itself - use it only for a server that refuses the issuer form. A value other than the ones listed, or either option without `private_key_jwt`, throws when the provider is built.
+
+  ```ts
+  createEnterpriseOAuthProvider({
+    // ...as above, for an IdP and an authorization server built to RFC 7523
+    clientAuthMethod: 'private_key_jwt',
+    assertionAudience: 'token-endpoint', // aud = the discovered token endpoint
+    assertionType: 'JWT',
+    expectedIssuer: 'https://auth.example.com',
+    idp: {
+      tokenEndpoint: 'https://acme.idp.example/oauth2/token', // aud of the IdP assertion
+      clientId: 'agent-at-idp',
+      clientAuthMethod: 'private_key_jwt',
+      privateKey: idpJwk,
+      algorithm: 'RS256',
+      assertionAudience: 'token-endpoint',
+      assertionType: 'JWT',
+    },
+    // ...
   })
   ```
 - **A client ID metadata document as `clientId`.** `clientId` may be the https URL of a client ID metadata document (CIMD) you host, for an authorization server that resolves clients that way instead of pre-registering them. The URL must be https with a path of its own, and takes no `clientSecret` (a public document establishes no shared secret): such a client uses `private_key_jwt`, with the keys the document lists in `jwks` / `jwks_uri` and `token_endpoint_auth_method: 'private_key_jwt'`, or no credential. The IdP must know the client by the same URL, because it goes into the ID-JAG's `client_id`.

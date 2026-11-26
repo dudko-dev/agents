@@ -172,6 +172,26 @@ user step, on the word of the company's identity provider (IdP).
   a captured one is hard to replay. The private key is never stored, logged or
   put in an error; a `CryptoKey` imported as non-extractable cannot be read by
   page script at all, only used.
+- **`assertionAudience: 'token-endpoint'` is a trade-off, and the default is
+  the other side of it.** RFC 7523 as published lets the audience of a client
+  assertion be the token endpoint URL, and many deployed identity providers
+  accept nothing else. `draft-ietf-oauth-rfc7523bis` forbids that form because
+  of audience injection: a token endpoint is one field of a metadata document,
+  so a client that reads its audience from metadata can be handed a document
+  naming an honest server's endpoint and made to sign an assertion that is valid
+  there. The issuer identifier is the value a client verifies before it trusts
+  the rest of the document, which is why it is the default (`'issuer'`). With
+  `'token-endpoint'` the audience is still never the MCP server's to choose: for
+  the IdP it is the configured `idp.tokenEndpoint`; for the authorization server
+  it is the `token_endpoint` of the metadata whose issuer matched
+  `expectedIssuer` (still required), after the https-or-loopback check. What you
+  give up is the defence in depth - you now also trust that server's metadata
+  document to name its own endpoint. Set it per hop, only for a server that
+  refuses the issuer form, and leave the other hop on the default.
+  `assertionType: 'JWT'` only relabels the token (`typ`) for servers that reject
+  `client-authentication+jwt`; the explicit type is what keeps a client
+  assertion from being mistaken for another kind of JWT, so keep the default
+  where the server takes it.
 - **A client ID metadata document** (`clientId` as a URL) must be https with a
   path of its own and cannot be combined with a `clientSecret`.
 - **The IdP's answer is checked** before anything goes to the authorization

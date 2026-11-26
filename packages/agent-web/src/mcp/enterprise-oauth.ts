@@ -30,10 +30,13 @@ import { assertSecureOAuthUrl, VaultOAuthStorage, type McpOAuthStorage } from '.
  * in an error.
  *
  * The client authenticates on each hop with a secret or with a signed
- * assertion (`private_key_jwt`, RFC 7523 section 2.2). The audience of that
- * assertion is the issuer identifier of the server it is for and nothing else,
- * as draft-ietf-oauth-rfc7523bis requires: an assertion made for the IdP is of
- * no use at the authorization server, and the other way round.
+ * assertion (`private_key_jwt`, RFC 7523 section 2.2). By default the audience
+ * of that assertion is the issuer identifier of the server it is for and
+ * nothing else, as draft-ietf-oauth-rfc7523bis requires: an assertion made for
+ * the IdP is of no use at the authorization server, and the other way round.
+ * For a server built to RFC 7523 as published, `assertionAudience:
+ * 'token-endpoint'` and `assertionType: 'JWT'` produce the older form - see
+ * `EnterpriseAssertionAudience` for what that gives up.
  *
  * Follows draft-ietf-oauth-identity-assertion-authz-grant and the extension's
  * 2026-07-28 revision. The Node package carries the same provider; change both.
@@ -93,6 +96,38 @@ export type EnterpriseAssertionAlgorithm =
  */
 export type EnterprisePrivateKey = JsonWebKey | CryptoKey
 
+/**
+ * What a `private_key_jwt` client assertion names as its audience (`aud`).
+ *
+ * - `'issuer'` (the default): the issuer identifier of the server the
+ *   assertion is for, as draft-ietf-oauth-rfc7523bis requires.
+ * - `'token-endpoint'`: the URL of that server's token endpoint, which is what
+ *   RFC 7523 as published describes and what many deployed identity providers
+ *   check for.
+ *
+ * The default is the issuer because an assertion addressed to a token endpoint
+ * URL is exactly what the bis draft forbids. The token endpoint is one field of
+ * a metadata document; a client that reads its audience from metadata can be
+ * handed a document that names an honest server's endpoint (audience
+ * injection), and then signs an assertion the party that served the document
+ * can replay at that honest server. The issuer identifier is the one value a
+ * client checks before it trusts the rest of the document. This provider never
+ * takes either value from the MCP server alone - the IdP's endpoint is
+ * configuration, and the authorization server's is used only after its
+ * metadata matched `expectedIssuer` - so `'token-endpoint'` here costs the
+ * defence in depth, not the check itself. Use it only for a server that
+ * refuses the issuer form.
+ */
+export type EnterpriseAssertionAudience = 'issuer' | 'token-endpoint'
+
+/**
+ * The `typ` header of a client assertion: `client-authentication+jwt` (the
+ * default, from draft-ietf-oauth-rfc7523bis: a token typed this way cannot be
+ * mistaken for another kind of JWT) or `JWT`, for a server that refuses a
+ * `typ` it does not know.
+ */
+export type EnterpriseAssertionType = 'client-authentication+jwt' | 'JWT'
+
 /** Where the provider reports what it will not put in an error. */
 export type EnterpriseOAuthLog = (level: 'info' | 'warn' | 'error', message: string) => void
 
@@ -104,8 +139,9 @@ export interface EnterpriseIdpOptions {
    */
   tokenEndpoint: string
   /**
-   * The IdP's issuer identifier. REQUIRED with `private_key_jwt`: it is the
-   * audience of the client assertion (not the token endpoint URL).
+   * The IdP's issuer identifier. REQUIRED with `private_key_jwt`, where it is
+   * the audience of the client assertion - unless `assertionAudience` is
+   * `'token-endpoint'`, which addresses the assertion to `tokenEndpoint`.
    */
   issuer?: string
   /** This client's `client_id` at the IdP (the audience of the ID token). */
@@ -120,7 +156,8 @@ export interface EnterpriseIdpOptions {
    * How the client authenticates at the IdP. With a secret: in an
    * `Authorization: Basic` header (the default, which every OAuth server must
    * accept) or in the form body. `'private_key_jwt'`: a signed assertion, which
-   * needs `privateKey`, `algorithm` and `issuer`.
+   * needs `privateKey`, `algorithm` and `issuer` (or `assertionAudience:
+   * 'token-endpoint'`).
    */
   clientAuthMethod?: 'client_secret_basic' | 'client_secret_post' | 'private_key_jwt'
   /** The key for `private_key_jwt`. Never stored, logged or put in an error. */
@@ -129,6 +166,18 @@ export interface EnterpriseIdpOptions {
   keyId?: string
   /** Signature algorithm of the assertion. */
   algorithm?: EnterpriseAssertionAlgorithm
+  /**
+   * The audience of the assertion: `'issuer'` (the default: `issuer`) or
+   * `'token-endpoint'` (`tokenEndpoint`, for an IdP built to RFC 7523 - the
+   * weaker form, see `EnterpriseAssertionAudience`). Only with `private_key_jwt`.
+   */
+  assertionAudience?: EnterpriseAssertionAudience
+  /**
+   * The `typ` header of the assertion: `'client-authentication+jwt'` (the
+   * default) or `'JWT'` for an IdP that refuses the new one. Only with
+   * `private_key_jwt`.
+   */
+  assertionType?: EnterpriseAssertionType
 }
 
 export interface EnterpriseOAuthProviderOptions {
@@ -166,6 +215,22 @@ export interface EnterpriseOAuthProviderOptions {
   keyId?: string
   /** Signature algorithm of the assertion. */
   algorithm?: EnterpriseAssertionAlgorithm
+  /**
+   * The audience of the assertion for the authorization server: `'issuer'`
+   * (the default: the issuer discovery found, once it matched
+   * `expectedIssuer`) or `'token-endpoint'` (the token endpoint from that same
+   * metadata, for a server built to RFC 7523 - the weaker form, see
+   * `EnterpriseAssertionAudience`). The endpoint is read only from metadata
+   * whose issuer is `expectedIssuer`, and must be https or loopback. Only with
+   * `private_key_jwt`.
+   */
+  assertionAudience?: EnterpriseAssertionAudience
+  /**
+   * The `typ` header of the assertion: `'client-authentication+jwt'` (the
+   * default) or `'JWT'` for a server that refuses the new one. Only with
+   * `private_key_jwt`.
+   */
+  assertionType?: EnterpriseAssertionType
   /**
    * The issuer of the MCP server's authorization server. Anything else the MCP
    * server points at is refused before a credential leaves the process.
@@ -248,8 +313,10 @@ const resourceCovers = (resource: string, serverUrl: string): boolean => {
 
 /**
  * The audience and the resource of the ID-JAG, read from what discovery found
- * for THIS server and from nothing else. Throws (`hop: 'discovery'`) when the
- * published metadata cannot be trusted:
+ * for THIS server and from nothing else - and, once every check below has
+ * passed, the token endpoint that metadata names (the audience of a client
+ * assertion under `assertionAudience: 'token-endpoint'`). Throws (`hop:
+ * 'discovery'`) when the published metadata cannot be trusted:
  *
  * - the authorization server and its token endpoint must be https or loopback;
  * - it must have published metadata with an `issuer`, and that issuer must be
@@ -265,7 +332,7 @@ export const enterpriseGrantTarget = (
   serverUrl: string,
   state: OAuthDiscoveryState | undefined,
   expectedIssuer?: string,
-): { audience: string; resource: string } => {
+): { audience: string; resource: string; tokenEndpoint?: string } => {
   const refuse = (message: string): never => {
     throw new EnterpriseOAuthError('discovery', `Enterprise MCP authorization: ${message}`)
   }
@@ -305,7 +372,14 @@ export const enterpriseGrantTarget = (
       `the protected resource "${published}" this server published does not cover "${serverUrl}"`,
     )
   }
-  return { audience: issuer, resource: published ?? stripFragment(serverUrl) }
+  return {
+    audience: issuer,
+    resource: published ?? stripFragment(serverUrl),
+    // Handed out only here, after the issuer and the scheme checks above.
+    ...(typeof metadata?.token_endpoint === 'string' && metadata.token_endpoint
+      ? { tokenEndpoint: metadata.token_endpoint }
+      : {}),
+  }
 }
 
 /** Printable ASCII only, clipped: a server's words, safe to put in an error. */
@@ -435,27 +509,33 @@ const keySecrets = (key: EnterprisePrivateKey | undefined): string[] => {
 export interface ClientAssertionRequest {
   /** The client: both `iss` and `sub`. */
   clientId: string
-  /** The issuer identifier of the server the assertion is for: its sole `aud`. */
+  /**
+   * The sole `aud`: the issuer identifier of the server the assertion is for
+   * or, for a server built to RFC 7523, the URL of its token endpoint.
+   */
   audience: string
   privateKey: EnterprisePrivateKey
   algorithm: EnterpriseAssertionAlgorithm
   keyId?: string
+  /** The `typ` header. Default `client-authentication+jwt`. */
+  type?: EnterpriseAssertionType
 }
 
 /**
  * A `private_key_jwt` client assertion (RFC 7523 section 2.2, with the audience
  * rule of draft-ietf-oauth-rfc7523bis): `iss` = `sub` = the client, `aud` = the
- * issuer identifier of the one server it is for (never a token endpoint URL),
- * a random `jti`, `iat`, and an `exp` one minute away; header `typ`
- * `client-authentication+jwt`. A failure to sign says so and nothing more: the
- * underlying error may describe the key. The browser package carries the same
- * function; change both.
+ * one audience the caller chose (the provider passes the issuer identifier of
+ * the server it is for, or its token endpoint URL when configured to), a
+ * random `jti`, `iat`, and an `exp` one minute away; header `typ`
+ * `client-authentication+jwt` unless `type` says `JWT`. A failure to sign says
+ * so and nothing more: the underlying error may describe the key. The Node
+ * package carries the same function; change both.
  */
 export const createClientAssertion = async (req: ClientAssertionRequest): Promise<string> => {
   const now = Math.floor(Date.now() / 1000)
   const header = {
     alg: req.algorithm,
-    typ: 'client-authentication+jwt',
+    typ: req.type === 'JWT' ? 'JWT' : 'client-authentication+jwt',
     ...(req.keyId ? { kid: req.keyId } : {}),
   }
   const payload = {
@@ -611,6 +691,34 @@ const looksLikeUrl = (value: string): boolean => /^[a-z][a-z0-9+.-]*:\/\//i.test
 const configError = (message: string): Error =>
   new Error(`Enterprise MCP authorization: ${message}`)
 
+const ASSERTION_AUDIENCES: readonly unknown[] = ['issuer', 'token-endpoint']
+const ASSERTION_TYPES: readonly unknown[] = ['client-authentication+jwt', 'JWT']
+
+/**
+ * The two options that shape a client assertion, for one hop (`prefix` is ''
+ * or 'idp.'): a value that is not one of the known ones is refused rather than
+ * read as the default, and so is either option where no assertion is signed.
+ */
+const checkAssertionShape = (
+  prefix: string,
+  hop: { clientAuthMethod?: string; assertionAudience?: unknown; assertionType?: unknown },
+): void => {
+  if (hop.assertionAudience !== undefined && !ASSERTION_AUDIENCES.includes(hop.assertionAudience)) {
+    throw configError(`${prefix}assertionAudience must be 'issuer' or 'token-endpoint'`)
+  }
+  if (hop.assertionType !== undefined && !ASSERTION_TYPES.includes(hop.assertionType)) {
+    throw configError(`${prefix}assertionType must be 'client-authentication+jwt' or 'JWT'`)
+  }
+  if (
+    hop.clientAuthMethod !== 'private_key_jwt' &&
+    (hop.assertionAudience !== undefined || hop.assertionType !== undefined)
+  ) {
+    throw configError(
+      `${prefix}assertionAudience and ${prefix}assertionType are only used with ${prefix}clientAuthMethod 'private_key_jwt'`,
+    )
+  }
+}
+
 /**
  * What is wrong with the options, said when the provider is built and not in
  * the middle of a flow. Every rule here keeps a credential from going where
@@ -677,16 +785,21 @@ const checkOptions = (opts: EnterpriseOAuthProviderOptions): void => {
     throw configError("privateKey is only used with clientAuthMethod 'private_key_jwt'")
   }
 
+  checkAssertionShape('', opts)
+
   // The client at the IdP.
+  checkAssertionShape('idp.', idp)
   if (idp.clientAuthMethod === 'private_key_jwt') {
     if (idp.privateKey === undefined || !ALGORITHMS.includes(idp.algorithm as never)) {
       throw configError(
         `idp.clientAuthMethod 'private_key_jwt' needs idp.privateKey and an idp.algorithm (${ALGORITHMS.join(', ')})`,
       )
     }
-    if (!idp.issuer) {
+    // The audience is configuration either way: the issuer, or the token
+    // endpoint that is required above. Only the former needs `idp.issuer`.
+    if (idp.assertionAudience !== 'token-endpoint' && !idp.issuer) {
       throw configError(
-        'idp.clientAuthMethod private_key_jwt needs idp.issuer: it is the audience of the client assertion',
+        "idp.clientAuthMethod private_key_jwt needs idp.issuer: it is the audience of the client assertion (or set idp.assertionAudience to 'token-endpoint')",
       )
     }
     if (idp.clientSecret) {
@@ -902,16 +1015,21 @@ export class BrowserEnterpriseOAuthProvider implements OAuthClientProvider {
     }
 
     const { idp } = this.#opts
-    // Signed for the IdP's issuer and for nothing else: it is no use at the
-    // authorization server, whose assertion is made separately, for its issuer.
+    // Signed for the IdP and for nothing else - its issuer or, when configured
+    // so, its token endpoint, both from configuration: it is no use at the
+    // authorization server, whose assertion is made separately.
     const clientAssertion =
       idp.clientAuthMethod === 'private_key_jwt'
         ? await createClientAssertion({
             clientId: idp.clientId,
-            audience: idp.issuer as string,
+            audience:
+              idp.assertionAudience === 'token-endpoint'
+                ? idp.tokenEndpoint
+                : (idp.issuer as string),
             privateKey: idp.privateKey as EnterprisePrivateKey,
             algorithm: idp.algorithm as EnterpriseAssertionAlgorithm,
             keyId: idp.keyId,
+            type: idp.assertionType,
           }).catch((err: Error) => {
             throw new EnterpriseOAuthError('idp', err.message)
           })
@@ -933,19 +1051,30 @@ export class BrowserEnterpriseOAuthProvider implements OAuthClientProvider {
   async #authenticateClient(headers: Headers, params: URLSearchParams): Promise<void> {
     const { clientId, clientSecret, clientAuthMethod } = this.#opts
     if (clientAuthMethod === 'private_key_jwt') {
-      // The audience is the issuer discovery found - and only after it was
-      // checked against `expectedIssuer`, which this method requires.
-      const { audience } = enterpriseGrantTarget(
+      // The audience is the issuer discovery found, or the token endpoint of
+      // that same metadata - either one only after the metadata was checked
+      // against `expectedIssuer`, which this method requires.
+      const target = enterpriseGrantTarget(
         this.serverUrl,
         await this.discoveryState(),
         this.#opts.expectedIssuer,
       )
+      const audience =
+        this.#opts.assertionAudience === 'token-endpoint' ? target.tokenEndpoint : target.audience
+      if (audience === undefined) {
+        this.#pendingAssertion = undefined
+        throw new EnterpriseOAuthError(
+          'discovery',
+          `Enterprise MCP authorization: the authorization server "${target.audience}" published no token endpoint, so there is no audience for the client assertion (assertionAudience 'token-endpoint')`,
+        )
+      }
       const assertion = await createClientAssertion({
         clientId,
         audience,
         privateKey: this.#opts.privateKey as EnterprisePrivateKey,
         algorithm: this.#opts.algorithm as EnterpriseAssertionAlgorithm,
         keyId: this.#opts.keyId,
+        type: this.#opts.assertionType,
       }).catch((err: Error) => {
         this.#pendingAssertion = undefined
         throw new EnterpriseOAuthError('authorization-server', err.message)
