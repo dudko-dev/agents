@@ -6,22 +6,29 @@ import { inspect } from 'node:util'
 import { createAgent, type IAgent } from '../src/index.ts'
 import { connectMcpServers } from '../src/mcp.ts'
 import {
+  createClientAssertion,
   createEnterpriseOAuthProvider,
   ENTERPRISE_MANAGED_AUTHORIZATION_EXTENSION,
   enterpriseGrantTarget,
   EnterpriseOAuthError,
   requestIdJag,
+  type EnterpriseAssertionAlgorithm,
 } from '../src/mcp-enterprise-oauth.ts'
 import { MemoryOAuthStore } from '../src/mcp-oauth.ts'
 import {
+  CLIENT_ASSERTION_TYPE,
+  generateClientKey,
   ID_JAG_TOKEN_TYPE,
   ID_TOKEN_TOKEN_TYPE,
   JWT_BEARER_GRANT,
+  peekJwt,
   startLocalIdp,
   TOKEN_EXCHANGE_GRANT,
+  verifyJwt,
   type ILocalIdp,
+  type ILocalIdpOptions,
 } from './helpers/idp-server.ts'
-import { startLocalMcp, type ILocalMcp } from './helpers/mcp-server.ts'
+import { startLocalMcp, type ILocalMcp, type ILocalMcpOptions } from './helpers/mcp-server.ts'
 import {
   hasToolResult,
   startLocalOpenAI,
@@ -509,7 +516,7 @@ test('provider: only the access token is stored; the ID token, the ID-JAG and th
   assert.match(dump, /access-1/)
   assertNoSecrets(dump, 'the store')
   // Nor does printing the provider give them away.
-  assertNoSecrets(inspect(provider, { depth: 6 }), 'inspect(provider)')
+  assertNoSecrets(inspect(provider, { depth: 8, showHidden: true }), 'inspect(provider)')
   assertNoSecrets(JSON.stringify(provider), 'JSON.stringify(provider)')
 })
 
@@ -539,14 +546,25 @@ interface IWorld {
   provider: (extra?: Record<string, unknown>) => ReturnType<typeof createEnterpriseOAuthProvider>
 }
 
+interface IWorldOptions {
+  expiresIn?: number
+  echoAssertion?: boolean
+  publicClient?: boolean
+  /** Overrides for the test IdP (e.g. `clientJwks`, `resourceClientId`). */
+  idp?: Partial<ILocalIdpOptions>
+  /** Overrides for the authorization server's enterprise settings. */
+  enterprise?: Partial<NonNullable<ILocalMcpOptions['enterprise']>>
+}
+
 const withWorld = async (
   body: (world: IWorld) => Promise<void>,
-  opts: { expiresIn?: number; echoAssertion?: boolean; publicClient?: boolean } = {},
+  opts: IWorldOptions = {},
 ): Promise<void> => {
   const idp = await startLocalIdp({
     clientId: IDP_CLIENT,
     clientSecret: IDP_SECRET,
     resourceClientId: AS_CLIENT,
+    ...opts.idp,
   })
   const mcp = await startLocalMcp({
     requireAuth: true,
@@ -557,6 +575,7 @@ const withWorld = async (
       clientId: AS_CLIENT,
       clientSecret: opts.publicClient ? undefined : AS_SECRET,
       echoAssertion: opts.echoAssertion,
+      ...opts.enterprise,
     },
   })
   const store = new MemoryOAuthStore()
@@ -591,20 +610,45 @@ const withWorld = async (
 
 const collectLogs = () => {
   const lines: string[] = []
-  return { lines, log: (_level: string, message: string) => void lines.push(message) }
+  const levels: string[] = []
+  return {
+    lines,
+    levels,
+    log: (level: string, message: string) => {
+      levels.push(level)
+      lines.push(message)
+    },
+  }
 }
 
 const callTool = (tools: Record<string, unknown>, name: string, args: unknown): Promise<unknown> =>
   (tools[name] as { execute: (a: unknown, o: unknown) => Promise<unknown> }).execute(args, {})
 
-/** Nothing this run touched may hold a token of the exchange or a secret. */
-const assertWorldLeaksNothing = (world: IWorld, texts: string[]): void => {
+/**
+ * Nothing this run touched may hold a token of the exchange, a client assertion
+ * or a secret: not the store, not an error, not a log line.
+ */
+const assertWorldLeaksNothing = (world: IWorld, texts: string[], more: string[] = []): void => {
   const dump = JSON.stringify([...(world.store as unknown as { map: Map<string, string> }).map])
-  const sensitive = [...world.idTokens, ...world.idp.issuedIdJags, AS_SECRET, IDP_SECRET]
+  const assertions = [
+    ...world.idp.exchanges.map((e) => e.params.client_assertion),
+    ...world.mcp.tokenRequests().map((r) => r.params.client_assertion),
+  ].filter((v): v is string => Boolean(v))
+  const sensitive = [
+    ...world.idTokens,
+    ...world.idp.issuedIdJags,
+    ...assertions,
+    AS_SECRET,
+    IDP_SECRET,
+    ...more,
+  ]
   for (const value of sensitive) {
-    assert.ok(!dump.includes(value), 'the store holds no ID token, ID-JAG or secret')
+    assert.ok(!dump.includes(value), 'the store holds no token, assertion, key or secret')
     for (const text of texts) {
-      assert.ok(!text.includes(value), `no ID token, ID-JAG or secret in: ${text.slice(0, 80)}`)
+      assert.ok(
+        !text.includes(value),
+        `no token, assertion, key or secret in: ${text.slice(0, 90)}`,
+      )
     }
   }
 }
@@ -774,11 +818,18 @@ test('e2e: an ID-JAG for the wrong audience is refused by the authorization serv
     idp.misbehave.audience = 'https://another-as.example.test'
     const { error, logs } = await failToConnect(world)
 
-    assert.match(error, /MCP authorization server refused the ID-JAG grant/)
-    assert.match(error, /Audience validation failed/)
-    assert.ok(
-      mcp.tokenRequests().every((r) => r.error === 'invalid_grant: Audience validation failed'),
+    // Short and safe for whoever shows it; the server's words go to the log.
+    assert.equal(
+      error,
+      'MCP authorization server refused the ID-JAG grant: invalid_grant (HTTP 400)',
     )
+    assert.ok(logs.some((l) => /Audience validation failed/.test(l)))
+    assert.deepEqual(
+      mcp.tokenRequests().map((r) => r.error),
+      ['invalid_grant: Audience validation failed'],
+      'one grant, refused once: a final refusal is not retried',
+    )
+    assert.equal(idp.exchanges.length, 1)
     assert.equal(mcp.validTokens.size, 0, 'no access token was issued')
     assert.equal(await world.provider().tokens(), undefined)
     assertWorldLeaksNothing(world, [error, ...logs])
@@ -794,8 +845,8 @@ test('e2e: an expired ID-JAG is refused by the authorization server', async () =
   await withWorld(async (world) => {
     world.idp.misbehave.expired = true
     const { error, logs } = await failToConnect(world)
-    assert.match(error, /MCP authorization server refused the ID-JAG grant/)
-    assert.match(error, /Assertion has expired/)
+    assert.match(error, /MCP authorization server refused the ID-JAG grant: invalid_grant/)
+    assert.ok(logs.some((l) => /Assertion has expired/.test(l)))
     assert.equal(world.mcp.validTokens.size, 0)
     assertWorldLeaksNothing(world, [error, ...logs])
   })
@@ -914,8 +965,11 @@ test('e2e: a wrong client secret at the authorization server names that hop and 
       world,
       world.provider({ clientSecret: wrongSecret }),
     )
-    assert.match(error, /MCP authorization server refused the ID-JAG grant/)
-    assert.match(error, /Client authentication failed/)
+    assert.equal(
+      error,
+      'MCP authorization server refused the ID-JAG grant: invalid_client (HTTP 401)',
+    )
+    assert.ok(logs.some((l) => /Client authentication failed/.test(l)))
     assert.ok(![error, ...logs].some((t) => t.includes(wrongSecret)))
     assertWorldLeaksNothing(world, [error, ...logs])
   })
@@ -925,8 +979,12 @@ test('e2e: an authorization server that echoes the grant leaks nothing through t
   await withWorld(
     async (world) => {
       const { error, logs } = await failToConnect(world)
-      assert.match(error, /MCP authorization server refused the ID-JAG grant/)
-      assert.match(error, /\[redacted\]/)
+      assert.equal(
+        error,
+        'MCP authorization server refused the ID-JAG grant: invalid_request (HTTP 400)',
+      )
+      // The server quoted the whole request; the log line has it cut out.
+      assert.ok(logs.some((l) => /cannot accept/.test(l) && /\[redacted\]/.test(l)))
       assert.equal(world.idp.issuedIdJags.length, 1)
       assertWorldLeaksNothing(world, [error, ...logs])
     },
