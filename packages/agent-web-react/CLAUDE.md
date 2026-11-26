@@ -1,13 +1,16 @@
 # @dudko.dev/agent-web-react — instructions for Claude
 
+> Lives in the `dudko-dev/agents` monorepo at `packages/agent-web-react`. The root `CLAUDE.md` has the workspace
+> commands (pnpm + nx) and the rules shared by all packages; this file is about this package only.
+
 React bindings for **`@dudko.dev/agent-web`**, the headless in-browser LLM agent.
 This package adds a thin, UI layer: one hook (`useAgent`), a context provider,
 and a set of optional pre-styled components. It ships **no agent logic of its
 own** — the core does planning/tools/providers/vault; this package turns its
 `AgentEvent` stream into React state and renders it.
 
-The repo also contains a **Vite demo** (`demo/`) that is auto-deployed to
-**GitHub Pages** on every push to `main`.
+The **Vite demo** lives in `apps/demo` of the monorepo; the browser tests in `e2e/` here run
+against its production build.
 
 ## Principles
 
@@ -56,7 +59,7 @@ The repo also contains a **Vite demo** (`demo/`) that is auto-deployed to
   (the agent's notebook: `learned` in the state belongs to the agent, not the conversation),
   `ContextMeter`, `Composer` (minimal), `PlanView`, `ModelLoadBar`,
   `UsageBadge`, `ApiKeyForm`, `icons`, `format`. Docs: `docs/chat.md`.
-- `demo/src/components/McpPanel.tsx` — the demo's "bring your own MCP" panel.
+- `apps/demo/src/components/McpPanel.tsx` (monorepo root) — the demo's "bring your own MCP" panel.
 - `src/util.ts` — tiny shared helpers (`errMessage`).
 - `src/styles.css` — optional theme (light + dark).
 - `src/index.ts` — public surface (+ curated re-exports from the core).
@@ -68,20 +71,20 @@ The repo also contains a **Vite demo** (`demo/`) that is auto-deployed to
   (a run, typing to it while it works, the notebook and the fetched pages) against a scripted Gemini
   endpoint (`gemini.ts`, routed by the stage markers; it can script tool calls and the notebook's
   `save_skill`).
-- `demo/` — the Vite + React demo (aliases the library to `../dist`).
+- `apps/demo/` (monorepo root) — the Vite + React demo (aliases the library to this package's `dist`).
 
 ## Commands
 
 ```bash
-npm run typecheck     # tsc --noEmit
-npm run format:check  # prettier
-npm run build         # tsup → dist (ESM + CJS + d.ts) + copy styles.css
-npm test              # node --test tests/*.test.ts (pretest builds)
-npm run test:e2e      # playwright over the built demo (browser flows)
+pnpm nx typecheck @dudko.dev/agent-web-react     # tsc --noEmit (nx builds the core first)
+pnpm nx format:check @dudko.dev/agent-web-react  # prettier
+pnpm nx build @dudko.dev/agent-web-react         # tsup → dist (ESM + CJS + d.ts) + copy styles.css
+pnpm nx test @dudko.dev/agent-web-react          # node --test tests/*.test.ts (nx builds first)
+pnpm nx test:e2e @dudko.dev/agent-web-react      # playwright over the built demo (browser flows)
 
 # demo
-cd demo && npm install && npm run dev      # local dev (rebuild the lib first)
-cd demo && npm run typecheck && npm run build
+pnpm nx build @dudko.dev/agent-web-react && pnpm --filter demo dev   # local dev
+pnpm nx run-many -t typecheck build -p demo
 ```
 
 CI (`.github/workflows/ci.yml`) runs the library job (typecheck → format:check →

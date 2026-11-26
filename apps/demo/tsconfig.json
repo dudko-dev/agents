@@ -15,8 +15,8 @@
     "verbatimModuleSyntax": true,
     "noEmit": true,
     "paths": {
-      "@dudko.dev/agent-web-react": ["../dist/index.d.ts"],
-      "@dudko.dev/agent-web-react/mcp": ["../dist/mcp.d.ts"]
+      "@dudko.dev/agent-web-react": ["../../packages/agent-web-react/dist/index.d.ts"],
+      "@dudko.dev/agent-web-react/mcp": ["../../packages/agent-web-react/dist/mcp.d.ts"]
     }
   },
   "include": ["src", "vite.config.ts"]

@@ -60,7 +60,8 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "github:dudko-dev/agent"
+    "url": "git+https://github.com/dudko-dev/agents.git",
+    "directory": "packages/agent"
   },
   "exports": {
     ".": {
@@ -85,8 +86,7 @@
     "test": "node --test --experimental-strip-types --disable-warning=ExperimentalWarning tests/*.test.ts",
     "typecheck": "tsc --noEmit",
     "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\"",
-    "format:check": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\"",
-    "prepublishOnly": "npm run typecheck && npm test && npm run build"
+    "format:check": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\""
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
@@ -147,6 +147,7 @@
     "@ai-sdk/google-vertex": "^5.0.144",
     "@ai-sdk/openai": "^4.0.122",
     "@ai-sdk/openai-compatible": "^3.0.94",
+    "@ai-sdk/provider-utils": "^5.0.85",
     "@ai-sdk/xai": "^5.0.48",
     "@types/node": "^22.9.0",
     "prettier": "^3.10.1",
@@ -161,5 +162,8 @@
     "workers-ai-provider": {
       "ai": "$ai"
     }
+  },
+  "bugs": {
+    "url": "https://github.com/dudko-dev/agents/issues"
   }
 }

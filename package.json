@@ -1,0 +1,25 @@
+{
+  "name": "agents",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Monorepo of the @dudko.dev agent packages: the Node agent, the in-browser agent, its React bindings and the demo.",
+  "license": "MIT",
+  "packageManager": "pnpm@10.28.0",
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "scripts": {
+    "build": "nx run-many -t build",
+    "typecheck": "nx run-many -t typecheck",
+    "format:check": "nx run-many -t format:check",
+    "format": "nx run-many -t format",
+    "test": "nx run-many -t test",
+    "test:e2e": "nx run @dudko.dev/agent-web-react:test:e2e",
+    "check": "nx run-many -t typecheck format:check build test",
+    "affected": "nx affected -t typecheck format:check build test"
+  },
+  "devDependencies": {
+    "nx": "^24.0.7"
+  }
+}

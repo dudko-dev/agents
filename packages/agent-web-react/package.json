@@ -47,8 +47,6 @@
     "format": "prettier --write \"src/**/*.{ts,tsx,css}\" \"tests/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.{ts,tsx,css}\" \"tests/**/*.ts\"",
     "test": "node --test --experimental-strip-types --disable-warning=ExperimentalWarning tests/*.test.ts",
-    "prepublishOnly": "npm run typecheck && npm test && npm run build",
-    "pretest": "npm run build",
     "test:e2e": "playwright test"
   },
   "keywords": [
@@ -87,11 +85,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/dudko-dev/agent-web-react.git"
+    "url": "git+https://github.com/dudko-dev/agents.git",
+    "directory": "packages/agent-web-react"
   },
   "homepage": "https://dudko-dev.github.io/agent-web-react/",
   "bugs": {
-    "url": "https://github.com/dudko-dev/agent-web-react/issues"
+    "url": "https://github.com/dudko-dev/agents/issues"
   },
   "funding": [
     {
@@ -120,7 +119,7 @@
     "react-dom": ">=18"
   },
   "devDependencies": {
-    "@dudko.dev/agent-web": "^0.0.34",
+    "@dudko.dev/agent-web": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.32.2",
     "@playwright/test": "^1.65.1",
     "@types/node": "^22.9.0",
@@ -130,6 +129,7 @@
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "tsup": "^9.0.0",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "zod": "^4.6.7"
   }
 }

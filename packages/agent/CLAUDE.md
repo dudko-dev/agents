@@ -1,5 +1,8 @@
 # CLAUDE.md
 
+> Lives in the `dudko-dev/agents` monorepo at `packages/agent`. The root `CLAUDE.md` has the workspace
+> commands (pnpm + nx) and the rules shared by all packages; this file is about this package only.
+
 ## Project
 
 `@dudko.dev/agent` — tool-using planning agent over MCP servers, built on the Vercel AI SDK. TypeScript, ESM, Node ≥22.6.
@@ -71,15 +74,14 @@
 After **any** change to `.ts` files in `src/` or `tests/`, run:
 
 ```bash
-npm run typecheck
-npm run format:check
-npm run build
-npm test
+pnpm nx run-many -t typecheck format:check build test -p @dudko.dev/agent
 ```
+
+(or `pnpm run typecheck` etc. inside `packages/agent`).
 
 Do not consider a task done until all four exit cleanly. Run them with the `Bash` tool, do not infer success from "the change looks right".
 
-If `npm install` is needed (e.g. lockfile changed), run it with `--no-audit --no-fund` and ensure it returned 0 before running checks.
+If dependencies changed, run `pnpm install` at the repo root and ensure it returned 0 before running checks.
 
 ## Conventions
 
@@ -99,11 +101,14 @@ If `npm install` is needed (e.g. lockfile changed), run it with `--no-audit --no
 ## When you are working on an autoupdate PR
 
 - Branch will be `chore/autoupdate-<run_id>`.
-- Goal: bring `npm run typecheck && npm run format:check && npm run build && npm test` to green.
+- Goal: bring `pnpm nx run-many -t typecheck format:check build test` to green.
 - Push compatibility fixes onto this branch. Each push re-runs the `CI` workflow automatically once the PR is open.
 - If a fix is impossible without changing product behavior, stop and leave a comment explaining what's blocked rather than guessing.
 
-## CI quirks specific to this repo
+## CI quirks carried over from the standalone repo
+
+The release, live-model and autoupdate workflows described below are being ported to the monorepo
+(their originals are kept under `.github/_imported/agent/` until then). The reasons still apply.
 
 This repo follows the unified `autoupdate-with-claude` baseline (same template across siblings). Several workarounds are intentional:
 - `autoupdate.yml` uses `GITHUB_TOKEN` and explicitly dispatches `test.yml` (the `CI` workflow) after PR creation, because events created via `GITHUB_TOKEN` don't trigger `pull_request` workflows.

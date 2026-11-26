@@ -1,5 +1,5 @@
 {
-  "name": "agent-web-react-demo",
+  "name": "demo",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -20,7 +20,7 @@
     "@browser-ai/core": "^3.0.4",
     "@browser-ai/transformers-js": "^3.0.4",
     "@browser-ai/web-llm": "^3.0.4",
-    "@dudko.dev/agent-web": "^0.0.34",
+    "@dudko.dev/agent-web": "workspace:*",
     "@dudko.dev/pdf-to-md-core": "^0.3.6",
     "@huggingface/transformers": "^4.3.2",
     "@mlc-ai/web-llm": "^0.2.87",
@@ -37,6 +37,7 @@
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.2.1",
     "typescript": "^6.0.3",
-    "vite": "^8.3.6"
+    "vite": "^8.3.6",
+    "@dudko.dev/agent-web-react": "workspace:*"
   }
 }

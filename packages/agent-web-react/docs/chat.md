@@ -134,7 +134,7 @@ The input stays live during a run. Text typed then is **said to the running agen
 send button, or Enter): it is shown to the model at the next boundary — between tool
 calls, or when the step ends, where the replanner re-checks the plan against it. It never
 cuts a tool call short. Needs `@dudko.dev/agent-web` with `createRunControl` (see the
-core's [steering docs](https://github.com/dudko-dev/agent-web/blob/main/docs/capabilities.md)).
+core's [steering docs](https://github.com/dudko-dev/agents/blob/main/packages/agent-web/docs/capabilities.md)).
 
 What the user sees:
 

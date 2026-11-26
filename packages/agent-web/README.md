@@ -32,8 +32,8 @@ across a session (`agent.usage`), **steering** a run while it goes (`RunControl`
 [![npm](https://img.shields.io/npm/v/@dudko.dev/agent-web.svg)](https://www.npmjs.com/package/@dudko.dev/agent-web)
 [![npm](https://img.shields.io/npm/dy/@dudko.dev/agent-web.svg)](https://www.npmjs.com/package/@dudko.dev/agent-web)
 [![NpmLicense](https://img.shields.io/npm/l/@dudko.dev/agent-web.svg)](https://www.npmjs.com/package/@dudko.dev/agent-web)
-![GitHub last commit](https://img.shields.io/github/last-commit/dudko-dev/agent-web.svg)
-![GitHub release](https://img.shields.io/github/release/dudko-dev/agent-web.svg)
+![GitHub last commit](https://img.shields.io/github/last-commit/dudko-dev/agents.svg)
+![GitHub release](https://img.shields.io/github/release/dudko-dev/agents.svg)
 
 > Browser sibling of the Node package
 > [`@dudko.dev/agent`](https://www.npmjs.com/package/@dudko.dev/agent).
@@ -41,7 +41,7 @@ across a session (`agent.usage`), **steering** a run while it goes (`RunControl`
 > **Using React?** [`@dudko.dev/agent-web-react`](https://www.npmjs.com/package/@dudko.dev/agent-web-react)
 > wraps this core in a `useAgent` hook, an `<AgentProvider>` context and drop-in
 > UI components — try the **[live demo](https://dudko-dev.github.io/agent-web-react/)**
-> ([source](https://github.com/dudko-dev/agent-web-react)).
+> ([source](https://github.com/dudko-dev/agents/tree/main/packages/agent-web-react)).
 
 ## Install
 
@@ -66,7 +66,7 @@ npm install @modelcontextprotocol/sdk
 `dist/agent-web.js` is a **self-contained ESM bundle** of the core — `ai`,
 `zod` and `idb` are baked in. It ships in the npm package (so it's on every
 CDN) and is attached to each
-[GitHub release](https://github.com/dudko-dev/agent-web/releases) as
+[GitHub release](https://github.com/dudko-dev/agents/releases) as
 `agent-web-<version>.min.js`:
 
 ```html
@@ -411,7 +411,7 @@ against it), `stopSubagent(id)` stops one subagent. `egress` (off by default) gi
 - [`@dudko.dev/agent-web-react`](https://www.npmjs.com/package/@dudko.dev/agent-web-react) —
   React bindings (`useAgent`, `<AgentProvider>`, pre-styled components) ·
   [live demo](https://dudko-dev.github.io/agent-web-react/) ·
-  [source](https://github.com/dudko-dev/agent-web-react).
+  [source](https://github.com/dudko-dev/agents/tree/main/packages/agent-web-react).
 - [`@dudko.dev/agent`](https://www.npmjs.com/package/@dudko.dev/agent) — the
   Node/server sibling (stdio MCP, persistence/resume, OpenTelemetry, CLI).
 

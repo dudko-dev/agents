@@ -39,7 +39,7 @@ export default defineConfig({
     // server running. Binding the same literal address both places removes the
     // resolver from the equation.
     command:
-      'npm --prefix demo run build && npm --prefix demo run preview -- --host 127.0.0.1 --port 4173 --strictPort',
+      'pnpm --filter demo run build && pnpm --filter demo run preview --host 127.0.0.1 --port 4173 --strictPort',
     url: 'http://127.0.0.1:4173/agent-web-react/',
     reuseExistingServer: !process.env.CI,
     // Playwright ignores webServer stdout by default, which is why the first CI

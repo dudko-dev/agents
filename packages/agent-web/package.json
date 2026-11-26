@@ -59,9 +59,7 @@
     "typecheck": "tsc --noEmit",
     "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\"",
-    "test": "node --test --experimental-strip-types --disable-warning=ExperimentalWarning tests/*.test.ts",
-    "prepublishOnly": "npm run typecheck && npm test && npm run build",
-    "pretest": "npm run build"
+    "test": "node --test --experimental-strip-types --disable-warning=ExperimentalWarning tests/*.test.ts"
   },
   "keywords": [
     "agent",
@@ -107,11 +105,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/dudko-dev/agent-web.git"
+    "url": "git+https://github.com/dudko-dev/agents.git",
+    "directory": "packages/agent-web"
   },
-  "homepage": "https://github.com/dudko-dev/agent-web#readme",
+  "homepage": "https://github.com/dudko-dev/agents/tree/main/packages/agent-web#readme",
   "bugs": {
-    "url": "https://github.com/dudko-dev/agent-web/issues"
+    "url": "https://github.com/dudko-dev/agents/issues"
   },
   "funding": [
     {

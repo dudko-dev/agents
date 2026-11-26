@@ -5,8 +5,8 @@ This lightweight, opinionated planning agent automates complex workflows by orch
 [![npm](https://img.shields.io/npm/v/@dudko.dev/agent.svg)](https://www.npmjs.com/package/@dudko.dev/agent)
 [![npm](https://img.shields.io/npm/dy/@dudko.dev/agent.svg)](https://www.npmjs.com/package/@dudko.dev/agent)
 [![NpmLicense](https://img.shields.io/npm/l/@dudko.dev/agent.svg)](https://www.npmjs.com/package/@dudko.dev/agent)
-![GitHub last commit](https://img.shields.io/github/last-commit/dudko-dev/agent.svg)
-![GitHub release](https://img.shields.io/github/release/dudko-dev/agent.svg)
+![GitHub last commit](https://img.shields.io/github/last-commit/dudko-dev/agents.svg)
+![GitHub release](https://img.shields.io/github/release/dudko-dev/agents.svg)
 
 > Node/server sibling of the **browser** package
 > [`@dudko.dev/agent-web`](https://www.npmjs.com/package/@dudko.dev/agent-web) —
@@ -754,7 +754,7 @@ The newer features are env-driven too: `AGENT_THINKING` (`off | minimal | low | 
 For local development against the source tree:
 
 ```bash
-npm start  # node --experimental-strip-types src/cli/start.ts --env-file=.env
+pnpm --filter @dudko.dev/agent start  # node --experimental-strip-types src/cli/start.ts --env-file=.env
 ```
 
 The CLI source lives in [`src/cli`](./src/cli) — [`env.example`](./env.example) is the full, commented list of recognized env vars. The core ones:
@@ -773,11 +773,12 @@ The CLI source lives in [`src/cli`](./src/cli) — [`env.example`](./env.example
 ## Build & test
 
 ```bash
-npm run build         # tsup -> dist/ (ESM + CJS + .d.ts + cli.js with shebang)
-npm run typecheck     # tsc --noEmit
-npm test              # node --test against tests/
-npm run format        # prettier --write
-npm run format:check  # prettier --check
+# from the monorepo root (https://github.com/dudko-dev/agents), after `pnpm install`
+pnpm nx build @dudko.dev/agent         # tsup -> dist/ (ESM + CJS + .d.ts + cli.js with shebang)
+pnpm nx typecheck @dudko.dev/agent     # tsc --noEmit
+pnpm nx test @dudko.dev/agent          # node --test against tests/
+pnpm nx format:check @dudko.dev/agent  # prettier --check
+pnpm --filter @dudko.dev/agent format  # prettier --write
 ```
 
 ## Testing against a real model

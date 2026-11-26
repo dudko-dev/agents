@@ -4,8 +4,8 @@ import { defineConfig } from 'vite'
 
 const at = (p: string) => fileURLToPath(new URL(p, import.meta.url))
 
-// The demo consumes the freshly built library from ../dist (run `npm run build`
-// in the repo root first — CI does this before the demo build). Aliasing to the
+// The demo consumes the freshly built library from packages/agent-web-react/dist (nx builds it
+// first: `pnpm nx build demo`). Aliasing to the
 // real dist keeps the demo honest: it exercises the published artifact, not the
 // TypeScript source.
 export default defineConfig({
@@ -13,15 +13,14 @@ export default defineConfig({
   base: process.env.DEMO_BASE ?? '/agent-web-react/',
   plugins: [react()],
   resolve: {
-    // The library in ../dist resolves its peers from the repo root's
-    // node_modules; force ONE copy of each (two Reacts break every hook).
+    // The library's dist sits outside this app; force ONE copy of each (two Reacts break every hook).
     dedupe: ['react', 'react-dom', '@dudko.dev/agent-web', 'ai', 'zod'],
     alias: [
-      { find: '@dudko.dev/agent-web-react/styles.css', replacement: at('../dist/styles.css') },
+      { find: '@dudko.dev/agent-web-react/styles.css', replacement: at('../../packages/agent-web-react/dist/styles.css') },
       // Before the bare name: a string alias also matches by prefix, so without this
-      // `…/mcp` would resolve to `../dist/index.js/mcp`.
-      { find: '@dudko.dev/agent-web-react/mcp', replacement: at('../dist/mcp.js') },
-      { find: '@dudko.dev/agent-web-react', replacement: at('../dist/index.js') },
+      // `…/mcp` would resolve to `…/dist/index.js/mcp`.
+      { find: '@dudko.dev/agent-web-react/mcp', replacement: at('../../packages/agent-web-react/dist/mcp.js') },
+      { find: '@dudko.dev/agent-web-react', replacement: at('../../packages/agent-web-react/dist/index.js') },
     ],
   },
   // The chess analysts run as module Web Workers (`new Worker(new URL(…), {

@@ -423,7 +423,7 @@ export const App = () => {
           </div>
         </div>
         <nav className="app__links">
-          <a href="https://github.com/dudko-dev/agent-web-react" target="_blank" rel="noreferrer">
+          <a href="https://github.com/dudko-dev/agents" target="_blank" rel="noreferrer">
             GitHub
           </a>
           <a

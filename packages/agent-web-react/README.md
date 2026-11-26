@@ -36,7 +36,7 @@ app with a single hook and (optionally) a set of pre-styled components:
 [![npm](https://img.shields.io/npm/v/@dudko.dev/agent-web-react.svg)](https://www.npmjs.com/package/@dudko.dev/agent-web-react)
 [![npm downloads](https://img.shields.io/npm/dy/@dudko.dev/agent-web-react.svg)](https://www.npmjs.com/package/@dudko.dev/agent-web-react)
 [![license](https://img.shields.io/npm/l/@dudko.dev/agent-web-react.svg)](https://www.npmjs.com/package/@dudko.dev/agent-web-react)
-![GitHub last commit](https://img.shields.io/github/last-commit/dudko-dev/agent-web-react.svg)
+![GitHub last commit](https://img.shields.io/github/last-commit/dudko-dev/agents.svg)
 
 > **▶︎ [Live demo](https://dudko-dev.github.io/agent-web-react/)** — three agents:
 > one edits a sticky-notes board, one drives any number of MCP servers (plus a
@@ -418,7 +418,7 @@ Servers connect in parallel, each with its own deadline; paginated tool lists
 are read to the end; tools a server marks read-only skip the "ask before
 changes" prompt. With hundreds of tools the core switches to **tool search**
 (a compact catalogue + `find_tools`) above `toolSearchThreshold` — see the
-core's [capabilities doc](https://github.com/dudko-dev/agent-web/blob/main/docs/capabilities.md).
+core's [capabilities doc](https://github.com/dudko-dev/agents/blob/main/packages/agent-web/docs/capabilities.md).
 
 ## Components
 
@@ -482,13 +482,13 @@ from one place.
 > from a browser origin. Google (Gemini), openai-compatible and the gateway are
 > the reliable direct paths; Anthropic works (a required header is injected);
 > OpenAI/xAI/DeepSeek usually need a proxy. See the core's
-> [providers doc](https://github.com/dudko-dev/agent-web/blob/main/docs/providers.md).
+> [providers doc](https://github.com/dudko-dev/agents/blob/main/packages/agent-web/docs/providers.md).
 > Ship only the **user's own** key to the browser — shared/app keys belong
 > behind a proxy or the gateway.
 
 ## Browser tests
 
-`npm run test:e2e` builds the demo and drives it in Chromium:
+`pnpm nx test:e2e @dudko.dev/agent-web-react` (from the monorepo root) builds the demo and drives it in Chromium:
 
 - MCP: connecting to one and to several servers, the full OAuth redirect
   round-trip (authorize → come back with a code → connected), reconnecting
@@ -511,17 +511,18 @@ render, a real navigation away and back, and IndexedDB.
 
 ## Demo & deployment
 
-The [`demo/`](demo/) app (Vite + React) is deployed to GitHub Pages by
-[`.github/workflows/deploy-demo.yml`](.github/workflows/deploy-demo.yml) on
-every push to `main`. To run it locally:
+The demo app (Vite + React) lives in
+[`apps/demo`](https://github.com/dudko-dev/agents/tree/main/apps/demo) of the monorepo. To run it
+locally, from the repo root:
 
 ```bash
-npm install && npm run build      # build the library into dist/
-cd demo && npm install && npm run dev
+pnpm install
+pnpm nx build @dudko.dev/agent-web-react   # build the library (and the core) into dist/
+pnpm --filter demo dev
 ```
 
-The demo aliases `@dudko.dev/agent-web-react` to the built `../dist`, so rebuild
-the library (`npm run build`) after changing its source.
+The demo aliases `@dudko.dev/agent-web-react` to this package's built `dist`, so rebuild the
+library after changing its source.
 
 ## License
 

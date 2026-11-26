@@ -1,0 +1,9 @@
+packages:
+  - 'packages/*'
+  - 'apps/*'
+
+# Dependency install scripts are off unless listed here. esbuild and nx need theirs; onnxruntime-node
+# (a native runtime the browser demo never loads) and protobufjs do not.
+onlyBuiltDependencies:
+  - esbuild
+  - nx

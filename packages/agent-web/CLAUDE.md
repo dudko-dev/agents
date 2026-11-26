@@ -1,5 +1,8 @@
 # @dudko.dev/agent-web — instructions for Claude
 
+> Lives in the `dudko-dev/agents` monorepo at `packages/agent-web`. The root `CLAUDE.md` has the workspace
+> commands (pnpm + nx) and the rules shared by all packages; this file is about this package only.
+
 Headless, UI-agnostic, **universal in-browser** LLM agent built on the **Vercel
 AI SDK** (`ai` v7). One package drives cloud providers (bring-your-own-key),
 local WebGPU/WebLLM models, and any AI SDK `LanguageModel` (e.g. Chrome/Edge
@@ -85,15 +88,14 @@ behind every decision.
 ## Commands
 
 ```bash
-npm run typecheck     # tsc --noEmit
-npm run format:check  # prettier
-npm run build         # tsup → dist (ESM + CJS + d.ts; entries: ., ./mcp, ./webmcp; + dist/agent-web.js)
-npm test              # node --test tests/*.test.ts (builds first)
+pnpm nx typecheck @dudko.dev/agent-web     # tsc --noEmit
+pnpm nx format:check @dudko.dev/agent-web  # prettier
+pnpm nx build @dudko.dev/agent-web         # tsup → dist (ESM + CJS + d.ts; entries: ., ./mcp, ./webmcp; + dist/agent-web.js)
+pnpm nx test @dudko.dev/agent-web          # node --test tests/*.test.ts (nx builds first: tests import dist)
 ```
 
-CI (`.github/workflows/test.yml`) runs typecheck → format:check → build → test.
-Release (`release.yml`) publishes to npm via Trusted Publishing after CI passes
-on `main`. Keep all four green before pushing.
+CI (the root `.github/workflows/ci.yml`) runs typecheck → format:check → build → test for every
+package. Keep all four green before pushing.
 
 ## Conventions
 

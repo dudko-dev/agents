@@ -73,22 +73,18 @@ paste or drop an image and ask about it.
 ## Run locally
 
 ```bash
-# from the repo root — build the library the demo consumes
-npm install && npm run build
-
-# then the demo
-cd demo
-npm install
-npm run dev
+# from the monorepo root — build the library the demo consumes, then run the demo
+pnpm install
+pnpm nx build @dudko.dev/agent-web-react
+pnpm --filter demo dev
 ```
 
-The demo aliases `@dudko.dev/agent-web-react` to the built `../dist` (see
-[`vite.config.ts`](vite.config.ts)), so re-run `npm run build` in the repo root
-after editing the library source.
+The demo aliases `@dudko.dev/agent-web-react` to the built `packages/agent-web-react/dist` (see
+[`vite.config.ts`](vite.config.ts)), so rebuild the library after editing its source.
 
 ## Deployment
 
-Pushed to GitHub Pages automatically by
-[`../.github/workflows/deploy-demo.yml`](../.github/workflows/deploy-demo.yml).
+The Pages deployment workflow is being ported to the monorepo (the original is kept under
+`.github/_imported/agent-web-react/deploy-demo.yml` until then).
 The Vite `base` is `/agent-web-react/` to match the project-pages URL; override
 it with the `DEMO_BASE` env var if you fork under a different repo name.
