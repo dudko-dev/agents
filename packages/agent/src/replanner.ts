@@ -1,5 +1,11 @@
 import { z } from 'zod'
 import { stageCallOptions, withCapHint } from './call-options.ts'
+import {
+  askDecisionModel,
+  decisionEventOf,
+  decisionUsageOf,
+  replanDecisionQuestion,
+} from './decision.ts'
 import type { IAgentInternalContext } from './internal.ts'
 import { PlanSchema, TieredPlanSchema, catalogModeFor, effectiveToolStrategy } from './planner.ts'
 import { buildReplannerUserPrompt, composeReplannerSystem } from './prompts.ts'
@@ -106,3 +112,45 @@ export const decideNextAction = async (
     span.setAttribute(ATTR.USAGE_TOTAL_TOKENS, usage.totalTokens)
     return object
   })
+
+// `config.decisionModel`, asked before the replanner: "continue or finish?". Returns the decision
+// when the model is confident of one of those two, and undefined when the replanner must be
+// called as ever - no decision model, a low confidence, an error, a timeout, an answer that is
+// not an option, or `revise` (a revised plan is text; a decision model does not write). Either
+// way a `decision` event says what happened. Throws only when the run is stopped.
+export const decideWithDecisionModel = async (
+  input: string,
+  plan: IPlan,
+  trace: IStepResult[],
+  nextStep: IPlanStep | null,
+  ctx: IAgentInternalContext,
+  signal?: AbortSignal,
+): Promise<{ decision: ReplanDecision; confidence: number } | undefined> => {
+  const model = ctx.config.decisionModel
+  if (!model || ctx.config.decision?.replan === false) {
+    return undefined
+  }
+  const view = ctx.run
+    ? { summary: ctx.run.traceSummary, upTo: ctx.run.traceSummaryUpTo }
+    : undefined
+  const question = replanDecisionQuestion(
+    buildReplannerUserPrompt(input, plan, trace, nextStep, view),
+  )
+  let outcome = await askDecisionModel(model, question, ctx.config.decision, signal)
+  ctx.emit({ type: 'usage', phase: 'decision', usage: decisionUsageOf(outcome) })
+  if (outcome.accepted && outcome.choice === 'revise') {
+    outcome = { ...outcome, accepted: false, reason: 'needs-model' }
+  }
+  ctx.emit(decisionEventOf('replan', outcome, model))
+  if (!outcome.accepted || (outcome.choice !== 'continue' && outcome.choice !== 'finish')) {
+    return undefined
+  }
+  const confidence = outcome.confidence ?? 0
+  return {
+    decision: {
+      mode: outcome.choice,
+      reason: `decision model: ${outcome.choice} (confidence ${confidence.toFixed(2)})`,
+    },
+    confidence,
+  }
+}

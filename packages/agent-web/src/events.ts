@@ -7,13 +7,18 @@ import type {
   ModelTier,
   TierReason,
 } from './agent/loop-types.js'
+import type { IDecisionEvent } from './decision.js'
 import type { LimitKind } from './limits.js'
 import type { PipelineEvent } from './pipeline/engine.js'
 
 export type ReplanMode = 'continue' | 'revise' | 'finish'
 export type Phase = 'plan' | 'execute' | 'replan' | 'synthesize'
-/** Phases a `usage` event can be charged to: the four stages plus compaction and subagents. */
-export type UsagePhase = Phase | 'compact' | 'subagent'
+/**
+ * Phases a `usage` event can be charged to: the four stages plus compaction, subagents and
+ * `decision` - a call to `config.decisionModel` (`usage.decisionCalls`, plus the tokens its API
+ * reported).
+ */
+export type UsagePhase = Phase | 'compact' | 'subagent' | 'decision'
 
 /**
  * Everything the agent does is streamed as a typed event so any UI (or none)
@@ -73,9 +78,22 @@ type AgentEventBody =
    * `byUser`: the replanner ran because the user sent a message (`RunControl.send`), not because a
    * step failed. `failed`: the replanner call itself failed (unparsable output, the provider
    * down) and `mode: 'continue'` is the fallback, not the model's decision — the failure is the
-   * `error` event (phase 'replan') just before this one.
+   * `error` event (phase 'replan') just before this one. `confidence`: `config.decisionModel`
+   * made this decision (the replanner was not called) - the probability it gave its choice.
    */
-  | { type: 'replan.decision'; mode: ReplanMode; reason: string; byUser?: boolean; failed?: true }
+  | {
+      type: 'replan.decision'
+      mode: ReplanMode
+      reason: string
+      byUser?: boolean
+      failed?: true
+      confidence?: number
+    }
+  /**
+   * `config.decisionModel` was asked a question: its answer was used (`accepted`), or the
+   * ordinary model call ran and `reason` says why.
+   */
+  | IDecisionEvent
   | { type: 'final.text-delta'; delta: string }
   /** The synthesizer's streamed thoughts. */
   | { type: 'final.reasoning-delta'; delta: string }

@@ -3,6 +3,12 @@ import { z } from 'zod'
 import { createAgent, type IAgent } from './agent.ts'
 import { stageCallOptions } from './call-options.ts'
 import {
+  askDecisionModel,
+  decisionEventOf,
+  decisionUsageOf,
+  routeDecisionQuestion,
+} from './decision.ts'
+import {
   matchPipelineRoute,
   PIPELINE_ROUTER_SYSTEM,
   preparePipeline,
@@ -109,6 +115,32 @@ const pickRoute = async (
   }
 }
 
+// `config.decisionModel` of the node's agent, asked before the route call. Returns the route when
+// the model is confident of one of the labels, and undefined when the route call must run as
+// ever (no decision model, fewer than two labels, a low confidence, an error, a timeout, an
+// answer that is not a label). A `decision` event says what happened; what the question cost is
+// returned either way.
+const pickRouteWithDecisionModel = async (
+  { config }: INodeAgent,
+  node: PipelineNode,
+  text: string,
+  signal: AbortSignal,
+  emit: (event: AgentEvent) => void,
+): Promise<{ route?: string; usage: IUsage } | undefined> => {
+  const model = config.decisionModel
+  const routes = node.routes ?? []
+  if (!model || config.decision?.route === false || routes.length < 2) return undefined
+  const question = routeDecisionQuestion(routes, renderPipelineRoutePrompt(node, text))
+  const outcome = await askDecisionModel(model, question, config.decision, signal)
+  const usage = decisionUsageOf(outcome)
+  emit({ type: 'usage', phase: 'decision', usage })
+  emit(decisionEventOf('route', outcome, model))
+  return {
+    usage,
+    ...(outcome.accepted && outcome.choice !== undefined ? { route: outcome.choice } : {}),
+  }
+}
+
 export const createPipeline = (
   definition: PipelineDefinition,
   options: PipelineOptions,
@@ -144,7 +176,13 @@ export const createPipeline = (
       onEvent: ctx.emit,
     })
     if (!node.routes?.length) return { text: result.text, usage: result.usage }
-    const picked = await pickRoute(entry, node, result.text, ctx.signal)
+    const quick = await pickRouteWithDecisionModel(entry, node, result.text, ctx.signal, ctx.emit)
+    const picked = quick?.route
+      ? quick
+      : await pickRoute(entry, node, result.text, ctx.signal).then((slow) => ({
+          ...slow,
+          usage: quick ? addUsage(quick.usage, slow.usage) : slow.usage,
+        }))
     return {
       text: result.text,
       usage: addUsage(result.usage, picked.usage),

@@ -69,7 +69,9 @@ import {
 } from './loop-types.js'
 import { resolveResume, type RunSnapshot, type RunStatus } from './persistence.js'
 import { createPlan, type PlanOutcome } from './planner.js'
-import { decideReplan } from './replanner.js'
+import type { IDecisionModel } from '../decision.js'
+import { resolveDecisionModel } from '../decision-provider.js'
+import { decideReplan, decideReplanWithDecisionModel } from './replanner.js'
 import { synthesizeAnswer } from './synthesizer.js'
 import { createLogger } from '../logger.js'
 import { splitComplexityTag } from '../parse.js'
@@ -227,6 +229,8 @@ export interface Agent {
     pdf: boolean | undefined
     files: boolean | undefined
   }
+  /** `config.decisionModel`, resolved (a spec built into a model). Absent when the feature is off. */
+  readonly decisionModel?: IDecisionModel
   /** The resolved models, for hosts that want to reuse them (e.g. warm-up). */
   readonly models: {
     planner: LanguageModel
@@ -313,6 +317,9 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
         }
       : undefined
 
+  // Off unless set. A spec is resolved here: the key from `credentials`, the request pinned to
+  // the API's host.
+  const decisionModel = await resolveDecisionModel(config.decisionModel, config.credentials)
   const plannerMode = selectToolMode(plannerModel, cfg.toolMode)
   const executorMode = selectToolMode(executorModel, cfg.toolMode)
   // The window every run must fit: the configured one, capped by the smallest
@@ -713,6 +720,7 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
       executorModel,
       ...(tiers ? { tiers } : {}),
       synthesizerModel,
+      ...(decisionModel ? { decisionModel } : {}),
       plannerMode,
       executorMode,
       tools,
@@ -1115,14 +1123,27 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
                 log.warn('replanAfter predicate threw — using the failure rule', err),
             })))
         if (wantReplan && !isAborted()) {
-          const decision = await decideReplan(
-            ctx,
-            text,
-            done,
-            remaining.map((s) => s.description),
-            fresh,
-          )
-          bumpUsage(decision.usage, 'replan')
+          // A message from the user is weighed by the replanner itself: what the user wants now
+          // is not a closed question.
+          const quick = byUser
+            ? undefined
+            : await decideReplanWithDecisionModel(
+                ctx,
+                text,
+                done,
+                remaining.map((s) => s.description),
+                (u) => bumpUsage(u, 'decision'),
+              )
+          const decision =
+            quick ??
+            (await decideReplan(
+              ctx,
+              text,
+              done,
+              remaining.map((s) => s.description),
+              fresh,
+            ))
+          if (!quick) bumpUsage(decision.usage, 'replan')
           // A replanner that could not be asked (both attempts failed) is not a reason to drop
           // the steps already done: the run carries on with the plan as it is, and says so.
           if (decision.failed) {
@@ -1135,6 +1156,7 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
             reason: decision.reason,
             ...(byUser ? { byUser: true } : {}),
             ...(decision.failed ? { failed: true } : {}),
+            ...(decision.confidence !== undefined ? { confidence: decision.confidence } : {}),
           })
           // Weighed, whatever it decided: from here the messages are part of the run's story.
           // A replanner that failed weighed nothing: the next boundary asks it again.
@@ -1337,5 +1359,6 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
       synthesizer: synthesizerModel,
       ...(tierModels ? { tiers: tierModels } : {}),
     },
+    ...(decisionModel ? { decisionModel } : {}),
   }
 }

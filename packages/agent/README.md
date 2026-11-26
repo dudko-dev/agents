@@ -110,7 +110,7 @@ Pass an event handler as the second argument to `createAgent`, or per run via `o
 | `step.reasoning-delta` / `final.reasoning-delta` | The executor's / synthesizer's thoughts, when [thinking](#thinking-reasoning) is on and the provider streams them. |
 | `step.tool-call` / `step.tool-result` | A tool was called (`name`, `input`) / returned (`output`, `ok`). |
 | `step.complete` | The step finished (`result`; with tiers it carries `tier`, `model` and `escalations`). |
-| `replan.decision` | The replanner's verdict: `mode: 'continue' \| 'revise' \| 'finish'`, `reason`, and `cause: 'last-step' \| 'clean-step' \| 'llm-decision' \| 'user-message'`. `failed: true` when the replanner call itself failed and `continue` is the fallback (see [When the replanner fails](#when-the-replanner-fails)). |
+| `replan.decision` | The replanner's verdict: `mode: 'continue' \| 'revise' \| 'finish'`, `reason`, and `cause: 'last-step' \| 'clean-step' \| 'llm-decision' \| 'user-message' \| 'decision-model'` (the last with `confidence`: a [decision model](#decision-models) decided and the replanner was not called). `failed: true` when the replanner call itself failed and `continue` is the fallback (see [When the replanner fails](#when-the-replanner-fails)). |
 | `revisions.exceeded` | The cap on plan revisions (`cap`) was reached; the run goes on to synthesize. |
 | `final.text-delta` | The final answer, streamed. |
 | `final` | The final answer, whole (`text`). |
@@ -122,7 +122,8 @@ Pass an event handler as the second argument to `createAgent`, or per run via `o
 
 | Event | When |
 | --- | --- |
-| `usage` | Per LLM call; `phase` is `'plan' \| 'execute' \| 'replan' \| 'synthesize' \| 'compact' \| 'subagent'`. Counted live into [`agent.usage`](#usage-what-a-session-has-spent). |
+| `decision` | A [decision model](#decision-models) was asked a question: `point` (`'replan' \| 'route'`), `accepted`, `choice?`, `confidence?`, `threshold`, `reason?` (`'low-confidence' \| 'invalid-choice' \| 'invalid-confidence' \| 'error' \| 'timeout' \| 'needs-model'` - why the ordinary model call ran instead), `error?`, `durationMs`, `model?`. |
+| `usage` | Per LLM call; `phase` is `'plan' \| 'execute' \| 'replan' \| 'synthesize' \| 'compact' \| 'subagent' \| 'decision'` (a decision-model call: `usage.decisionCalls: 1` plus the tokens its API reported). Counted live into [`agent.usage`](#usage-what-a-session-has-spent). |
 | `budget.exceeded` | A run cap was crossed; `kind: 'input' \| 'output' \| 'reasoning' \| 'total' \| 'tool-calls'`, `tokens`, `cap`. |
 | `context.compacted` | History, trace or stale tool results were compacted (`scope: 'history' \| 'trace' \| 'tool-results'`, `beforeTokens`, `afterTokens`). |
 
@@ -478,7 +479,7 @@ Manual: `agent.compact({ history, force?, signal? })` returns `{ history, summar
 
 ## Usage: what a session has spent
 
-`result.usage` is one run's tokens (`inputTokens`, `outputTokens`, `totalTokens`, and `reasoningTokens` / `cachedInputTokens` / `cacheWriteTokens` when the provider reports them). `agent.usage` is the agent's total over all its runs and manual compactions since it was created (or `agent.resetUsage()`): a snapshot, counted call by call as the usage arrives, so a run that is stopped or fails still counts what it spent, a resumed run adds only what THIS process spent, and a subagent's tokens (charged to its parent run) count once. The REPL shows it: `/usage`, and `session=<total>` on every answer's `[meta]` line.
+`result.usage` is one run's tokens (`inputTokens`, `outputTokens`, `totalTokens`, and `reasoningTokens` / `cachedInputTokens` / `cacheWriteTokens` when the provider reports them; `decisionCalls` when a [decision model](#decision-models) was called - calls, not tokens). `agent.usage` is the agent's total over all its runs and manual compactions since it was created (or `agent.resetUsage()`): a snapshot, counted call by call as the usage arrives, so a run that is stopped or fails still counts what it spent, a resumed run adds only what THIS process spent, and a subagent's tokens (charged to its parent run) count once. The REPL shows it: `/usage`, and `session=<total>` on every answer's `[meta]` line.
 
 ## Skills
 
@@ -1028,6 +1029,8 @@ Consent is the host's job ([tool approval](#tool-approval-and-autopilot)) — th
 | `planner` / `synthesizer` | Optional per-stage override blocks: `{ providerType?, baseURL?, apiKey?, model? }`. Use these to mix providers (e.g. Gemini planner, Anthropic synthesizer). Cross-provider overrides MUST set their own `apiKey`. |
 | `executorTiers` | Off by default. `{ light?, standard?, strong? }`, each a stage override like `planner`: the planner rates every step `low` / `medium` / `high` and the executor runs it on that tier's model; a tier that is not configured falls back to the nearest one. See [Model tiers and escalation](#model-tiers-and-escalation). |
 | `escalation` | `true` (default once `executorTiers` is on) \| `false` \| `{ maxPerStep?, maxPerRun? }` (defaults 1 / 3). A step that fails in a way a stronger model could fix is retried on the next stronger tier before the replanner is consulted. Nothing without tiers. |
+| `decisionModel` | Off by default. A [decision model](#decision-models): an object with `decide(question, { abortSignal })` that answers a closed question with `{ choice, confidence }` (`decisionModelFromAiSdk(...)` adapts Gemini Decision 1, TypeSafe's Jev or any AI SDK decision model). Where it is confident it replaces the replanner's continue / finish call and a pipeline node's route call. Never consulted for tool approval or egress. |
+| `decision` | `{ confidenceThreshold?, timeoutMs?, replan?, route? }` (defaults `0.8`, `5000`, `true`, `true`). Below the threshold, on an error, a timeout or an answer that is not an option, the ordinary model call runs unchanged. |
 | `plannerModel` / `synthesizerModel` | **Deprecated** model-only shortcuts. Equivalent to `planner: { model }` / `synthesizer: { model }`. The override block, if present, wins. |
 | `mcpServers` | `Record<name, { url, headers?, getHeaders?, authProvider?, fetch?, connectTimeoutMs? } \| { command, args?, env?, cwd?, connectTimeoutMs? }>` — StreamableHTTP for remote (legacy HTTP+SSE servers are **not** supported), stdio for locally-spawned servers. |
 | `tools` | Optional `ToolSet` of native AI-SDK tools registered alongside MCP-discovered ones. Names must not collide with MCP-prefixed names or the built-in tools (`createAgent` throws on conflict). Mark read-only tools with `markReadOnly(tool)`. |
@@ -1120,6 +1123,59 @@ const agent = await createAgent({
 **Usage, limits, caps.** Every tier's calls are `usage` events of phase `execute` and count in `result.usage`, `agent.usage` and against `limits` - a failed attempt included. One context window governs the whole run: `compaction.contextWindowTokens` must be the window of the **smallest** model among the tiers, because the trace and the history are compacted before anyone knows which tier a step (or its escalation) will land on. The executor's default output cap is a share of that window for every tier; set `limits.perCall.executor` if the strong model should write more.
 
 **Elsewhere.** A resumed run keeps each step's `complexity` (in the saved plan), each finished step's tier (in the trace) and the escalation count. A subagent's config and a pipeline node's are agent configs: tiers pass through (a pipeline node that names another `model` drops the base's tiers, like its `planner` / `synthesizer` blocks, unless the registry entry brings its own). There is no router model: the planner is the only judge of a step's complexity.
+
+### Decision models
+
+A *decision model* does not write text: it is given a closed question and answers with one of the options and a probability, in a fraction of the time and price of a language-model call. `decisionModel` (off by default) lets the agent ask one where an ordinary model call only picks from a list.
+
+```ts
+import { google } from '@ai-sdk/google'
+import { createAgent, decisionModelFromAiSdk } from '@dudko.dev/agent'
+
+const agent = await createAgent({
+  ...config,
+  // Gemini Decision 1; reads GOOGLE_GENERATIVE_AI_API_KEY like any @ai-sdk/google model.
+  decisionModel: decisionModelFromAiSdk(google.decisionModel('gemini-decision-1')),
+  decision: { confidenceThreshold: 0.85, timeoutMs: 3000 },
+})
+```
+
+`decisionModelFromAiSdk` takes any AI SDK decision model - `typeSafeAi.decisionModel('jev-latest')` from `@ai-sdk/typesafe-ai` (install it yourself; it is not a dependency of this package), a registry's, the gateway's. The confidence it reports is the probability the API gave the option it chose; a model that returns no distribution (a language model adapted to decide) gets confidence `0`, so it is never used - a threshold needs a probability, not a guess at one. Or write the interface yourself; it is one function:
+
+```ts
+interface IDecisionModel {
+  name?: string
+  decide(
+    question: { id: string; prompt: string; options: { id: string; description?: string }[]; context?: string },
+    options: { abortSignal?: AbortSignal },
+  ): Promise<{ choice: string; confidence: number; usage?: { inputTokens?: number; outputTokens?: number } }>
+}
+```
+
+| The decision model says | What happens |
+|---|---|
+| an option, with `confidence >= decision.confidenceThreshold` (default `0.8`, `DEFAULT_DECISION_CONFIDENCE_THRESHOLD`) | it is used; the model call it stands for is not made |
+| an option, below the threshold | the ordinary model call runs (`reason: 'low-confidence'`) |
+| something that is not one of the options | the ordinary model call runs (`'invalid-choice'`) |
+| a confidence that is not a number in 0..1 | the ordinary model call runs (`'invalid-confidence'`) |
+| nothing within `decision.timeoutMs` (default `5000`; `0` = no limit) | the call is aborted, the ordinary model call runs (`'timeout'`) |
+| an error (the API is down, a 429, a refusal, a blocked input) | the ordinary model call runs (`'error'`) |
+| `revise`, at the replanner | the replanner runs (`'needs-model'`): a revised plan is text, which a decision model does not write |
+
+"The ordinary model call runs" means exactly that: the same request as without a decision model, byte for byte (`tests/decision.test.ts` compares them). A stop of the run is still a stop.
+
+**Where it is asked.**
+
+- **The replanner's decision** (`decision.replan`, default on). At the point where the replanner would be called, the decision model is asked *continue / finish / revise* about the same text the replanner would read. A confident `continue` or `finish` is the decision. It is **not** asked when the replanner runs because the user sent a message (`RunControl.send`): what the user wants now is not a closed question.
+- **A pipeline node's route** (`decision.route`, default on). A node with two or more `routes` asks the decision model of *that node's agent config* which label its answer takes, with each route's `description`. A confident label is the route and the route call is not made. A choice question always spreads its probability over the labels, even when none fits, so "none of them" (which lets an `otherwise` edge fire) can only come from the fallback: keep the threshold high where that matters.
+
+Not wired, on purpose, yet: answering directly instead of planning, the tier of a step (the planner already rates steps in the call it makes anyway, so there is no call to save), and picking tools or skills from a large catalogue (that needs ranking many options per step, a different shape from one closed question).
+
+**Events and usage.** Every question emits one `decision` event: `point` (`'replan'` | `'route'`), `accepted`, `choice?`, `confidence?`, `threshold`, `reason?` (why it fell back), `error?`, `durationMs`, `model?`. A replanner decision the decision model made is a `replan.decision` with `cause: 'decision-model'` and its `confidence`. Usage is counted without pretending a call is a token: each question is a `usage` event of phase `'decision'` whose `usage.decisionCalls` is `1` and whose token fields are what the API reported (zero when it reported nothing - nothing is estimated). `result.usage.decisionCalls` / `agent.usage.decisionCalls` are the totals; the field is absent when no decision model was called. Reported tokens count against `limits` like any others.
+
+**Never a security control.** The decision model is not consulted for tool approval, for egress, for the sandbox or for anything else that lets the model do more: those are decided in code. A decision model that says "approve" with confidence 1 approves nothing (`tests/decision.test.ts` runs exactly that). The worst a wrong answer does is end a plan early or take the wrong route of a pipeline - which is why the threshold is yours to set.
+
+**What exists (checked 2026-11-26, from the vendors' own documentation).** Google's *Decisions API* (`POST https://generativelanguage.googleapis.com/v1beta/decisions`, header `x-goog-api-key`, model `gemini-decision-1`; [docs](https://aistudio.google.com/docs/decisions-api)) and TypeSafe's *System One* API for Jev (`POST https://api.typesafe.ai/v1/systemone`, `Authorization: Bearer`; [docs](https://docs.typesafe.ai), [OpenAPI](https://api.typesafe.ai/openapi.json)). Both take shared input and a map of typed questions; a `choice` question takes a map of option -> description and answers with `choice`, `probabilities` (one per option) and `confidence`; both bill input tokens only. The AI SDK this package is built on already speaks to both through `experimental_decide` (`google.decisionModel(...)` in `@ai-sdk/google`, `typeSafeAi.decisionModel(...)` in `@ai-sdk/typesafe-ai`), so there is no HTTP client of ours to maintain: `decisionModelFromAiSdk` adapts any of them. That AI SDK API is marked experimental and may change in a patch release.
 
 ## API
 

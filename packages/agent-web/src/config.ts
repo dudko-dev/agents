@@ -17,6 +17,8 @@ import type { SandboxConfig } from './sandbox/index.js'
 import type { Skill } from './skills.js'
 import type { IEgressPolicy } from './tools/egress.js'
 import type { ISearchConfig } from './tools/web-search.js'
+import type { IDecisionConfig, IDecisionModel } from './decision.js'
+import type { IDecisionModelSpec } from './decision-provider.js'
 import {
   resolveThinking,
   thinkingFor,
@@ -109,6 +111,19 @@ export interface BrowserAgentConfig {
    * cross-origin calls from a page - see `ISearchConfig`.
    */
   search?: ISearchConfig
+  /**
+   * A decision model: a small, fast model that answers a closed question with one option and a
+   * probability instead of writing text. Off unless set. Where it is confident it replaces the
+   * replanner's continue / finish call and a pipeline node's route call; below
+   * `decision.confidenceThreshold`, on an error, a timeout or an answer that is not an option,
+   * the ordinary model call runs exactly as without it. Never consulted for tool approval or
+   * egress. Either an object with `decide` (yours), or a spec of a hosted decision API a page
+   * can call (`{ providerType: 'google', model: 'gemini-decision-1', credentialRef }` - the key
+   * stays in `credentials`, never here).
+   */
+  decisionModel?: IDecisionModel | IDecisionModelSpec
+  /** The threshold (default 0.8), the timeout (default 5000 ms) and which questions it is asked. */
+  decision?: IDecisionConfig
   /**
    * Let the agent RUN JavaScript it wrote (the `run_js` tool) and read the output. Off unless
    * set: with it off the tool does not exist and the engine is never loaded. `true` = the

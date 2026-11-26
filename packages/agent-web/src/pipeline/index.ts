@@ -3,6 +3,12 @@ import type { IUsage } from '../agent/loop-types.js'
 import { addUsage } from '../agent/loop-types.js'
 import { createAgent, type Agent } from '../agent/runner.js'
 import { resolveConfig, type BrowserAgentConfig } from '../config.js'
+import {
+  askDecisionModel,
+  decisionEventOf,
+  decisionUsageOf,
+  routeDecisionQuestion,
+} from '../decision.js'
 import type { AgentEvent, AgentEventHandler } from '../events.js'
 import { generate, generateStructured } from '../llm/generate.js'
 import { normalizeUsage, usageOfError } from '../llm/util.js'
@@ -109,6 +115,40 @@ const pickRoute = async (
   }
 }
 
+/**
+ * `config.decisionModel` of the node's agent, asked before the route call. Returns the route when
+ * the model is confident of one of the labels, and undefined when the route call must run as
+ * ever (no decision model, fewer than two labels, a low confidence, an error, a timeout, an
+ * answer that is not a label). A `decision` event says what happened; what the question cost is
+ * returned either way.
+ */
+const pickRouteWithDecisionModel = async (
+  { agent, config }: NodeAgent,
+  node: PipelineNode,
+  text: string,
+  signal: AbortSignal,
+  emit: (event: AgentEvent) => void,
+): Promise<{ route?: string; usage: IUsage } | undefined> => {
+  const model = agent.decisionModel
+  const routes = node.routes ?? []
+  if (!model || config.decision?.route === false || routes.length < 2) return undefined
+  const question = routeDecisionQuestion(routes, renderPipelineRoutePrompt(node, text))
+  let outcome
+  try {
+    outcome = await askDecisionModel(model, question, config.decision, signal)
+  } catch (err) {
+    if (signal.aborted) throw aborted()
+    throw err
+  }
+  const usage = decisionUsageOf(outcome)
+  emit({ type: 'usage', phase: 'decision', usage })
+  emit(decisionEventOf('route', outcome, model))
+  return {
+    usage,
+    ...(outcome.accepted && outcome.choice !== undefined ? { route: outcome.choice } : {}),
+  }
+}
+
 export const createPipeline = (
   definition: PipelineDefinition,
   options: PipelineOptions,
@@ -151,7 +191,13 @@ export const createPipeline = (
     if (result.stopped || ctx.signal.aborted) throw aborted()
     if (failure !== undefined) throw new Error(failure)
     if (!node.routes?.length) return { text: result.final, usage: result.usage }
-    const picked = await pickRoute(entry, node, result.final, ctx.signal)
+    const quick = await pickRouteWithDecisionModel(entry, node, result.final, ctx.signal, ctx.emit)
+    const picked = quick?.route
+      ? quick
+      : await pickRoute(entry, node, result.final, ctx.signal).then((slow) => ({
+          ...slow,
+          usage: quick ? addUsage(quick.usage, slow.usage) : slow.usage,
+        }))
     return {
       text: result.final,
       usage: addUsage(result.usage, picked.usage),
