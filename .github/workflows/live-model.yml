@@ -32,6 +32,7 @@ on:
       - '.github/workflows/live-model.yml'
       - 'packages/agent/tests/live-model.test.ts'
       - 'packages/agent/tests/helpers/**'
+      - 'packages/test-servers/**'
 
 # Pinned so a rerun behaves the same. Bump deliberately.
 #
