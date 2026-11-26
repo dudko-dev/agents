@@ -1,5 +1,13 @@
 # @dudko.dev/agent-web-react
 
+[![npm](https://img.shields.io/npm/v/@dudko.dev/agent-web-react.svg)](https://www.npmjs.com/package/@dudko.dev/agent-web-react)
+[![downloads](https://img.shields.io/npm/dy/@dudko.dev/agent-web-react.svg)](https://www.npmjs.com/package/@dudko.dev/agent-web-react)
+[![license](https://img.shields.io/npm/l/@dudko.dev/agent-web-react.svg)](https://github.com/dudko-dev/agents/blob/main/LICENSE)
+[![last commit](https://img.shields.io/github/last-commit/dudko-dev/agents.svg?path=packages%2Fagent-web-react)](https://github.com/dudko-dev/agents/commits/main/packages/agent-web-react)
+[![release](https://img.shields.io/github/v/release/dudko-dev/agents.svg?filter=agent-web-react-v*&label=release)](https://github.com/dudko-dev/agents/releases)
+
+**[agent.dudko.dev](https://agent.dudko.dev)** · [live demo](https://agent.dudko.dev/demo/) · [source](https://github.com/dudko-dev/agents/tree/main/packages/agent-web-react)
+
 React bindings for [`@dudko.dev/agent-web`](https://www.npmjs.com/package/@dudko.dev/agent-web) —
 the headless, universal **in-browser LLM agent**. Drop the agent into any React
 app with a single hook and (optionally) a set of pre-styled components:
@@ -32,11 +40,6 @@ app with a single hook and (optionally) a set of pre-styled components:
   download progress, switching and unloading.
 - 🎛️ **Headless-first** — the event→UI logic is a pure, exported reducer
   (`agentStateReducer`); the components are optional sugar on top.
-
-[![npm](https://img.shields.io/npm/v/@dudko.dev/agent-web-react.svg)](https://www.npmjs.com/package/@dudko.dev/agent-web-react)
-[![npm downloads](https://img.shields.io/npm/dy/@dudko.dev/agent-web-react.svg)](https://www.npmjs.com/package/@dudko.dev/agent-web-react)
-[![license](https://img.shields.io/npm/l/@dudko.dev/agent-web-react.svg)](https://www.npmjs.com/package/@dudko.dev/agent-web-react)
-![GitHub last commit](https://img.shields.io/github/last-commit/dudko-dev/agents.svg)
 
 > **▶︎ [Live demo](https://agent.dudko.dev/demo/)** — three agents:
 > one edits a sticky-notes board, one drives any number of MCP servers (plus a

@@ -1,13 +1,17 @@
 # agents
 
+[![CI](https://github.com/dudko-dev/agents/actions/workflows/ci.yml/badge.svg)](https://github.com/dudko-dev/agents/actions/workflows/ci.yml)
+[![license](https://img.shields.io/github/license/dudko-dev/agents.svg)](LICENSE)
+[![last commit](https://img.shields.io/github/last-commit/dudko-dev/agents.svg)](https://github.com/dudko-dev/agents/commits/main)
+
 Monorepo of the `@dudko.dev` agent packages: a tool-using planning agent for Node, the same loop
 running fully in the browser, React bindings for it, and a demo.
 
 | Path | Package | What it is |
 | --- | --- | --- |
-| [`packages/agent`](packages/agent) | [`@dudko.dev/agent`](https://www.npmjs.com/package/@dudko.dev/agent) | Node / server: plan → execute → replan → synthesize over MCP servers, a REPL CLI, persistence and resume, OpenTelemetry. |
-| [`packages/agent-web`](packages/agent-web) | [`@dudko.dev/agent-web`](https://www.npmjs.com/package/@dudko.dev/agent-web) | The same loop in the browser: BYOK cloud providers or local WebGPU models, an encrypted key vault, HTTP MCP. |
-| [`packages/agent-web-react`](packages/agent-web-react) | [`@dudko.dev/agent-web-react`](https://www.npmjs.com/package/@dudko.dev/agent-web-react) | React bindings: the `useAgent` hook, a provider and a drop-in chat. |
+| [`packages/agent`](packages/agent) | [`@dudko.dev/agent`](https://www.npmjs.com/package/@dudko.dev/agent)<br>[![npm](https://img.shields.io/npm/v/@dudko.dev/agent.svg)](https://www.npmjs.com/package/@dudko.dev/agent) [![downloads](https://img.shields.io/npm/dy/@dudko.dev/agent.svg)](https://www.npmjs.com/package/@dudko.dev/agent) | Node / server: plan → execute → replan → synthesize over MCP servers, a REPL CLI, persistence and resume, OpenTelemetry. |
+| [`packages/agent-web`](packages/agent-web) | [`@dudko.dev/agent-web`](https://www.npmjs.com/package/@dudko.dev/agent-web)<br>[![npm](https://img.shields.io/npm/v/@dudko.dev/agent-web.svg)](https://www.npmjs.com/package/@dudko.dev/agent-web) [![downloads](https://img.shields.io/npm/dy/@dudko.dev/agent-web.svg)](https://www.npmjs.com/package/@dudko.dev/agent-web) | The same loop in the browser: BYOK cloud providers or local WebGPU models, an encrypted key vault, HTTP MCP. |
+| [`packages/agent-web-react`](packages/agent-web-react) | [`@dudko.dev/agent-web-react`](https://www.npmjs.com/package/@dudko.dev/agent-web-react)<br>[![npm](https://img.shields.io/npm/v/@dudko.dev/agent-web-react.svg)](https://www.npmjs.com/package/@dudko.dev/agent-web-react) [![downloads](https://img.shields.io/npm/dy/@dudko.dev/agent-web-react.svg)](https://www.npmjs.com/package/@dudko.dev/agent-web-react) | React bindings: the `useAgent` hook, a provider and a drop-in chat. |
 | [`apps/demo`](apps/demo) | — (private) | The Vite demo of the React package ([live](https://agent.dudko.dev/demo/)). |
 
 Each package keeps its own README, docs and version; they are published to npm independently.

@@ -1,5 +1,13 @@
 # @dudko.dev/agent-web
 
+[![npm](https://img.shields.io/npm/v/@dudko.dev/agent-web.svg)](https://www.npmjs.com/package/@dudko.dev/agent-web)
+[![downloads](https://img.shields.io/npm/dy/@dudko.dev/agent-web.svg)](https://www.npmjs.com/package/@dudko.dev/agent-web)
+[![license](https://img.shields.io/npm/l/@dudko.dev/agent-web.svg)](https://github.com/dudko-dev/agents/blob/main/LICENSE)
+[![last commit](https://img.shields.io/github/last-commit/dudko-dev/agents.svg?path=packages%2Fagent-web)](https://github.com/dudko-dev/agents/commits/main/packages/agent-web)
+[![release](https://img.shields.io/github/v/release/dudko-dev/agents.svg?filter=agent-web-v*&label=release)](https://github.com/dudko-dev/agents/releases)
+
+**[agent.dudko.dev](https://agent.dudko.dev)** · [live demo](https://agent.dudko.dev/demo/) · [source](https://github.com/dudko-dev/agents/tree/main/packages/agent-web)
+
 Headless, **universal**, configurable **in-browser** LLM agent built on the
 [Vercel AI SDK](https://ai-sdk.dev). One package drives **any** model from the
 browser:
@@ -28,12 +36,6 @@ across a session (`agent.usage`), **steering** a run while it goes (`RunControl`
 **resuming** an interrupted run, **egress** you switch on and bound (the model's
 `web_fetch`), and **learning** — the agent writes its own lessons down as skills
 — see [docs/capabilities.md](docs/capabilities.md).
-
-[![npm](https://img.shields.io/npm/v/@dudko.dev/agent-web.svg)](https://www.npmjs.com/package/@dudko.dev/agent-web)
-[![npm](https://img.shields.io/npm/dy/@dudko.dev/agent-web.svg)](https://www.npmjs.com/package/@dudko.dev/agent-web)
-[![NpmLicense](https://img.shields.io/npm/l/@dudko.dev/agent-web.svg)](https://www.npmjs.com/package/@dudko.dev/agent-web)
-![GitHub last commit](https://img.shields.io/github/last-commit/dudko-dev/agents.svg)
-![GitHub release](https://img.shields.io/github/release/dudko-dev/agents.svg)
 
 > Browser sibling of the Node package
 > [`@dudko.dev/agent`](https://www.npmjs.com/package/@dudko.dev/agent).
