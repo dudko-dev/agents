@@ -1,14 +1,12 @@
-import {
-  auth,
-  type OAuthClientProvider,
-  type OAuthDiscoveryState,
-} from '@modelcontextprotocol/sdk/client/auth.js'
+import { auth } from '@modelcontextprotocol/client'
 import type {
+  OAuthClientProvider,
+  OAuthDiscoveryState,
   OAuthClientInformationMixed,
   OAuthClientMetadata,
   OAuthTokens,
-} from '@modelcontextprotocol/sdk/shared/auth.js'
-import type { FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js'
+  FetchLike,
+} from '@modelcontextprotocol/client'
 import { randomBytes } from 'node:crypto'
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import os from 'node:os'

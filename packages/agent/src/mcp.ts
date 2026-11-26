@@ -1,20 +1,17 @@
+import { CallToolResultSchema } from '@modelcontextprotocol/core'
+import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotocol/client/stdio'
 import {
   auth,
   UnauthorizedError,
-  type OAuthClientProvider,
-} from '@modelcontextprotocol/sdk/client/auth.js'
-import { Client } from '@modelcontextprotocol/sdk/client/index.js'
-import {
-  getDefaultEnvironment,
-  StdioClientTransport,
-} from '@modelcontextprotocol/sdk/client/stdio.js'
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
-import type { FetchLike, Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
-import {
-  CallToolResultSchema,
-  ToolListChangedNotificationSchema,
-  type CallToolResult,
-} from '@modelcontextprotocol/sdk/types.js'
+  Client,
+  StreamableHTTPClientTransport,
+} from '@modelcontextprotocol/client'
+import type {
+  OAuthClientProvider,
+  FetchLike,
+  Transport,
+  CallToolResult,
+} from '@modelcontextprotocol/client'
 import { dynamicTool, jsonSchema, type ToolSet } from 'ai'
 import { randomUUID } from 'node:crypto'
 import { mkdir, writeFile } from 'node:fs/promises'
@@ -686,7 +683,7 @@ export const connectMcpServers = async (
       // set during init would otherwise lose the notification in the small
       // window between connect() and listTools().
       if (onToolsChanged) {
-        client.setNotificationHandler(ToolListChangedNotificationSchema, () => {
+        client.setNotificationHandler('notifications/tools/list_changed', () => {
           onToolsChanged(name)
         })
       }

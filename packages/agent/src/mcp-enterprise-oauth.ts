@@ -1,11 +1,12 @@
-import { auth, type OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js'
-import type { OAuthDiscoveryState } from '@modelcontextprotocol/sdk/client/auth.js'
+import { auth } from '@modelcontextprotocol/client'
 import type {
+  OAuthClientProvider,
+  OAuthDiscoveryState,
   OAuthClientInformationMixed,
   OAuthClientMetadata,
   OAuthTokens,
-} from '@modelcontextprotocol/sdk/shared/auth.js'
-import type { FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js'
+  FetchLike,
+} from '@modelcontextprotocol/client'
 import {
   constants as cryptoConstants,
   createPrivateKey,

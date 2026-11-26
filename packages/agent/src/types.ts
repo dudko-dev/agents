@@ -1,5 +1,4 @@
-import type { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js'
-import type { FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js'
+import type { OAuthClientProvider, FetchLike } from '@modelcontextprotocol/client'
 import type { ToolSet } from 'ai'
 import type { RunControl } from './control.ts'
 import type { IDecisionConfig, IDecisionEvent, IDecisionModel } from './decision.ts'
