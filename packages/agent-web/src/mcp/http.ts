@@ -9,9 +9,22 @@ import {
   type StreamableHTTPReconnectionOptions,
 } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import type { FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js'
-import { ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js'
+import {
+  CallToolResultSchema,
+  ToolListChangedNotificationSchema,
+  type CallToolResult,
+} from '@modelcontextprotocol/sdk/types.js'
 import { dynamicTool, jsonSchema, type ToolSet } from 'ai'
 import { assertSecureOAuthUrl } from './oauth.js'
+import {
+  cleanMcpInstructions,
+  dropStructuredDuplicates,
+  isStructuredContent,
+  markMcpTool,
+  outputSchemaNote,
+  withStructuredContent,
+  type McpServerInstructions,
+} from './shared.js'
 
 /**
  * A remote MCP server reached over StreamableHTTP. Browsers can ONLY speak the
@@ -73,6 +86,15 @@ export interface ConnectedMcp {
   catalog: McpCatalogEntry[]
   /** Per-server connect outcome. */
   results: McpServerResult[]
+  /**
+   * The `instructions` each connected server returned in its `initialize`
+   * result, in declaration order; servers that sent none are absent. Read once
+   * per connection. Third-party text: the agent shows it to the model under a
+   * preamble that says so (`config.mcpInstructions`, on by default) — each
+   * mounted tool carries its server's instructions, so merging `tools` into
+   * the agent's config is all a host does.
+   */
+  instructions: McpServerInstructions[]
   /**
    * Re-list one server's tools and rewrite its entries in `tools`/`catalog`.
    * Both are mutated in place, so anything holding a reference (including a
@@ -193,9 +215,28 @@ interface McpToolDescriptor {
   annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean; title?: string }
 }
 
+/**
+ * A result schema that hands every result it accepts to `onResult` first.
+ *
+ * `Client.callTool` validates `structuredContent` against the tool's
+ * `outputSchema` AFTER the response was received and parsed, and throws when
+ * it does not fit — taking the result with it. Reading the result here, where
+ * the protocol layer parses it, is what lets a caller tell that throw (a
+ * result exists) from a failed request (none does) and still use the result.
+ */
+const capturingResultSchema = (
+  onResult: (result: CallToolResult) => void,
+): typeof CallToolResultSchema =>
+  CallToolResultSchema.refine((result) => {
+    onResult(result as CallToolResult)
+    return true
+  }) as typeof CallToolResultSchema
+
 interface ServerConnect {
   name: string
   client?: Client
+  /** What the server said in its initialize result ('' when nothing). */
+  instructions?: string
   listed?: McpToolDescriptor[]
   error?: string
   needsAuthorization?: boolean
@@ -496,7 +537,8 @@ const connectAndList = async (
   }
 
   const listed = await listAllTools(client)
-  return { name, client, listed }
+  // Read once, here: the text is fixed for the life of this connection.
+  return { name, client, listed, instructions: cleanMcpInstructions(client.getInstructions()) }
 }
 
 /**
@@ -513,6 +555,8 @@ export const connectMcpHttp = async (
   const tools: ToolSet = {}
   const catalog: McpCatalogEntry[] = []
   const results: McpServerResult[] = []
+  const instructions: McpServerInstructions[] = []
+  const instructionsOf = new Map<string, string>()
   // server name → the tool keys it currently owns, so a refresh can remove
   // exactly its own entries.
   const mountedKeys = new Map<string, string[]>()
@@ -558,23 +602,61 @@ export const connectMcpHttp = async (
         description,
         inputSchema: jsonSchema(t.inputSchema as Parameters<typeof jsonSchema>[0]),
         execute: async (args, options) => {
-          const res = await client.callTool(
-            { name: t.name, arguments: (args ?? {}) as Record<string, unknown> },
-            undefined,
-            options?.abortSignal ? { signal: options.abortSignal } : undefined,
-          )
-          const flat = flattenContent(res.content)
+          let res: CallToolResult
+          // Set when the SDK refused a result that had arrived (see below).
+          let schemaNote: string | undefined
+          let received: CallToolResult | undefined
+          try {
+            res = (await client.callTool(
+              { name: t.name, arguments: (args ?? {}) as Record<string, unknown> },
+              capturingResultSchema((r) => {
+                received = r
+              }),
+              options?.abortSignal ? { signal: options.abortSignal } : undefined,
+            )) as CallToolResult
+          } catch (err) {
+            // The request itself failed (transport, protocol, abort): there is
+            // no result, and the throw is recorded as a failed call.
+            if (!received) throw err
+            // A result arrived and the SDK client threw afterwards: the only
+            // thing it does there is check structuredContent against the
+            // tool's outputSchema (missing, or not matching). The call RAN on
+            // the server, so the result is passed on with a note rather than
+            // reported as a failure — a tool the model is told failed is a
+            // tool it calls again, and this one may write.
+            res = received
+            schemaNote = outputSchemaNote(t.name, err)
+            log(
+              'warn',
+              `[mcp] ${key}: result does not follow the declared outputSchema - ${
+                err instanceof Error ? err.message : String(err)
+              }; passed on with a note`,
+            )
+          }
           // An MCP failure is a NORMAL response with isError set — surface it
           // as a thrown error so both tool paths record a failed call instead
           // of feeding the error text to the model as a success.
-          if ((res as { isError?: boolean }).isError) {
+          if (res.isError) {
+            const flat = flattenContent(res.content)
             throw new Error(typeof flat === 'string' ? flat : JSON.stringify(flat))
           }
-          return flat
+          // A server that returns structured content also sends it serialized
+          // as text (the specification's backwards-compatible form): the model
+          // gets the value once, and whatever else the content holds beside it.
+          const structured = isStructuredContent(res.structuredContent)
+            ? res.structuredContent
+            : undefined
+          const flat = flattenContent(
+            structured ? dropStructuredDuplicates(res.content, structured) : res.content,
+          )
+          return withStructuredContent(flat, structured, schemaNote)
         },
       })
       // The agent's consent gate lets read-only tools through in 'ask-writes'.
       if (readOnly) (tools[key] as { readOnly?: boolean }).readOnly = true
+      // Which server the tool came from, and that server's instructions: the
+      // agent shows the notes of the servers whose tools it actually mounts.
+      markMcpTool(tools[key], name, instructionsOf.get(name))
       catalog.push({ name: key, description, server: name, ...(readOnly ? { readOnly } : {}) })
       keys.push(key)
       mounted += 1
@@ -598,6 +680,14 @@ export const connectMcpHttp = async (
       continue
     }
     clients.set(server.name, server.client)
+    if (server.instructions) {
+      log(
+        'info',
+        `[mcp] ${server.name}: the server sent instructions (${server.instructions.length} chars)`,
+      )
+      instructions.push({ server: server.name, instructions: server.instructions })
+      instructionsOf.set(server.name, server.instructions)
+    }
     mountTools(server.name, server.client, server.listed)
     results.push({ name: server.name, connected: true })
   }
@@ -606,6 +696,7 @@ export const connectMcpHttp = async (
     tools,
     catalog,
     results,
+    instructions,
     refreshServer: async (name: string) => {
       const client = clients.get(name)
       if (!client) throw new Error(`MCP server "${name}" is not connected`)

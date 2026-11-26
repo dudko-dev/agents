@@ -41,7 +41,8 @@ implementation. `"private": true` — **never published**, never a runtime depen
 - `src/authorization-server.ts` — `startLocalAuthorizationServer`: metadata, registration, token
   endpoint; with `enterprise`, the `jwt-bearer` grant only (ID-JAG draft, section 4.4.1, in order).
 - `src/mcp-server.ts` — `startLocalMcpServer` (the SDK's stateless streamable-HTTP server, tools
-  `echo` / `secret` / `boom`) and `startLocalMcp`, the pair with its authorization server that most
+  `echo` / `secret` / `boom`; options add `instructions` and the structured tools `report` /
+  `report_mixed`, whose switch is `structuredFaults`) and `startLocalMcp`, the pair with its authorization server that most
   tests use.
 - `src/cli.ts` — `parseCliArgs`, `startFromCli`, and the entry that prints one JSON line.
 - `src/index.ts` — exports only.

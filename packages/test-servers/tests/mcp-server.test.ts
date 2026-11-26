@@ -2,7 +2,13 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { startLocalIdp, startLocalMcp, startLocalMcpServer } from '../src/index.ts'
+import {
+  REPORT_IMAGE_BASE64,
+  REPORT_VALUE,
+  startLocalIdp,
+  startLocalMcp,
+  startLocalMcpServer,
+} from '../src/index.ts'
 import { basic, exchangeParams, getJson, grantParams, postForm } from './helpers.ts'
 
 /** The SDK's own client, so the server is spoken to by a real peer. */
@@ -198,5 +204,83 @@ test('the pair, enterprise: the authorization server governs the MCP server it w
   } finally {
     await pair.close()
     await idp.close()
+  }
+})
+
+test('mcp server: instructions arrive in the initialize result, and only when configured', async () => {
+  const plain = await startLocalMcpServer()
+  const guided = await startLocalMcpServer({ instructions: 'Call echo before secret.' })
+  try {
+    const a = await connect(plain.url)
+    assert.equal(a.getInstructions(), undefined)
+    await a.close()
+    const b = await connect(guided.url)
+    assert.equal(b.getInstructions(), 'Call echo before secret.')
+    // A change reaches the next client to connect, not the one already connected.
+    guided.setInstructions('Changed.')
+    await b.listTools()
+    assert.equal(b.getInstructions(), 'Call echo before secret.')
+    const c = await connect(guided.url)
+    assert.equal(c.getInstructions(), 'Changed.')
+    await c.close()
+    await b.close()
+  } finally {
+    await plain.close()
+    await guided.close()
+  }
+})
+
+test('mcp server: the structured tools are off by default and declare an output schema when on', async () => {
+  const mcp = await startLocalMcpServer({ structuredTools: true })
+  try {
+    const client = await connect(mcp.url)
+    const { tools } = await client.listTools()
+    assert.deepEqual(
+      tools.map((t) => t.name),
+      ['echo', 'secret', 'boom', 'report', 'report_mixed'],
+    )
+    assert.equal(tools[3].outputSchema?.type, 'object')
+    const report = await client.callTool({ name: 'report', arguments: {} })
+    assert.deepEqual(report.structuredContent, REPORT_VALUE)
+    // The backwards-compatible form: the same value, serialized, as text.
+    assert.deepEqual(JSON.parse(textOf(report)), REPORT_VALUE)
+    const mixed = await client.callTool({ name: 'report_mixed', arguments: {} })
+    assert.deepEqual(mixed.structuredContent, REPORT_VALUE)
+    assert.deepEqual(mixed.content, [
+      { type: 'text', text: 'A mild, clear day.' },
+      { type: 'image', data: REPORT_IMAGE_BASE64, mimeType: 'image/png' },
+    ])
+    await client.close()
+  } finally {
+    await mcp.close()
+  }
+})
+
+test('mcp server: structuredFaults makes the answer break the schema the listing still declares', async () => {
+  const mcp = await startLocalMcpServer({ structuredTools: true })
+  try {
+    const client = await connect(mcp.url)
+    await client.listTools()
+    mcp.structuredFaults.result = 'mismatch'
+    // The SDK client validates against the listed schema: this is its refusal.
+    await assert.rejects(
+      () => client.callTool({ name: 'report', arguments: {} }),
+      /does not match the tool's output schema/,
+    )
+    mcp.structuredFaults.result = 'missing'
+    await assert.rejects(
+      () => client.callTool({ name: 'report', arguments: {} }),
+      /did not return structured content/,
+    )
+    // The listing is unchanged by the fault.
+    assert.equal((await client.listTools()).tools[3].outputSchema?.type, 'object')
+    delete mcp.structuredFaults.result
+    assert.deepEqual(
+      (await client.callTool({ name: 'report', arguments: {} })).structuredContent,
+      REPORT_VALUE,
+    )
+    await client.close()
+  } finally {
+    await mcp.close()
   }
 })

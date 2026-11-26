@@ -55,6 +55,11 @@ export interface IAgentInternalContext {
   // Set when config.sandbox is on and run_js is among the tools: the stage prompts say what it
   // is and that code is never reported as run without it.
   sandbox?: { files: boolean }
+  // The rendered instructions of the connected MCP servers whose tools are mounted (the planner's
+  // and the executor's system prompts carry it); absent when none sent any or
+  // config.mcpInstructions is false. Replaced only between runs (refresh / reconnect), and a run
+  // reads its own copy of this context, so the text cannot change under a run.
+  mcpInstructions?: string
   approval?: IApprovalController
   // Per-run state; set by the runner on its per-run copy of the context.
   run?: IRunState

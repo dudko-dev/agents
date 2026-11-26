@@ -162,8 +162,11 @@ export const promptOverheadTokens = (p: {
   searching: boolean
   // The rendered skills index and the active skills' instructions.
   skillsText: string
+  // The MCP servers' instructions section, when the prompts carry one.
+  mcpInstructions?: string
 }): number =>
   BASE_PROMPT_TOKENS +
+  estimateTokens(p.mcpInstructions ?? '') +
   estimateTokens(p.systemPrompt ?? '') +
   (p.searching ? Math.min(p.toolTokens, SEARCH_TOOLS_ALLOWANCE) : p.toolTokens) +
   estimateTokens(p.skillsText)

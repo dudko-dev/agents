@@ -61,6 +61,16 @@
     rfc7523bis one, and the token endpoint is only ever read from metadata that matched `expectedIssuer`. The browser package carries a copy:
     change both), `tracing.ts` (OpenTelemetry spans, a no-op without an SDK), `utils.ts`
     (retry / timeout / usage helpers).
+  - `mcp-shared.ts` (pure, no imports): how a server's `instructions` become a prompt section
+    (`renderMcpInstructions`: third-party preamble, every line quoted with `| `, per-server and
+    total caps, invisible characters removed; `markMcpTool` / `collectMcpInstructions`: each MCP
+    tool carries its server, so only servers with a mounted tool speak) and how `structuredContent`
+    reaches the model (`dropStructuredDuplicates`, `withStructuredContent`, `outputSchemaNote`). A
+    COPY of the browser sibling's `src/mcp/shared.ts`, byte for byte: change both
+    (`tests/mcp-shared.test.ts` compares them and tests every cap and guard; each needs a mutation
+    check). The section goes to the planner and the executor only, and `ctx.mcpInstructions` is
+    replaced only between runs (prompt caching). A result the SDK client refuses for its
+    `outputSchema` is passed on with a note, never thrown (`capturingResultSchema` in `mcp.ts`).
   - `pipeline-engine.ts` + `pipeline.ts` (`createPipeline`: a graph of agents with conditions and
     loops, described in plain JSON). The engine (definition types, `validatePipeline`, the conditions
     with the non-backtracking `matches` matcher, the wave scheduler; pure, no imports) is a COPY of

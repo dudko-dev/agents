@@ -381,6 +381,7 @@ const runAgentLoopInner = async (
       systemPrompt: ctx.config.systemPrompt,
       toolTokens: await toolDefinitionTokens(ctx.tools),
       searching: state.strategy === 'search',
+      mcpInstructions: proxiedCtx.mcpInstructions,
       skillsText: [
         ...skills.map((s) => `- ${s.name}: ${s.description}`),
         ...skills.filter((s) => state.activeSkills.includes(s.name)).map((s) => s.content),

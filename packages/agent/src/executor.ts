@@ -236,6 +236,7 @@ const runOnce = async (
       toolCount: ctx.toolCatalog.length,
       ...(ctx.learning?.nudge ? { learning: { fetch: Boolean(ctx.tools[WEB_FETCH_TOOL]) } } : {}),
       ...(ctx.sandbox ? { sandbox: ctx.sandbox } : {}),
+      ...(ctx.mcpInstructions ? { mcpInstructions: ctx.mcpInstructions } : {}),
     }),
   )
   const emitThoughts = stageEmitsThoughts(ctx.config, 'executor')

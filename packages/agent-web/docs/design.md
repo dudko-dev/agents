@@ -382,6 +382,34 @@ the same in both. Only the adapter that runs a node with `createAgent` differs.
   `stoppedBy: 'aborted'` (as `agent.run` resolves with `stopped`); on the server
   it rejects with an `AbortError`. A failed node rejects in both.
 
+## MCP: server instructions and structured results
+
+- **Instructions travel on the tools.** The connector is a separate entry point and the host
+  merges `mcp.tools` into `config.tools` (the React hooks wrap and re-merge them), so a
+  `config.serverInstructions` field would be one more thing every host has to thread through.
+  Each MCP tool carries its server and that server's instructions under a registry symbol
+  (`markMcpTool`, copied by an object spread); `createAgent` collects them from the tools it
+  really mounts. A filtered-out server therefore says nothing, with no extra rule.
+- **Appended in `stageCall`, not in the prompt builders.** A host that overrides
+  `prompts.planner` would otherwise drop the section — or, worse, be handed raw third-party
+  text to place. The preamble and the quoting are not the host's to forget.
+- **Planner and executor only.** They choose and call tools. The replanner revises by
+  description and the synthesizer writes the answer: neither needs the notes, and third-party
+  text is kept away from the stage that speaks to the user.
+- **Fixed at `createAgent`.** System prompts must not move inside a run (prompt caching), and a
+  server must not be able to change them mid-run by reconnecting.
+- **A schema mismatch is a note, not an error.** The SDK client throws after the result
+  arrived. Reporting a call that ran as failed makes the model call it again, and the tool may
+  write. The connector keeps the parsed result (a refinement on the result schema hands it
+  over before the SDK's check) and passes it on with a note; if the SDK ever stops parsing
+  through that schema, the code falls back to the SDK's own error, which is still a failed
+  tool call and not a crashed run.
+- **No duplicate, no guess.** A text part is dropped only when it parses to exactly the
+  structured value (key order aside). A sentence that paraphrases it stays: telling the two
+  apart is the model's job, not a heuristic's.
+- The pure core (`mcp/shared.ts`) is a byte-for-byte copy of the Node package's
+  `mcp-shared.ts`, like the pipeline and sandbox engines.
+
 ## Secrets
 
 API keys are encrypted at rest with a **non-extractable AES-GCM `CryptoKey`**
