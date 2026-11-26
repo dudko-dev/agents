@@ -8,6 +8,7 @@ import type { IEgressPolicy } from './safe-fetch.ts'
 import type { ISearchConfig } from './web-search.ts'
 import type { ISandboxConfig } from './sandbox-engine.ts'
 import type { IMediaConfig, IRunFile } from './media.ts'
+import type { ISubagentsConfig } from './subagent-dynamic-shared.ts'
 
 export type ProviderType =
   | 'openai'
@@ -228,6 +229,9 @@ export interface IToolApprovalRequest {
   readOnly: boolean
   step?: IPlanStep
   runId?: string
+  // Set when the call comes from a helper the model started (config.subagents.dynamic), not from
+  // the run itself: the helper's id (as in its subagent.start event) and its depth.
+  subagent?: { id: string; depth: number }
 }
 
 // `remember: true` on an approval allows the tool for the rest of this agent
@@ -413,6 +417,15 @@ export interface IAgentConfig {
   // (default 8). Prompts, spoken text and audio leave for the provider of that model. See
   // src/media.ts.
   media?: IMediaConfig
+  // Subagents the MODEL starts itself. `dynamic: true` (or an object of limits) mounts the
+  // spawn_subagent tool: the model gives a sub-task, an optional role and optionally a subset of
+  // its own tools by name; a helper agent runs the normal loop on it and its answer is the tool
+  // result. Off unless set: with it off the tool does not exist and no prompt mentions it. A helper
+  // can only have LESS than the run that starts it (its tools, a share of what is left of its
+  // budgets, the same models, approval mode and rules); its spend counts against this run's limits.
+  // Subagents the HOST defines are tools (createSubagentTool) and need no switch. See
+  // IDynamicSubagentsConfig and src/subagent-dynamic.ts.
+  subagents?: ISubagentsConfig
   // Native AI-SDK tools registered alongside MCP-discovered tools. Names
   // must not collide with any MCP-prefixed tool ("server__tool"); createAgent
   // throws on conflict. Native tools bypass outputSanitizer/inputSanitizer
@@ -694,6 +707,8 @@ type AgentEventBody =
       input: unknown
       readOnly: boolean
       step?: IPlanStep
+      // Set when a helper the model started is asking (see IToolApprovalRequest.subagent).
+      subagent?: { id: string; depth: number }
     }
   // automatic: true for rule / mode / timeout denials nobody decided on.
   // Automatic ALLOWs emit nothing, to keep the stream quiet.
@@ -706,13 +721,36 @@ type AgentEventBody =
       automatic: boolean
     }
   // `profile` is set when the parent chose one of the subagent's named profiles for this call.
-  | { type: 'subagent.start'; id: string; name: string; task: string; profile?: string }
+  // The tree: `parentId` is the id of the subagent that made the call, or the `runId` of the run
+  // when the run itself made it; `depth` is 1 for the run's own subagents, 2 for theirs, ...
+  // `dynamic` marks a helper the model started with spawn_subagent (config.subagents.dynamic):
+  // `role` is what the model wrote for it, `tools` the tool names it was given.
+  | {
+      type: 'subagent.start'
+      id: string
+      name: string
+      task: string
+      profile?: string
+      parentId?: string
+      depth?: number
+      dynamic?: true
+      role?: string
+      tools?: string[]
+    }
   // A child event, forwarded verbatim (long strings clipped).
   | { type: 'subagent.event'; id: string; name: string; event: AgentEvent }
   | { type: 'subagent.complete'; id: string; name: string; text: string; usage: IUsage }
   // `stopped` is set when the user stopped this subagent (RunControl.stopSubagent), as
   // opposed to it failing.
-  | { type: 'subagent.error'; id: string; name: string; error: string; stopped?: boolean }
+  // `usage`: what a dynamic helper had spent when it failed (already charged to the parent).
+  | {
+      type: 'subagent.error'
+      id: string
+      name: string
+      error: string
+      stopped?: boolean
+      usage?: IUsage
+    }
   // A message sent with RunControl.send is waiting for the next boundary.
   | { type: 'message.queued'; id: string; text: string }
   // The message reached the model. 'round' = between tool-calling rounds inside a step, so
@@ -864,6 +902,8 @@ export interface IRunSnapshot {
   userUpdates?: { text: string; reconciled: boolean }[]
   // Escalations so far (counts against escalation.maxPerRun on resume).
   escalations?: number
+  // Helpers the model started so far (counts against subagents.dynamic.maxChildren on resume).
+  subagentsSpawned?: number
 }
 
 // Optional persistence facade. Write hooks fire at run start, after each

@@ -30,6 +30,11 @@ export interface ToolApprovalRequest {
   input: unknown
   readOnly: boolean
   step?: IPlanStep
+  /**
+   * Set when the call comes from a helper the model started (`subagents.dynamic`), not from the
+   * run itself: the helper's id (as in its `subagent.start` event) and its depth.
+   */
+  subagent?: { id: string; depth: number }
 }
 
 /**
@@ -167,7 +172,13 @@ export interface ApprovalEvents {
  */
 export const gateToolCall = async (
   state: ApprovalState,
-  call: { toolName: string; input: unknown; readOnly: boolean; step?: IPlanStep },
+  call: {
+    toolName: string
+    input: unknown
+    readOnly: boolean
+    step?: IPlanStep
+    subagent?: { id: string; depth: number }
+  },
   events: ApprovalEvents,
   signal?: AbortSignal,
 ): Promise<void> => {

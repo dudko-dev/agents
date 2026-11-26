@@ -5,6 +5,7 @@ import {
   SANDBOX_SYNTHESIZER_NOTE,
   sandboxPromptNote,
 } from './sandbox-engine.ts'
+import { SPAWN_EXECUTOR_NOTE, SPAWN_PLANNER_NOTE } from './subagent-dynamic-shared.ts'
 import { renderActiveSkills, renderSkillsIndex } from './skills.ts'
 import { renderEarlierAttempts, type IEarlierAttempt } from './tiers.ts'
 import { FIND_TOOLS_TOOL, renderSearchCatalog } from './tool-search.ts'
@@ -234,6 +235,9 @@ export interface ISystemParts {
   // Set when config.sandbox is on (run_js is callable). Run-stable: it depends on the agent's
   // configuration only, so the cached prefix does not move.
   sandbox?: { files: boolean }
+  // Set while spawn_subagent is callable (config.subagents.dynamic). Run-stable, like `sandbox`.
+  // Planner and executor only.
+  subagents?: { dynamic: true }
   // The rendered instructions of the connected MCP servers (renderMcpInstructions), '' or absent
   // when no server sent any. Fixed for a run: the runner works on a copy of the agent's context.
   // Planner and executor only - the stages that choose and call tools.
@@ -261,6 +265,14 @@ const sandboxSection = (
             ? SANDBOX_SYNTHESIZER_NOTE
             : sandboxPromptNote(sandbox.files)
       }`
+
+// Only in the prompts of an agent whose model may start helpers: runs without it send what they
+// always did.
+const subagentsSection = (
+  subagents: { dynamic: true } | undefined,
+  stage: 'planner' | 'executor',
+): string =>
+  subagents ? `\n\nHELPERS:\n${stage === 'planner' ? SPAWN_PLANNER_NOTE : SPAWN_EXECUTOR_NOTE}` : ''
 
 const skillsIndexSection = (skills: ISkill[] | undefined): string =>
   skills?.length ? `\n\nSKILLS:\n${renderSkillsIndex(skills)}` : ''
@@ -290,6 +302,7 @@ export const composePlannerSystem = (
     parts.domain,
   ) +
   sandboxSection(parts.sandbox, 'planner') +
+  subagentsSection(parts.subagents, 'planner') +
   skillsIndexSection(parts.skills) +
   mcpInstructionsSection(parts.mcpInstructions) +
   `\n\nAvailable tools:\n${renderCatalogFor(parts.catalog, parts.mode)}`
@@ -349,6 +362,7 @@ export const composeExecutorSystem = (
     : '') +
   (parts.learning ? learningNote(parts.learning.fetch) : '') +
   sandboxSection(parts.sandbox, 'executor') +
+  subagentsSection(parts.subagents, 'executor') +
   mcpInstructionsSection(parts.mcpInstructions) +
   activeSkillsSection(parts.skills, parts.activeSkills)
 

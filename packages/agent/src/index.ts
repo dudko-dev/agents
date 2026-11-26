@@ -231,6 +231,22 @@ export type {
 } from './pipeline-engine.ts'
 export { createSubagentTool } from './subagent.ts'
 export type { ISubagentProfile, ISubagentToolOptions, SubagentIsolation } from './subagent.ts'
+// Dynamic subagents: helpers the model starts itself (config.subagents.dynamic).
+export {
+  adoptSubagentEvent,
+  resolveDynamicSubagents,
+  SPAWN_INPUT_SCHEMA,
+  SPAWN_SUBAGENT_TOOL,
+  SUBAGENT_DEFAULTS,
+  SUBAGENT_MAX_DEPTH_LIMIT,
+  SubagentSpawnError,
+} from './subagent-dynamic-shared.ts'
+export type {
+  IDynamicSubagentsConfig,
+  IResolvedDynamicSubagents,
+  ISubagentsConfig,
+  SubagentDefaultTools,
+} from './subagent-dynamic-shared.ts'
 
 export type {
   AgentEvent,

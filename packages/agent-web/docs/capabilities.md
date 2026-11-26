@@ -717,6 +717,126 @@ const researcher = createSubagentTool({
   that changes `systemPrompt`, `skills` or `tools` — the parent cannot hand a
   child more of its own conversation.
 
+## Dynamic subagents: helpers the model starts itself
+
+`createSubagentTool` is a subagent the **host** defines: its config, its tools, its model are
+written up front. With `subagents.dynamic` the **model** decides, mid-run, that a sub-task
+deserves a helper of its own:
+
+```ts
+const agent = await createAgent({
+  model,
+  tools,
+  subagents: { dynamic: true },
+  // or: { dynamic: { maxDepth: 1, maxChildren: 8, maxConcurrent: 3, budgetShare: 0.5,
+  //                  minTokens: 2000, timeoutMs: 300_000, defaultTools: 'read-only' } }
+})
+```
+
+It mounts one tool, `spawn_subagent({ task, role?, tools? })`. The helper runs the normal loop
+(plan → execute → replan → synthesize) on `task` and its final answer is the tool result,
+capped like any tool result (`compaction.maxToolOutputChars`). Several calls in one model step
+run in parallel. It works in both tool modes (a prompted model sees it in the catalogue with its
+parameters). **Off by default**: without the switch the tool does not exist and every prompt,
+tool list and call is byte for byte what it was. With it on, the tool's description and a short
+`HELPERS:` section in the planner's and the executor's system prompts (run-stable, so the cached
+prefix does not move) say when a helper pays - independent sub-tasks, long reading whose
+conclusion is all that is needed - and that it spends this run's budget.
+
+**A helper can only have less than the run that starts it.** It is built from the calling
+agent's own pieces - nothing is resolved from a spec again:
+
+| | What a helper gets |
+| --- | --- |
+| Tools | A subset of the caller's tool **objects**, by name. A name the caller does not have - never passed, filtered by `availableTools` / `excludedTools`, or not handed down to this helper - is **refused** with a message, not dropped. Without `tools`: the caller's read-only tools (`defaultTools: 'all'` makes it all of them); `tools: []` is a helper that only reasons. |
+| MCP tools, `egress`, `search`, `sandbox`, the file system | Nothing of its own. `web_fetch`, `web_search`, `run_js`, the file tools and every MCP tool are the caller's objects, so they reach exactly what they reach in the caller: the same egress policy, the same search credential, the same server connection, the same `VirtualFileSystem` namespace. A helper given `run_js` gets the sandbox's prompt notes too - and with them what `run_js` can do in the caller, the workspace binding included (its `fs` calls pass the gate under the file tools' names, as always). |
+| Models | The caller's resolved model **objects**: planner, executor, synthesizer and the `executorTiers` (a helper's planner rates its steps, and they run on the same tier models, with the same escalation rules). A loaded WebLLM engine is shared, not loaded again. |
+| Consent | The **same** state: the mode as it is at the moment of each call (a mode you switch mid-run applies to a helper's next call), the same `rules`, the same "always allow" choices. A helper's write under `ask-writes` asks the same `onRequest`, with `subagent: { id, depth }` on the request and on `tool.approval-requested`. Starting a helper is itself not a write (so `ask-writes` and `read-only` let it through and still ask about / refuse what the helper does); `ask-all` asks about it, and a rule on `spawn_subagent` applies. |
+| System prompt | The host's (`systemPrompt`, `prompts`, `describeState`), unchanged. `role` is model-written text: it is put in front of the task, under a line that says where it came from - never in the system prompt. |
+| Context | The task (and the role). No memory, no session transcript, none of the caller's steps. |
+| Skills | Read: the same index, `load_skill` and `read_skill_file` (the caller's lessons included, still marked as lessons). **Never the notebook**: `save_skill` / `forget_skill` are refused by name and left out of `'all'` - a helper sees a part of the task and none of its outcome, so it reports what it learned and the caller decides what is a lesson. |
+| Limits | Its own caps, each inside the caller's - see below. |
+
+There is no parameter for a model, a provider, a limit, a timeout or a consent mode: the tool's
+input schema is `task`, `role`, `tools` (`additionalProperties: false`), and a call with any
+other key is refused, not quietly cleaned.
+
+**Limits.** Each has a default and a test.
+
+| Setting | Default | What it bounds |
+| --- | --- | --- |
+| `maxDepth` | `1` | How deep helpers nest. `1`: the run's helpers are not offered `spawn_subagent` at all. At most `4`. A helper's helper narrows from **its** parent's tools. |
+| `maxChildren` | `8` | Helpers one run starts in all, its helpers' helpers included; a resumed run keeps counting. The next call is refused. |
+| `maxConcurrent` | `3` | Helpers of one parent running at once; further calls wait their turn. |
+| `budgetShare` | `0.5` | The share of what is **left** of the caller's run limits one helper may take: each of `limits.maxTotalTokens` / `maxInputTokens` / `maxOutputTokens` / `maxReasoningTokens` the caller has, and `maxToolCalls`. "Left" is after what the caller has spent and what its running helpers may still spend. Also the helper's `maxIterations` (that share of the caller's cap, at least 1). |
+| `minTokens` | `2000` | A helper is not started with a smaller total or input share (a quarter of it for the output cap; one tool call) - the call is refused with the numbers. |
+| `timeoutMs` | `300000` | Wall clock of one helper (`0` = none). The run itself has no wall-clock limit to share; `chatTimeoutMs` applies to each of the helper's calls as to the caller's. |
+
+A helper's tokens are charged to the caller as they are spent (`usage` events with
+`phase: 'subagent'`), all the way up, so they count against the run's limits and in
+`agent.usage` / `sessionUsage` once. Its tool calls count on the caller's `maxToolCalls` as well
+as its own share: a helper cannot make a call its parent has no budget left for. Token limits
+are soft, as everywhere: a helper stops at the next boundary after crossing its share and writes
+its answer. A caller without a limit of some kind gives its helpers none of that kind.
+
+**Stopping.** The run's abort signal stops every helper. `control.stopSubagent(id)` stops one -
+at any depth, helpers register in the run's `RunControl` (`control.subagents()` lists
+`{ id, name: 'spawn_subagent', task, role?, depth, parentId?, dynamic: true }`) - and the
+caller reads "the helper was stopped by the user ... carry on without its result".
+
+**Isolation.** In-process only: a helper shares the page's thread with the run. A Web Worker
+cannot be handed live tools, a loaded model or the consent gate, and a helper is defined by
+*sharing* them; a subagent that needs its own thread is a static one (`createSubagentTool` with
+`worker`), which a helper can call if it is given that tool.
+
+**Escalation and resume.** With `executorTiers`, a step retried on a stronger tier does not run
+a helper twice: a `spawn_subagent` call that **finished** in an earlier attempt is answered from
+that answer, like any write. A helper that had not finished is lost with the attempt. The same
+is true of a reload: a helper has no checkpoint of its own. A run interrupted while a helper
+works resumes at the step that started it (see
+[Resuming an interrupted run](#resuming-an-interrupted-run)); that step runs again and starts a
+**new** helper from the task alone. What the lost helper had already written stays written and
+is not replayed, exactly like a tool call of an interrupted step, and the last checkpoint is
+from before it started - so the tokens it spent are in `agent.usage` of the page that died, not
+in the resumed run's `usage`. The helpers of finished steps stay counted (`subagentsSpawned` in
+the snapshot).
+
+### The subagent tree, from the events
+
+Static and dynamic subagents report through the same four events, and a host can draw the tree
+from the stream alone:
+
+- `subagent.start` `{ id, name, task, parentId, depth, profile?, dynamic?, role?, tools? }` - a
+  node. `parentId` is the `id` of the subagent that made the call, or the `runId` of the run
+  (see `run.start`) when the run itself made it; `depth` is `1` for the run's own subagents, `2`
+  for theirs. `dynamic: true` marks a helper the model started (`role` and the granted `tools`
+  come with it); `name` is the subagent's name (`spawn_subagent` for a helper).
+- `subagent.event` `{ id, name, event }` - one event of that subagent, forwarded. A subagent's
+  own subagents arrive nested: `subagent.event{ id: A, event: subagent.event{ id: G, event } }`.
+  The chain of ids around an event is its ancestry, innermost last, and its length is the depth.
+- `subagent.complete` `{ id, text, usage }` / `subagent.error` `{ id, error, stopped?, usage? }`
+  - the node's end. `usage` is everything spent under that node (its own helpers included),
+  already charged to its parent.
+
+Every `subagent.start` is emitted with `depth: 1` and the caller's `runId`; each subagent it
+passes through on the way up adds a level, and the first one puts its own `id` in `parentId`
+(`adoptSubagentEvent`, exported). So at the top of the stream every start carries its true
+parent and depth whatever is below it - static or dynamic, in-process or a worker. Events a
+[pipeline](#pipelines-a-graph-of-agents) forwards from a node get that node's `nodeId` /
+`visit` on the outermost event, as always, so a pipeline node's subagents are a tree under that
+node.
+
+```ts
+const nodes = new Map()
+const walk = (e) => {
+  if (e.type === 'subagent.start') nodes.set(e.id, { ...e, status: 'running' })
+  if (e.type === 'subagent.complete') Object.assign(nodes.get(e.id), { status: 'done', usage: e.usage })
+  if (e.type === 'subagent.error')
+    Object.assign(nodes.get(e.id), { status: e.stopped ? 'stopped' : 'failed', usage: e.usage })
+  if (e.type === 'subagent.event') walk(e.event)
+}
+```
+
 ## Model tiers and escalation
 
 Most steps of a plan are mechanical and a few are hard. `executorTiers` runs each on a model that
@@ -1047,8 +1167,10 @@ write); the message waits for the next boundary and is then shown to the model:
 one). Its delegation fails with a message the parent model can route around ("stopped by
 the user … carry on without its result"), `subagent.error` carries `stopped: true`, and
 sibling subagents and the run are untouched. Only a child that has started is listed; one
-still waiting for a `maxConcurrent` slot is not. A child's own subagents are not
-individually stoppable — stopping the child stops them with it. The log of what each
+still waiting for a `maxConcurrent` slot is not. A static child's own subagents are not
+individually stoppable — stopping the child stops them with it; helpers the model starts
+([dynamic subagents](#dynamic-subagents-helpers-the-model-starts-itself)) register in the
+run's control at every depth. The log of what each
 child does is the `subagent.event` stream, the same events the parent emits.
 
 ## Learning: lessons that outlive the task
@@ -1660,7 +1782,7 @@ Subscribe with `onEvent` (per run) or the handler you pass to `createAgent`; ren
 | --- | --- |
 | `skill.activated` | `name, by: 'plan' \| 'tool'` |
 | `tools.discovered` | `step?, query, names` — `find_tools` activated more tools |
-| `tool.approval-requested` | `id, name, input, readOnly, step?` |
+| `tool.approval-requested` | `id, name, input, readOnly, step?, subagent?` (`subagent: { id, depth }` when a helper the model started is asking) |
 | `tool.approval-resolved` | `id, name, approved, reason?, automatic` |
 | `egress.request` | `url` (origin + path), `allowed`, `status?`, `reason?` — a `web_fetch` request (or `web_search`'s call to its [search API](#search-finding-the-page-to-fetch)), allowed or refused ([egress](#egress-what-the-model-may-fetch)) |
 | `media.generated` | `kind: 'image' \| 'speech'`, `path`, `mediaType`, `bytes`, `model`, `step?` — a media tool wrote a file to the virtual file system; read it with `vfs.readDataUrl(path)` ([media](#media-images-speech-and-transcription)) |
@@ -1672,7 +1794,7 @@ Subscribe with `onEvent` (per run) or the handler you pass to `createAgent`; ren
 
 | Event | Payload |
 | --- | --- |
-| `subagent.start` / `subagent.event` / `subagent.complete` / `subagent.error` | `id, name` + `task, profile?` / `event` / `text, usage` / `error, stopped?` |
+| `subagent.start` / `subagent.event` / `subagent.complete` / `subagent.error` | `id, name` + `task, parentId, depth, profile?, dynamic?, role?, tools?` / `event` / `text, usage` / `error, stopped?, usage?` — a static subagent or a helper the model started; see [the subagent tree](#the-subagent-tree-from-the-events) |
 | `message.queued` | `id, text` — a `RunControl.send()` is waiting for a boundary |
 | `message.delivered` | `id, text, at: 'round' \| 'step' \| 'final'` — the model has seen it |
 

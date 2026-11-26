@@ -36,6 +36,7 @@ On top of the loop:
 - **[Prompt caching](#prompt-caching)** — run-stable system prompts, Anthropic cache breakpoints, OpenAI cache keys.
 - **[Subagents](#subagents-worker_threads)** — a whole agent exposed as one tool, isolated in a `worker_thread`.
 - **[Images, speech, transcription](#media-images-speech-and-transcription)** — three optional tools, each mounted only when its model is configured; files on disk, never bytes in the context.
+- **[Dynamic subagents](#dynamic-subagents-helpers-the-model-starts-itself)** — opt-in: the model starts a helper for a sub-task itself, with a subset of its own tools and a share of its budgets; a helper can only have less than its parent.
 - **[Autonomy](#autonomy)** — the agent looks things up and decides on its own instead of asking.
 
 ## Install
@@ -144,7 +145,7 @@ Pass an event handler as the second argument to `createAgent`, or per run via `o
 
 | Event | When |
 | --- | --- |
-| `subagent.start` / `subagent.event` / `subagent.complete` / `subagent.error` | A subagent tool call's lifecycle and its forwarded child events (`error` carries `stopped` when the user stopped it). |
+| `subagent.start` / `subagent.event` / `subagent.complete` / `subagent.error` | A subagent's lifecycle and its forwarded child events - a static one (`createSubagentTool`) or a helper the model started (`subagents.dynamic`, `dynamic: true`). `start` carries `parentId` and `depth`, `error` carries `stopped` when the user stopped it. See [the subagent tree](#the-subagent-tree-from-the-events). |
 | `message.queued` / `message.delivered` | A `RunControl.send()` message is waiting for a boundary / the model has seen it (`at: 'round' \| 'step' \| 'final'`). See [Steering a run](#steering-a-run-that-is-already-going). |
 
 **Pipelines**
@@ -660,6 +661,76 @@ const researcher = createSubagentTool({
 - `subagent.start` carries `profile` when one was chosen. Child tokens are charged to the parent as always, whichever profile ran.
 - The child's context is still just `task`. A different context means a profile that changes `systemPrompt`, `skills` or `tools` — the parent cannot hand a child more of its own conversation.
 
+## Dynamic subagents: helpers the model starts itself
+
+`createSubagentTool` is a subagent the **host** defines: its config, its tools, its model are written up front. With `subagents.dynamic` the **model** decides, mid-run, that a sub-task deserves a helper of its own:
+
+```ts
+const agent = await createAgent({
+  ...config,
+  subagents: { dynamic: true },
+  // or: { dynamic: { maxDepth: 1, maxChildren: 8, maxConcurrent: 3, budgetShare: 0.5,
+  //                  minTokens: 2000, timeoutMs: 300_000, defaultTools: 'read-only' } }
+})
+// CLI: AGENT_SUBAGENTS=on, AGENT_SUBAGENTS_MAX_DEPTH, AGENT_SUBAGENTS_MAX_CHILDREN, AGENT_SUBAGENTS_MAX_CONCURRENT
+```
+
+It mounts one tool, `spawn_subagent({ task, role?, tools? })`. The helper runs the normal loop (plan → execute → replan → synthesize) on `task` and its final answer is the tool result, capped like any tool result (`compaction.maxToolOutputChars`). Several calls in one model step run in parallel. **Off by default**: without the switch the tool does not exist and every prompt, tool list and request is byte for byte what it was. With it on, the tool's description and a short `HELPERS:` note in the planner's and the executor's system prompts (run-stable, so the cached prefix does not move) say when a helper pays - independent sub-tasks, long reading whose conclusion is all that is needed - and that it spends this run's budget.
+
+**A helper can only have less than the run that starts it.** It is not a new agent built from a config: it is a nested run over the caller's own context. That is what makes the rule hold by construction rather than by checking:
+
+| | What a helper gets |
+| --- | --- |
+| Tools | A subset of the caller's tool **objects**, by name. A name the caller does not have - never mounted, filtered by `availableTools` / `excludedTools`, or not passed down to this helper - is **refused** with a message, not dropped. Without `tools`: the caller's read-only tools (`defaultTools: 'all'` makes it all of them); `tools: []` is a helper that only reasons. |
+| MCP servers, `egress`, `search`, `sandbox` | Nothing of its own. `web_fetch`, `web_search`, `run_js` and every MCP tool are the caller's objects, so they reach exactly what they reach in the caller: the same egress policy, the same search key, the same server connection. A helper given `run_js` gets the sandbox's prompt note too. |
+| Models | The caller's: planner, executor, synthesizer and the `executorTiers` (a helper's planner rates its steps, and they run on the same tier models, with the same escalation rules). |
+| Approval | The **same** gate: the mode as it is at the moment of each call (a mode you tighten mid-run applies to a helper's next call), the same `rules`, the same "always allow" choices. A helper's write under `ask-writes` asks the same `onRequest`, with `subagent: { id, depth }` on the request and on `tool.approval-requested`. Starting a helper is itself not a write (so `ask-writes` and `read-only` let it through and still ask about / refuse what the helper does); `ask-all` asks about it, and a rule on `spawn_subagent` applies. |
+| System prompt | The operator's, unchanged. `role` is model-written text: it is put in front of the task, under a line that says where it came from - never in the system prompt. |
+| Context | The task (and the role). No history, none of the caller's trace. |
+| Skills | Read: the same index, `load_skill` and `read_skill_file`. **Never the notebook**: `save_skill` / `forget_skill` are refused by name and left out of `'all'` - a helper sees a part of the task and none of its outcome, so it reports what it learned and the caller decides what is a lesson. |
+| Limits | Its own caps, each inside the caller's - see below. |
+
+There is no parameter for a model, a provider, a limit, a timeout or an approval mode: the tool's input schema is `task`, `role`, `tools` (`additionalProperties: false`), and a call with any other key is refused, not quietly cleaned.
+
+**Limits.** Each has a default and a test.
+
+| Setting | Default | What it bounds |
+| --- | --- | --- |
+| `maxDepth` | `1` | How deep helpers nest. `1`: the run's helpers are not offered `spawn_subagent` at all. At most `4`. A helper's helper narrows from **its** parent's tools. |
+| `maxChildren` | `8` | Helpers one run starts in all, its helpers' helpers included; a resumed run keeps counting. The next call is refused. |
+| `maxConcurrent` | `3` | Helpers of one parent running at once; further calls wait their turn. |
+| `budgetShare` | `0.5` | The share of what is **left** of the caller's run limits one helper may take: each of `limits.maxTotalTokens` / `maxInputTokens` / `maxOutputTokens` / `maxReasoningTokens` the caller has, and `maxToolCalls`. "Left" is after what the caller has spent and what its running helpers may still spend. Also the helper's `maxIterations` (that share of the caller's cap, at least 1). |
+| `minTokens` | `2000` | A helper is not started with a smaller total or input share (a quarter of it for the output cap; one tool call) - the call is refused with the numbers. |
+| `timeoutMs` | `300000` | Wall clock of one helper (`0` = none). The run itself has no wall-clock limit to share; `llmTimeoutMs` applies to each of the helper's calls as to the caller's. |
+
+A helper's tokens are charged to the caller as they are spent (`usage` events with `phase: 'subagent'`), all the way up, so they count against the run's limits and in `agent.usage` once. Its tool calls count on the caller's `maxToolCalls` as well as its own share: a helper cannot make a call its parent has no budget left for. Token limits are soft, as everywhere: a helper stops at the next boundary after crossing its share and writes its answer. A caller without a limit of some kind gives its helpers none of that kind.
+
+**Stopping.** The run's abort signal stops every helper. `control.stopSubagent(id)` stops one - at any depth, helpers register in the run's `RunControl` (`control.subagents()` lists `{ id, name: 'spawn_subagent', task, role?, depth, parentId?, dynamic: true }`) - and the caller reads "the helper was stopped by the user ... carry on without its result".
+
+**Isolation.** In-process only. A worker thread would have to rebuild the tools, the MCP connections and the approval gate on the other side, and a helper is defined by *sharing* them; a subagent that needs its own thread is a static one (`createSubagentTool`, `isolation: 'worker'`), which a helper can call if it is given that tool.
+
+**Escalation and resume.** With `executorTiers`, a step retried on a stronger tier does not run a helper twice: a `spawn_subagent` call that **finished** in an earlier attempt is answered from that answer, like any write. A helper that had not finished is lost with the attempt. The same is true of a crash: a helper has no checkpoint of its own. A run interrupted while a helper works resumes at the step that started it (see [Resume](#resume-after-crash)); that step runs again and starts a **new** helper from the task alone. What the lost helper had already written stays written and is not replayed, exactly like a tool call of an interrupted step. The tokens it had reported stay charged when the run was *stopped* (the closing `cancelled` snapshot carries them in `usage`); after a real crash the last checkpoint is from before the helper started, so they are in that process's `agent.usage` and not in the resumed run's. The helpers of finished steps stay counted (`subagentsSpawned` in the snapshot).
+
+### The subagent tree, from the events
+
+Static and dynamic subagents report through the same four events, and a host can draw the tree from the stream alone:
+
+- `subagent.start` `{ id, name, task, parentId, depth, profile?, dynamic?, role?, tools? }` - a node. `parentId` is the `id` of the subagent that made the call, or the `runId` of the run when the run itself made it; `depth` is `1` for the run's own subagents, `2` for theirs. `dynamic: true` marks a helper the model started (`role` and the granted `tools` come with it); `name` is the tool's name.
+- `subagent.event` `{ id, name, event }` - one event of that subagent, forwarded (long strings clipped). A subagent's own subagents arrive nested: `subagent.event{ id: A, event: subagent.event{ id: G, event } }`. The chain of ids around an event is its ancestry, innermost last, and its length is the depth.
+- `subagent.complete` `{ id, text, usage }` / `subagent.error` `{ id, error, stopped?, usage? }` - the node's end. `usage` is everything spent under that node (its own helpers included), already charged to its parent.
+
+Every `subagent.start` is emitted with `depth: 1` and the caller's `runId`; each subagent it passes through on the way up adds a level, and the first one puts its own `id` in `parentId` (`adoptSubagentEvent`, exported). So at the top of the stream every start carries its true parent and depth whatever is below it - static or dynamic, a thread or a worker. The envelope carries the parent run's `runId`; the event inside keeps its own run's. Events a [pipeline](#pipelines) forwards from a node get that node's `nodeId` / `visit` on the outermost event, as always, so a pipeline node's subagents are a tree under that node.
+
+```ts
+const nodes = new Map()
+const walk = (e) => {
+  if (e.type === 'subagent.start') nodes.set(e.id, { ...e, status: 'running' })
+  if (e.type === 'subagent.complete') Object.assign(nodes.get(e.id), { status: 'done', usage: e.usage })
+  if (e.type === 'subagent.error') Object.assign(nodes.get(e.id), { status: e.stopped ? 'stopped' : 'failed', usage: e.usage })
+  if (e.type === 'subagent.event') walk(e.event)
+}
+```
+
 ## Steering a run that is already going
 
 `run()` takes one input and resolves when the run is over. To say something in the meantime
@@ -713,8 +784,9 @@ message waits for the next boundary and is then shown to the model:
 one). Its delegation fails with a message the parent model can route around ("stopped by the user
 ... carry on without its result"), `subagent.error` carries `stopped: true`, and sibling subagents
 and the run are untouched. Only a child that has started is listed; one still waiting for a
-`maxConcurrent` slot is not. A child's own subagents are not individually stoppable - stopping the
-child stops them with it. What each child does is the `subagent.event` stream, the same events the
+`maxConcurrent` slot is not. A static child's own subagents are not individually stoppable - stopping the
+child stops them with it; helpers the model starts ([dynamic subagents](#dynamic-subagents-helpers-the-model-starts-itself))
+register in the run's control at every depth. What each child does is the `subagent.event` stream, the same events the
 parent emits.
 
 ## Egress: what the model may fetch
@@ -1097,6 +1169,7 @@ Consent is the host's job ([tool approval](#tool-approval-and-autopilot)) — th
 | `baseURL` | Required for `openai-compatible` (point at your self-hosted server) and `azure` (point at your deployment URL). Optional for the rest. |
 | `apiKey` | Required by the type, but **ignored** for `google-vertex` (which authenticates via Google ADC). |
 | `providerOptions` | Escape hatch for provider-specific factory options. Spread into the SDK's `create*()` call after `baseURL` / `apiKey`, so anything documented for the underlying SDK works: e.g. `{ apiVersion, resourceName }` for Azure, `{ region, accessKeyId, secretAccessKey }` for Bedrock, `{ project, location, googleAuthOptions }` for Vertex, `{ accountId }` (or `{ binding }` inside a Worker) for Cloudflare. Per-stage override blocks have their own `providerOptions`; if absent, the top-level value is used. |
+| `subagents` | Off by default. `{ dynamic: true }` or `{ dynamic: { maxDepth, maxChildren, maxConcurrent, budgetShare, minTokens, timeoutMs, defaultTools } }` gives the model `spawn_subagent`: it starts a helper agent for a sub-task, with a subset of its own tools and a share of what is left of its budgets. A helper can only have less than the run that starts it. See [Dynamic subagents](#dynamic-subagents-helpers-the-model-starts-itself). |
 | `sandbox` | Off by default. `true` or `{ timeoutMs, memoryLimitBytes, maxOutputChars, maxCodeChars }` gives the model `run_js`: JavaScript it wrote runs in QuickJS/WebAssembly inside a worker thread that is killed at the deadline. Needs the optional peer `quickjs-emscripten`. See [Running code](#running-code-the-sandbox). |
 | `model` | Default model for every stage (executor / planner / synthesizer) when no per-stage override is set. |
 | `planner` / `synthesizer` | Optional per-stage override blocks: `{ providerType?, baseURL?, apiKey?, model? }`. Use these to mix providers (e.g. Gemini planner, Anthropic synthesizer). Cross-provider overrides MUST set their own `apiKey`. |
@@ -1287,6 +1360,7 @@ Top-level exports beyond `createAgent`:
 - `getCurrentRunSandbox(): string | undefined` — absolute path to the active run's sandbox directory. Native tools that need to spill binary output should write into this path so files are auto-cleaned when the run completes (set `keepSandbox: true` to retain).
 - `redactHeaders(headers)` — small helper for masking `Authorization`, `X-Api-Key`, `Cookie`, etc. when logging request headers (e.g. inside an `outputSanitizer` or your own MCP transport wrapper).
 - `createSubagentTool(options)` — [subagents](#subagents-worker_threads).
+- `SPAWN_SUBAGENT_TOOL`, `SPAWN_INPUT_SCHEMA`, `SUBAGENT_DEFAULTS`, `SUBAGENT_MAX_DEPTH_LIMIT`, `resolveDynamicSubagents(subagents)`, `SubagentSpawnError`, `adoptSubagentEvent(event, parentId)` — [dynamic subagents](#dynamic-subagents-helpers-the-model-starts-itself): the tool's name and input, the defaults, the validated settings, the refusal a model reads, and the rule that places a forwarded `subagent.start` in the tree.
 - `createPipeline(definition, options)`, `nodeResolver(registries)`, `validatePipeline(definition)`, `normalizePipeline(definition)`, `testPipelineCondition(when, output)`, `renderPipelineNodeInput(input)`, `PIPELINE_LIMITS`, `PipelineNodeError`, `PipelineValidationError` — [pipelines](#pipelines).
 - `resolveThinking(setting)`, `mergeProviderOptions(...layers)` — [thinking](#thinking-reasoning).
 - `checkLimits(usage, limits)`, `resolveLimits(config)`, `normalizeUsage(sdkUsage)`, `addUsage(a, b)` — [token limits](#token-limits-and-step-caps).
@@ -1314,7 +1388,7 @@ dd-agent --env-file=.env
 
 `--env-file=<path>` is loaded via Node's built-in `process.loadEnvFile`, so no `dotenv` dependency is needed. Without the flag the CLI reads the ambient process env. `-h` / `--help` prints the supported flags and the in-REPL slash commands (`/status`, `/usage`, `/tools`, `/history`, `/reset`, `/compact`, `/autopilot`, `/approval <mode>`, `/reconnect`, `/skills`, `/forget <name>`, `/agents`, `/stop [n]`, `/exit` — `/quit` does the same).
 
-The newer features are env-driven too: `AGENT_THINKING` (`off | minimal | low | medium | high | xhigh | <budget tokens>`), `AGENT_MAX_INPUT_TOKENS` / `AGENT_MAX_OUTPUT_TOKENS` / `AGENT_MAX_REASONING_TOKENS` / `AGENT_MAX_TOTAL_TOKENS`, `AGENT_MAX_TOOL_CALLS`, `AGENT_PER_CALL_TOKENS` (JSON `{"executor":16000,"synthesizer":0}` — per-stage output caps, `0` = no cap, see [Token limits](#token-limits-and-step-caps)), `AGENT_TOOL_APPROVAL` (`autopilot | ask-writes | ask-all | read-only`), `AGENT_TOOL_RULES` (JSON `{ "<tool or glob*>": "allow" | "ask" | "deny" }`, beats the mode — e.g. `{"github__delete_*":"deny"}`), `AGENT_EGRESS` (`on | off`; with `AGENT_EGRESS_ALLOW`, `AGENT_EGRESS_DENY`, `AGENT_EGRESS_PROTOCOLS`, `AGENT_EGRESS_ALLOW_PRIVATE` — see [Egress](#egress-what-the-model-may-fetch)), `AGENT_SEARCH` (`brave | tavily | searxng | off`; with `AGENT_SEARCH_API_KEY`, `AGENT_SEARCH_BASE_URL`, `AGENT_SEARCH_MAX_RESULTS`, `AGENT_SEARCH_ALLOW_PRIVATE` — see [Search](#search-finding-the-page-to-fetch)), `AGENT_SANDBOX` (`on | off`; with `AGENT_SANDBOX_TIMEOUT_MS`, `AGENT_SANDBOX_MEMORY_MB` — see [Running code](#running-code-the-sandbox)), `AGENT_IMAGE_MODEL` / `AGENT_SPEECH_MODEL` / `AGENT_TRANSCRIPTION_MODEL` (a model id each; each mounts its tool - with `AGENT_MEDIA_PROVIDER_TYPE` / `AGENT_MEDIA_API_KEY` / `AGENT_MEDIA_BASE_URL` / `AGENT_MEDIA_PROVIDER_OPTIONS` when those models live at another provider than the main one, `AGENT_MEDIA_DIR` (default `./agent-media`), `AGENT_MEDIA_MAX_CALLS`, `AGENT_SPEECH_VOICE` — see [Media](#media-images-speech-and-transcription); in the REPL `/audio <file> [question]` attaches an audio file, and `/usage` shows the media calls beside the tokens), `AGENT_SKILLS_DIR`, `AGENT_LEARNING` (`on | off`; `AGENT_LEARNING_DIR` keeps the lessons across sessions — see [Learning](#learning-lessons-that-outlive-the-task)), `AGENT_TOOL_SELECTION_STRATEGY` (`auto | all | plan-narrowed | search`), `AGENT_CONTEXT_WINDOW_TOKENS`, `AGENT_COMPACTION_THRESHOLD` (percent of the window where auto-compaction starts, default 85) and `AGENT_COMPACTION=off`. The REPL prints the model's thoughts dimmed, auto-compacts its history with the same settings, and — when the approval mode asks — prompts `allow? [y]es / [n]o / [a]lways` right in the terminal; `/autopilot` toggles between autopilot and the last asking mode.
+The newer features are env-driven too: `AGENT_THINKING` (`off | minimal | low | medium | high | xhigh | <budget tokens>`), `AGENT_MAX_INPUT_TOKENS` / `AGENT_MAX_OUTPUT_TOKENS` / `AGENT_MAX_REASONING_TOKENS` / `AGENT_MAX_TOTAL_TOKENS`, `AGENT_MAX_TOOL_CALLS`, `AGENT_PER_CALL_TOKENS` (JSON `{"executor":16000,"synthesizer":0}` — per-stage output caps, `0` = no cap, see [Token limits](#token-limits-and-step-caps)), `AGENT_TOOL_APPROVAL` (`autopilot | ask-writes | ask-all | read-only`), `AGENT_TOOL_RULES` (JSON `{ "<tool or glob*>": "allow" | "ask" | "deny" }`, beats the mode — e.g. `{"github__delete_*":"deny"}`), `AGENT_EGRESS` (`on | off`; with `AGENT_EGRESS_ALLOW`, `AGENT_EGRESS_DENY`, `AGENT_EGRESS_PROTOCOLS`, `AGENT_EGRESS_ALLOW_PRIVATE` — see [Egress](#egress-what-the-model-may-fetch)), `AGENT_SEARCH` (`brave | tavily | searxng | off`; with `AGENT_SEARCH_API_KEY`, `AGENT_SEARCH_BASE_URL`, `AGENT_SEARCH_MAX_RESULTS`, `AGENT_SEARCH_ALLOW_PRIVATE` — see [Search](#search-finding-the-page-to-fetch)), `AGENT_SANDBOX` (`on | off`; with `AGENT_SANDBOX_TIMEOUT_MS`, `AGENT_SANDBOX_MEMORY_MB` — see [Running code](#running-code-the-sandbox)), `AGENT_SUBAGENTS` (`on | off`; with `AGENT_SUBAGENTS_MAX_DEPTH`, `AGENT_SUBAGENTS_MAX_CHILDREN`, `AGENT_SUBAGENTS_MAX_CONCURRENT` — see [Dynamic subagents](#dynamic-subagents-helpers-the-model-starts-itself); `/agents` and `/stop` list and stop helpers, and an approval prompt says when a helper is asking), `AGENT_IMAGE_MODEL` / `AGENT_SPEECH_MODEL` / `AGENT_TRANSCRIPTION_MODEL` (a model id each; each mounts its tool - with `AGENT_MEDIA_PROVIDER_TYPE` / `AGENT_MEDIA_API_KEY` / `AGENT_MEDIA_BASE_URL` / `AGENT_MEDIA_PROVIDER_OPTIONS` when those models live at another provider than the main one, `AGENT_MEDIA_DIR` (default `./agent-media`), `AGENT_MEDIA_MAX_CALLS`, `AGENT_SPEECH_VOICE` — see [Media](#media-images-speech-and-transcription); in the REPL `/audio <file> [question]` attaches an audio file, and `/usage` shows the media calls beside the tokens), `AGENT_SKILLS_DIR`, `AGENT_LEARNING` (`on | off`; `AGENT_LEARNING_DIR` keeps the lessons across sessions — see [Learning](#learning-lessons-that-outlive-the-task)), `AGENT_TOOL_SELECTION_STRATEGY` (`auto | all | plan-narrowed | search`), `AGENT_CONTEXT_WINDOW_TOKENS`, `AGENT_COMPACTION_THRESHOLD` (percent of the window where auto-compaction starts, default 85) and `AGENT_COMPACTION=off`. The REPL prints the model's thoughts dimmed, auto-compacts its history with the same settings, and — when the approval mode asks — prompts `allow? [y]es / [n]o / [a]lways` right in the terminal; `/autopilot` toggles between autopilot and the last asking mode.
 
 **Talking to the agent while it works.** The REPL keeps reading while a run goes. Text you type then is said to the running agent (it sees it at its next boundary and the replanner re-checks the plan — see [Steering a run](#steering-a-run-that-is-already-going)): the REPL prints `[you->agent] queued` and then `delivered (round|step|final)`, and the message enters the history as a user turn. A message that arrives while the answer is being written is sent as the next prompt (`[follow-up]`). After Ctrl-C nothing is sent behind your back: what the agent never saw is listed as `[not delivered]`. While a run goes, `/agents` lists the running subagents and `/stop <n>` (or an id prefix, or just `/stop` when one runs) stops one — the run goes on; the other REPL commands work between runs. Each subagent's own steps and tool calls are logged as `[name id] ...` lines, so parallel ones can be told apart.
 

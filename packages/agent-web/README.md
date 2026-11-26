@@ -461,7 +461,10 @@ needs. Subagents are tools too — `createSubagentTool({ config })` runs a child
 agent in-process, `createSubagentTool({ worker, workerConfig })` isolates it in a
 Web Worker served by `serveSubagentWorker()`. Add `profiles` and the parent model
 chooses, per call, between named variants of the same subagent — another model,
-thinking level, limits or system prompt. Give `persistence` a store
+thinking level, limits or system prompt. With `subagents: { dynamic: true }` the model
+starts helpers itself (`spawn_subagent`): a sub-task, an optional role and a subset of its own
+tools — a helper can only have less than the run that starts it, and its spend counts against
+that run's limits. Give `persistence` a store
 (`new IndexedDBRunStore()`) and a run interrupted by a reload or a crash resumes from its
 last checkpoint with `run('', { resumeFromRunId })` — the planner does not run again and
 no finished step is repeated. `createRunControl()` steers a run that is going: `send()`
@@ -545,6 +548,7 @@ Loading a definition someone else wrote: [docs/security.md](docs/security.md#pip
 | `media` | off | image generation, speech and transcription as tools, each mounted only when its model is set: `{ imageModel, speechModel, transcriptionModel, maxCalls, timeoutMs, files, folder, voice, speechFormat, transcribeAttachments }`. A model is an AI SDK image / speech / transcription model object or a `ProviderModelSpec` (key by `credentialRef`). Generated files go to the virtual file system and the model gets a path, never the bytes; attached audio is transcribed to text; calls are counted in `usage.mediaCalls` (and the other media fields) and capped per run — see [Media](docs/capabilities.md#media-images-speech-and-transcription) |
 | `decisionModel` | off | a **decision model** - answers a closed question with one option and a probability instead of writing text: `{ providerType: 'google', model: 'gemini-decision-1', credentialRef }` (the key stays in `credentials`; the request reaches only that API) or an object with `decide(question, { abortSignal })`. Where it is confident it replaces the replanner's continue / finish call and a pipeline node's route call; never consulted for tool approval or egress — see [Decision models](docs/capabilities.md#decision-models) |
 | `decision` | `{}` | `{ confidenceThreshold, timeoutMs, replan, route }` (defaults 0.8, 5000 ms, on, on): below the threshold, on an error, a timeout or an answer that is not an option, the ordinary model call runs unchanged |
+| `subagents` | off | the **model** may start helper agents itself (`spawn_subagent`): `{ dynamic: true }`, or `{ dynamic: { maxDepth, maxChildren, maxConcurrent, budgetShare, minTokens, timeoutMs, defaultTools } }`. A helper gets a subset of the caller's tools by name (read-only ones by default), a share of what is left of its budgets, the same models and the same consent gate — it can only have less than the run that starts it. See [docs/capabilities.md](docs/capabilities.md#dynamic-subagents-helpers-the-model-starts-itself) |
 | `sandbox` | off | the model may **run JavaScript it wrote** (`run_js`) and read the real output: `true`, or `{ worker, timeoutMs, memoryLimitBytes, maxOutputChars, maxCodeChars, files, engine }`. QuickJS in WebAssembly (optional peer `quickjs-emscripten`), in a Web Worker you supply (`@dudko.dev/agent-web/sandbox-worker`) that is killed at the deadline; with `createFileTools` the guest can import / require workspace files and use `fs` — see [Running code](docs/capabilities.md#running-code-the-sandbox) |
 | `learning` | off | the agent writes down lessons as skills (`save_skill` / `forget_skill`): `true` = this session, `{ store: new VfsSkillStore(vfs) }` = across sessions — see [Learning](docs/capabilities.md#learning-lessons-that-outlive-the-task) |
 | `thinking` / `stageThinking` | provider default | `true`, a level (`'low'`…`'xhigh'`, `'none'`), or `{ level, budgetTokens, includeThoughts }` |

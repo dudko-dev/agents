@@ -43,6 +43,8 @@ export interface PlannerPromptContext {
   searchMode?: boolean
   /** Set when `config.sandbox` is on: when to plan a `run_js` step. */
   sandbox?: string
+  /** Set while `spawn_subagent` is callable (`subagents.dynamic`): when a helper is worth a step. */
+  subagents?: string
   /** Set when `config.executorTiers` is on: the planner rates every step's complexity. */
   tiers?: boolean
 }
@@ -68,6 +70,8 @@ export interface ExecutorPromptContext {
   learning?: { fetch: boolean }
   /** Set when `config.sandbox` is on: what `run_js` is, and never to report code as run without it. */
   sandbox?: string
+  /** Set while `spawn_subagent` is callable (`subagents.dynamic`): when to hand work to a helper. */
+  subagents?: string
 }
 export interface ReplannerPromptContext {
   goal: string
@@ -251,6 +255,7 @@ export const defaultPrompts: Prompts = {
       (ctx.tiers ? (ctx.mode === 'prompted' ? PLANNER_TIERS_PROMPTED : PLANNER_TIERS_NATIVE) : '') +
       (ctx.searchMode ? PLANNER_SEARCH : '') +
       (ctx.sandbox ? `\n${ctx.sandbox}` : '') +
+      section('HELPERS', ctx.subagents) +
       section('SKILLS', ctx.skills) +
       `\n\nTOOLS:\n${ctx.toolCatalog}`,
     prompt: `GOAL: ${ctx.goal}${historyBlock(ctx.history)}${stateBlock(ctx.state)}`,
@@ -262,6 +267,7 @@ export const defaultPrompts: Prompts = {
       (ctx.skills ? EXECUTOR_SKILLS : '') +
       (ctx.learning ? executorLearning(ctx.learning.fetch) : '') +
       (ctx.sandbox ? `\n- ${ctx.sandbox}` : '') +
+      section('HELPERS', ctx.subagents) +
       section('SKILLS', ctx.skills) +
       section('ACTIVE SKILL INSTRUCTIONS', ctx.activeSkills),
     prompt: [

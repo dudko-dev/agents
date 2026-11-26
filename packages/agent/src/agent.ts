@@ -10,6 +10,8 @@ import { runAgentLoop } from './runner.ts'
 import { createLearning } from './learning.ts'
 import { MODEL_TIERS, resolveEscalation } from './tiers.ts'
 import { createSandboxTools, RUN_JS_TOOL } from './sandbox.ts'
+import { createDynamicSubagentTool } from './subagent-dynamic.ts'
+import { resolveDynamicSubagents, SPAWN_SUBAGENT_TOOL } from './subagent-dynamic-shared.ts'
 import { createSkillTools, validateSkills } from './skills.ts'
 import { createEgressTools } from './web-fetch.ts'
 import { createSearchTools } from './web-search.ts'
@@ -178,17 +180,31 @@ export const createAgent = async (
   const sandboxTools = createSandboxTools(config.sandbox)
   // What config.search switches on (web_search): its own request is pinned to the search API.
   const searchTools = createSearchTools(config.search, config.egress)
+  // What config.subagents.dynamic switches on (spawn_subagent). Off = nothing is created.
+  const dynamicSubagents = resolveDynamicSubagents(config.subagents)
+  // The agent's context, for the helpers the model starts (ctx is assigned below).
+  let ctxRef: (() => IAgentInternalContext) | undefined
+  const subagentTools: ToolSet | undefined = dynamicSubagents
+    ? {
+        [SPAWN_SUBAGENT_TOOL]: createDynamicSubagentTool({
+          settings: dynamicSubagents,
+          ctx: () => (ctxRef as () => IAgentInternalContext)(),
+          wrapBuiltin: (tools) => wrapToolSet(tools, wrapDeps, { builtIn: true }),
+        }),
+      }
+    : undefined
   // What config.media switches on (generate_image / generate_speech / transcribe_audio): only
   // the tools whose model is configured; nothing at all without one.
   const media = await createMedia(config)
   const nativeTools: ToolSet | undefined =
-    egressTools || searchTools || learning || sandboxTools || media
+    egressTools || searchTools || learning || sandboxTools || media || subagentTools
       ? {
           ...egressTools,
           ...searchTools,
           ...sandboxTools,
           ...media?.tools,
           ...learning?.tools,
+          ...subagentTools,
           ...config.tools,
         }
       : config.tools
@@ -466,6 +482,20 @@ export const createAgent = async (
     }
   }
   syncSandbox()
+  ctxRef = () => ctx
+  // The same for spawn_subagent: the prompts name it only while it is really the built-in one.
+  const syncSubagents = (): void => {
+    if (
+      subagentTools &&
+      config.tools?.[SPAWN_SUBAGENT_TOOL] === undefined &&
+      ctx.tools[SPAWN_SUBAGENT_TOOL]
+    ) {
+      ctx.subagents = { dynamic: true }
+    } else {
+      delete ctx.subagents
+    }
+  }
+  syncSubagents()
   // Read through ctx so find_tools always searches the live catalogue
   // (refresh / reconnect replace ctx.toolCatalog).
   catalogRef = () => ctx.toolCatalog
@@ -667,6 +697,7 @@ export const createAgent = async (
         syncMcpInstructions(fresh.mcpInstructions)
         syncFindTools()
         syncSandbox()
+        syncSubagents()
         connected = fresh
         // Close old connections only after the new ones are wired up so a
         // failed reconnect doesn't leave the agent without tools.

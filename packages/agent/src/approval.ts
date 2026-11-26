@@ -257,6 +257,10 @@ export const createApprovalController = (
     }
     const shown = deps.sanitize ? await deps.sanitize(name, input) : input
     const step = store?.currentStep
+    // A call made by a helper the model started says so: the same user is asked, and can see
+    // that it is the helper asking.
+    const scope = store?.state?.spawn
+    const subagent = scope?.id ? { id: scope.id, depth: scope.depth } : undefined
     emit({
       type: 'tool.approval-requested',
       id,
@@ -264,6 +268,7 @@ export const createApprovalController = (
       input: shown,
       readOnly: opts.readOnly,
       ...(step ? { step } : {}),
+      ...(subagent ? { subagent } : {}),
     })
     const request: IToolApprovalRequest = {
       id,
@@ -272,6 +277,7 @@ export const createApprovalController = (
       readOnly: opts.readOnly,
       ...(step ? { step } : {}),
       ...(store?.runId ? { runId: store.runId } : {}),
+      ...(subagent ? { subagent } : {}),
     }
     let raw: ToolApprovalDecision
     try {

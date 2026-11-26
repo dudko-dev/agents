@@ -14,6 +14,7 @@ import type { Prompts } from './prompts.js'
 import type { CredentialStore } from './secrets/store.js'
 import type { LearningConfig } from './learning.js'
 import type { SandboxConfig } from './sandbox/index.js'
+import type { ISubagentsConfig } from './subagent/dynamic-shared.js'
 import type { Skill } from './skills.js'
 import type { IEgressPolicy } from './tools/egress.js'
 import type { ISearchConfig } from './tools/web-search.js'
@@ -148,6 +149,17 @@ export interface BrowserAgentConfig {
    * consent rules (`files: false` switches that off). A run is a write for tool approval.
    */
   sandbox?: boolean | SandboxConfig
+  /**
+   * Subagents the MODEL starts itself. `dynamic: true` (or an object of limits) mounts the
+   * `spawn_subagent` tool: the model gives a sub-task, an optional role and optionally a subset of
+   * its own tools by name; a helper agent runs the normal loop on it and its answer is the tool
+   * result. Off unless set: with it off the tool does not exist and no prompt mentions it. A
+   * helper can only have LESS than the run that starts it (its tools, a share of what is left of
+   * its budgets, the same models, approval mode and rules); its spend counts against this run's
+   * limits. Subagents the HOST defines are tools (`createSubagentTool`) and need no switch. See
+   * `IDynamicSubagentsConfig` and docs/capabilities.md.
+   */
+  subagents?: ISubagentsConfig
   /** Host tools the executor may call (an AI SDK ToolSet; use defineTool). */
   tools?: AgentToolSet
   /** Whitelist: only these tool names from `tools` are mounted (default: all). */

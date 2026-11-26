@@ -90,6 +90,22 @@ export type {
   WorkerToParent,
   ProxiedToolSpec,
 } from './subagent/protocol.js'
+// Dynamic subagents: helpers the model starts itself (`subagents.dynamic`).
+export {
+  adoptSubagentEvent,
+  resolveDynamicSubagents,
+  SPAWN_INPUT_SCHEMA,
+  SPAWN_SUBAGENT_TOOL,
+  SUBAGENT_DEFAULTS,
+  SUBAGENT_MAX_DEPTH_LIMIT,
+  SubagentSpawnError,
+} from './subagent/dynamic-shared.js'
+export type {
+  IDynamicSubagentsConfig,
+  IResolvedDynamicSubagents,
+  ISubagentsConfig,
+  SubagentDefaultTools,
+} from './subagent/dynamic-shared.js'
 
 // ── Images, files ────────────────────────────────────────────────────────────
 export {

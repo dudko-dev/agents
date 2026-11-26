@@ -2,6 +2,7 @@ import type { Tool, ToolExecutionOptions, ToolSet } from 'ai'
 import { isReadOnlyTool, type IApprovalController } from './approval.ts'
 import { withToolOutputLimit } from './compaction.ts'
 import { runContext } from './context.ts'
+import type { IRunState } from './internal.ts'
 import { recordWrite, replayOutput, replayedWrite } from './tiers.ts'
 
 export interface IToolWrapDeps {
@@ -27,6 +28,29 @@ export class ToolBudgetError extends Error {
   }
 }
 
+// One call against a run's tool budget. A helper the model started (config.subagents.dynamic)
+// has its own cap - its share of its parent's - and its calls ALSO count on the parent, all the
+// way up: a helper cannot make a call its parent has no budget left for.
+const reserveOn = (state: IRunState, cap: number | undefined): (() => void) => {
+  const own = state.spawn?.parent ? state.spawn.config?.maxToolCalls : cap
+  if (typeof own === 'number' && own > 0 && state.toolCalls >= own) {
+    throw new ToolBudgetError(own)
+  }
+  const parent = state.spawn?.parent
+  const releaseParent = parent ? reserveOn(parent, cap) : undefined
+  state.toolCalls++
+  if (parent && state.spawn) {
+    state.spawn.toolCalls = state.toolCalls
+  }
+  return () => {
+    state.toolCalls--
+    if (parent && state.spawn) {
+      state.spawn.toolCalls = state.toolCalls
+    }
+    releaseParent?.()
+  }
+}
+
 // Reserve one call of the run's tool budget; returns a release for a call
 // that ends up not running (denied).
 const reserveToolCall = (cap: number | undefined): (() => void) => {
@@ -34,13 +58,7 @@ const reserveToolCall = (cap: number | undefined): (() => void) => {
   if (!state) {
     return () => {}
   }
-  if (typeof cap === 'number' && cap > 0 && state.toolCalls >= cap) {
-    throw new ToolBudgetError(cap)
-  }
-  state.toolCalls++
-  return () => {
-    state.toolCalls--
-  }
+  return reserveOn(state, cap)
 }
 
 const isAsyncGeneratorFunction = (fn: unknown): boolean =>

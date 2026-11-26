@@ -16,6 +16,7 @@ import {
   type ModelTier,
 } from './loop-types.js'
 import { capNotice, imageRefusal, promptFor, stageCall, type AgentContext } from './internal.js'
+import { SPAWN_EXECUTOR_NOTE } from '../subagent/dynamic-shared.js'
 
 /**
  * Split the executor's reply into a clean summary and a structural `blocked`
@@ -133,6 +134,7 @@ export const executeStep = async (
     updates: ctx.userUpdates?.(),
     ...(ctx.learning?.nudge ? { learning: { fetch: Boolean(ctx.tools[WEB_FETCH_TOOL]) } } : {}),
     ...(ctx.sandbox ? { sandbox: ctx.sandbox.executor } : {}),
+    ...(ctx.subagents ? { subagents: SPAWN_EXECUTOR_NOTE } : {}),
   })
 
   // What an escalated attempt is shown of the attempts before it goes into the USER prompt here,

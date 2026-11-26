@@ -144,6 +144,22 @@ behind every decision.
   `tests/decision.test.ts` and a mutation check; no test calls a real API.
 - `src/subagent/` — `tool` (createSubagentTool), `worker` (serveSubagentWorker),
   `protocol` (postMessage shapes).
+- `src/subagent/dynamic.ts` + `dynamic-shared.ts` — `config.subagents.dynamic`: the
+  `spawn_subagent` tool, with which the MODEL starts a helper for a sub-task. A helper is an agent
+  ASSEMBLED from the calling agent's own pieces (its model objects, its approval state itself, its
+  skills, tool objects picked by name) - never built from the model's arguments, and never with an
+  `egress` / `search` / `sandbox` / `media` / `learning` / `memory` of its own; that is what makes
+  "a helper can only have less" hold. The helper's config is the caller's MINUS those fields: a new
+  config field that mounts a tool must be removed there too, with a test that a helper not given
+  the tool does not have it (`media` was missed once, at a merge). The hand-over (`SpawnSeed`) travels in a WeakMap keyed by the helper's
+  config object, not in the config. `dynamic-shared` (pure, no imports: the settings, the input
+  schema and its validation, narrowing, the budget share, the depth / count guards, the texts,
+  `adoptSubagentEvent`) is a COPY of the server's `src/subagent-dynamic-shared.ts`, byte for byte —
+  change both (the server's `tests/subagent-dynamic.test.ts` compares them and unit-tests the
+  rules). The runner mounts the tool, hands tools their `SpawnRun` through `wrap.ts` and counts a
+  helper's tool calls on every run above it. OFF without the switch: the same golden fixture as
+  the tiers. Privilege boundary: every guard has a test in `tests/subagent-dynamic.test.ts` and a
+  mutation check. In-process only.
 - `src/{thinking,limits,caching,skills,images}.ts` — see docs/capabilities.md.
 - `src/logger.ts` — `logLevel` / `logger` (leveled, console-like sink; default `warn`).
 - Compaction (`memory/compress.ts`, `context-window.ts`) is judged on prompt + transcript + step log together

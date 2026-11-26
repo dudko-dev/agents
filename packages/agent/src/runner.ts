@@ -311,6 +311,8 @@ const runAgentLoopInner = async (
     traceSummaryUpTo: resumed?.traceSummaryUpTo ?? 0,
     userUpdates: (resumed?.userUpdates ?? []).map((u) => ({ ...u })),
     escalations: resumed?.escalations ?? 0,
+    ...(resumed?.subagentsSpawned ? { subagentsSpawned: resumed.subagentsSpawned } : {}),
+    ...(ctx.spawn ? { spawn: ctx.spawn } : {}),
   }
 
   // proxiedCtx must be in scope BEFORE callPersistence so the persistence
@@ -602,6 +604,7 @@ const runAgentLoopInner = async (
     ...(state.toolCalls ? { toolCallCount: state.toolCalls } : {}),
     ...(state.userUpdates.length ? { userUpdates: state.userUpdates.map((u) => ({ ...u })) } : {}),
     ...(state.escalations ? { escalations: state.escalations } : {}),
+    ...(state.subagentsSpawned ? { subagentsSpawned: state.subagentsSpawned } : {}),
     ...extra,
   })
 

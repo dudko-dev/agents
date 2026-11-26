@@ -146,6 +146,19 @@
     without `decisionModel`: the golden requests of `tests/model-tiers.test.ts` must pass
     untouched. Every guard has a test in `tests/decision.test.ts` and a mutation check; the vendor
     adapter is tested against a local imitation of the documented response, never a real API.
+  - `subagent-dynamic.ts` + `subagent-dynamic-shared.ts` (`config.subagents.dynamic`: the
+    `spawn_subagent` tool, with which the MODEL starts a helper for a sub-task). A helper is a
+    nested `runAgentLoop` over a context DERIVED from the calling run's (`ISpawnScope` in
+    `internal.ts`): the caller's tool objects picked by name, the same models, approval controller
+    and skills, a share of what is left of its budgets. It is never a new agent built from a
+    config - that is what makes "a helper can only have less" hold. The shared file (pure, no
+    imports: the settings, the input schema and its validation, narrowing, the budget share, the
+    depth / count guards, the texts, `adoptSubagentEvent`) is a COPY of the browser sibling's
+    `src/subagent/dynamic-shared.ts`, byte for byte: change both (`tests/subagent-dynamic.test.ts`
+    compares them). The tool-call share is enforced in `tool-wrap.ts` (`reserveOn`: a helper's
+    call counts on every run above it), the approval label in `approval.ts`. OFF without the
+    switch: the same golden fixture as the tiers. Privilege boundary: every guard has a test in
+    `tests/subagent-dynamic.test.ts` and a mutation check. In-process only.
   - `internal.ts` (`IRunState`: the per-run mutable state shared by the runner, the stages and the tool
     wrappers) + `context.ts` (`runContext`, the AsyncLocalStorage that carries run id, emit and state
     into tools). Neither is public API.

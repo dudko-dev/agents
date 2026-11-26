@@ -111,6 +111,11 @@ export interface AgentContext {
    */
   sandbox?: { planner: string; executor: string; synthesizer: string }
   /**
+   * Set while `spawn_subagent` is among the tools (`config.subagents.dynamic`): the planner's and
+   * the executor's prompts say when a helper is worth it.
+   */
+  subagents?: true
+  /**
    * The rendered instructions of the MCP servers whose tools are mounted (`renderMcpInstructions`);
    * absent when none sent any or `config.mcpInstructions` is false. Built once, when the agent is
    * created, so it is the same text in every call of every run.
