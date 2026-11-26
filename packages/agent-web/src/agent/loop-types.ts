@@ -1,0 +1,67 @@
+/** A single step of a plan. Mirrors the Node sibling's IPlanStep. */
+export interface IPlanStep {
+  id: string
+  description: string
+  expectedOutcome?: string
+  /** Tools the planner thinks this step needs (drives 'plan-narrowed' selection). */
+  suggestedTools?: string[]
+  /** Set by the pipeline when suggestedTools were named but all were unknown. */
+  requiresTools?: boolean
+}
+
+export interface IPlan {
+  thought: string
+  steps: IPlanStep[]
+}
+
+export interface IUsage {
+  inputTokens: number
+  outputTokens: number
+  totalTokens: number
+  /** Output tokens spent thinking (a subset of outputTokens). */
+  reasoningTokens?: number
+  /** Input tokens served from the provider's prompt cache. */
+  cachedInputTokens?: number
+  /** Input tokens written to the provider's prompt cache. */
+  cacheWriteTokens?: number
+}
+
+export interface IToolCall {
+  name: string
+  input: unknown
+  output: unknown
+  ok: boolean
+}
+
+export interface IStepResult {
+  step: IPlanStep
+  summary: string
+  toolCalls: IToolCall[]
+  /** True when the executor signalled it could not complete the step ([BLOCKER]). */
+  blocked: boolean
+}
+
+/**
+ * Sentinel the executor emits when it cannot complete a step. Language-agnostic
+ * and shared by the tool loop (which must preserve it across prompted rounds)
+ * and `splitBlocker` (which strips it and drives the replanner).
+ */
+export const BLOCKER = '[BLOCKER]'
+
+export const emptyUsage = (): IUsage => ({
+  inputTokens: 0,
+  outputTokens: 0,
+  totalTokens: 0,
+  reasoningTokens: 0,
+  cachedInputTokens: 0,
+  cacheWriteTokens: 0,
+})
+
+export const addUsage = (a: IUsage, b: IUsage): IUsage => ({
+  inputTokens: a.inputTokens + b.inputTokens,
+  outputTokens: a.outputTokens + b.outputTokens,
+  totalTokens: a.totalTokens + b.totalTokens,
+  reasoningTokens: (a.reasoningTokens ?? 0) + (b.reasoningTokens ?? 0),
+  cachedInputTokens: (a.cachedInputTokens ?? 0) + (b.cachedInputTokens ?? 0),
+  cacheWriteTokens: (a.cacheWriteTokens ?? 0) + (b.cacheWriteTokens ?? 0),
+})

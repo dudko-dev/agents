@@ -1,0 +1,108 @@
+# @dudko.dev/agent-web — instructions for Claude
+
+Headless, UI-agnostic, **universal in-browser** LLM agent built on the **Vercel
+AI SDK** (`ai` v7). One package drives cloud providers (bring-your-own-key),
+local WebGPU/WebLLM models, and any AI SDK `LanguageModel` (e.g. Chrome/Edge
+built-in AI). It exposes low-level primitives (generate/stream/tool-loop/
+structured output) and a high-level **plan → execute → replan → synthesize**
+agent. Browser sibling of the Node package `@dudko.dev/agent` — shared shapes,
+separate packages.
+
+See [docs/design.md](docs/design.md) for the architecture and the rationale
+behind every decision.
+
+## Principles
+
+- **The model is the only seam.** Everything accepts an AI SDK `LanguageModel`,
+  supplied directly or via a `ProviderModelSpec` the registry resolves.
+- **No UI, no framework, no `node:*` in the core bundle.** Streams typed
+  `AgentEvent`s, returns a `RunResult`. Browser Web APIs (IndexedDB, WebGPU,
+  WebCrypto) are fine.
+- **Two tool-modes over one tool shape.** Native function-calling / structured
+  output for capable models; a prompted JSON-salvage fallback (`parse.ts`) for
+  tiny local models. `selectToolMode` picks per model.
+- **Everything configurable**: models per stage, providers, credentials, tools,
+  MCP, prompts, budgets, timeouts, iteration caps, replan/synthesize, memory.
+- **Secrets encrypted at rest.** A non-extractable WebCrypto AES-GCM key in
+  IndexedDB; API keys never inlined into config. BYOK only — shared keys go
+  through a proxy/gateway (see docs/security.md).
+- **Optional peers, imported dynamically.** `@ai-sdk/*`, `@browser-ai/*`,
+  `@modelcontextprotocol/sdk`, `@mlc-ai/web-llm` — external in the bundle so
+  hosts install and code-split only what they use. `ai`, `zod`, `idb` are deps.
+- Tracks **AI SDK v7**, in step with `@browser-ai/*` v3 which peers `ai@^7`.
+  (This was pinned to v6 while `@browser-ai/web-llm` still peered `ai@^6`.)
+- The public API, config fields, event names and semantics are shared with the Node sibling
+  `@dudko.dev/agent`; keep names aligned when changing them.
+
+## Layout
+
+- `src/providers/` — `types`, `registry` (resolveStage/buildModelFromStage),
+  `webllm`, `capabilities`.
+- `src/secrets/` — `crypto` (AES-GCM key), `vault` (IndexedDBVault),
+  `store` (CredentialStore).
+- `src/storage/db.ts` — the single IndexedDB owner (keys/secrets/sessions).
+- `src/llm/` — `generate`/`stream`/`generateStructured`, `tool-loop`, `context-editing`
+  (stale tool results → stubs inside one step), `util` (`clip`, prompt helpers,
+  `usageOfError`: the spend of a failed structured attempt still counts).
+- `src/tools/` — `define`, `prompted` (catalog + dispatch), `mode`, `types`.
+- `src/agent/` — `schemas`, `planner`/`executor`/`replanner`/`synthesizer`,
+  `runner` (createAgent), `loop-types`, `control` (RunControl: mid-run messages,
+  stopping one subagent), `persistence` (run checkpoints / resume), `internal` (per-run
+  state and prompt plumbing the stages share; not public).
+- `src/memory/` — `store`, `sessions` (IndexedDBStore), `runs` (IndexedDBRunStore /
+  MemoryRunStore), `compress` (compaction + `estimateTokens`).
+- `src/tools/approval.ts` (consent gate), `search.ts` (find_tools / large
+  catalogues), `wrap.ts` (per-run tool wrapping: gate, call budget, output cap).
+- `src/tools/egress.ts` — `config.egress` / `web_fetch`: the browser sibling of the server's
+  `createSafeFetch` (same policy shape; the pure address/pattern core is a COPY of the server's —
+  change both, with tests). Security boundary: a change needs a test and a mutation check.
+- `src/learning.ts` — `config.learning`: `save_skill` / `forget_skill` write the agent's own lessons
+  as skills (`origin.kind: 'learned'`); `MemorySkillStore` / `VfsSkillStore`; secret scan, caps, host
+  skills never overwritten. Knowledge only, never policy: a lesson is loaded under `learnedPreamble`.
+  Browser sibling of the server's `learning.ts` (same names and guards). Every guard needs a test in
+  `tests/learning*.test.ts` and a mutation check.
+- `src/subagent/` — `tool` (createSubagentTool), `worker` (serveSubagentWorker),
+  `protocol` (postMessage shapes).
+- `src/{thinking,limits,caching,skills,images}.ts` — see docs/capabilities.md.
+- `src/logger.ts` — `logLevel` / `logger` (leveled, console-like sink; default `warn`).
+- Compaction (`memory/compress.ts`, `context-window.ts`) is judged on prompt + transcript + step log together
+  against `thresholdRatio` (0.85) of the window; `estimateTokens` is calibrated high on Claude's tokenizer
+  (1.1-1.4x real, never below): keep it that way. `agent.usage` / `sessionUsage` count from the usage as it
+  arrives (`charge`), not at the end of a run; per-call output caps default to shares of the window.
+- `src/context-window.ts` — the model's real window (read from WebLLM models),
+  compaction sized to it, tool search by definition size, the clear
+  `ContextWindowExceededError`.
+- `src/files/` — `vfs` (VirtualFileSystem, IndexedDB `files` store) + `tools`
+  (createFileTools).
+- `src/mcp/` — optional HTTP connector (`./mcp` subpath): `http` (transport,
+  mount, refresh) + `oauth` (OAuth 2.1 / DCR provider, vault-backed tokens).
+- `src/webmcp/` — optional `./webmcp` subpath: publish a ToolSet through the browser's WebMCP API
+  and use a page's WebMCP tools as one. No dependency; a no-op where the browser has no WebMCP.
+- `src/{parse,prompts,events,config,index}.ts`.
+- `tests/` — `node --test` with `--experimental-strip-types` (Node ≥ 22.6);
+  tests import from `dist` (pretest builds).
+
+## Commands
+
+```bash
+npm run typecheck     # tsc --noEmit
+npm run format:check  # prettier
+npm run build         # tsup → dist (ESM + CJS + d.ts; entries: ., ./mcp, ./webmcp; + dist/agent-web.js)
+npm test              # node --test tests/*.test.ts (builds first)
+```
+
+CI (`.github/workflows/test.yml`) runs typecheck → format:check → build → test.
+Release (`release.yml`) publishes to npm via Trusted Publishing after CI passes
+on `main`. Keep all four green before pushing.
+
+## Conventions
+
+- Prettier: no semicolons, single quotes, trailing commas, width 100.
+- Docs ship in the npm package. A new config field, event, export or entry point goes in the README
+  (config table), `docs/capabilities.md` (the section + the event reference) and, if it can hurt
+  someone, `docs/security.md`. A new design decision gets its rationale in `docs/design.md`.
+- Keep the core free of DOM-UI, framework, and `node:*` imports. Use
+  `globalThis.crypto` (WebCrypto), never `node:crypto`. Anything Node-only
+  (stdio MCP, fs) belongs in the sibling package, not here.
+- New providers: add to the `ProviderType` union + `PROVIDER_PACKAGE` map +
+  the `buildModelFromStage` switch, and declare the peer as optional.
