@@ -1,0 +1,408 @@
+import { useState } from 'react'
+import {
+  ApprovalModeSwitch,
+  LearnedSkills,
+  loadSkillFromUrl,
+  parseSkillMarkdown,
+  type UseAgentReturn,
+} from '@dudko.dev/agent-web-react'
+import {
+  allSkills,
+  DEFAULT_WINDOW,
+  skillsOfView,
+  type DemoSettings,
+  type ThinkingChoice,
+  type View,
+} from '../settings'
+import { BUILTIN_SKILLS, SKILL_TEMPLATE } from '../skills'
+
+export interface AgentSettingsPanelProps {
+  settings: DemoSettings
+  /** The open tab: its skills are listed, and the notes speak about its tools. */
+  view: View
+  /** The open tab's agent: its notebook is listed under "Learning". */
+  controller?: UseAgentReturn
+  /** The model's own window, when known ("auto" uses it). */
+  modelWindow?: number
+  update: (patch: Partial<DemoSettings>) => void
+  onReset: () => void
+}
+
+const TOKEN_BUDGETS = [0, 20_000, 50_000, 100_000, 250_000]
+const TOOL_CALL_CAPS = [0, 5, 10, 25, 50]
+const WINDOWS = [4_096, 8_000, 32_000, 128_000, 1_000_000]
+// 4096 → 4k, 32768 → 32k, 128000 → 128k.
+const k = (n: number) =>
+  n >= 1_000_000 ? `${n / 1_000_000}M` : `${n % 1024 === 0 ? n / 1024 : Math.round(n / 1000)}k`
+
+/**
+ * Everything the agent loop exposes, as settings: tool consent (the autopilot
+ * switch), thinking, run limits, context compaction and skills. The loop
+ * settings are shared by all three tabs; the skills shown are the open tab's.
+ */
+export const AgentSettingsPanel = ({
+  settings,
+  view,
+  controller,
+  modelWindow,
+  update,
+  onReset,
+}: AgentSettingsPanelProps) => {
+  const skills = skillsOfView(settings, view)
+  const enabledHere = skills.filter((s) => settings.enabledSkills.includes(s.name)).length
+  const writeExample =
+    view === 'chess' ? 'a chess move' : view === 'mcp' ? 'a write to your MCP server' : 'a note'
+  const [draft, setDraft] = useState('')
+  const [skillUrl, setSkillUrl] = useState('')
+  const [skillError, setSkillError] = useState<string | undefined>()
+  const builtin = new Set(BUILTIN_SKILLS.map((s) => s.name))
+
+  const toggleSkill = (name: string, on: boolean) =>
+    update({
+      enabledSkills: on
+        ? [...settings.enabledSkills, name]
+        : settings.enabledSkills.filter((n) => n !== name),
+    })
+
+  const addSkill = (skill: ReturnType<typeof parseSkillMarkdown>) => {
+    if (allSkills(settings).some((s) => s.name === skill.name)) {
+      throw new Error(`a skill named "${skill.name}" already exists`)
+    }
+    update({
+      customSkills: [...settings.customSkills, skill],
+      enabledSkills: [...settings.enabledSkills, skill.name],
+    })
+  }
+
+  const addFromDraft = () => {
+    try {
+      addSkill(parseSkillMarkdown(draft))
+      setDraft('')
+      setSkillError(undefined)
+    } catch (err) {
+      setSkillError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  const addFromUrl = async () => {
+    try {
+      addSkill(await loadSkillFromUrl(skillUrl.trim()))
+      setSkillUrl('')
+      setSkillError(undefined)
+    } catch (err) {
+      setSkillError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  return (
+    <details className="agentset">
+      <summary className="agentset__title">
+        Agent settings{' '}
+        <span className="agentset__peek">
+          {settings.approvalMode === 'autopilot' ? 'autopilot' : settings.approvalMode} · thinking{' '}
+          {settings.thinking} · {enabledHere} skill(s)
+        </span>
+      </summary>
+
+      <div className="agentset__group">
+        <span className="settings__label">Tool consent</span>
+        <ApprovalModeSwitch
+          mode={settings.approvalMode}
+          onChange={(approvalMode) => update({ approvalMode })}
+        />
+        <p className="settings__note">
+          {settings.approvalMode === 'autopilot'
+            ? 'Autopilot: the agent runs every tool on its own.'
+            : settings.approvalMode === 'ask-writes'
+              ? `Read-only tools run freely; you approve anything that changes state (${writeExample}).`
+              : settings.approvalMode === 'ask-all'
+                ? 'You approve every single tool call.'
+                : 'Read-only: changes are refused without asking — the agent can only look.'}{' '}
+          Switches apply instantly, even mid-run.
+        </p>
+      </div>
+
+      <div className="agentset__grid">
+        <label className="settings__field">
+          <span className="settings__label">Thinking</span>
+          <select
+            className="settings__select"
+            value={settings.thinking}
+            onChange={(e) => update({ thinking: e.target.value as ThinkingChoice })}
+          >
+            <option value="off">default</option>
+            <option value="none">none</option>
+            <option value="low">low</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+          </select>
+        </label>
+        <label className="settings__field">
+          <span className="settings__label">Tokens / run</span>
+          <select
+            className="settings__select"
+            value={settings.maxTotalTokens}
+            onChange={(e) => update({ maxTotalTokens: Number(e.target.value) })}
+          >
+            {TOKEN_BUDGETS.map((n) => (
+              <option key={n} value={n}>
+                {n ? k(n) : 'unlimited'}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="settings__field">
+          <span className="settings__label">Tool calls / run</span>
+          <select
+            className="settings__select"
+            value={settings.maxToolCalls}
+            onChange={(e) => update({ maxToolCalls: Number(e.target.value) })}
+          >
+            {TOOL_CALL_CAPS.map((n) => (
+              <option key={n} value={n}>
+                {n || 'unlimited'}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="settings__field">
+          <span className="settings__label">Steps / run</span>
+          <input
+            className="settings__select"
+            type="number"
+            min={1}
+            max={20}
+            value={settings.maxIterations}
+            onChange={(e) => update({ maxIterations: Math.max(1, Number(e.target.value) || 1) })}
+          />
+        </label>
+        <label className="settings__field">
+          <span className="settings__label">Rounds / step</span>
+          <input
+            className="settings__select"
+            type="number"
+            min={1}
+            max={12}
+            value={settings.maxStepsPerTask}
+            onChange={(e) => update({ maxStepsPerTask: Math.max(1, Number(e.target.value) || 1) })}
+          />
+        </label>
+        <label className="settings__field">
+          <span className="settings__label">Window</span>
+          <select
+            className="settings__select"
+            value={settings.contextWindowTokens}
+            onChange={(e) => update({ contextWindowTokens: Number(e.target.value) })}
+          >
+            <option value={0}>auto ({k(modelWindow ?? DEFAULT_WINDOW)})</option>
+            {WINDOWS.map((n) => (
+              <option key={n} value={n}>
+                {k(n)}
+                {modelWindow && n > modelWindow ? ' (capped at the model’s)' : ''}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      <div className="agentset__checks">
+        <label>
+          <input
+            type="checkbox"
+            checked={settings.showThoughts}
+            onChange={(e) => update({ showThoughts: e.target.checked })}
+          />{' '}
+          Show thoughts
+        </label>
+        <label>
+          <input
+            type="checkbox"
+            checked={settings.autoCompact}
+            onChange={(e) => update({ autoCompact: e.target.checked })}
+          />{' '}
+          Auto-compact the conversation
+        </label>
+        <label title="No replanning and no separate final answer: 2 model calls per turn instead of 3+ — the biggest speed-up on a local model, together with Thinking “none”.">
+          <input
+            type="checkbox"
+            checked={settings.fastAnswers}
+            onChange={(e) => update({ fastAnswers: e.target.checked })}
+          />{' '}
+          Fast answers (fewer model calls)
+        </label>
+      </div>
+
+      <div className="agentset__group">
+        <span className="settings__label">Chat UI — every part is a prop</span>
+        <div className="agentset__checks">
+          {(
+            [
+              ['showToolCalls', 'Tool calls'],
+              ['showUsage', 'Token usage'],
+              ['history', 'Saved chats (IndexedDB)'],
+              ['filesPanel', 'Files panel'],
+            ] as const
+          ).map(([key, label]) => (
+            <label key={key}>
+              <input
+                type="checkbox"
+                checked={settings[key]}
+                onChange={(e) => update({ [key]: e.target.checked })}
+              />{' '}
+              {label}
+            </label>
+          ))}
+        </div>
+        <div className="agentset__grid">
+          <label className="settings__field">
+            <span className="settings__label">Theme</span>
+            <select
+              className="settings__select"
+              value={settings.theme}
+              onChange={(e) => update({ theme: e.target.value as DemoSettings['theme'] })}
+            >
+              <option value="auto">auto</option>
+              <option value="light">light</option>
+              <option value="dark">dark</option>
+            </select>
+          </label>
+          <label className="settings__field">
+            <span className="settings__label">Labels</span>
+            <select
+              className="settings__select"
+              value={settings.lang}
+              onChange={(e) => update({ lang: e.target.value as DemoSettings['lang'] })}
+            >
+              <option value="en">English</option>
+              <option value="ru">Русский</option>
+            </select>
+          </label>
+        </div>
+      </div>
+
+      <div className="agentset__group">
+        <span className="settings__label">Learning and web access</span>
+        <div className="agentset__checks">
+          <label title="The agent keeps a notebook: when it solves a problem it writes the lesson down as a skill of its own, and the planner sees it from then on. You can read, edit and delete the files in the Files panel (/skills).">
+            <input
+              type="checkbox"
+              checked={settings.learning}
+              onChange={(e) => update({ learning: e.target.checked })}
+            />{' '}
+            Let the agent learn (save lessons as skills)
+          </label>
+          <label title="Off by default: with it off the agent has no way to make a request of its own. On, it gets one tool, web_fetch, limited to the hosts below.">
+            <input
+              type="checkbox"
+              checked={settings.egress}
+              onChange={(e) => update({ egress: e.target.checked })}
+            />{' '}
+            Let it read the web (web_fetch)
+          </label>
+        </div>
+        {settings.egress && (
+          <label className="settings__field">
+            <span className="settings__label">Allowed hosts</span>
+            <input
+              className="settings__select"
+              type="text"
+              value={settings.egressAllow}
+              placeholder="en.wikipedia.org, *.github.com"
+              onChange={(e) => update({ egressAllow: e.target.value })}
+            />
+            <span className="settings__note">
+              Comma-separated; <code>*.host</code> covers subdomains. Empty = any public https host
+              — risky in a browser, which cannot pin DNS; keep a list. Only sites that allow
+              cross-origin reads (CORS) answer at all; for the rest hand <code>egress.fetch</code> a
+              gateway.
+            </span>
+          </label>
+        )}
+        {settings.learning && (
+          <LearnedSkills controller={controller} showSources className="agentset__notebook" />
+        )}
+      </div>
+
+      <div className="agentset__group">
+        <span className="settings__label">Skills</span>
+        <ul className="agentset__skills">
+          {skills.map((s) => (
+            <li key={s.name}>
+              <label title={s.content}>
+                <input
+                  type="checkbox"
+                  checked={settings.enabledSkills.includes(s.name)}
+                  onChange={(e) => toggleSkill(s.name, e.target.checked)}
+                />{' '}
+                <code>{s.name}</code> — {s.description}
+              </label>
+              {!builtin.has(s.name) && (
+                <button
+                  type="button"
+                  className="mcp__btn-ghost"
+                  onClick={() =>
+                    update({
+                      customSkills: settings.customSkills.filter((c) => c.name !== s.name),
+                      enabledSkills: settings.enabledSkills.filter((n) => n !== s.name),
+                    })
+                  }
+                >
+                  remove
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+        <details className="agentset__add">
+          <summary>Add a skill (SKILL.md)</summary>
+          <textarea
+            className="agentset__textarea"
+            rows={7}
+            placeholder={SKILL_TEMPLATE}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+          />
+          <div className="mcp__actions">
+            <button
+              type="button"
+              className="settings__btn"
+              onClick={addFromDraft}
+              disabled={!draft.trim()}
+            >
+              Add
+            </button>
+            <button
+              type="button"
+              className="mcp__btn-ghost"
+              onClick={() => setDraft(SKILL_TEMPLATE)}
+            >
+              Insert template
+            </button>
+          </div>
+          <div className="mcp__form-row">
+            <input
+              className="mcp__input mcp__grow"
+              type="url"
+              placeholder="…or import https://…/SKILL.md"
+              value={skillUrl}
+              onChange={(e) => setSkillUrl(e.target.value)}
+            />
+            <button
+              type="button"
+              className="settings__btn"
+              onClick={() => void addFromUrl()}
+              disabled={!skillUrl.trim()}
+            >
+              Import
+            </button>
+          </div>
+        </details>
+        {skillError && <p className="settings__warn">{skillError}</p>}
+      </div>
+
+      <button type="button" className="mcp__btn-ghost" onClick={onReset}>
+        Reset settings
+      </button>
+    </details>
+  )
+}

@@ -1,0 +1,11 @@
+node_modules
+dist
+.env
+*.log
+.DS_Store
+*.tsbuildinfo
+.nx/cache
+.nx/workspace-data
+test-results/
+playwright-report/
+.playwright/

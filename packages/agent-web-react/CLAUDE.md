@@ -1,0 +1,113 @@
+# @dudko.dev/agent-web-react — instructions for Claude
+
+> Lives in the `dudko-dev/agents` monorepo at `packages/agent-web-react`. The root `CLAUDE.md` has the workspace
+> commands (pnpm + nx) and the rules shared by all packages; this file is about this package only.
+
+React bindings for **`@dudko.dev/agent-web`**, the headless in-browser LLM agent.
+This package adds a thin, UI layer: one hook (`useAgent`), a context provider,
+and a set of optional pre-styled components. It ships **no agent logic of its
+own** — the core does planning/tools/providers/vault; this package turns its
+`AgentEvent` stream into React state and renders it.
+
+The **Vite demo** lives in `apps/demo` of the monorepo; the browser tests in `e2e/` here run
+against its production build.
+
+## Principles
+
+- **The core is the engine; this is the dashboard.** All model/tool/vault logic
+  lives in `@dudko.dev/agent-web` (a peer dependency). Never reimplement it here.
+- **Headless-first.** The event→UI mapping is a **pure reducer** (`src/state.ts`,
+  exported as `agentStateReducer`) with no React, clock or randomness — so it is
+  unit-testable and lets hosts build a fully custom UI. Components are sugar.
+- **`useAgent` is the seam.** It builds the agent, streams events into
+  `AgentUiState`, and exposes `run/stop/reset/reload`. Everything else composes it.
+- **Optional peers.** `react`, `react-dom`, and `@dudko.dev/agent-web` are peers.
+  Model providers / WebLLM are the **core's** optional peers — this package never
+  imports them directly.
+- **Styling is opt-in.** Components carry `awr-`-prefixed classes and read
+  `--awr-*` custom properties; `styles.css` is a separate import, copied verbatim
+  into `dist`. No CSS-in-JS runtime, no CSS imported from TS.
+
+## Layout
+
+- `src/state.ts` — the pure `agentStateReducer` + `createInitialAgentState`.
+- `src/types.ts` — `AgentUiState`, `ChatMessage`, `StepView`, `ToolCallView`, …
+- `src/hooks/` — `use-agent` (the hook; `send` / `stopSubagent` steer a running agent
+  through the core's `RunControl`), `use-credentials` (vault),
+  `use-local-model` (any on-device runtime as an engine) + `use-webllm-model`
+  (its WebLLM engine), `use-mcp` (remote MCP + OAuth round-trip),
+  `use-mcp-servers` (several servers), `use-chat-history`, `use-virtual-files`,
+  `use-speech-to-text`.
+- `src/chat-history.ts` — `ChatHistoryStore` (raw IndexedDB, memory fallback).
+- `src/composer.ts` — the composer's pure helpers (slash commands, attachment
+  kinds/refusals, notices); `src/image-resize.ts` — `downscaleImage`.
+- `src/labels.tsx` — every UI string (`defaultLabels`, `AgentLabelsProvider`,
+  `useLabels`); components take `labels` overrides.
+- `src/mcp-types.ts` — structural types for the core's optional `./mcp` subpath,
+  which `use-mcp` loads with a dynamic import (never a static one).
+- `src/mcp.ts` — the **`./mcp` entry**: `useMcp`, `useMcpServers` and their helpers
+  and types. They are deliberately NOT in `src/index.ts`. A bundler resolves even a
+  dynamic `import('@dudko.dev/agent-web/mcp')` at build time, and the core's `mcp.js`
+  statically imports the optional `@modelcontextprotocol/sdk` — so any reference from
+  the main entry fails webpack/CRA builds of hosts that never use MCP.
+  `tests/entries.test.ts` enforces it; don't move MCP back "for convenience".
+- `src/context.tsx` — `AgentProvider` + `useAgentContext`.
+- `src/components/` — `AgentChat` (panel: history sidebar, transcript,
+  composer, files panel; slots / render props / components / theme),
+  `AgentComposer`, `MessageList`, `StepList` (+ `ToolCallRow`),
+  `ToolApprovalPrompt`, `ApprovalModeSwitch`, `ChatHistoryList`, `FilesPanel`, `LearnedSkills`
+  (the agent's notebook: `learned` in the state belongs to the agent, not the conversation),
+  `ContextMeter`, `Composer` (minimal), `PlanView`, `ModelLoadBar`,
+  `UsageBadge`, `ApiKeyForm`, `icons`, `format`. Docs: `docs/chat.md`.
+- `apps/demo/src/components/McpPanel.tsx` (monorepo root) — the demo's "bring your own MCP" panel.
+- `src/util.ts` — tiny shared helpers (`errMessage`).
+- `src/styles.css` — optional theme (light + dark).
+- `src/index.ts` — public surface (+ curated re-exports from the core).
+- `tests/state.test.ts`, `tests/chat.test.ts` — `node --test` over the reducer,
+  composer helpers, labels and the history store (imports from `dist`).
+- `e2e/` — Playwright over the built demo. `mcp.spec.ts`: MCP (several servers, the OAuth
+  redirect round-trip, IndexedDB reuse, CORS — `servers.ts` starts a real MCP server + authorization
+  server on loopback). `agent.spec.ts`, `steering.spec.ts`, `learning.spec.ts`: the agent end to end
+  (a run, typing to it while it works, the notebook and the fetched pages) against a scripted Gemini
+  endpoint (`gemini.ts`, routed by the stage markers; it can script tool calls and the notebook's
+  `save_skill`).
+- `apps/demo/` (monorepo root) — the Vite + React demo (aliases the library to this package's `dist`).
+
+## Commands
+
+```bash
+pnpm nx typecheck @dudko.dev/agent-web-react     # tsc --noEmit (nx builds the core first)
+pnpm nx format:check @dudko.dev/agent-web-react  # prettier
+pnpm nx build @dudko.dev/agent-web-react         # tsup → dist (ESM + CJS + d.ts) + copy styles.css
+pnpm nx test @dudko.dev/agent-web-react          # node --test tests/*.test.ts (nx builds first)
+pnpm nx test:e2e @dudko.dev/agent-web-react      # playwright over the built demo (browser flows)
+
+# demo
+pnpm nx build @dudko.dev/agent-web-react && pnpm --filter demo dev   # local dev
+pnpm nx run-many -t typecheck build -p demo
+```
+
+CI (`.github/workflows/ci.yml`) runs the library job (typecheck → format:check →
+build → test), then a demo job (build lib → build demo) and a browser job
+(Playwright over the built demo). Release (`release.yml`)
+publishes to npm via Trusted Publishing after CI passes on `main`. Pages
+(`deploy-demo.yml`) builds and deploys the demo. Keep all green before pushing.
+
+## Conventions
+
+- Prettier: no semicolons, single quotes, trailing commas, width 100.
+- Intra-package imports use `.js` specifiers (tsup/esbuild resolve them to
+  `.ts`/`.tsx`), matching the core package.
+- The **demo** uses extensionless imports (Vite) and consumes the built
+  library from `../dist` via a Vite alias + a tsconfig `paths` mapping — so
+  build the library before building the demo.
+- Keep the event→UI logic in the reducer, not the components. New event fields
+  from the core map to new `AgentUiState` fields + a reducer case + a test.
+- Every user-visible string goes through `labels` (add it to `AgentLabels` and
+  `defaultLabels`); every new part of a component gets a `show*` prop or a
+  render prop / slot — hosts must be able to hide, relabel or replace it.
+- Docs ship in the npm package: a new prop, hook field, exported type or label goes in the README
+  (hook table / components table) and `docs/chat.md`. `tests/chat.test.ts` fails when a label key is not
+  listed in `docs/chat.md`'s label reference.
+- Don't import model providers, `ai`, or `zod` at runtime here — the core owns
+  them. Type-only imports from `@dudko.dev/agent-web` are fine.

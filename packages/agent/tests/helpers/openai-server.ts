@@ -1,0 +1,261 @@
+import { createServer, type Server } from 'node:http'
+import type { AddressInfo } from 'node:net'
+
+/**
+ * A scripted OpenAI-compatible chat-completions endpoint on loopback.
+ *
+ * The point is to exercise the REAL provider package and the REAL wire format
+ * — SSE framing, tool_calls deltas, json_schema responses — without a network
+ * call or an API key. A mock LanguageModel would skip all of that; this only
+ * skips the model's judgement, which is exactly the part a test must not
+ * depend on anyway.
+ */
+
+export interface IChatRequest {
+  /** The model id the agent asked for — how a test tells two subagent profiles apart on the wire. */
+  model?: string
+  stream: boolean
+  messages: { role: string; content: unknown; tool_call_id?: string }[]
+  tools?: { function?: { name?: string } }[]
+  response_format?: { type?: string; json_schema?: { name?: string; schema?: unknown } }
+  /** The per-call output cap the agent sent (the chat-completions name for maxOutputTokens). */
+  max_tokens?: number
+  max_completion_tokens?: number
+}
+
+/** What the scripted model should answer with. */
+export interface IScriptedReply {
+  /** Plain assistant text (or the JSON body for a structured-output call). */
+  text?: string
+  /** Tool calls to emit instead of text. */
+  toolCalls?: { name: string; args: unknown }[]
+  /** Streamed first as `reasoning_content` deltas (the model's thoughts). */
+  reasoning?: string
+  /** Finish the answer as a model cut off by its output cap does (`finish_reason: 'length'`). */
+  cutOff?: boolean
+  /** Hold the answer this long (a slow model, to act mid-run). */
+  delayMs?: number
+  /** Usage to report instead of the default 10 in / 5 out. */
+  usage?: { prompt?: number; completion?: number; cached?: number; reasoning?: number }
+}
+
+export type Script = (request: IChatRequest) => IScriptedReply
+
+export interface ILocalOpenAI {
+  baseURL: string
+  /** Every request the agent made, in order — assert the call sequence on it. */
+  requests: IChatRequest[]
+  close: () => Promise<void>
+}
+
+const CHUNK_HEAD = {
+  id: 'chatcmpl-test',
+  object: 'chat.completion.chunk',
+  created: 1,
+  model: 'scripted',
+}
+
+const usageOf = (reply: IScriptedReply) => {
+  const prompt = reply.usage?.prompt ?? 10
+  const completion = reply.usage?.completion ?? 5
+  return {
+    prompt_tokens: prompt,
+    completion_tokens: completion,
+    total_tokens: prompt + completion,
+    ...(reply.usage?.cached !== undefined
+      ? { prompt_tokens_details: { cached_tokens: reply.usage.cached } }
+      : {}),
+    ...(reply.usage?.reasoning !== undefined
+      ? { completion_tokens_details: { reasoning_tokens: reply.usage.reasoning } }
+      : {}),
+  }
+}
+
+const sse = (payload: unknown): string => `data: ${JSON.stringify(payload)}\n\n`
+
+const streamBody = (reply: IScriptedReply): string => {
+  const parts: string[] = []
+  parts.push(sse({ ...CHUNK_HEAD, choices: [{ index: 0, delta: { role: 'assistant' } }] }))
+  if (reply.reasoning) {
+    const size = Math.max(1, Math.ceil(reply.reasoning.length / 2))
+    for (let i = 0; i < reply.reasoning.length; i += size) {
+      parts.push(
+        sse({
+          ...CHUNK_HEAD,
+          choices: [{ index: 0, delta: { reasoning_content: reply.reasoning.slice(i, i + size) } }],
+        }),
+      )
+    }
+  }
+
+  if (reply.toolCalls?.length) {
+    reply.toolCalls.forEach((call, index) => {
+      // Real providers split a tool call across chunks: the id/name arrive
+      // first, then the arguments in fragments. Reproduce that, or the test
+      // would not cover the provider's accumulation logic.
+      parts.push(
+        sse({
+          ...CHUNK_HEAD,
+          choices: [
+            {
+              index: 0,
+              delta: {
+                tool_calls: [
+                  {
+                    index,
+                    id: `call_${index}`,
+                    type: 'function',
+                    function: { name: call.name, arguments: '' },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      )
+      const args = JSON.stringify(call.args ?? {})
+      const half = Math.ceil(args.length / 2)
+      for (const fragment of [args.slice(0, half), args.slice(half)]) {
+        parts.push(
+          sse({
+            ...CHUNK_HEAD,
+            choices: [
+              { index: 0, delta: { tool_calls: [{ index, function: { arguments: fragment } }] } },
+            ],
+          }),
+        )
+      }
+    })
+    parts.push(
+      sse({ ...CHUNK_HEAD, choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] }),
+    )
+  } else {
+    const text = reply.text ?? ''
+    // Split text into a few deltas so the consumer's streaming path runs.
+    const size = Math.max(1, Math.ceil(text.length / 3))
+    for (let i = 0; i < text.length; i += size) {
+      parts.push(
+        sse({
+          ...CHUNK_HEAD,
+          choices: [{ index: 0, delta: { content: text.slice(i, i + size) } }],
+        }),
+      )
+    }
+    parts.push(
+      sse({
+        ...CHUNK_HEAD,
+        choices: [{ index: 0, delta: {}, finish_reason: reply.cutOff ? 'length' : 'stop' }],
+      }),
+    )
+  }
+
+  parts.push(sse({ ...CHUNK_HEAD, choices: [], usage: usageOf(reply) }))
+  parts.push('data: [DONE]\n\n')
+  return parts.join('')
+}
+
+const jsonBody = (reply: IScriptedReply): string =>
+  JSON.stringify({
+    id: 'chatcmpl-test',
+    object: 'chat.completion',
+    created: 1,
+    model: 'scripted',
+    choices: [
+      {
+        index: 0,
+        message: reply.toolCalls?.length
+          ? {
+              role: 'assistant',
+              content: null,
+              tool_calls: reply.toolCalls.map((call, index) => ({
+                id: `call_${index}`,
+                type: 'function',
+                function: { name: call.name, arguments: JSON.stringify(call.args ?? {}) },
+              })),
+            }
+          : { role: 'assistant', content: reply.text ?? '' },
+        finish_reason: reply.toolCalls?.length ? 'tool_calls' : reply.cutOff ? 'length' : 'stop',
+      },
+    ],
+    usage: usageOf(reply),
+  })
+
+/** Start the endpoint on an ephemeral port. `script` decides each answer. */
+export const startLocalOpenAI = async (script: Script): Promise<ILocalOpenAI> => {
+  const requests: IChatRequest[] = []
+
+  const server: Server = createServer((req, res) => {
+    const chunks: Buffer[] = []
+    req.on('data', (c: Buffer) => chunks.push(c))
+    req.on('end', () => {
+      if (!req.url?.includes('/chat/completions')) {
+        res.writeHead(404).end('not found')
+        return
+      }
+      const parsed = JSON.parse(Buffer.concat(chunks).toString() || '{}') as IChatRequest
+      requests.push(parsed)
+      const reply = script(parsed)
+      const answer = (): void => {
+        if (parsed.stream) {
+          res.writeHead(200, {
+            'content-type': 'text/event-stream',
+            'cache-control': 'no-cache',
+            connection: 'keep-alive',
+          })
+          res.end(streamBody(reply))
+        } else {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(jsonBody(reply))
+        }
+      }
+      if (reply.delayMs) {
+        setTimeout(answer, reply.delayMs)
+      } else {
+        answer()
+      }
+    })
+  })
+
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const { port } = server.address() as AddressInfo
+
+  return {
+    baseURL: `http://127.0.0.1:${port}/v1`,
+    requests,
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.closeAllConnections()
+        server.close(() => resolve())
+      }),
+  }
+}
+
+/** True when the request is a structured-output call for the named schema. */
+export const wantsSchema = (req: IChatRequest, name: string): boolean =>
+  JSON.stringify(req.response_format ?? {}).includes(name)
+
+/** True when the conversation already carries a tool result. */
+export const hasToolResult = (req: IChatRequest): boolean =>
+  req.messages.some((m) => m.role === 'tool' || m.tool_call_id !== undefined)
+
+/** The system prompt of a request ('' when none). */
+export const systemOf = (req: IChatRequest): string => {
+  const system = req.messages.find((m) => m.role === 'system')?.content
+  return typeof system === 'string' ? system : JSON.stringify(system ?? '')
+}
+
+/** The (first) user message of a request ('' when none). */
+export const userOf = (req: IChatRequest): string => {
+  const user = req.messages.find((m) => m.role === 'user')?.content
+  return typeof user === 'string' ? user : JSON.stringify(user ?? '')
+}
+
+/** Tool results already in the conversation, oldest first. */
+export const toolResults = (req: IChatRequest): string[] =>
+  req.messages
+    .filter((m) => m.role === 'tool')
+    .map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content)))
+
+/** Names of the tools offered in a request. */
+export const toolNames = (req: IChatRequest): string[] =>
+  (req.tools ?? []).map((t) => t.function?.name ?? '').filter(Boolean)

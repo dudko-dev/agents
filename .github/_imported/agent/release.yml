@@ -1,0 +1,108 @@
+name: Release
+on:
+  workflow_run:
+    # Must watch CI (test.yml), not PR checks: pr-checks.yml is declared
+    # `push: branches-ignore: [main]`, so it never runs on main, and its
+    # pull_request runs are attributed to the PR branch. `branches: [main]`
+    # therefore matched nothing and this trigger could never fire -- the last
+    # automatic release was in May, every one since was dispatched by hand.
+    workflows: [CI]
+    branches: [main]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Tag, branch or commit SHA to publish (e.g. v0.1.0). Empty = main HEAD.'
+        type: string
+        required: false
+        default: ''
+permissions:
+  contents: write
+  id-token: write
+jobs:
+  # Gate the publish on a run against a REAL model, served locally on the
+  # runner (no key, no hosted API). CI proves the code works against a scripted
+  # model; this proves it still works against one that has opinions -- and the
+  # moment before publishing is when that question is worth asking. A skipped
+  # or failed smoke leaves the package unpublished rather than shipping blind.
+  live-model:
+    name: Live model
+    uses: ./.github/workflows/live-model.yml
+
+  release:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    needs: live-model
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+    environment: release
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref != '' && inputs.ref || github.event.workflow_run.head_sha || github.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - run: npm ci
+      - id: meta
+        run: |
+          set -euo pipefail
+          NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          TAG="v$VERSION"
+          {
+            echo "name=$NAME"
+            echo "version=$VERSION"
+            echo "tag=$TAG"
+          } >>"$GITHUB_OUTPUT"
+      - id: check
+        run: |
+          set -euo pipefail
+          if npm view "${{ steps.meta.outputs.name }}@${{ steps.meta.outputs.version }}" version >/dev/null 2>&1; then
+            echo "publish=false" >>"$GITHUB_OUTPUT"
+            echo "::notice::${{ steps.meta.outputs.name }}@${{ steps.meta.outputs.version }} is already published; skipping."
+          else
+            echo "publish=true" >>"$GITHUB_OUTPUT"
+            echo "::notice::Will publish ${{ steps.meta.outputs.name }}@${{ steps.meta.outputs.version }}."
+          fi
+      # Preferred: npm Trusted Publishing (OIDC), no secret needed. Fallback:
+      # the NPM_TOKEN secret — npm only reads a token from .npmrc (a
+      # NODE_AUTH_TOKEN env var alone is ignored), so write .npmrc explicitly,
+      # and only when the secret is set (an empty _authToken breaks OIDC).
+      - if: steps.check.outputs.publish == 'true'
+        run: |
+          set -euo pipefail
+          if [ -n "${NPM_TOKEN:-}" ]; then
+            echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" >>"$HOME/.npmrc"
+            echo "::notice::Publishing with the NPM_TOKEN secret (fallback)."
+          else
+            echo "::notice::No NPM_TOKEN secret; relying on npm Trusted Publishing (OIDC)."
+          fi
+          npx -y npm@11.5.1 --version
+          npx -y npm@11.5.1 publish --provenance
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - if: steps.check.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.meta.outputs.tag }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::notice::GitHub release $TAG already exists; skipping tag/release creation."
+            exit 0
+          fi
+          git config user.name "Siarhei Dudko"
+          git config user.email "siarhei@dudko.dev"
+          if git rev-parse --verify "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "::notice::Git tag $TAG already exists locally; reusing without re-tagging."
+          else
+            git tag -a "$TAG" -m "Release $TAG"
+            git push origin "$TAG"
+          fi
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --generate-notes \
+            --target "$(git rev-parse HEAD)"
