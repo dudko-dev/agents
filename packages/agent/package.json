@@ -90,7 +90,7 @@
     "format:check": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\""
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@modelcontextprotocol/client": "^2.4.0",
     "@opentelemetry/api": "^1.10.0",
     "ai": "^7.0.183",
     "zod": "^4.6.7"

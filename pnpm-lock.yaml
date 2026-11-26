@@ -133,9 +133,9 @@ importers:
 
   packages/agent:
     dependencies:
-      '@modelcontextprotocol/sdk':
-        specifier: ^1.32.2
-        version: 1.32.2(zod@4.6.7)
+      '@modelcontextprotocol/client':
+        specifier: ^2.4.0
+        version: 2.4.0
       '@opentelemetry/api':
         specifier: ^1.10.0
         version: 1.10.0

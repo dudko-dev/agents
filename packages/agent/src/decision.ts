@@ -320,12 +320,16 @@ export const decisionModelFromAiSdk = (
     decide: async (question, call) => {
       const result = await experimental_decide({
         model,
-        state: question.context ?? '',
+        // The API refuses an empty state (Google's answers 400 "Missing text in content"), and a
+        // question asked without a context is its own subject.
+        state: question.context?.trim() ? question.context : question.prompt,
         questions: {
           [QUESTION_KEY]: {
             type: 'choice',
             instructions: question.prompt,
-            criteria: Object.fromEntries(question.options.map((o) => [o.id, o.description ?? ''])),
+            criteria: Object.fromEntries(
+              question.options.map((o) => [o.id, o.description?.trim() ? o.description : o.id]),
+            ),
           },
         },
         maxRetries: options.maxRetries ?? 0,

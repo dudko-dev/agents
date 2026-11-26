@@ -107,8 +107,23 @@
     COPY of the browser sibling's `src/mcp/shared.ts`, byte for byte: change both
     (`tests/mcp-shared.test.ts` compares them and tests every cap and guard; each needs a mutation
     check). The section goes to the planner and the executor only, and `ctx.mcpInstructions` is
-    replaced only between runs (prompt caching). A result the SDK client refuses for its
-    `outputSchema` is passed on with a note, never thrown (`capturingResultSchema` in `mcp.ts`).
+    replaced only between runs (prompt caching). A result that breaks its tool's `outputSchema`
+    is passed on with a note, never thrown (`outputSchemaViolation` in `mcp.ts`).
+  - The MCP client is the official 2.x SDK, `@modelcontextprotocol/client` (stdio from its
+    `/stdio` subpath, the JSON Schema validator from `/validators/ajv`); `@modelcontextprotocol/sdk`
+    1.x is gone from this package (the test servers keep it, for their `legacy` mode).
+    `versionNegotiation` stays at the SDK's default, `'legacy'`: the 2025 `initialize` handshake,
+    the same wire as before; opting into 2026-07-28 is a separate change. `mcp.ts` deliberately
+    does NOT use the typed verbs: `tools/list` goes page by page through `client.request`
+    (`listAllTools`: our page cap and repeated-cursor guard; `client.listTools()` would aggregate,
+    throw past its own cap, skip servers without the tools capability and switch on the SDK's
+    output check), and `tools/call` through `client.request` too (`client.callTool` throws on a
+    result that breaks the `outputSchema` and takes the result with it). A 403 `insufficient_scope`
+    never starts an interactive authorization (`onInsufficientScope: 'throw'` for a provider with a
+    `redirectUrl`). OAuth guards on this boundary - the `iss` check, the refusal of a callback
+    without discovery state, the issuer stamp surviving the store, the scope policy - each have a
+    test in `tests/mcp-connect.test.ts` and need a mutation check; `tests/mcp-protocol.test.ts`
+    runs the connector against the test server in `legacy`, `dual` and `modern` mode.
   - `pipeline-engine.ts` + `pipeline.ts` (`createPipeline`: a graph of agents with conditions and
     loops, described in plain JSON). The engine (definition types, `validatePipeline`, the conditions
     with the non-backtracking `matches` matcher, the wave scheduler; pure, no imports) is a COPY of
