@@ -74,8 +74,13 @@ export interface DemoSettings {
   history: boolean
   /** The workspace (virtual file system) panel. */
   filesPanel: boolean
-  lang: 'en' | 'ru'
+  /** The chat's labels: English is the library's own, the others come from `i18n.ts`. */
+  lang: ChatLang
 }
+
+/** The languages the chat's labels come in. */
+export const CHAT_LANGS = ['en', 'es', 'de'] as const
+export type ChatLang = (typeof CHAT_LANGS)[number]
 
 /** A tier setting that follows the chosen model: see `autoTiers` (use-model.ts). */
 export const TIER_AUTO = 'auto'
@@ -148,6 +153,9 @@ const knownOnly = (value: unknown): Overrides => {
       out[key] = (value as Record<string, unknown>)[key]
     }
   }
+  // A language the demo no longer has (a stored 'ru'), or anything else that is not one of
+  // ours, is not a choice the page can honour: it follows the default.
+  if ('lang' in out && !(CHAT_LANGS as readonly unknown[]).includes(out.lang)) delete out.lang
   return out as Overrides
 }
 

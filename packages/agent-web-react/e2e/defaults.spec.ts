@@ -272,3 +272,40 @@ test('a visitor who had switched things off in the old shape and back: a stored 
     set: { approvalMode: 'ask-writes', maxToolCalls: 10 },
   })
 })
+
+test('a returning visitor whose chat language is gone (Russian): the chat is in English, and a language the demo has is kept', async ({
+  page,
+}) => {
+  await page.goto('/')
+  await page.evaluate(
+    ([key, value]) => localStorage.setItem(key, value),
+    [SETTINGS_KEY, JSON.stringify({ v: 2, set: { lang: 'ru', maxIterations: 9 } })],
+  )
+  await page.reload()
+  await expect(page.getByRole('button', { name: 'Show chats' })).toBeVisible()
+  await expect(page.getByRole('textbox', { name: 'Message' })).toBeVisible()
+  await page.locator('.agentset__title').click()
+  await expect(page.getByLabel('Chat language')).toHaveValue('en')
+  // The other choice stored with it is kept; the language that no longer exists is not stored again.
+  await expect(page.getByLabel('Steps / run')).toHaveValue('9')
+  await expect.poll(() => stored(page)).toEqual({ v: 2, set: { maxIterations: 9 } })
+
+  // The same in the shape from before versions, where the whole object was stored.
+  await page.evaluate(
+    ([key, value]) => localStorage.setItem(key, value),
+    [SETTINGS_KEY, JSON.stringify({ ...LEGACY, lang: 'ru' })],
+  )
+  await page.reload()
+  await expect(page.getByRole('button', { name: 'Show chats' })).toBeVisible()
+  await expect.poll(() => stored(page)).toEqual({ v: 2, set: {} })
+
+  // A language the demo has survives a reload.
+  await page.evaluate(
+    ([key, value]) => localStorage.setItem(key, value),
+    [SETTINGS_KEY, JSON.stringify({ v: 2, set: { lang: 'de' } })],
+  )
+  await page.reload()
+  await expect(page.getByRole('button', { name: 'Chats anzeigen' })).toBeVisible()
+  await page.locator('.agentset__title').click()
+  await expect(page.getByLabel('Chat language')).toHaveValue('de')
+})

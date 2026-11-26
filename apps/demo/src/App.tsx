@@ -27,7 +27,7 @@ import { Settings } from './components/Settings'
 import { buildMockCatalog } from './mockCatalog'
 import { MODELS } from './models'
 import { useNotesBoard } from './notes'
-import { RU_LABELS } from './i18n'
+import { LABELS } from './i18n'
 import { PIPELINE_URL } from './links'
 import { Markdown } from './markdown'
 import markUrl from './mark.svg'
@@ -391,7 +391,8 @@ export const App = () => {
   }, [view])
 
   // Everything below is a prop of <AgentChat> — the "Chat UI" settings flip them.
-  const ru = settings.lang === 'ru'
+  // English is the library's own labels; the other languages are complete sets (i18n.ts).
+  const labels = settings.lang === 'en' ? undefined : LABELS[settings.lang]
   const chatCommon: Partial<AgentChatProps> = {
     showContext: settings.maxTotalTokens || true,
     showThoughts: settings.showThoughts,
@@ -400,13 +401,11 @@ export const App = () => {
     showTotalUsage: settings.showUsage,
     // The site is dark only, and so is the demo.
     theme: 'dark',
-    labels: ru ? RU_LABELS : undefined,
+    labels,
     files: settings.filesPanel ? workspace : undefined,
     // What the media tools wrote is in the workspace whether its panel is shown or not (and the
     // chess tab has no panel at all), so a generated file is always drawn from there.
-    renderMedia: (m) => (
-      <GeneratedMedia media={m} files={workspace} labels={ru ? RU_LABELS : undefined} />
-    ),
+    renderMedia: (m) => <GeneratedMedia media={m} files={workspace} labels={labels} />,
     // A tool call that failed says why, right under its row: a refused image (the provider's
     // quota error), a blocked request, a tool's own complaint - the sentence the model got.
     renderToolCall: (call, fallback) =>
@@ -422,7 +421,8 @@ export const App = () => {
     renderContent: (m) => (m.role === 'assistant' ? <Markdown text={m.content} /> : m.content),
   }
   const composer = (placeholder: string): AgentChatProps['composer'] => ({
-    placeholder: ru ? undefined : placeholder,
+    // The tabs' own placeholders are English: another language shows its label instead.
+    placeholder: labels ? undefined : placeholder,
     // The model and thinking chips switch the same state as the settings panel.
     model: {
       label: model.label.split(' — ')[0],

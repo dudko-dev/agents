@@ -53,7 +53,7 @@ The **Agent settings** panel drives the core's features live: tool consent
 level ("none" turns a local Qwen's thinking off), token / tool-call / step limits, context window and auto-compaction,
 skills (each tab lists its own built-in examples; your own or imported
 `SKILL.md` ones apply to every tab), the chess analysts — and the **chat UI**: tool calls, token usage, saved chats
-(IndexedDB), the files panel, theme, and the labels (English / Russian — every
+(IndexedDB), the files panel, theme, and the labels (English / Spanish / German — every
 string of the chat is a prop).
 
 **Every capability is on by default** - the demo shows the most the library can do, which is

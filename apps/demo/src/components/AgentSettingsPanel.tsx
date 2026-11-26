@@ -606,7 +606,8 @@ export const AgentSettingsPanel = ({
               onChange={(e) => update({ lang: e.target.value as DemoSettings['lang'] })}
             >
               <option value="en">English</option>
-              <option value="ru">Русский</option>
+              <option value="es">Español</option>
+              <option value="de">Deutsch</option>
             </select>
           </label>
         </div>

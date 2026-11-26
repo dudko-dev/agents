@@ -316,11 +316,31 @@ test('fast answers: the step’s reply is the answer — no synthesizer call', a
   expect(calls.map((c) => c.stage)).toEqual(['planner', 'executor'])
 })
 
-test('labels: every text of the chat can be swapped (Russian)', async ({ page }) => {
+test('labels: every text of the chat can be swapped (Spanish, German)', async ({ page }) => {
   await mockGemini(page, () => ({ text: 'ok' }))
   await openWithKey(page)
   await page.locator('.agentset__title').click()
-  await page.getByLabel('Chat language').selectOption('ru')
-  await expect(page.getByRole('button', { name: 'Отправить' })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Показать чаты' })).toBeVisible()
+  const lang = page.getByLabel('Chat language')
+  await expect(lang.locator('option')).toHaveText(['English', 'Español', 'Deutsch'])
+
+  await lang.selectOption('es')
+  await expect(page.getByRole('button', { name: 'Enviar' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Mostrar chats' })).toBeVisible()
+  await expect(page.getByRole('textbox', { name: 'Mensaje' })).toHaveAttribute(
+    'placeholder',
+    /Pida algo al agente/,
+  )
+
+  await lang.selectOption('de')
+  await expect(page.getByRole('button', { name: 'Senden' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Chats anzeigen' })).toBeVisible()
+  await expect(page.getByRole('textbox', { name: 'Nachricht' })).toHaveAttribute(
+    'placeholder',
+    /Geben Sie dem Agenten eine Aufgabe/,
+  )
+
+  // Back to English: the library's own labels and the tab's own placeholder.
+  await lang.selectOption('en')
+  await expect(page.getByRole('button', { name: 'Send' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Show chats' })).toBeVisible()
 })
