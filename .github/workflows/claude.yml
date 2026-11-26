@@ -64,15 +64,19 @@ jobs:
       # then rejected on another version (jsdom 30, firebase-admin's optional
       # deps). The last setup wins the PATH and is the default `node`.
       - uses: pnpm/action-setup@v4
-      - name: Setup Node.js 24
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-      # Last, so it is the default `node`: the release and the demo build use 22.
       - name: Setup Node.js 22
         uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Setup Node.js 26
+        uses: actions/setup-node@v4
+        with:
+          node-version: 26
+      # Last, so it is the default `node`: the release and the site build use 24.
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
       - name: Provide with-node for the other Node versions
         run: |
           mkdir -p "$RUNNER_TEMP/bin"
@@ -144,10 +148,10 @@ jobs:
 
           This is a pnpm workspace driven by nx (see CLAUDE.md in the repo
           root, and the CLAUDE.md of each package you touch). CI runs the
-          checks on Node 22 and 24; the default \`node\` here is 22. Both are
-          installed: run a command under the other with
-          \`with-node 24 <command>\`, e.g.
-          \`with-node 24 pnpm nx run-many -t typecheck build test --skip-nx-cache\`.
+          checks on Node 22, 24 and 26; the default \`node\` here is 24. All
+          three are installed: run a command under another with
+          \`with-node 22 <command>\`, e.g.
+          \`with-node 22 pnpm nx run-many -t typecheck build test --skip-nx-cache\`.
           A fix that is green on one Node only is not done.
 
           Hard rules:
