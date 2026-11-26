@@ -1,0 +1,49 @@
+---
+// The licence as a page of the site: the text is the repository's LICENSE file, inlined at build.
+import raw from '../../../../LICENSE?raw'
+import Base from '../layouts/Base.astro'
+import { REPO } from '../data/site'
+
+const text = raw.trim()
+const [title = 'MIT License', ...rest] = text.split('\n')
+const paragraphs = rest
+  .join('\n')
+  .trim()
+  .split(/\n\s*\n/)
+  .map((p) => p.replace(/\s*\n\s*/g, ' '))
+---
+
+<Base
+  title="License · dudko.dev agents"
+  description="The three agent packages and this site's source are open source under the MIT License. The full text of the licence."
+  path="/license/"
+>
+  <section class="section">
+    <div class="wrap wrap--narrow licence">
+      <h1>{title}</h1>
+      <p class="licence__lead">
+        The three packages of this project are released under this licence. The{' '}
+        <a href={`${REPO}/blob/main/LICENSE`}>same text</a>{' '}
+        ships in the repository and in every package.
+      </p>
+      {paragraphs.map((p) => <p>{p}</p>)}
+    </div>
+  </section>
+</Base>
+
+<style>
+  .licence h1 {
+    margin: 0 0 var(--space-6);
+    font-size: var(--text-4xl);
+    line-height: var(--leading-tight);
+  }
+  .licence p {
+    margin: 0 0 var(--space-4);
+    color: var(--c-text-muted);
+    line-height: var(--leading-normal);
+  }
+  .licence__lead {
+    padding-bottom: var(--space-6);
+    border-bottom: 1px solid var(--c-border);
+  }
+</style>

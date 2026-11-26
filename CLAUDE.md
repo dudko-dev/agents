@@ -11,6 +11,9 @@ Monorepo (pnpm workspaces + Nx) of three published packages and two private apps
   and `docs/*.md` (`scripts/sync-docs.mjs`): edit the source file in the package, never the copy.
   A new docs file needs an entry in that script's `PAGES` and in the sidebar (`astro.config.mjs`).
   Dark theme only; colours, type and motion come from `src/styles/tokens.css`.
+  Files for machines (`llms.txt`, `robots.txt`, the sitemap, the manifest) are never linked from the
+  interface - no footer or menu entry: crawlers find them by their well-known paths. Check every
+  page at phone width for sideways scroll before pushing.
 
 **Each package has its own `CLAUDE.md`. Read it before changing that package** — layout, conventions
 and the reasons behind them live there. This file holds only what is shared.
