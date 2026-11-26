@@ -1,6 +1,7 @@
 # 0.0.29 / 2026-11-26
 
 ### :tada: Enhancements
+- The generated-audio player is visible: it measured 0 px wide inside the list of generated files
 - `useMcp` / `useMcpServers` recognise the `UnauthorizedError` of the 2.x MCP SDK (core 0.0.40 and later) as well as the 1.x one; a 403 `insufficient_scope` does not flip a server to "needs authorization"
 - Install the MCP package your core asks for: `@modelcontextprotocol/client` for `@dudko.dev/agent-web` 0.0.40 and later, `@modelcontextprotocol/sdk` for 0.0.39
 
