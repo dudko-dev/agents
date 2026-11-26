@@ -333,8 +333,10 @@ export const AgentSettingsPanel = ({
                   onChange={onKeyChange}
                 />
                 <span className="settings__note">
-                  Search provider: Tavily. The key is stored encrypted in this browser, next to the
-                  model keys, and sent only to api.tavily.com.{' '}
+                  Tavily is a web search service made for AI agents (it has a free tier). The agent
+                  needs some search service to search the web, and this demo uses Tavily. The key is
+                  stored encrypted in this browser, next to the model keys, and sent only to
+                  api.tavily.com.{' '}
                   <a href="https://app.tavily.com" target="_blank" rel="noopener noreferrer">
                     Get a key →
                   </a>
