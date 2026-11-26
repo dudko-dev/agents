@@ -359,6 +359,9 @@ const softwareLd = {
   .features,
   .loop {
     display: grid;
+    /* One column that may shrink below its content: a long install command scrolls inside its
+       box instead of widening the page. */
+    grid-template-columns: minmax(0, 1fr);
     gap: var(--space-4);
     margin: var(--space-10) 0 0;
     padding: 0;
@@ -425,6 +428,7 @@ const softwareLd = {
   }
   .install code {
     flex: 1;
+    min-width: 0;
     overflow-x: auto;
     white-space: nowrap;
     font-family: var(--font-mono);

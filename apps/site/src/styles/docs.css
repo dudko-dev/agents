@@ -39,3 +39,45 @@ starlight-theme-select {
   display: block;
   overflow-x: auto;
 }
+
+/* Previous / next at the foot of a page: two quiet cards side by side at every width (Starlight
+   stacks them into two tall boxes on a phone), each one line of label and one of title. */
+.pagination-links {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+.pagination-links > a {
+  flex-basis: auto;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  background: var(--c-surface);
+  box-shadow: none;
+  color: var(--c-text-muted);
+  font-size: var(--text-xs);
+  line-height: var(--leading-snug);
+  gap: var(--space-2);
+  transition:
+    border-color var(--dur-fast) var(--ease-settle),
+    background-color var(--dur-fast) var(--ease-settle);
+}
+.pagination-links > a:hover {
+  border-color: var(--c-border-strong);
+  background: var(--c-surface-2);
+}
+.pagination-links > a[rel='next'] {
+  grid-column: 2;
+}
+.pagination-links .link-title {
+  color: var(--c-text);
+  font-size: var(--text-base);
+  font-weight: 600;
+  line-height: var(--leading-snug);
+  overflow-wrap: anywhere;
+}
+.pagination-links svg {
+  flex: none;
+  font-size: var(--text-base);
+  color: var(--c-text-faint);
+}
