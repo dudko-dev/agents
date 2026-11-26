@@ -612,6 +612,31 @@ wider one than a tool result: it is there before the first call.
   a call that ran as failed, and invite a repeat): do not treat the schema as a validation
   boundary for what your own code does with `structuredContent`.
 
+## MCP protocol revision (`protocol`): what a page sends, and what the server must allow
+
+A server connected with `protocol: 'auto'` or `'modern'` is sent the request headers of the
+2026-07-28 revision: `Mcp-Method` (the JSON-RPC method), `Mcp-Name` (the name of the tool being
+called) and `MCP-Protocol-Version`, on every request including the first. Leaving `protocol` out
+sends none of them.
+
+- **The server must list them** in `Access-Control-Allow-Headers`, next to `Content-Type` and
+  `Authorization`, or a browser blocks the request before it leaves. Nothing new has to be
+  exposed. This is the server operator's change; a page cannot work around it, and should not
+  try to (a proxy that strips CORS also strips the reason the server had it).
+- **`'auto'` degrades quietly where the browser hides the cause.** A blocked probe looks like an
+  old server, so the connection is made with the 2025 revisions and a `warn` line names the
+  missing headers. Read `ConnectedMcp.protocols` if your application depends on the revision, or
+  use `'modern'` to make that a failed connect.
+- **The tool name is now in a header.** `Mcp-Name` puts the name of each tool called where
+  proxies and access logs see it without reading the body. Tool arguments are not: this package
+  does not send `Mcp-Param-*` headers.
+- **The diagnosis makes requests of its own**, only after a connect failed or fell back: up to
+  four `POST`s of a JSON-RPC `ping` to the MCP endpoint, one per header, with no credentials of
+  yours beyond what your `fetch` adds. A server sees them as unauthenticated pings.
+- **No call is repeated.** The revision is chosen at connect; a tool call that fails is not sent
+  again in the other revision, and an `input_required` answer is not retried - a tool that
+  writes runs once.
+
 ## Pipelines: a definition is data
 
 A pipeline definition is meant to be saved, shared and loaded - including one that

@@ -209,6 +209,55 @@ test("page, good CORS, protocol 'modern', a 2025 server: refused by the server -
   assert.deepEqual(s.requests, ['modern server/discover'])
 })
 
+test('page: a probe lost to the network, with a CORS list that is fine, is not blamed on a header', async () => {
+  // One request fails (a blip), nothing is wrong with the server's list.
+  const flaky = (): FetchFn => {
+    const page = pageFetch()
+    let first = true
+    return (input, init) => {
+      if (first) {
+        first = false
+        return Promise.reject(new TypeError('Failed to fetch'))
+      }
+      return page(input, init)
+    }
+  }
+  // 'auto', a server that speaks both: connected on 2025, and told why - without a header to add.
+  const dual = await startLocalMcpServer({ protocol: 'dual', cors: ORIGIN })
+  try {
+    const logs: string[] = []
+    const mcp = await asPage(() =>
+      connectMcpHttp(
+        { wx: { url: dual.url, fetch: flaky(), protocol: 'auto' } },
+        { onLog: (level, message) => logs.push(`${level} ${message}`) },
+      ),
+    )
+    assert.deepEqual(mcp.protocols, [{ server: 'wx', version: '2025-11-25', era: 'legacy' }])
+    assert.deepEqual(
+      logs.filter((l) => /was blocked/.test(l)),
+      [
+        'warn [mcp] wx: the version probe (server/discover) was blocked before it reached the server, so the connection uses 2025-11-25',
+      ],
+    )
+    await mcp.close()
+  } finally {
+    await dual.close()
+  }
+  // 'auto', a 2026-only server: the server's refusal, and no CORS advice.
+  const modern = await startLocalMcpServer({ protocol: 'modern', cors: ORIGIN })
+  try {
+    const mcp = await asPage(() =>
+      connectMcpHttp({ wx: { url: modern.url, fetch: flaky(), protocol: 'auto' } }),
+    )
+    assert.equal(mcp.results[0].connected, false)
+    assert.match(mcp.results[0].error ?? '', /Unsupported protocol version: 2025-11-25/)
+    assert.doesNotMatch(mcp.results[0].error ?? '', /Access-Control|HEADER/)
+    await mcp.close()
+  } finally {
+    await modern.close()
+  }
+})
+
 // ── diagnoseMcpCors, header by header ──────────────────────────────────────
 
 const URL_ = 'https://mcp.example.test/mcp'

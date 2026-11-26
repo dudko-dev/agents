@@ -214,11 +214,56 @@ enters your core bundle.
 
 The MCP client is the official 2.x SDK, **`@modelcontextprotocol/client`** (an
 optional peer: install it when you import `./mcp`; `@modelcontextprotocol/sdk`
-1.x is no longer used — [what to change](#upgrading-to-the-2x-mcp-sdk)). It
-negotiates the 2025 protocol revisions with the unchanged `initialize`
-handshake, so servers see the same requests and the same headers as before. A
-server that speaks **only** the 2026-07-28 revision fails to connect, at once,
-with `Unsupported protocol version: 2025-11-25` in `results[].error`.
+1.x is no longer used — [what to change](#upgrading-to-the-2x-mcp-sdk)). By
+default it negotiates the 2025 protocol revisions with the unchanged
+`initialize` handshake, so servers see the same requests and the same headers
+as before; a server that speaks **only** the 2026-07-28 revision then fails to
+connect, at once, with `Unsupported protocol version: 2025-11-25` in
+`results[].error`.
+
+**The 2026-07-28 revision is a per-server opt-in**, `protocol`:
+
+```ts
+const mcp = await connectMcpHttp({
+  docs: { url: 'https://docs.example.com/mcp' },                  // 'legacy', the default
+  crm: { url: 'https://crm.example.com/mcp', protocol: 'auto' },
+  files: { url: 'https://files.example.com/mcp', protocol: 'modern' },
+})
+mcp.protocols // [{ server: 'docs', version: '2025-11-25', era: 'legacy' }, { server: 'crm', version: '2026-07-28', era: 'modern' }, …]
+```
+
+| `protocol` | What is spoken | Against a server of the other kind |
+| --- | --- | --- |
+| `'legacy'` (default, same as leaving it out) | The 2025 revisions: exactly the requests and the request headers sent before the option existed (a test compares them with a recording made before it). | Only 2026-07-28: `Unsupported protocol version: 2025-11-25`, at once. |
+| `'auto'` | The server is asked first (`server/discover`). One that answers with 2026-07-28 is spoken to that way; any other gets the 2025 handshake. | Works with both. An HTTP 5xx, an answer that is not JSON-RPC or no answer fails the connect: an outage is not read as "an old server". |
+| `'modern'` | 2026-07-28 only. | A 2025 server: `the server did not offer pinned protocol version 2026-07-28 …`, at once. |
+
+The revision is decided **once, at connect**; no tool call is ever sent again in
+another revision. `protocols` says what each connected server negotiated, and
+for a server with `protocol` set an `info` line goes to `onLog`
+(`[mcp] crm: protocol 2026-07-28 (modern: …; configured 'auto')`).
+
+On 2026-07-28: there is no session (`mcp-session-id`), no GET stream and no
+`initialize`; `instructions`, `isError`, `structuredContent` and the
+`outputSchema` note work as before; OAuth is unchanged. Three things differ:
+
+- **CORS.** Every request carries `Mcp-Method` and `Mcp-Name`, and
+  `MCP-Protocol-Version` from the first one on: the server must allow them
+  ([below](#cors-what-the-server-must-send)). A server that does not cannot be
+  reached that way from a page. `'modern'` then fails, and the error names the
+  missing headers. `'auto'` cannot tell a blocked probe from an old server (the
+  browser says nothing), so it falls back to the 2025 revisions and logs a
+  `warn` line that names the headers - or, when the server speaks only
+  2026-07-28, fails with that same explanation.
+- **Tool list changes** arrive over a `subscriptions/listen` stream, which the
+  connector opens at connect when you pass `onToolsChanged` and the server
+  advertises `tools.listChanged`. If that stream ends it is **not opened
+  again**: a `warn` line says so, and changes are not announced until you
+  connect again. `refreshServer(name)` always works.
+- **`input_required` is not supported.** A tool that asks the user something
+  (elicitation), or asks for the call to be sent again with a state, fails with
+  `MCP tool "x" did not finish: the server asked for more input …`; the call
+  is not repeated.
 
 Pass several servers at once — they connect concurrently, each with its own
 deadline (`connectTimeoutMs`, default 30 s), every page of a paginated
@@ -243,7 +288,7 @@ SDK added — read `error.code` for the number. A paginated `tools/list` is
 followed for up to 100 pages (a repeated cursor ends the walk; past the cap a
 `warn` line says the rest is not mounted).
 
-`connectMcpHttp` returns `{ tools, catalog, results, instructions, refreshServer, close }`.
+`connectMcpHttp` returns `{ tools, catalog, results, instructions, protocols, refreshServer, close }`.
 `tools` and `catalog` are mutated **in place** by `refreshServer(name)`, so an
 agent built from them picks up a server's new tool list (react to it via the
 `onToolsChanged` option) without being rebuilt. Filtering is plain object work:
@@ -434,11 +479,25 @@ HTTP server, the old and the new client send the same requests with the same
 headers (`Accept`, `Content-Type`, then `mcp-session-id` and
 `MCP-Protocol-Version` after `initialize`, `Authorization` and `Last-Event-ID`
 when they apply), and the browser tests run against a server with exactly this
-list. **Later:** when this package opts into the 2026-07-28 protocol revision,
-requests will also carry `Mcp-Method` and `Mcp-Name` (and `Mcp-Param-*` for
-tool arguments a server asks to mirror) — a server that wants to keep working
-with browser clients then should add those to `Access-Control-Allow-Headers`
-now.
+list.
+
+**For the 2026-07-28 revision** (a server connected with `protocol: 'auto'` or
+`'modern'`) two more request headers are needed, and `MCP-Protocol-Version` is
+on the very first request:
+
+```
+Access-Control-Allow-Headers:  Content-Type, Authorization, MCP-Protocol-Version,
+                               Mcp-Method, Mcp-Name
+```
+
+(`mcp-session-id` and `Last-Event-ID` are not sent in that revision, and no new
+response header needs exposing; keep them all in one list if the server also
+serves 2025 clients.) This package does **not** send `Mcp-Param-*` headers -
+the mirror of tool arguments a tool may ask for with `x-mcp-header` - so the
+list above is the whole requirement for it; another client may send them, and
+their names come from the tools, so a server that uses the feature has to
+allow them by pattern. Without `protocol`, none of these headers is sent and
+the 2025 list is still enough.
 
 Each line earns its place:
 
@@ -462,6 +521,16 @@ When a connection does fail this way, `connectMcpHttp` no longer just repeats th
 browser's silence: it re-probes the endpoint with a plain request and, if that
 gets through, says which header is being refused. `diagnoseMcpCors(url)` is
 exported so a UI can show the same sentence.
+
+With `protocol: 'auto'` or `'modern'` it goes one step further, because the
+browser will not say *which* header a preflight refused: it sends one request
+per header (`MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`, each alone) and
+names the ones that were blocked - `… one carrying Mcp-Method / Mcp-Name was
+blocked: the server's Access-Control-Allow-Headers does not list them …`. That
+sentence is added to the connect error (`'modern'`, and `'auto'` against a
+2026-only server) or logged at `warn` (`'auto'` that fell back to 2025). The
+same from your own code: `diagnoseMcpCors(url, fetch, { protocol: 'modern' })`.
+These extra requests are made only after a connect already failed or fell back.
 
 ## Optional: WebMCP — a page's tools, both ways
 
@@ -686,7 +755,7 @@ If you do import it:
    calls, where it used to fail the whole server at connect; a
    `403 insufficient_scope` fails the call instead of starting an
    authorization; a server that speaks only 2026-07-28 is refused with a clear
-   error.
+   error (unless you opt in: `protocol: 'auto'` or `'modern'` on that server).
 
 ## Docs
 

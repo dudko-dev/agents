@@ -506,6 +506,47 @@ test('2026-07-28: no listen stream without onToolsChanged, and closing the conne
   }
 })
 
+test('2026-07-28: a server that does not advertise tools.listChanged is not asked for a listen stream', async () => {
+  // Answered by hand: the test server always advertises it.
+  const methods: string[] = []
+  const fetchFn = async (_url: string | URL, init: RequestInit = {}): Promise<Response> => {
+    const msg = JSON.parse(String(init.body)) as { id?: number | string; method: string }
+    methods.push(msg.method)
+    const result =
+      msg.method === 'server/discover'
+        ? {
+            resultType: 'complete',
+            supportedVersions: ['2026-07-28'],
+            capabilities: { tools: {} },
+            ttlMs: 0,
+            cacheScope: 'private',
+          }
+        : msg.method === 'tools/list'
+          ? { resultType: 'complete', ttlMs: 0, cacheScope: 'private', tools: [] }
+          : undefined
+    return new Response(
+      JSON.stringify(
+        result
+          ? { jsonrpc: '2.0', id: msg.id, result }
+          : { jsonrpc: '2.0', id: msg.id, error: { code: -32601, message: 'Method not found' } },
+      ),
+      { status: result ? 200 : 404, headers: { 'content-type': 'application/json' } },
+    )
+  }
+  const logs: string[] = []
+  const mcp = await connectMcpHttp(
+    { wx: { url: 'https://mcp.example.test/mcp', fetch: fetchFn, protocol: 'modern' } },
+    { onLog: (level, message) => logs.push(`${level} ${message}`), onToolsChanged: () => {} },
+  )
+  assert.deepEqual(mcp.results, [{ name: 'wx', connected: true }])
+  assert.deepEqual(methods, ['server/discover', 'tools/list'])
+  assert.deepEqual(
+    logs.filter((l) => /tool list change/.test(l)),
+    ['info [mcp] wx: the server does not announce tool list changes'],
+  )
+  await mcp.close()
+})
+
 // ── 2026-07-28: input_required ─────────────────────────────────────────────
 
 test('2026-07-28: an input_required result is a clear tool error, and the call is made once', async () => {

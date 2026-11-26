@@ -677,7 +677,7 @@ const listenForToolChanges = async (
     // The SDK does not open the stream again, and neither does this connector:
     // say so, or the silence reads as "nothing changed".
     void subscription.closed.then((cause) => {
-      if (cause !== 'local' && !isClosing()) {
+      if (!isClosing()) {
         log(
           'warn',
           `[mcp] ${name}: the tool list change stream ended (${

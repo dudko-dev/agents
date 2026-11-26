@@ -720,7 +720,7 @@ export const connectMcpServers = async (
       // The SDK does not open the stream again, and neither does this
       // connector: say so, or the silence reads as "nothing changed".
       void subscription.closed.then((cause) => {
-        if (cause !== 'local' && !closing) {
+        if (!closing) {
           log(
             'warn',
             `[mcp] ${name}: the tool list change stream ended (${cause === 'graceful' ? 'closed by the server' : 'dropped'}); changes are not announced until the server is connected again`,

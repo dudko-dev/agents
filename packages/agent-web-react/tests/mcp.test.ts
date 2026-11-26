@@ -394,3 +394,37 @@ test('mcpInstructionsOf: an older core (no field), an empty text and a malformed
   )
   assert.equal(mcpInstructionsOf({ instructions: 'nope' as unknown as [] }, 'docs'), undefined)
 })
+
+test('protocol: the core takes the field of McpHttpServerConfig and reports protocols, as mcp-types describes them', async () => {
+  // The structural types in src/mcp-types.ts (`McpHttpServerConfig.protocol`,
+  // `ConnectedMcp.protocols`) describe the core this package is built against:
+  // checked here against the real thing, over real sockets.
+  const { startLocalMcpServer } = await import('@dudko.dev/test-servers')
+  const mod = (await import('@dudko.dev/agent-web/mcp')) as unknown as {
+    connectMcpHttp: (servers: Record<string, unknown>) => Promise<{
+      results: { name: string; connected: boolean; error?: string }[]
+      protocols?: { server: string; version: string; era: string }[]
+      close: () => Promise<void>
+    }>
+  }
+  const server = await startLocalMcpServer({ protocol: 'dual' })
+  try {
+    const mcp = await mod.connectMcpHttp({
+      unset: { url: server.url },
+      auto: { url: server.url, protocol: 'auto' },
+      modern: { url: server.url, protocol: 'modern' },
+    })
+    assert.deepEqual(
+      mcp.results.map((r) => r.connected),
+      [true, true, true],
+    )
+    assert.deepEqual(mcp.protocols, [
+      { server: 'unset', version: '2025-11-25', era: 'legacy' },
+      { server: 'auto', version: '2026-07-28', era: 'modern' },
+      { server: 'modern', version: '2026-07-28', era: 'modern' },
+    ])
+    await mcp.close()
+  } finally {
+    await server.close()
+  }
+})

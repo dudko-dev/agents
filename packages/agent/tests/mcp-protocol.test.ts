@@ -762,6 +762,8 @@ const stdioSession = async (
     },
     (level, message) => logs.push(`${level} ${message}`),
     'agent-test',
+    undefined,
+    () => {},
   )
   const connectMs = Date.now() - began
   try {
@@ -825,6 +827,12 @@ test('stdio, 2026-07-28: auto and modern connect to a server that offers it; uns
     assert.deepEqual(s.protocols, [{ server: 'local', version: '2026-07-28', era: 'modern' }])
     assert.equal(s.env?.PATH, process.env.PATH)
     assert.equal(s.processes, 2)
+    // This server does not advertise `tools.listChanged`: no listen stream is
+    // asked of it (it would answer "method not found"), and that is said.
+    assert.deepEqual(
+      s.logs.filter((l) => /tool list change/.test(l)),
+      ['info [mcp] local: the server does not announce tool list changes'],
+    )
   }
   const unset = await stdioSession(undefined, 'modern')
   assert.equal(unset.result.connected, false)
