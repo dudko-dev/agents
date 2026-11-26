@@ -1,9 +1,6 @@
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
-import type { AddressInfo } from 'node:net'
-import { z } from 'zod'
 import type { JsonWebKey } from 'node:crypto'
+import { createServer } from 'node:http'
+import { applyCors, closeServer, json, listen, readBody, type IListenOptions } from './http.ts'
 import {
   CLIENT_ASSERTION_TYPE,
   ID_JAG_TYP,
@@ -12,20 +9,55 @@ import {
   readClientAuth,
   verifyClientAssertion,
   verifyJwt,
-} from './idp-server.ts'
+  type ClientAssertionProfile,
+} from './jwt.ts'
 
 /**
- * A real MCP server and a real OAuth authorization server, both on loopback.
+ * A test OAuth authorization server for an MCP server, on loopback, over real
+ * sockets. Two personalities:
  *
- * The unit tests stub `fetch`; this runs the actual SDK server implementation
- * over actual sockets, so the client is validated against a peer rather than
- * against our idea of one — session headers, protocol negotiation, SSE framing
- * and the 401 challenge all come from the SDK itself.
+ * - by default, the endpoints the interactive flow needs (metadata, dynamic
+ *   client registration, a token endpoint that rotates the access token). There
+ *   is no `/authorize` page: a test plays the redirect itself;
+ * - with `enterprise`, only the `jwt-bearer` grant with an ID-JAG from one
+ *   identity provider, verified the way the ID-JAG draft asks.
  */
 
-export interface ILocalMcpOptions {
-  /** Reject requests without a currently-valid bearer token. */
-  requireAuth?: boolean
+/** Enterprise-managed authorization: who may be granted a token, and how they authenticate. */
+export interface IEnterpriseGrantOptions {
+  /** The `iss` an ID-JAG must carry. */
+  idpIssuer: string
+  /** Where the IdP's signing keys are fetched from, on every grant. */
+  jwksUri: string
+  clientId: string
+  /**
+   * Omit to run a PUBLIC client for this grant: it is identified by `client_id`
+   * alone. Draft -04 only discourages that; draft -06 (section 4.4) requires a
+   * sender-constrained ID-JAG then, which this server does not implement.
+   */
+  clientSecret?: string
+  /** The client's public keys, for `private_key_jwt`. */
+  clientJwks?: { keys: JsonWebKey[] }
+  /**
+   * What a `private_key_jwt` client assertion must look like: `'rfc7523bis'`
+   * (the default: `aud` = this issuer, `typ: client-authentication+jwt`) or
+   * `'rfc7523'` (`aud` = this token endpoint, `typ: JWT` or none). Each refuses
+   * the other's form.
+   */
+  assertionProfile?: ClientAssertionProfile
+  /**
+   * Accept a client whose `client_id` is the https URL of a client ID
+   * metadata document: fetch the document (through `resolve`, which stands in
+   * for DNS and TLS and maps the https URL to the test server that hosts it),
+   * require `private_key_jwt`, and verify the assertion against the document's
+   * `jwks` or `jwks_uri`.
+   */
+  cimd?: { resolve: (url: string) => string }
+  /** Refuse every grant, quoting the request in the error (a careless server). */
+  echoAssertion?: boolean
+}
+
+export interface ILocalAuthorizationServerOptions extends IListenOptions {
   /** Seconds until an issued access token expires. Default 3600. */
   expiresIn?: number
   /** Advertise `client_id_metadata_document_supported` (CIMD). */
@@ -39,51 +71,34 @@ export interface ILocalMcpOptions {
   /**
    * Accept the `jwt-bearer` grant with an ID-JAG (enterprise-managed
    * authorization) from this identity provider, for this pre-registered
-   * confidential client. Every other grant is then refused: there is no
-   * interactive way in.
+   * client. Every other grant is then refused: there is no interactive way in.
    */
-  enterprise?: {
-    /** The `iss` an ID-JAG must carry. */
-    idpIssuer: string
-    /** Where the IdP's signing keys are fetched from, on every grant. */
-    jwksUri: string
-    clientId: string
-    /**
-     * Omit to run a PUBLIC client for this grant: it is identified by `client_id`
-     * alone. Draft -04 only discourages that; draft -06 (section 4.4) requires a
-     * sender-constrained ID-JAG then, which this server does not implement.
-     */
-    clientSecret?: string
-    /** The client's public keys, for `private_key_jwt`. */
-    clientJwks?: { keys: JsonWebKey[] }
-    /**
-     * Accept a client whose `client_id` is the https URL of a client ID
-     * metadata document: fetch the document (through `resolve`, which stands in
-     * for DNS and TLS and maps the https URL to the test server that hosts it),
-     * require `private_key_jwt`, and verify the assertion against the document's
-     * `jwks` or `jwks_uri`.
-     */
-    cimd?: { resolve: (url: string) => string }
-    /** Refuse every grant, quoting the request in the error (a careless server). */
-    echoAssertion?: boolean
-  }
+  enterprise?: IEnterpriseGrantOptions
+  /**
+   * The MCP resource this server governs: an ID-JAG that names another
+   * `resource` is refused. Also settable afterwards (`server.resource = ...`),
+   * for the usual order of starting the authorization server first.
+   */
+  resource?: string
 }
 
-export interface ILocalMcp {
-  /** The MCP endpoint to hand to `mcpServers[name].url`. */
-  url: string
-  /** The authorization server's issuer: what an honest redirect carries as `iss`. */
+/** One request the token endpoint received. */
+export interface ITokenRequest {
+  /** Its form parameters. */
+  params: Record<string, string>
+  /** How the client authenticated: `basic`, `post`, `none` or `assertion`. */
+  authMethod: string
+  /** The OAuth error it was answered with, if any. */
+  error?: string
+}
+
+export interface ILocalAuthorizationServer {
+  /** The issuer identifier: what an honest redirect carries as `iss`. */
   issuer: string
-  /**
-   * A value only this server knows, returned by the `secret` tool. A task that
-   * asks for it cannot be answered from the model's own knowledge, so "did the
-   * model actually use the tool?" has a factual answer rather than a stylistic
-   * one.
-   */
-  secret: string
-  /** Arguments every tool call received, in order. */
-  calls: { name: string; args: unknown }[]
-  /** Tokens the authorization server currently accepts. */
+  tokenEndpoint: string
+  /** Mutable: the MCP resource this server governs (see the option). */
+  resource: string | undefined
+  /** Tokens the authorization server currently accepts. Hand it to the MCP server. */
   validTokens: Set<string>
   /** Dynamic client registrations performed so far. */
   registrations: () => number
@@ -91,71 +106,41 @@ export interface ILocalMcp {
   grants: () => string[]
   /** client_id values seen at the token endpoint, in order. */
   tokenClientIds: () => string[]
+  /** Every request the token endpoint received. */
+  tokenRequests: () => ITokenRequest[]
   /**
-   * Every request the token endpoint received: its form parameters, how the
-   * client authenticated, and the OAuth error it was answered with (if any).
-   */
-  /** The `capabilities` of every `initialize` request the MCP server received. */
-  initializeCapabilities: Record<string, unknown>[]
-  /**
-   * Mutable: make the token endpoint go wrong from now on. `refuseGrant`
-   * answers every grant with that OAuth error; `echoRequest` refuses and quotes
-   * the whole request body in the description (a careless server).
+   * Mutable: make the token endpoint go wrong from now on (enterprise mode).
+   * `refuseGrant` answers every grant with that OAuth error; `echoRequest`
+   * refuses and quotes the whole request body in the description (a careless
+   * server).
    */
   faults: { refuseGrant?: { error: string; description: string }; echoRequest?: boolean }
   /** Every client ID metadata document URL the authorization server fetched. */
   cimdFetches: string[]
-  tokenRequests: () => { params: Record<string, string>; authMethod: string; error?: string }[]
   close: () => Promise<void>
 }
 
-const json = (res: ServerResponse, status: number, body: unknown): void => {
-  res.writeHead(status, { 'content-type': 'application/json' })
-  res.end(JSON.stringify(body))
-}
-
-const readBody = async (req: IncomingMessage): Promise<string> => {
-  const chunks: Buffer[] = []
-  for await (const chunk of req) {
-    chunks.push(chunk as Buffer)
-  }
-  return Buffer.concat(chunks).toString()
-}
-
-const listen = async (server: Server): Promise<number> => {
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-  return (server.address() as AddressInfo).port
-}
-
-const close = (server: Server): Promise<void> =>
-  new Promise<void>((resolve) => {
-    server.closeAllConnections()
-    server.close(() => resolve())
-  })
-
-/**
- * Start an MCP server exposing one `echo` tool, plus the authorization server
- * that guards it. The two live on separate ports, exactly as they would in
- * production, so RFC 9728 discovery has somewhere real to point.
- */
-export const startLocalMcp = async (opts: ILocalMcpOptions = {}): Promise<ILocalMcp> => {
-  const calls: { name: string; args: unknown }[] = []
-  const secret = `zq-${Math.random().toString(36).slice(2, 8)}`
+export const startLocalAuthorizationServer = async (
+  opts: ILocalAuthorizationServerOptions = {},
+): Promise<ILocalAuthorizationServer> => {
   const validTokens = new Set<string>()
   const grants: string[] = []
   const tokenClientIds: string[] = []
-  const tokenRequests: { params: Record<string, string>; authMethod: string; error?: string }[] = []
+  const tokenRequests: ITokenRequest[] = []
   const seenJti = new Set<string>()
   const seenClientJti = new Set<string>()
   const cimdFetches: string[] = []
-  const faults: ILocalMcp['faults'] = { echoRequest: opts.enterprise?.echoAssertion }
-  const initializeCapabilities: Record<string, unknown>[] = []
+  const faults: ILocalAuthorizationServer['faults'] = {
+    echoRequest: opts.enterprise?.echoAssertion,
+  }
   let registrations = 0
   let issued = 0
 
-  // ── authorization server ────────────────────────────────────────────────
-  const as = createServer((req, res) => {
+  const server = createServer((req, res) => {
     void (async () => {
+      if (applyCors(req, res, opts.cors)) {
+        return
+      }
       const url = new URL(req.url ?? '/', `http://${req.headers.host}`)
       if (url.pathname.includes('/.well-known/oauth-authorization-server')) {
         json(res, 200, {
@@ -199,7 +184,7 @@ export const startLocalMcp = async (opts: ILocalMcpOptions = {}): Promise<ILocal
         grants.push(grant)
         tokenClientIds.push(params.get('client_id') ?? '')
         const client = readClientAuth(req, params)
-        const record: (typeof tokenRequests)[number] = {
+        const record: ITokenRequest = {
           params: Object.fromEntries(params),
           authMethod: client.method,
         }
@@ -265,7 +250,9 @@ export const startLocalMcp = async (opts: ILocalMcpOptions = {}): Promise<ILocal
               jwks && params.get('client_assertion_type') === CLIENT_ASSERTION_TYPE
                 ? verifyClientAssertion(assertion, {
                     jwks,
-                    audience: asUrl,
+                    issuer: asUrl,
+                    tokenEndpoint: `${asUrl}/token`,
+                    profile: ent.assertionProfile,
                     seenJti: seenClientJti,
                   })
                 : { refused: clientRefusal }
@@ -325,7 +312,11 @@ export const startLocalMcp = async (opts: ILocalMcpOptions = {}): Promise<ILocal
             refuse(400, 'invalid_grant', 'Assertion was already used')
             return
           }
-          if (payload.resource !== undefined && payload.resource !== mcpUrl) {
+          if (
+            payload.resource !== undefined &&
+            handle.resource !== undefined &&
+            payload.resource !== handle.resource
+          ) {
             refuse(400, 'invalid_target', 'This authorization server does not govern that resource')
             return
           }
@@ -361,108 +352,26 @@ export const startLocalMcp = async (opts: ILocalMcpOptions = {}): Promise<ILocal
         return
       }
       json(res, 404, { error: 'not_found' })
-    })()
-  })
-  const asPort = await listen(as)
-  const asUrl = `http://127.0.0.1:${asPort}`
-
-  // ── MCP server ──────────────────────────────────────────────────────────
-  // Built per request: a stateless StreamableHTTP transport is single-use, and
-  // an McpServer can only be connected to one transport at a time. This is the
-  // SDK's own pattern for stateless mode.
-  const buildServer = (): McpServer => {
-    const server = new McpServer({ name: 'local-mcp', version: '1.0.0' })
-    server.registerTool(
-      'echo',
-      { description: 'Echo the input back', inputSchema: { text: z.string() } },
-      ({ text }) => {
-        calls.push({ name: 'echo', args: { text } })
-        return { content: [{ type: 'text' as const, text: `echo:${text}` }] }
-      },
-    )
-    server.registerTool(
-      'secret',
-      {
-        description: 'Return the server-side secret code. There is no other way to learn it.',
-        inputSchema: {},
-        annotations: { readOnlyHint: true },
-      },
-      () => {
-        calls.push({ name: 'secret', args: {} })
-        return { content: [{ type: 'text' as const, text: secret }] }
-      },
-    )
-    server.registerTool('boom', { description: 'Always fails', inputSchema: {} }, () => {
-      calls.push({ name: 'boom', args: {} })
-      return { content: [{ type: 'text' as const, text: 'kaboom' }], isError: true }
-    })
-    return server
-  }
-
-  const httpServer = createServer((req, res) => {
-    void (async () => {
-      const path = new URL(req.url ?? '/', `http://${req.headers.host}`).pathname
-      if (path.includes('/.well-known/oauth-protected-resource')) {
-        json(res, 200, {
-          resource: mcpUrl,
-          authorization_servers: [asUrl],
-          scopes_supported: ['mcp:tools'],
-        })
-        return
-      }
-      if (opts.requireAuth) {
-        const token = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '')
-        if (!validTokens.has(token)) {
-          res.writeHead(401, {
-            'content-type': 'application/json',
-            'www-authenticate': `Bearer resource_metadata="${mcpOrigin}/.well-known/oauth-protected-resource/mcp"`,
-          })
-          res.end(JSON.stringify({ error: 'unauthorized' }))
-          return
-        }
-      }
-      const server = buildServer()
-      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
-      res.on('close', () => {
-        void transport.close()
-        void server.close()
-      })
-      await server.connect(transport)
-      const raw = await readBody(req)
-      const message = raw
-        ? (JSON.parse(raw) as {
-            method?: string
-            params?: { capabilities?: Record<string, unknown> }
-          })
-        : undefined
-      if (message?.method === 'initialize') {
-        initializeCapabilities.push(message.params?.capabilities ?? {})
-      }
-      await transport.handleRequest(req, res, message)
     })().catch(() => {
-      if (!res.headersSent) json(res, 500, { error: 'server_error' })
+      if (!res.headersSent) {
+        json(res, 500, { error: 'server_error' })
+      }
     })
   })
-  const mcpPort = await listen(httpServer)
-  const mcpOrigin = `http://127.0.0.1:${mcpPort}`
-  const mcpUrl = `${mcpOrigin}/mcp`
+  const asUrl = await listen(server, opts)
 
-  return {
-    url: mcpUrl,
+  const handle: ILocalAuthorizationServer = {
     issuer: asUrl,
-    secret,
-    calls,
+    tokenEndpoint: `${asUrl}/token`,
+    resource: opts.resource,
     validTokens,
     registrations: () => registrations,
     grants: () => grants,
     tokenClientIds: () => tokenClientIds,
     tokenRequests: () => tokenRequests,
-    initializeCapabilities,
     faults,
     cimdFetches,
-    close: async () => {
-      await close(httpServer)
-      await close(as)
-    },
+    close: () => closeServer(server),
   }
+  return handle
 }

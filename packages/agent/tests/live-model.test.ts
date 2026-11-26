@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createAgent } from '../src/index.ts'
-import { startLocalMcp } from './helpers/mcp-server.ts'
+import { startLocalMcp } from '@dudko.dev/test-servers'
 
 /**
  * The same loop as `integration.test.ts`, but driven by a REAL model behind an

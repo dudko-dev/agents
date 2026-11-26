@@ -17,13 +17,21 @@ import {
   EnterpriseOAuthError,
   MemoryOAuthStorage,
 } from '../dist/mcp.js'
+import {
+  startLocalIdp,
+  startLocalMcp,
+  type ILocalIdp,
+  type ILocalMcp,
+} from '@dudko.dev/test-servers'
 
 // Enterprise-Managed Authorization (ID-JAG), in the browser package. The MCP
 // server, its authorization server and the identity provider are all spoken to
 // over mock fetches, so the real SDK state machine runs without a network. The
-// flow over real sockets, against a test IdP that signs real tokens, is in the
-// Node package (packages/agent/tests/mcp-enterprise-oauth.test.ts): the two
-// providers are the same code.
+// whole flow over real sockets, against a test IdP that signs real tokens, is
+// covered in the Node package (packages/agent/tests/mcp-enterprise-oauth.test.ts):
+// the two providers are the same code. The last tests here use those same
+// servers (@dudko.dev/test-servers) for the one thing a mock cannot show: a
+// server built to one form of client assertion refusing the other.
 
 const TOKEN_EXCHANGE_GRANT = 'urn:ietf:params:oauth:grant-type:token-exchange'
 const JWT_BEARER_GRANT = 'urn:ietf:params:oauth:grant-type:jwt-bearer'
@@ -1278,4 +1286,303 @@ test('enterprise: with no onLog the detail goes to the package logger, redacted;
   )
   assert.equal(down.message, 'MCP authorization server could not be reached for the ID-JAG grant')
   assertNoSecrets(said.join('\n'), 'the log')
+})
+
+// ── the RFC 7523 form of the assertion: assertionAudience / assertionType ─
+
+/** Both assertions of one provider, decoded. `discovery` replaces what is stored. */
+const formsOf = async (extra: Record<string, unknown>, discovery: unknown = STORED_DISCOVERY) => {
+  const idp = mockIdp()
+  const provider = makeProvider({ ...jwtOptions(), ...idpJwt(), fetch: idp.fetchFn, ...extra })
+  await provider.saveDiscoveryState(discovery as never)
+  await provider.prepareTokenRequest()
+  const params = new URLSearchParams()
+  await provider.addClientAuthentication?.(new Headers(), params, `${AS_URL}/token`, undefined)
+  return {
+    forIdp: peekJwt(idp.calls[0].params.get('client_assertion') ?? ''),
+    forAs: peekJwt(params.get('client_assertion') ?? ''),
+  }
+}
+
+const discoveryWith = (metadata: Record<string, unknown>, asUrl = AS_URL) => ({
+  authorizationServerUrl: `${asUrl}/`,
+  authorizationServerMetadata: { issuer: asUrl, token_endpoint: `${asUrl}/token`, ...metadata },
+  resourceMetadata: { resource: MCP_URL, authorization_servers: [asUrl] },
+})
+
+test('assertionAudience / assertionType: what the options may hold, said when the provider is built', () => {
+  makeProvider(jwtOptions({ assertionAudience: 'token-endpoint', assertionType: 'JWT' }))
+  makeProvider(
+    jwtOptions({ assertionAudience: 'issuer', assertionType: 'client-authentication+jwt' }),
+  )
+  // A value that is not one of the two is not read as the default.
+  assert.throws(
+    () => makeProvider(jwtOptions({ assertionAudience: 'token_endpoint' })),
+    /assertionAudience must be 'issuer' or 'token-endpoint'/,
+  )
+  assert.throws(
+    () => makeProvider(jwtOptions({ assertionType: 'jwt' })),
+    /assertionType must be 'client-authentication\+jwt' or 'JWT'/,
+  )
+  assert.throws(
+    () => makeProvider(idpJwt({ assertionAudience: 'endpoint' })),
+    /idp\.assertionAudience must be/,
+  )
+  assert.throws(() => makeProvider(idpJwt({ assertionType: 'jws' })), /idp\.assertionType must be/)
+  // Where no assertion is signed, the options mean nothing: say so.
+  assert.throws(
+    () => makeProvider({ assertionAudience: 'token-endpoint' }),
+    /assertionAudience and assertionType are only used with clientAuthMethod 'private_key_jwt'/,
+  )
+  assert.throws(
+    () =>
+      makeProvider({
+        idp: {
+          tokenEndpoint: IDP_TOKEN_URL,
+          clientId: IDP_CLIENT,
+          clientSecret: IDP_SECRET,
+          assertionType: 'JWT',
+        },
+      }),
+    /idp\.assertionAudience and idp\.assertionType are only used with idp\.clientAuthMethod/,
+  )
+  // The token endpoint still needs expectedIssuer: it comes from the same metadata.
+  assert.throws(
+    () =>
+      makeProvider(jwtOptions({ assertionAudience: 'token-endpoint', expectedIssuer: undefined })),
+    /private_key_jwt needs expectedIssuer/,
+  )
+  // At the IdP the token endpoint is configuration, so its issuer is not needed...
+  makeProvider(idpJwt({ issuer: undefined, assertionAudience: 'token-endpoint' }))
+  // ...and it still is with the default audience, said or left out.
+  for (const assertionAudience of [undefined, 'issuer']) {
+    assert.throws(
+      () => makeProvider(idpJwt({ issuer: undefined, assertionAudience })),
+      /needs idp\.issuer/,
+    )
+  }
+})
+
+test('assertionAudience: each hop is addressed as configured, independently of the other', async () => {
+  // The defaults, and the defaults said out loud: the issuer on both hops.
+  for (const said of [{}, { assertionAudience: 'issuer' }]) {
+    const { forIdp, forAs } = await formsOf({ ...said, ...idpJwt(said) })
+    assert.equal(forAs.payload.aud, AS_URL)
+    assert.equal(forIdp.payload.aud, IDP_ISSUER)
+  }
+  // Only the authorization server's.
+  const asOnly = await formsOf({ assertionAudience: 'token-endpoint' })
+  assert.equal(asOnly.forAs.payload.aud, `${AS_URL}/token`, 'the discovered token endpoint')
+  assert.equal(asOnly.forIdp.payload.aud, IDP_ISSUER)
+  // Only the IdP's - and without idp.issuer at all.
+  const idpOnly = await formsOf(idpJwt({ issuer: undefined, assertionAudience: 'token-endpoint' }))
+  assert.equal(idpOnly.forIdp.payload.aud, IDP_TOKEN_URL, 'the configured token endpoint')
+  assert.equal(idpOnly.forAs.payload.aud, AS_URL)
+  // The token endpoint is what the metadata says, not a guess from the issuer.
+  const elsewhere = await formsOf(
+    { assertionAudience: 'token-endpoint' },
+    discoveryWith({ token_endpoint: `${AS_URL}/oauth2/v1/token` }),
+  )
+  assert.equal(elsewhere.forAs.payload.aud, `${AS_URL}/oauth2/v1/token`)
+  // Everything else about the assertion is unchanged.
+  for (const { payload } of [asOnly.forAs, idpOnly.forIdp]) {
+    assert.deepEqual(Object.keys(payload).sort(), ['aud', 'exp', 'iat', 'iss', 'jti', 'sub'])
+    assert.equal(typeof payload.aud, 'string', 'one audience, not a list')
+    assert.equal((payload.exp as number) - (payload.iat as number), 60)
+  }
+})
+
+test('assertionType: the typ header of each hop is the one configured', async () => {
+  const defaults = await formsOf({})
+  assert.equal(defaults.forAs.header.typ, 'client-authentication+jwt')
+  assert.equal(defaults.forIdp.header.typ, 'client-authentication+jwt')
+  const said = await formsOf({
+    assertionType: 'client-authentication+jwt',
+    ...idpJwt({ assertionType: 'client-authentication+jwt' }),
+  })
+  assert.equal(said.forAs.header.typ, 'client-authentication+jwt')
+  assert.equal(said.forIdp.header.typ, 'client-authentication+jwt')
+  const asOnly = await formsOf({ assertionType: 'JWT' })
+  assert.equal(asOnly.forAs.header.typ, 'JWT')
+  assert.equal(asOnly.forIdp.header.typ, 'client-authentication+jwt')
+  const idpOnly = await formsOf(idpJwt({ assertionType: 'JWT' }))
+  assert.equal(idpOnly.forIdp.header.typ, 'JWT')
+  assert.equal(idpOnly.forAs.header.typ, 'client-authentication+jwt')
+  // The type does not move the audience, nor the audience the type.
+  assert.equal(asOnly.forAs.payload.aud, AS_URL)
+  const audienceOnly = await formsOf({ assertionAudience: 'token-endpoint' })
+  assert.equal(audienceOnly.forAs.header.typ, 'client-authentication+jwt')
+})
+
+test('assertionAudience token-endpoint: expectedIssuer still gates the audience; a bad endpoint is refused', async () => {
+  const sign = async (discovery: unknown) => {
+    const provider = makeProvider(
+      jwtOptions({ assertionAudience: 'token-endpoint', assertionType: 'JWT' }),
+    )
+    await provider.saveDiscoveryState(discovery as never)
+    const params = new URLSearchParams()
+    const err = await rejection(() =>
+      Promise.resolve(
+        provider.addClientAuthentication?.(
+          new Headers(),
+          params,
+          'https://evil.example.test/token',
+        ),
+      ),
+    )
+    assert.equal(params.has('client_assertion'), false)
+    return err
+  }
+  // Another authorization server, with a perfectly good token endpoint of its
+  // own: no assertion is signed for it.
+  const evil = await sign(discoveryWith({}, 'https://evil.example.test'))
+  assert.match(evil.message, /expected "https:\/\/as\.example\.test"; refusing to send credentials/)
+  // The expected issuer's own metadata, naming a plaintext token endpoint.
+  const plaintext = await sign(discoveryWith({ token_endpoint: 'http://as.example.test/token' }))
+  assert.match(plaintext.message, /token endpoint: .*requires https/)
+  // No token endpoint in the metadata: nothing to address, and nothing guessed.
+  const none = await sign(discoveryWith({ token_endpoint: undefined }))
+  assert.equal(none.hop, 'discovery')
+  assert.match(none.message, /published no token endpoint/)
+})
+
+// ── over real sockets: the test servers of @dudko.dev/test-servers ────────
+// The IdP and the authorization server each hold a client assertion to ONE
+// form - RFC 7523 as published, or the bis draft - and refuse the other.
+
+type Form = 'rfc7523bis' | 'rfc7523'
+const FORMS = {
+  rfc7523bis: {},
+  rfc7523: { assertionAudience: 'token-endpoint', assertionType: 'JWT' },
+} as const
+
+const withServers = async (
+  servers: { idp: Form; as: Form },
+  body: (world: {
+    idp: ILocalIdp
+    mcp: ILocalMcp
+    provider: (client: { idp: Form; as: Form }) => BrowserEnterpriseOAuthProvider
+  }) => Promise<void>,
+): Promise<void> => {
+  const idp = await startLocalIdp({
+    clientId: IDP_CLIENT,
+    clientJwks: { keys: [RSA_KEY.publicJwk] },
+    assertionProfile: servers.idp,
+    resourceClientId: AS_CLIENT,
+  })
+  const mcp = await startLocalMcp({
+    requireAuth: true,
+    enterprise: {
+      idpIssuer: idp.issuer,
+      jwksUri: idp.jwksUri,
+      clientId: AS_CLIENT,
+      clientJwks: { keys: [EC_KEY.publicJwk] },
+      assertionProfile: servers.as,
+    },
+  })
+  try {
+    await body({
+      idp,
+      mcp,
+      provider: (client) =>
+        createEnterpriseOAuthProvider({
+          serverUrl: mcp.url,
+          clientId: AS_CLIENT,
+          expectedIssuer: mcp.issuer,
+          clientAuthMethod: 'private_key_jwt',
+          privateKey: EC_KEY.privateJwk,
+          algorithm: 'ES256',
+          ...FORMS[client.as],
+          idp: {
+            tokenEndpoint: idp.tokenEndpoint,
+            // Not needed when the assertion is addressed to the token endpoint.
+            ...(client.idp === 'rfc7523bis' ? { issuer: idp.issuer } : {}),
+            clientId: IDP_CLIENT,
+            clientAuthMethod: 'private_key_jwt',
+            privateKey: RSA_KEY.privateJwk,
+            algorithm: 'RS256',
+            ...FORMS[client.idp],
+          },
+          getIdToken: () => idp.issueIdToken(),
+          // One per provider: a token an earlier one was granted is not this one's.
+          storage: new MemoryOAuthStorage(),
+        } as never),
+    })
+  } finally {
+    await mcp.close()
+    await idp.close()
+  }
+}
+
+const connectOver = async (url: string, provider: BrowserEnterpriseOAuthProvider) => {
+  const said: string[] = []
+  const mcp = await connectMcpHttp(
+    { docs: { url, authProvider: provider } },
+    { onLog: (_level: string, message: string) => void said.push(message) },
+  )
+  return { mcp, said }
+}
+
+test('e2e over sockets: servers built to RFC 7523 accept the token-endpoint form and refuse the default one', async () => {
+  await withServers({ idp: 'rfc7523', as: 'rfc7523' }, async ({ idp, mcp, provider }) => {
+    const ok = await connectOver(mcp.url, provider({ idp: 'rfc7523', as: 'rfc7523' }))
+    assert.equal(ok.mcp.results[0].connected, true, ok.mcp.results[0].error)
+    assert.match(
+      JSON.stringify(await callTool(ok.mcp.tools, 'docs__echo', { text: 'old form' })),
+      /echo:old form/,
+    )
+    await ok.mcp.close()
+    const forIdp = peekJwt(idp.exchanges[0].params.client_assertion)
+    assert.equal(forIdp.payload.aud, idp.tokenEndpoint, 'the configured IdP token endpoint')
+    assert.equal(forIdp.header.typ, 'JWT')
+    const forAs = peekJwt(mcp.tokenRequests()[0].params.client_assertion)
+    assert.equal(mcp.tokenRequests()[0].error, undefined)
+    assert.equal(forAs.payload.aud, mcp.tokenEndpoint, 'the discovered token endpoint')
+    assert.equal(forAs.header.typ, 'JWT')
+
+    // The default (bis) form is refused by the RFC 7523 IdP...
+    const atIdp = await connectOver(mcp.url, provider({ idp: 'rfc7523bis', as: 'rfc7523' }))
+    assert.equal(atIdp.mcp.results[0].connected, false)
+    assert.match(
+      String(atIdp.mcp.results[0].error),
+      /the identity provider answered 401 invalid_client - Client assertion typ is not supported/,
+    )
+    assert.equal(mcp.tokenRequests().length, 1, 'nothing more reached the authorization server')
+    // ...and by the RFC 7523 authorization server.
+    const atAs = await connectOver(mcp.url, provider({ idp: 'rfc7523', as: 'rfc7523bis' }))
+    assert.equal(
+      atAs.mcp.results[0].error,
+      'MCP authorization server refused the ID-JAG grant: invalid_client (HTTP 401)',
+    )
+    assert.ok(atAs.said.some((l) => /Client assertion typ is not supported/.test(l)))
+  })
+})
+
+test('e2e over sockets: servers built to rfc7523bis accept the default form and refuse the token-endpoint one', async () => {
+  await withServers({ idp: 'rfc7523bis', as: 'rfc7523bis' }, async ({ idp, mcp, provider }) => {
+    const ok = await connectOver(mcp.url, provider({ idp: 'rfc7523bis', as: 'rfc7523bis' }))
+    assert.equal(ok.mcp.results[0].connected, true, ok.mcp.results[0].error)
+    await ok.mcp.close()
+    const forIdp = peekJwt(idp.exchanges[0].params.client_assertion)
+    assert.equal(forIdp.payload.aud, idp.issuer)
+    assert.equal(forIdp.header.typ, 'client-authentication+jwt')
+    const forAs = peekJwt(mcp.tokenRequests()[0].params.client_assertion)
+    assert.equal(forAs.payload.aud, mcp.issuer)
+    assert.equal(forAs.header.typ, 'client-authentication+jwt')
+
+    const atIdp = await connectOver(mcp.url, provider({ idp: 'rfc7523', as: 'rfc7523bis' }))
+    assert.match(
+      String(atIdp.mcp.results[0].error),
+      /the identity provider answered 401 invalid_client - Client assertion typ is not client-authentication\+jwt/,
+    )
+    assert.equal(mcp.tokenRequests().length, 1, 'nothing more reached the authorization server')
+    const atAs = await connectOver(mcp.url, provider({ idp: 'rfc7523bis', as: 'rfc7523' }))
+    assert.equal(
+      atAs.mcp.results[0].error,
+      'MCP authorization server refused the ID-JAG grant: invalid_client (HTTP 401)',
+    )
+    assert.ok(
+      atAs.said.some((l) => /Client assertion typ is not client-authentication\+jwt/.test(l)),
+    )
+  })
 })

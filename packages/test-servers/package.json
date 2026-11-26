@@ -1,0 +1,31 @@
+{
+  "name": "@dudko.dev/test-servers",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Test servers for the @dudko.dev agent packages: an enterprise IdP, an MCP authorization server and an MCP server, on loopback. Never published.",
+  "license": "MIT",
+  "exports": {
+    ".": "./src/index.ts",
+    "./cli": "./src/cli.ts"
+  },
+  "scripts": {
+    "start": "node --experimental-strip-types --disable-warning=ExperimentalWarning src/cli.ts",
+    "test": "node --test --experimental-strip-types --disable-warning=ExperimentalWarning tests/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\""
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "prettier": "^3.10.1",
+    "typescript": "^6.0.3"
+  },
+  "engines": {
+    "node": ">=22.6.0"
+  }
+}

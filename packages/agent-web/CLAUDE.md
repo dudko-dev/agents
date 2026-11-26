@@ -92,6 +92,9 @@ behind every decision.
   grant; non-interactive; client secret or `private_key_jwt` signed with WebCrypto). A copy of the Node
   package's `mcp-enterprise-oauth.ts` except for the signing section - change both.
   Security boundary: every guard has a test in `tests/mcp-enterprise.test.ts` and a mutation check.
+  That suite mocks `fetch`; its last tests run over real sockets against `@dudko.dev/test-servers`
+  (`packages/test-servers`, a dev dependency), whose IdP and authorization server each accept one form
+  of client assertion (`assertionAudience` / `assertionType`) and refuse the other.
 - `src/webmcp/` — optional `./webmcp` subpath: publish a ToolSet through the browser's WebMCP API
   and use a page's WebMCP tools as one. No dependency; a no-op where the browser has no WebMCP.
 - `src/{parse,prompts,events,config,index}.ts`.

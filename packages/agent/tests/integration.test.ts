@@ -7,7 +7,7 @@ import {
   finishMcpOAuth,
   MemoryOAuthStore,
 } from '../src/mcp-oauth.ts'
-import { startLocalMcp } from './helpers/mcp-server.ts'
+import { startLocalMcp } from '@dudko.dev/test-servers'
 import {
   hasToolResult,
   startLocalOpenAI,

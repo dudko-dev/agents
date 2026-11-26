@@ -433,11 +433,14 @@ createEnterpriseOAuthProvider({
   clientId, clientSecret,            // this client at the MCP authorization server
   clientAuthMethod,                  // 'client_secret_basic' | 'client_secret_post' | 'private_key_jwt' | 'none'
   privateKey, algorithm, keyId,      // for 'private_key_jwt'
+  assertionAudience,                 // 'issuer' (default) | 'token-endpoint': the assertion's aud
+  assertionType,                     // 'client-authentication+jwt' (default) | 'JWT': its typ
   expectedIssuer,                    // that server's issuer; required with a secret or a key
   idp: {
     tokenEndpoint, clientId, clientSecret,
     clientAuthMethod,                // 'client_secret_basic' | 'client_secret_post' | 'private_key_jwt'
     privateKey, algorithm, keyId, issuer, // for 'private_key_jwt'
+    assertionAudience, assertionType, // as above, for the assertion sent to the IdP
   },
   getIdToken: () => idToken,         // called each time a new ID-JAG is needed
   scope,                             // asked of the IdP
@@ -474,11 +477,31 @@ createEnterpriseOAuthProvider({
   one for that algorithm (scheme, curve, hash), or signing is refused. The
   assertion: `iss` = `sub` = the client id, `aud` = the **issuer identifier** of
   the server it is for and nothing else (`idp.issuer`, or the authorization
-  server's issuer after it matched `expectedIssuer`; never a token endpoint
-  URL, as `draft-ietf-oauth-rfc7523bis` requires), a random `jti`, `iat`, `exp` 60 seconds
+  server's issuer after it matched `expectedIssuer`; by default never a token
+  endpoint URL, as `draft-ietf-oauth-rfc7523bis` requires), a random `jti`, `iat`, `exp` 60 seconds
   later, header `typ: client-authentication+jwt`. Signed with WebCrypto; no
   dependency. The key and the assertions are never stored, logged, put in an
   error or shown when the provider is printed or serialized.
+- **`assertionAudience` / `assertionType`** (top level for the authorization
+  server, inside `idp` for the IdP; each only with `private_key_jwt`, each
+  independent of the other and of the other hop) produce the assertion a server
+  built to RFC 7523 expects, where the default follows
+  `draft-ietf-oauth-rfc7523bis`:
+  - `assertionAudience: 'issuer'` (default) - `aud` is the issuer identifier.
+    `'token-endpoint'` - `aud` is the token endpoint URL of that hop:
+    `idp.tokenEndpoint` for the IdP (and `idp.issuer` is then not required); for
+    the authorization server the `token_endpoint` of the discovered metadata,
+    and only after that metadata's issuer matched `expectedIssuer` and the
+    endpoint passed the https-or-loopback check. Metadata without a token
+    endpoint is an `EnterpriseOAuthError` (`hop: 'discovery'`); nothing is
+    guessed from the issuer.
+  - `assertionType: 'client-authentication+jwt'` (default) or `'JWT'` - the
+    `typ` header, for a server that refuses a `typ` it does not know.
+
+  A value other than these, or either option where no assertion is signed,
+  throws when the provider is built. `'token-endpoint'` is the weaker form (see
+  [security.md](security.md#mcp-enterprise-managed-authorization-id-jag)): use it only for
+  a server that refuses the default.
 - **`clientId` as a client ID metadata document (CIMD)**: an https URL with a
   path of its own. It takes no `clientSecret`; use `private_key_jwt` (the
   document lists the keys in `jwks` / `jwks_uri` and says

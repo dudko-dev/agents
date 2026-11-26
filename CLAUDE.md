@@ -1,10 +1,15 @@
 # agents — instructions for Claude
 
-Monorepo (pnpm workspaces + Nx) of three published packages and two private apps:
+Monorepo (pnpm workspaces + Nx) of three published packages, one private test package and two
+private apps:
 
 - `packages/agent` — `@dudko.dev/agent`, the Node / server agent.
 - `packages/agent-web` — `@dudko.dev/agent-web`, the in-browser agent (the core of the next two).
 - `packages/agent-web-react` — `@dudko.dev/agent-web-react`, React bindings; its `e2e/` drives the demo.
+- `packages/test-servers` — `@dudko.dev/test-servers` (private, never published): the test
+  enterprise IdP, MCP authorization server and MCP server the packages' tests run against, as
+  functions and as a CLI. TypeScript run directly by Node (type stripping), no build. Loopback
+  only. Not in `.github/scripts/release-plan.mjs`'s list, and must stay out of it.
 - `apps/demo` — the Vite demo of the React package (private, never published). One project, two
   pages: the demo (`/demo/`) and the pipeline editor (`/pipeline/`).
 - `apps/site` — https://agent.dudko.dev: the landing page and the docs (Astro + Starlight), with the
@@ -32,9 +37,10 @@ pnpm test:e2e                # Playwright over the built demo
 pnpm nx <target> <project>   # e.g. pnpm nx test @dudko.dev/agent-web
 ```
 
-Projects: `@dudko.dev/agent`, `@dudko.dev/agent-web`, `@dudko.dev/agent-web-react`, `demo`, `site`.
+Projects: `@dudko.dev/agent`, `@dudko.dev/agent-web`, `@dudko.dev/agent-web-react`,
+`@dudko.dev/test-servers`, `demo`, `site`.
 Targets come from each package's `scripts`: `typecheck`, `format:check`, `format`, `build`, `test`
-(and `test:e2e` in the React package).
+(and `test:e2e` in the React package; `@dudko.dev/test-servers` has no `build`).
 
 After **any** change to `.ts` / `.tsx`, run the four checks for the packages you touched **and
 everything that depends on them** (`pnpm affected`, or `pnpm check` when in doubt) with the Bash
@@ -50,6 +56,10 @@ tool. Do not infer success from "the change looks right".
   the core's `dist` types, and the demo aliases the React package's `dist`. That is why `build`
   comes first in `nx.json` (`dependsOn`). Do not add `pretest` / `prebuild` scripts that rebuild —
   two builds of the same `dist` in parallel race.
+- `agent` and `agent-web` take `test-servers` as a `workspace:*` **dev** dependency and import its
+  TypeScript source directly (`exports` points at `src/index.ts`): there is nothing to build, and
+  Node strips the types because pnpm's link resolves to the real path outside `node_modules`.
+  It never becomes a runtime dependency of a published package.
 - `agent` and `agent-web` are siblings, not dependants: public API, config fields, event names and
   semantics are shared **by convention**. A change to one usually needs the same change in the
   other, in the same pull request. Some code is a deliberate copy (the egress policy core, learning

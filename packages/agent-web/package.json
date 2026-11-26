@@ -191,6 +191,7 @@
     "@ai-sdk/xai": "^5.0.52",
     "@browser-ai/core": "^3.0.4",
     "@browser-ai/web-llm": "^3.0.4",
+    "@dudko.dev/test-servers": "workspace:*",
     "@mlc-ai/web-llm": "^0.2.89",
     "@modelcontextprotocol/sdk": "^1.32.2",
     "@types/node": "^22.9.0",

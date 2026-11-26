@@ -47,7 +47,9 @@
     `private_key_jwt` signed with `node:crypto`; `transportFetch` turns a refused grant into a short
     `EnterpriseOAuthError` and sends the redacted detail to the log. Security boundary: every
     guard has a test in `tests/mcp-enterprise-oauth.test.ts`, which runs the flow against the test IdP
-    in `tests/helpers/idp-server.ts`, and a mutation check. The browser package carries a copy:
+    of `@dudko.dev/test-servers` (`packages/test-servers`), and a mutation check. `assertionAudience` /
+    `assertionType` (per hop) switch the client assertion to the RFC 7523 form; the default is the
+    rfc7523bis one, and the token endpoint is only ever read from metadata that matched `expectedIssuer`. The browser package carries a copy:
     change both), `tracing.ts` (OpenTelemetry spans, a no-op without an SDK), `utils.ts`
     (retry / timeout / usage helpers).
   - `pipeline-engine.ts` + `pipeline.ts` (`createPipeline`: a graph of agents with conditions and
@@ -74,7 +76,9 @@
 
 - `tests/*.test.ts` — units plus `integration.test.ts`, which runs the whole
   loop over real sockets against a scripted OpenAI-compatible endpoint, a real
-  MCP server and a real authorization server (`tests/helpers/`), and
+  MCP server and a real authorization server (`@dudko.dev/test-servers`, a private workspace
+  package the browser tests share; `tests/helpers/` keeps only what is this package's own, the
+  scripted OpenAI endpoint), and
   `features-integration.test.ts`, which drives thinking, limits, compaction,
   skills, approval, tool search and subagents (worker + in-process) the same
   way. No key, ~7s.
