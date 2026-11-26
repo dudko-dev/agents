@@ -7,5 +7,8 @@
   "compatibility_date": "2026-11-01",
   "assets": {
     "directory": "./apps/demo/dist"
-  }
+  },
+  // Pull requests get a preview: Workers Builds runs `npx wrangler preview` for them, and that
+  // command refuses to run without this block (it may stay empty).
+  "previews": {}
 }
