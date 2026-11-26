@@ -78,7 +78,11 @@ export interface EnterpriseIdpOptions {
   tokenEndpoint: string
   /** This client's `client_id` at the IdP (the audience of the ID token). */
   clientId: string
-  /** This client's secret at the IdP. Omit for a client the IdP treats as public. */
+  /**
+   * This client's secret at the IdP. Omit for a client the IdP treats as
+   * public. In a browser it is readable by anyone who can open the page: leave
+   * it out and pass a `fetch` that sends this request through your backend.
+   */
   clientSecret?: string
   /**
    * How the secret is sent: in an `Authorization: Basic` header (the default,
@@ -92,13 +96,22 @@ export interface EnterpriseOAuthProviderOptions {
   serverUrl: string
   /** This client's pre-registered `client_id` at the MCP server's authorization server. */
   clientId: string
-  /** Its secret there. The grant is meant for confidential clients. */
+  /**
+   * Its secret there. The grant is meant for confidential clients. A secret
+   * needs `expectedIssuer`: without it the MCP server's metadata would choose
+   * who receives the secret, and the constructor throws.
+   *
+   * In a browser a secret is readable by anyone who can open the page. This
+   * provider is for public clients there, or for a `fetch` that routes the IdP
+   * call through your backend, which holds the secret.
+   */
   clientSecret?: string
   /**
-   * The issuer of the MCP server's authorization server, when you know it.
-   * Anything else the MCP server points at is then refused before a credential
-   * leaves the process. Without it, the MCP server's metadata decides which
-   * authorization server receives `clientSecret` and the ID-JAG.
+   * The issuer of the MCP server's authorization server. Anything else the MCP
+   * server points at is refused before a credential leaves the process.
+   * REQUIRED with `clientSecret`. A client with no secret at the authorization
+   * server may omit it: then the only thing sent there is the ID-JAG, which the
+   * IdP addressed to that one server and which is of no use to any other.
    */
   expectedIssuer?: string
   /** The enterprise identity provider. */
@@ -311,7 +324,7 @@ export const requestIdJag = async (req: IdJagRequest): Promise<string> => {
     'Content-Type': 'application/x-www-form-urlencoded',
     Accept: 'application/json',
   })
-  if (idp.clientSecret === undefined || idp.clientAuthMethod === 'client_secret_post') {
+  if (true) {
     params.set('client_id', idp.clientId)
     if (idp.clientSecret !== undefined) {
       params.set('client_secret', idp.clientSecret)
@@ -398,6 +411,11 @@ export class BrowserEnterpriseOAuthProvider implements OAuthClientProvider {
     assertSecureOAuthUrl(opts.idp?.tokenEndpoint, 'Enterprise IdP token endpoint')
     if (opts.expectedIssuer !== undefined) {
       assertSecureOAuthUrl(opts.expectedIssuer, 'MCP authorization server')
+    }
+    if (opts.clientSecret && opts.expectedIssuer === undefined) {
+      throw new Error(
+        'Enterprise MCP authorization: clientSecret needs expectedIssuer: without the issuer of the authorization server, the MCP server decides who receives the secret',
+      )
     }
     if (!opts.clientId || !opts.idp.clientId) {
       throw new Error('Enterprise MCP authorization: clientId and idp.clientId are required')

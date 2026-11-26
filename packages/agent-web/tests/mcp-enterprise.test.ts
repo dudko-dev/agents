@@ -83,6 +83,8 @@ interface WorldOptions {
   tokenEndpoint?: string
   /** Seconds the access token lives. Default 3600. */
   expiresIn?: number
+  /** The client at the authorization server is public: `client_id` only, no secret. */
+  publicClient?: boolean
   /** Answer every grant with this OAuth error. */
   grantError?: { error: string; error_description: string }
 }
@@ -117,7 +119,7 @@ const mockWorld = (opts: WorldOptions = {}) => {
         token_endpoint: opts.tokenEndpoint ?? `${asUrl}/token`,
         response_types_supported: ['code'],
         grant_types_supported: [JWT_BEARER_GRANT],
-        token_endpoint_auth_methods_supported: ['client_secret_basic'],
+        token_endpoint_auth_methods_supported: [opts.publicClient ? 'none' : 'client_secret_basic'],
         authorization_grant_profiles_supported: ['urn:ietf:params:oauth:grant-profile:id-jag'],
       })
     }
@@ -126,7 +128,12 @@ const mockWorld = (opts: WorldOptions = {}) => {
       state.tokenRequests.push(seen)
       if (opts.grantError) return jsonResponse(opts.grantError, 400)
       const basic = `Basic ${Buffer.from(`${AS_CLIENT}:${AS_SECRET}`).toString('base64')}`
-      if (seen.headers.get('authorization') !== basic) {
+      const authenticated = opts.publicClient
+        ? seen.headers.get('authorization') === null &&
+          seen.params.get('client_id') === AS_CLIENT &&
+          !seen.params.has('client_secret')
+        : seen.headers.get('authorization') === basic
+      if (!authenticated) {
         return jsonResponse({ error: 'invalid_client' }, 401)
       }
       if (
@@ -200,11 +207,16 @@ const makeProvider = (extra: Record<string, unknown> = {}) =>
     serverUrl: MCP_URL,
     clientId: AS_CLIENT,
     clientSecret: AS_SECRET,
+    expectedIssuer: AS_URL,
     idp: { tokenEndpoint: IDP_TOKEN_URL, clientId: IDP_CLIENT, clientSecret: IDP_SECRET },
     getIdToken: () => ID_TOKEN,
     storage: new MemoryOAuthStorage(),
     ...extra,
   } as never)
+
+// No secret at the authorization server and no pinned issuer: what refuses
+// then is the provider's own reading of discovery, not the SDK's stamp check.
+const PUBLIC = { clientSecret: undefined, expectedIssuer: undefined }
 
 const assertNoSecrets = (text: string, label: string): void => {
   for (const [name, value] of Object.entries({ ID_TOKEN, ID_JAG, AS_SECRET, IDP_SECRET })) {
@@ -246,6 +258,29 @@ test('enterprise: the MCP server URL and the IdP token endpoint must be https or
   assert.throws(() => makeProvider({ getIdToken: undefined }), /getIdToken/)
   // Loopback is fine: there is no network to sniff.
   makeProvider({ serverUrl: 'http://127.0.0.1:8080/mcp', ...idp('http://localhost:9000/token') })
+})
+
+test('enterprise: a client secret needs expectedIssuer; a public client may omit it', async () => {
+  // Without the issuer, the MCP server's metadata would choose who gets the secret.
+  assert.throws(
+    () => makeProvider({ expectedIssuer: undefined }),
+    /clientSecret needs expectedIssuer/,
+  )
+  makeProvider()
+  const world = mockWorld({ publicClient: true })
+  const idp = mockIdp()
+  const pub = makeProvider({ ...PUBLIC, fetch: idp.fetchFn })
+  assert.deepEqual(pub.clientInformation(), { client_id: AS_CLIENT })
+
+  // And that path works end to end: the ID-JAG alone buys the token.
+  const mcp = await connectMcpHttp({
+    docs: { url: MCP_URL, authProvider: pub, fetch: world.fetchFn },
+  })
+  assert.equal(mcp.results[0].connected, true, mcp.results[0].error)
+  await mcp.close()
+  assert.equal(world.state.tokenRequests[0].params.get('client_id'), AS_CLIENT)
+  assert.equal(world.state.tokenRequests[0].headers.get('authorization'), null)
+  assert.equal(idp.calls[0].params.get('audience'), AS_URL)
 })
 
 test('enterprise: non-interactive, with the pre-registered client from configuration', async () => {
@@ -414,7 +449,7 @@ test('enterprise: metadata that names another issuer is refused (RFC 8414 3.3)',
   // server and delivered to the hostile token endpoint.
   await refusedBeforeAnyCredential(
     { authorizationServer: 'https://evil.example.test', metadataIssuer: AS_URL },
-    {},
+    PUBLIC,
     /names another issuer/,
   )
 })
@@ -455,12 +490,12 @@ test('enterprise: with expectedIssuer, any other authorization server receives n
 test('enterprise: a plaintext authorization server or token endpoint is refused', async () => {
   await refusedBeforeAnyCredential(
     { authorizationServer: 'http://as.example.test' },
-    {},
+    PUBLIC,
     /MCP authorization server: .*requires https/,
   )
   await refusedBeforeAnyCredential(
     { tokenEndpoint: 'http://as.example.test/token' },
-    {},
+    PUBLIC,
     /token endpoint: .*requires https/,
   )
 })

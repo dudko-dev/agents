@@ -39,7 +39,12 @@ export interface ILocalMcpOptions {
     /** Where the IdP's signing keys are fetched from, on every grant. */
     jwksUri: string
     clientId: string
-    clientSecret: string
+    /**
+     * Omit to run a PUBLIC client for this grant: it is identified by `client_id`
+     * alone. Draft -04 only discourages that; draft -06 (section 4.4) requires a
+     * sender-constrained ID-JAG then, which this server does not implement.
+     */
+    clientSecret?: string
     /** Refuse every grant, quoting the assertion in the error (a careless server). */
     echoAssertion?: boolean
   }
@@ -133,7 +138,7 @@ export const startLocalMcp = async (opts: ILocalMcpOptions = {}): Promise<ILocal
             ? [JWT_BEARER_GRANT]
             : ['authorization_code', 'refresh_token'],
           code_challenge_methods_supported: ['S256'],
-          token_endpoint_auth_methods_supported: opts.enterprise
+          token_endpoint_auth_methods_supported: opts.enterprise?.clientSecret
             ? ['client_secret_basic', 'client_secret_post']
             : ['none'],
           ...(opts.enterprise

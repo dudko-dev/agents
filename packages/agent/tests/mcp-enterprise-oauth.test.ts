@@ -49,6 +49,7 @@ const baseOptions = (extra: Record<string, unknown> = {}) => ({
   serverUrl: MCP_URL,
   clientId: 'agent-at-as',
   clientSecret: AS_SECRET,
+  expectedIssuer: AS_URL,
   idp: { tokenEndpoint: IDP_TOKEN_URL, clientId: 'agent-at-idp', clientSecret: IDP_SECRET },
   getIdToken: () => ID_TOKEN,
   store: new MemoryOAuthStore(),
@@ -155,6 +156,22 @@ test('enterprise: expectedIssuer must be https or loopback, and the required opt
     () => createEnterpriseOAuthProvider(baseOptions({ getIdToken: undefined })),
     /getIdToken/,
   )
+})
+
+test('enterprise: a client secret needs expectedIssuer; a public client may omit it', () => {
+  // Without the issuer, the MCP server's metadata would choose who gets the secret.
+  assert.throws(
+    () => createEnterpriseOAuthProvider(baseOptions({ expectedIssuer: undefined })),
+    /clientSecret needs expectedIssuer/,
+  )
+  createEnterpriseOAuthProvider(baseOptions())
+  const pub = createEnterpriseOAuthProvider(
+    baseOptions({ clientSecret: undefined, expectedIssuer: undefined }),
+  )
+  assert.deepEqual(pub.clientInformation(), { client_id: 'agent-at-as' })
+  // The secret at the IdP is a different matter: it only ever goes to the
+  // configured token endpoint.
+  assert.equal(pub.clientMetadata.token_endpoint_auth_method, 'none')
 })
 
 // ── guards: the audience and the resource come from discovery ─────────────
@@ -524,7 +541,7 @@ interface IWorld {
 
 const withWorld = async (
   body: (world: IWorld) => Promise<void>,
-  opts: { expiresIn?: number; echoAssertion?: boolean } = {},
+  opts: { expiresIn?: number; echoAssertion?: boolean; publicClient?: boolean } = {},
 ): Promise<void> => {
   const idp = await startLocalIdp({
     clientId: IDP_CLIENT,
@@ -538,7 +555,7 @@ const withWorld = async (
       idpIssuer: idp.issuer,
       jwksUri: idp.jwksUri,
       clientId: AS_CLIENT,
-      clientSecret: AS_SECRET,
+      clientSecret: opts.publicClient ? undefined : AS_SECRET,
       echoAssertion: opts.echoAssertion,
     },
   })
@@ -914,5 +931,37 @@ test('e2e: an authorization server that echoes the grant leaks nothing through t
       assertWorldLeaksNothing(world, [error, ...logs])
     },
     { echoAssertion: true },
+  )
+})
+
+test('e2e: a public client with no secret and no expectedIssuer gets a token on the ID-JAG alone', async () => {
+  await withWorld(
+    async (world) => {
+      const { idp, mcp } = world
+      const connected = await connectMcpServers(
+        {
+          files: {
+            url: mcp.url,
+            authProvider: world.provider({ clientSecret: undefined, expectedIssuer: undefined }),
+          },
+        },
+        (() => {}) as never,
+        'agent-test',
+      )
+      try {
+        assert.deepEqual(connected.results, [{ name: 'files', connected: true }])
+        await callTool(connected.tools, 'files__echo', { text: 'public' })
+      } finally {
+        await connected.close()
+      }
+      const [grant] = mcp.tokenRequests()
+      assert.equal(grant.authMethod, 'none')
+      assert.equal(grant.params.client_id, AS_CLIENT)
+      assert.equal(grant.params.client_secret, undefined)
+      assert.equal(grant.error, undefined)
+      // Still addressed to the server discovery found, and to nothing else.
+      assert.equal(idp.exchanges[0].params.audience, mcp.issuer)
+    },
+    { publicClient: true },
   )
 })
