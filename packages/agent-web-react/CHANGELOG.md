@@ -1,3 +1,11 @@
+# 0.0.27 / 2026-11-26
+
+### :tada: Enhancements
+- New entry `./pipeline`: a pipeline editor on a canvas of its own (`PipelineEditor`, `usePipeline`), with `pipeline.css`
+- `useMcp` / `useMcpServers`: `clientMetadataUrl` (client ID metadata documents), per hook and per server; the `iss` of the authorization response is passed to the core
+- `useMcpServers` keeps a server's OAuth details across a reload; `useMcp` reconnects after the redirect with the details the flow started with
+- Peer `@dudko.dev/agent-web` is now `>=0.0.38` (pipelines)
+
 # 0.0.25 / 2026-11-21
 
 ### :tada: Enhancements

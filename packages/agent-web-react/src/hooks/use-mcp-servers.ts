@@ -11,6 +11,7 @@ import {
   defaultRedirectUrl,
   describeMcpResult,
   loadMcp,
+  mcpOAuthProviderOptions,
   OAUTH_UNSUPPORTED,
   PENDING_TTL_MS,
   readCallbackParams,
@@ -18,6 +19,7 @@ import {
   stripOAuthParams,
   watchAuthorization,
   writeRecord,
+  type McpOAuthOptions,
   type McpStatus,
   type UseMcpOptions,
 } from './use-mcp.js'
@@ -36,8 +38,8 @@ export interface McpServerSpec {
   auth?: McpAuthMode
   /** Bearer token for `auth: 'bearer'` — kept in memory only, never persisted. */
   token?: string
-  /** OAuth details for `auth: 'oauth'`. */
-  oauth?: { redirectUrl?: string; scope?: string; clientName?: string }
+  /** OAuth details for `auth: 'oauth'` (`clientMetadataUrl` for CIMD among them). */
+  oauth?: McpOAuthOptions
 }
 
 /** A server's live state. */
@@ -103,6 +105,7 @@ interface PendingRecord {
   redirectUrl: string
   scope?: string
   clientName?: string
+  clientMetadataUrl?: string
   startedAt: number
 }
 
@@ -150,9 +153,11 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
   const pendingKey = `${storageKey}:pending`
   const persist = options.persist !== false
 
-  const [servers, setServers] = useState<McpServerView[]>(() =>
-    persist ? (readRecord<StoredServer[]>(storageKey) ?? []).map((s) => view(s)) : [],
+  // The remembered list as it was stored, read once: the views below drop `oauth`.
+  const [stored] = useState<StoredServer[]>(() =>
+    persist ? (readRecord<StoredServer[]>(storageKey) ?? []) : [],
   )
+  const [servers, setServers] = useState<McpServerView[]>(() => stored.map((s) => view(s)))
   const [oauthSupported, setOauthSupported] = useState<boolean | undefined>(undefined)
   const [completingAuthorization, setCompleting] = useState(
     () => readCallbackParams() !== undefined && readRecord(pendingKey) !== undefined,
@@ -163,8 +168,18 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
   const liveRef = useRef(new Map<string, Live>())
   const specsRef = useRef(new Map<string, StoredServer>())
   if (specsRef.current.size === 0 && servers.length > 0) {
-    for (const s of servers)
-      specsRef.current.set(s.name, { name: s.name, url: s.url, auth: s.auth })
+    for (const s of servers) {
+      // With the OAuth details the server was added with (redirect, scope, client name, client
+      // ID metadata document): after a reload it must be the same client, and the next save of
+      // the list must not drop them.
+      const oauth = stored.find((x) => x.name === s.name && x.url === s.url)?.oauth
+      specsRef.current.set(s.name, {
+        name: s.name,
+        url: s.url,
+        auth: s.auth,
+        ...(oauth && typeof oauth === 'object' ? { oauth } : {}),
+      })
+    }
   }
   const optionsRef = useRef(options)
   optionsRef.current = options
@@ -204,12 +219,10 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
 
   const providerFor = (mod: McpModule, spec: StoredServer): BrowserOAuthProvider => {
     if (!mod.BrowserOAuthProvider) throw new Error(OAUTH_UNSUPPORTED)
-    return new mod.BrowserOAuthProvider({
-      serverUrl: spec.url,
-      redirectUrl: spec.oauth?.redirectUrl ?? defaultRedirectUrl(),
-      clientName: spec.oauth?.clientName ?? optionsRef.current.clientName,
-      scope: spec.oauth?.scope,
-    })
+    // Throws on a clientMetadataUrl the core refuses (not https, or a bare origin).
+    return new mod.BrowserOAuthProvider(
+      mcpOAuthProviderOptions(spec.url, spec.oauth, optionsRef.current),
+    )
   }
 
   const connectServer = useCallback(
@@ -356,6 +369,7 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
         redirectUrl: spec.oauth?.redirectUrl ?? defaultRedirectUrl(),
         scope: spec.oauth?.scope,
         clientName: spec.oauth?.clientName ?? optionsRef.current.clientName,
+        clientMetadataUrl: spec.oauth?.clientMetadataUrl ?? optionsRef.current.clientMetadataUrl,
         startedAt: Date.now(),
       }
       writeRecord(pendingKey, pending)
@@ -371,7 +385,13 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
       let provider = l?.provider
       if (!provider && spec?.auth === 'oauth') {
         const mod = await loadMcp().catch(() => undefined)
-        if (mod?.BrowserOAuthProvider) provider = providerFor(mod, spec)
+        if (mod?.BrowserOAuthProvider) {
+          try {
+            provider = providerFor(mod, spec)
+          } catch {
+            // Options the core refuses never built a provider, so nothing was stored for them.
+          }
+        }
       }
       await provider?.reset().catch(() => {})
       if (l) l.provider = undefined
@@ -433,6 +453,7 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
               redirectUrl: pending.redirectUrl,
               scope: pending.scope,
               clientName: pending.clientName,
+              clientMetadataUrl: pending.clientMetadataUrl,
             },
           })
           live(spec.name).provider = provider

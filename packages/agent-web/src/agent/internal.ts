@@ -74,6 +74,12 @@ export interface AgentContext {
    * carry (what the tool is, and that code is never reported as run without it).
    */
   sandbox?: { planner: string; executor: string; synthesizer: string }
+  /**
+   * The rendered instructions of the MCP servers whose tools are mounted (`renderMcpInstructions`);
+   * absent when none sent any or `config.mcpInstructions` is false. Built once, when the agent is
+   * created, so it is the same text in every call of every run.
+   */
+  mcpInstructions?: string
   /** Tools find_tools activated during this run (search mode). */
   discovered?: () => string[]
   /** Built-in tool names (find_tools, skill tools) — always callable. */
@@ -160,7 +166,13 @@ export const stageCall = (
   stage: ThinkingStage,
   baseSystem: string,
 ): StageCallOptions => {
-  const system = systemFor(ctx, baseSystem)
+  // The MCP servers' instructions go to the stages that choose and call tools, after the stage's
+  // own text (whatever prompt builder made it) and under their own preamble: third-party text.
+  const withMcp =
+    ctx.mcpInstructions && (stage === 'planner' || stage === 'executor')
+      ? `${baseSystem}\n\n${ctx.mcpInstructions}`
+      : baseSystem
+  const system = systemFor(ctx, withMcp)
   const thinking = resolveThinking(thinkingFor(stage, ctx.raw.thinking, ctx.raw.stageThinking))
   const caching = ctx.caching ?? { enabled: false }
   const providerOptions = mergeProviderOptions(

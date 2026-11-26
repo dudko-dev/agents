@@ -108,6 +108,14 @@ export interface BrowserAgentConfig {
    */
   learning?: boolean | LearningConfig
 
+  /**
+   * Show the model the `instructions` an MCP server returned in its `initialize` result (read from
+   * the tools `connectMcpHttp` mounted): planner and executor system prompts, under a preamble
+   * that marks them as third-party text, capped per server and in total. Default true. Set false
+   * for servers you do not trust to write into a system prompt (see docs/security.md).
+   */
+  mcpInstructions?: boolean
+
   /** Prepended to every phase's system prompt. */
   systemPrompt?: string
   /** Override any phase prompt builder. */

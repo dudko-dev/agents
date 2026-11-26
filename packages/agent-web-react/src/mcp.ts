@@ -16,10 +16,17 @@ export {
   claimOAuthCallback,
   describeMcpResult,
   isUnauthorizedError,
+  mcpOAuthProviderOptions,
   readCallbackParams,
   stripOAuthParams,
 } from './hooks/use-mcp.js'
-export type { McpConnectOptions, McpStatus, UseMcpOptions, UseMcpReturn } from './hooks/use-mcp.js'
+export type {
+  McpConnectOptions,
+  McpOAuthOptions,
+  McpStatus,
+  UseMcpOptions,
+  UseMcpReturn,
+} from './hooks/use-mcp.js'
 export { useMcpServers } from './hooks/use-mcp-servers.js'
 export type {
   McpAuthMode,
@@ -29,6 +36,7 @@ export type {
   UseMcpServersReturn,
 } from './hooks/use-mcp-servers.js'
 export type {
+  BrowserOAuthProviderOptions,
   ConnectedMcp,
   McpCatalogEntry,
   McpOAuthCallback,

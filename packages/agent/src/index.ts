@@ -11,6 +11,12 @@ export {
   MemoryOAuthStore,
   NodeOAuthProvider,
 } from './mcp-oauth.ts'
+export {
+  MCP_INSTRUCTIONS_MAX_CHARS_PER_SERVER,
+  MCP_INSTRUCTIONS_MAX_CHARS_TOTAL,
+  renderMcpInstructions,
+  type McpServerInstructions,
+} from './mcp-shared.ts'
 export type { INodeOAuthProviderOptions, IOAuthRequestOptions, IOAuthStore } from './mcp-oauth.ts'
 export {
   createEnterpriseOAuthProvider,

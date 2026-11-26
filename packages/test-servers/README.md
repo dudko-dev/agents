@@ -17,7 +17,7 @@ TypeScript run directly by Node (type stripping, Node ≥ 22.6); there is no bui
 | --- | --- | --- |
 | Identity provider | `startLocalIdp(opts)` | Issues signed ID tokens for a test user, serves its JWKS, and answers the RFC 8693 token exchange with a signed ID-JAG (draft-ietf-oauth-identity-assertion-authz-grant) after authenticating the client. |
 | Authorization server | `startLocalAuthorizationServer(opts)` | Metadata (RFC 8414), dynamic registration and a token endpoint that rotates the access token. With `enterprise`: only the `jwt-bearer` grant with an ID-JAG from one IdP, verified claim by claim. |
-| MCP server | `startLocalMcpServer(opts)` | The MCP SDK's streamable-HTTP server with three tools (`echo`, `secret`, `boom`), protected resource metadata (RFC 9728) and, with `requireAuth`, the 401 challenge. |
+| MCP server | `startLocalMcpServer(opts)` | The MCP SDK's streamable-HTTP server with three tools (`echo`, `secret`, `boom`), optional `instructions` in its `initialize` result (`mcp.setInstructions()` changes them for the next client to connect), optional structured tools (`structuredTools`: `report` and `report_mixed` declare an `outputSchema` and answer with `structuredContent`), protected resource metadata (RFC 9728) and, with `requireAuth`, the 401 challenge. |
 | The pair | `startLocalMcp(opts)` | An MCP server and the authorization server that guards it, on two ports, already wired together. What most tests want. |
 
 Every one returns its URLs, what it recorded, and `close()`.
@@ -106,6 +106,13 @@ Set one at a time; that is how a negative test stays about one thing.
 | --- | --- |
 | `refuseGrant: { error, description }` | answers every grant with that OAuth error |
 | `echoRequest` | refuses and quotes the whole request body (also `enterprise.echoAssertion` at start) |
+
+**MCP server** — `mcp.structuredFaults` (with `structuredTools`):
+
+| Field | `report` / `report_mixed` then |
+| --- | --- |
+| `result: 'mismatch'` | answer with `structuredContent` that breaks the declared `outputSchema` (`temperature` is a string) |
+| `result: 'missing'` | answer with no `structuredContent` at all, while `tools/list` still declares the schema |
 
 **Options that change what a server accepts:**
 

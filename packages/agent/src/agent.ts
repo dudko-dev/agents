@@ -4,6 +4,7 @@ import { compactionMaxTokens } from './call-options.ts'
 import { compactHistory, resolveCompaction } from './compaction.ts'
 import type { IAgentInternalContext } from './internal.ts'
 import { connectMcpServers, filterTools } from './mcp.ts'
+import { collectMcpInstructions, renderMcpInstructions } from './mcp-shared.ts'
 import { buildModelFromStage, resolveStage } from './provider.ts'
 import { runAgentLoop } from './runner.ts'
 import { createLearning } from './learning.ts'
@@ -267,6 +268,11 @@ export const createAgent = async (
     return { tools: f.tools, catalog: [...f.catalog, ...nativeCatalog] }
   }
 
+  // The prompt section for the instructions of the servers whose tools survived the filter
+  // (read from the unwrapped tools: each MCP tool carries its server). '' when switched off.
+  const mcpInstructionsFor = (mounted: ReturnType<typeof filterTools>['tools']): string =>
+    config.mcpInstructions === false ? '' : renderMcpInstructions(collectMcpInstructions(mounted))
+
   const connect = async () => {
     const c = await connectMcpServers(
       config.mcpServers,
@@ -296,6 +302,7 @@ export const createAgent = async (
       connection: c,
       tools: wrapToolSet(merged.tools, wrapDeps),
       catalog: merged.catalog,
+      mcpInstructions: mcpInstructionsFor(merged.tools),
     }
   }
 
@@ -402,6 +409,15 @@ export const createAgent = async (
       : {}),
     approval,
   }
+  // Only between runs (here, a refresh, a reconnect): a run keeps the text it started with.
+  const syncMcpInstructions = (text: string): void => {
+    if (text) {
+      ctx.mcpInstructions = text
+    } else {
+      delete ctx.mcpInstructions
+    }
+  }
+  syncMcpInstructions(connected.mcpInstructions)
   // The prompts mention run_js only while it is really the sandbox's tool (not filtered out, not
   // replaced by a host tool of the same name).
   const syncSandbox = (): void => {
@@ -457,6 +473,7 @@ export const createAgent = async (
     }
     Object.assign(ctx.tools, wrapped)
     ctx.toolCatalog = toEntries(merged.catalog)
+    syncMcpInstructions(mcpInstructionsFor(merged.tools))
     syncFindTools()
     log(
       'info',
@@ -609,6 +626,7 @@ export const createAgent = async (
         }
         Object.assign(ctx.tools, fresh.tools)
         ctx.toolCatalog = toEntries(fresh.catalog)
+        syncMcpInstructions(fresh.mcpInstructions)
         syncFindTools()
         syncSandbox()
         connected = fresh

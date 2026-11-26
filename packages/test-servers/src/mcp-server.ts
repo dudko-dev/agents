@@ -33,7 +33,24 @@ export interface ILocalMcpServerOptions extends IListenOptions {
    * own, empty until a test fills it.
    */
   validTokens?: Set<string>
+  /** The `instructions` the server returns in its `initialize` result. Default: none. */
+  instructions?: string
+  /**
+   * Also mount the tools that declare an `outputSchema` and answer with
+   * `structuredContent`: `report` and `report_mixed`. Default: off.
+   */
+  structuredTools?: boolean
 }
+
+/** How the structured tools go wrong (see `ILocalMcpServer.structuredFaults`). */
+export type StructuredFault = 'mismatch' | 'missing'
+
+/** The value `report` returns as `structuredContent` (and, serialized, as its text). */
+export const REPORT_VALUE = { city: 'Lisbon', temperature: 21, tags: ['mild', 'clear'] }
+
+/** A 1x1 transparent PNG: the image part `report_mixed` returns. */
+export const REPORT_IMAGE_BASE64 =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII='
 
 export interface ILocalMcpServer {
   /** The MCP endpoint to hand to `mcpServers[name].url`. */
@@ -53,12 +70,25 @@ export interface ILocalMcpServer {
   validTokens: Set<string>
   /** The `capabilities` of every `initialize` request the MCP server received. */
   initializeCapabilities: Record<string, unknown>[]
+  /**
+   * Mutable: make the structured tools break their own `outputSchema` from now
+   * on. `result: 'mismatch'` answers with `temperature` as a string;
+   * `result: 'missing'` answers with no `structuredContent` at all. The schema
+   * in `tools/list` stays as declared: a server whose output drifted.
+   */
+  structuredFaults: { result?: StructuredFault }
+  /**
+   * Change (or, with `undefined`, drop) the `instructions` returned from the
+   * next `initialize` on: a client that is already connected keeps what it got.
+   */
+  setInstructions: (instructions: string | undefined) => void
   close: () => Promise<void>
 }
 
 /**
  * Start an MCP server (the SDK's own, stateless streamable HTTP) with three
- * tools: `echo`, `secret` and `boom` (which always fails).
+ * tools: `echo`, `secret` and `boom` (which always fails). `structuredTools`
+ * adds `report` and `report_mixed`.
  */
 export const startLocalMcpServer = async (
   opts: ILocalMcpServerOptions = {},
@@ -67,12 +97,24 @@ export const startLocalMcpServer = async (
   const secret = `zq-${Math.random().toString(36).slice(2, 8)}`
   const validTokens = opts.validTokens ?? new Set<string>()
   const initializeCapabilities: Record<string, unknown>[] = []
+  const structuredFaults: { result?: StructuredFault } = {}
+  let instructions = opts.instructions
 
   // Built per request: a stateless StreamableHTTP transport is single-use, and
   // an McpServer can only be connected to one transport at a time. This is the
   // SDK's own pattern for stateless mode.
-  const buildServer = (): McpServer => {
-    const server = new McpServer({ name: 'local-mcp', version: '1.0.0' })
+  //
+  // `method` is the JSON-RPC method this server instance will answer. The SDK's
+  // McpServer validates a result against the tool's outputSchema before it
+  // sends it, so a faulty answer is only possible from an instance that does
+  // not carry the schema: with a fault switched on, the instance answering
+  // `tools/call` registers the structured tools without one, while the one
+  // answering `tools/list` still declares it.
+  const buildServer = (method?: string): McpServer => {
+    const server = new McpServer(
+      { name: 'local-mcp', version: '1.0.0' },
+      instructions === undefined ? undefined : { instructions },
+    )
     server.registerTool(
       'echo',
       { description: 'Echo the input back', inputSchema: { text: z.string() } },
@@ -97,6 +139,59 @@ export const startLocalMcpServer = async (
       calls.push({ name: 'boom', args: {} })
       return { content: [{ type: 'text' as const, text: 'kaboom' }], isError: true }
     })
+    if (opts.structuredTools) {
+      const fault = method === 'tools/call' ? structuredFaults.result : undefined
+      const outputSchema = fault
+        ? undefined
+        : { city: z.string(), temperature: z.number(), tags: z.array(z.string()) }
+      const structured = (): Record<string, unknown> | undefined =>
+        fault === 'missing'
+          ? undefined
+          : fault === 'mismatch'
+            ? { ...REPORT_VALUE, temperature: 'warm' }
+            : { ...REPORT_VALUE }
+      // The specification's backwards-compatible form: the same value as
+      // structuredContent and, serialized, as a text block.
+      server.registerTool(
+        'report',
+        {
+          description: 'Return a weather report as structured content',
+          inputSchema: {},
+          ...(outputSchema ? { outputSchema } : {}),
+          annotations: { readOnlyHint: true },
+        },
+        () => {
+          calls.push({ name: 'report', args: {} })
+          const value = structured()
+          return {
+            content: [{ type: 'text' as const, text: JSON.stringify(value ?? REPORT_VALUE) }],
+            ...(value ? { structuredContent: value } : {}),
+          }
+        },
+      )
+      // Structured content beside content that says something else: a sentence
+      // and an image.
+      server.registerTool(
+        'report_mixed',
+        {
+          description: 'Return a weather report with a summary and a picture',
+          inputSchema: {},
+          ...(outputSchema ? { outputSchema } : {}),
+          annotations: { readOnlyHint: true },
+        },
+        () => {
+          calls.push({ name: 'report_mixed', args: {} })
+          const value = structured()
+          return {
+            content: [
+              { type: 'text' as const, text: 'A mild, clear day.' },
+              { type: 'image' as const, data: REPORT_IMAGE_BASE64, mimeType: 'image/png' },
+            ],
+            ...(value ? { structuredContent: value } : {}),
+          }
+        },
+      )
+    }
     return server
   }
 
@@ -128,13 +223,6 @@ export const startLocalMcpServer = async (
           return
         }
       }
-      const server = buildServer()
-      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
-      res.on('close', () => {
-        void transport.close()
-        void server.close()
-      })
-      await server.connect(transport)
       const raw = await readBody(req)
       const message = raw
         ? (JSON.parse(raw) as {
@@ -142,6 +230,13 @@ export const startLocalMcpServer = async (
             params?: { capabilities?: Record<string, unknown> }
           })
         : undefined
+      const server = buildServer(message?.method)
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
+      res.on('close', () => {
+        void transport.close()
+        void server.close()
+      })
+      await server.connect(transport)
       if (message?.method === 'initialize') {
         initializeCapabilities.push(message.params?.capabilities ?? {})
       }
@@ -160,6 +255,10 @@ export const startLocalMcpServer = async (
     calls,
     validTokens,
     initializeCapabilities,
+    structuredFaults,
+    setInstructions: (next) => {
+      instructions = next
+    },
     close: () => closeServer(httpServer),
   }
 }
@@ -186,6 +285,10 @@ export interface ILocalMcpOptions extends Pick<IListenOptions, 'host' | 'cors'> 
    * interactive way in.
    */
   enterprise?: IEnterpriseGrantOptions
+  /** The `instructions` the MCP server returns in its `initialize` result. */
+  instructions?: string
+  /** Also mount the structured tools (`report`, `report_mixed`). */
+  structuredTools?: boolean
 }
 
 export interface ILocalMcp extends ILocalMcpServer {
@@ -236,6 +339,8 @@ export const startLocalMcp = async (opts: ILocalMcpOptions = {}): Promise<ILocal
       requireAuth: opts.requireAuth,
       authorizationServers: [as.issuer],
       validTokens: as.validTokens,
+      instructions: opts.instructions,
+      structuredTools: opts.structuredTools,
     })
   } catch (err) {
     await as.close()

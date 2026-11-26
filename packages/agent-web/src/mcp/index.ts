@@ -4,6 +4,12 @@ export { connectMcpHttp, diagnoseMcpCors, flattenContent } from './http.js'
 // is always false — string sniffing is not an option, and a host that only
 // depends on this package has no other handle on the class.
 export { UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js'
+export {
+  MCP_INSTRUCTIONS_MAX_CHARS_PER_SERVER,
+  MCP_INSTRUCTIONS_MAX_CHARS_TOTAL,
+  renderMcpInstructions,
+} from './shared.js'
+export type { McpServerInstructions } from './shared.js'
 export type {
   McpHttpServerConfig,
   McpCatalogEntry,

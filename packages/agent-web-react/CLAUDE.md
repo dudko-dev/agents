@@ -93,6 +93,11 @@ against its production build.
   endpoint (`gemini.ts`, routed by the stage markers; it can script tool calls and the notebook's
   `save_skill`). `pipeline.spec.ts`: the pipeline editor at `/pipeline/` - mouse, keyboard, a real
   run against the scripted endpoint, a reload, a phone (touch pan and pinch through CDP).
+  `enterprise.spec.ts` is the one spec that does NOT use the demo: enterprise-managed MCP
+  authorization (ID-JAG) has no screen there and the hooks take no `authProvider`, so it drives the
+  core on a test-only page (`fixtures/enterprise-page.ts`, bundled with esbuild and served on
+  loopback by `page-server.ts` while the test runs - never built into the demo or the site) against
+  `@dudko.dev/test-servers`. Keep test pages there; do not add hidden routes to the demo.
 - `apps/demo/` (monorepo root) — the Vite + React demo (aliases the library to this package's `dist`).
   One Vite project, two pages: the demo (`index.html`, served at `/demo/`) and the pipeline editor
   (`pipeline/index.html`, `src/pipeline/`, served at `/pipeline/`). They share source - the model
