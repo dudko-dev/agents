@@ -1,15 +1,20 @@
 import { contextOverflowOf } from '../context-window.js'
 import { generate, generateStructured } from '../llm/generate.js'
 import { normalizeUsage, usageOfError } from '../llm/util.js'
-import { parsePlannerResponse } from '../parse.js'
+import { parsePlannerResponse, splitComplexityTag } from '../parse.js'
 import type { ToolCallMode } from '../prompts.js'
 import { renderSkillIndex } from '../skills.js'
-import { addUsage, type IPlan, type IUsage } from './loop-types.js'
+import { addUsage, type IPlan, type IUsage, type StepComplexity } from './loop-types.js'
 import { imageRefusal, promptFor, stageCall, withCapHint, type AgentContext } from './internal.js'
-import { PlanSchema } from './schemas.js'
+import { PlanSchema, TieredPlanSchema } from './schemas.js'
 
 const toSteps = (
-  raw: { description: string; expectedOutcome?: string; suggestedTools?: string[] }[],
+  raw: {
+    description: string
+    expectedOutcome?: string
+    suggestedTools?: string[]
+    complexity?: StepComplexity
+  }[],
   cap: number,
 ): IPlan['steps'] =>
   raw
@@ -20,6 +25,8 @@ const toSteps = (
       description: s.description.trim(),
       expectedOutcome: s.expectedOutcome,
       suggestedTools: s.suggestedTools,
+      // Only ever present with `config.executorTiers`: the schema and the tag are tiers-only.
+      ...(s.complexity ? { complexity: s.complexity } : {}),
     }))
 
 export interface PlanOutcome {
@@ -56,6 +63,7 @@ export const createPlan = async (
       skills: skillIndex,
       searchMode: ctx.strategy === 'search',
       ...(ctx.sandbox ? { sandbox: ctx.sandbox.planner } : {}),
+      ...(ctx.tiers ? { tiers: true } : {}),
     })
     return {
       ...stageCall(ctx, 'planner', parts.system),
@@ -82,7 +90,11 @@ export const createPlan = async (
   let wasted = normalizeUsage()
   if (ctx.plannerMode === 'native') {
     try {
-      const result = await generateStructured(ctx.plannerModel, PlanSchema, commonFor('native'))
+      const result = await generateStructured(
+        ctx.plannerModel,
+        ctx.tiers ? (TieredPlanSchema as unknown as typeof PlanSchema) : PlanSchema,
+        commonFor('native'),
+      )
       ctx.log.debug('planner (native):', result.object)
       return {
         plan: { thought: result.object.thought, steps: toSteps(result.object.steps, cap) },
@@ -122,7 +134,10 @@ export const createPlan = async (
     plan: {
       thought: parsed.reply,
       steps: toSteps(
-        parsed.plan.map((description) => ({ description })),
+        // With tiers, a step may open with its rating: "[high] ...".
+        parsed.plan.map((description) =>
+          ctx.tiers ? splitComplexityTag(description) : { description },
+        ),
         cap,
       ),
     },

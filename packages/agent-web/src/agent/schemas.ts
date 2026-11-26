@@ -11,6 +11,15 @@ export const PlanStepSchema = z.object({
   suggestedTools: z.array(z.string()).optional(),
 })
 
+/**
+ * The plan step of an agent with `config.executorTiers`: it also carries the planner's rating. A
+ * SEPARATE schema, so an agent without tiers sends exactly the schema it always did. Optional (a
+ * model that leaves it out still gives a valid plan; the step then runs on `standard`).
+ */
+export const TieredPlanStepSchema = PlanStepSchema.extend({
+  complexity: z.enum(['low', 'medium', 'high']).optional(),
+})
+
 export const PlanSchema = z.object({
   /** One short sentence. For a greeting/small talk, holds the answer and steps is empty. */
   thought: z.string(),
@@ -18,6 +27,8 @@ export const PlanSchema = z.object({
   /** Names of the configured skills that apply to this goal. */
   skills: z.array(z.string()).optional(),
 })
+
+export const TieredPlanSchema = PlanSchema.extend({ steps: z.array(TieredPlanStepSchema) })
 
 export const ReplanSchema = z.object({
   decision: z.enum(['continue', 'revise', 'finish']),

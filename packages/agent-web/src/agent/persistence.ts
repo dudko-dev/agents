@@ -68,6 +68,8 @@ export interface RunSnapshot {
    * correction the user had already made.
    */
   userUpdates?: { text: string; reconciled: boolean }[]
+  /** Escalations so far (counts against `escalation.maxPerRun` on resume). */
+  escalations?: number
   /** Final answer (status `complete`). */
   text?: string
   /** What ended the run (status `failed`). */

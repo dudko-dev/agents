@@ -1,28 +1,36 @@
 import { z } from 'zod'
 import { stageCallOptions, withCapHint } from './call-options.ts'
 import type { IAgentInternalContext } from './internal.ts'
-import { PlanSchema, catalogModeFor, effectiveToolStrategy } from './planner.ts'
+import { PlanSchema, TieredPlanSchema, catalogModeFor, effectiveToolStrategy } from './planner.ts'
 import { buildReplannerUserPrompt, composeReplannerSystem } from './prompts.ts'
 import { generateStructured } from './structured.ts'
 import { ATTR, withSpan } from './tracing.ts'
 import type { IPlan, IPlanStep, IStepResult, IUsage } from './types.ts'
 import { normalizeUsage, usageOfError, withRetry, withTimeout } from './utils.ts'
 
-export const DecisionSchema = z.discriminatedUnion('mode', [
-  z.object({
-    mode: z.literal('continue'),
-    reason: z.string().min(1).describe('Why the next step is still appropriate'),
-  }),
-  z.object({
-    mode: z.literal('finish'),
-    reason: z.string().min(1).describe('Why no more steps are needed'),
-  }),
-  z.object({
-    mode: z.literal('revise'),
-    reason: z.string().min(1).describe('Why the plan must change'),
-    newPlan: PlanSchema.describe('Plan covering ONLY the remaining work'),
-  }),
-])
+const decisionSchemaWith = (plan: typeof PlanSchema) =>
+  z.discriminatedUnion('mode', [
+    z.object({
+      mode: z.literal('continue'),
+      reason: z.string().min(1).describe('Why the next step is still appropriate'),
+    }),
+    z.object({
+      mode: z.literal('finish'),
+      reason: z.string().min(1).describe('Why no more steps are needed'),
+    }),
+    z.object({
+      mode: z.literal('revise'),
+      reason: z.string().min(1).describe('Why the plan must change'),
+      newPlan: plan.describe('Plan covering ONLY the remaining work'),
+    }),
+  ])
+
+export const DecisionSchema = decisionSchemaWith(PlanSchema)
+
+// With config.executorTiers: a revised plan's steps carry a complexity too (see TieredPlanSchema).
+export const TieredDecisionSchema = decisionSchemaWith(
+  TieredPlanSchema as unknown as typeof PlanSchema,
+)
 
 export type ReplanDecision = z.infer<typeof DecisionSchema>
 
@@ -54,11 +62,12 @@ export const decideNextAction = async (
             domain: ctx.config.systemPrompt,
             skills: ctx.skills,
             activeSkills: ctx.run?.activeSkills,
+            ...(ctx.tiers ? { tiers: true } : {}),
           }),
         )
         const r = await generateStructured({
           model: ctx.plannerModel,
-          schema: DecisionSchema,
+          schema: ctx.tiers ? TieredDecisionSchema : DecisionSchema,
           ...call,
           prompt: buildReplannerUserPrompt(
             input,

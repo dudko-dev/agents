@@ -39,6 +39,38 @@ export type ToolSelectionStrategy = 'all' | 'plan-narrowed' | 'search' | 'auto'
 // but has its own thinking / per-call budget knobs.
 export type AgentStage = 'planner' | 'executor' | 'replanner' | 'synthesizer'
 
+// Executor models by strength (config.executorTiers), weakest first.
+export type ModelTier = 'light' | 'standard' | 'strong'
+
+// What the planner marks a step with when tiers are configured: how hard the step is. It names
+// the tier the step should run on (low -> light, medium -> standard, high -> strong).
+export type StepComplexity = 'low' | 'medium' | 'high'
+
+// Why a step started on its tier: 'planned' - the planner's complexity named a configured tier;
+// 'default' - the planner did not mark the step, so it runs on `standard`; 'fallback' - the tier
+// the planner named is not configured, so the nearest configured one runs it.
+export type TierReason = 'planned' | 'default' | 'fallback'
+
+// Why a step was retried on a stronger tier: the executor reported a blocker; it produced no
+// text and no successful tool call; it kept calling a tool with arguments that did not parse;
+// its output was cut by the per-call cap; or its model call failed.
+export type EscalationReason =
+  'blocked' | 'empty-result' | 'tool-arguments' | 'output-cut' | 'error'
+
+// One escalation of a step, kept on its result.
+export interface IStepEscalation {
+  from: ModelTier
+  to: ModelTier
+  reason: EscalationReason
+}
+
+export interface IEscalationConfig {
+  // Retries of ONE step on stronger tiers (each on the next stronger configured tier). Default 1.
+  maxPerStep?: number
+  // Escalations in one run, a resumed run included. Default 3.
+  maxPerRun?: number
+}
+
 // Portable reasoning effort, mapped by the AI SDK onto each provider's own
 // knob. 'none' explicitly disables thinking; 'provider-default' sends the
 // provider's default level.
@@ -310,6 +342,22 @@ export interface IAgentConfig {
   // omit it to inherit every default from the top level.
   planner?: IAgentStageOverride
   synthesizer?: IAgentStageOverride
+  // Executor models by tier. Off unless `light` or `strong` is set: with neither, nothing about a
+  // run changes. Each block is a stage override like `planner` (omitted fields inherit the top
+  // level); `standard` is the top-level model unless overridden here. With tiers on, the planner
+  // marks every step with a `complexity` and the executor runs it on that tier's model (low ->
+  // light, medium -> standard, high -> strong); a tier that is not configured falls back to the
+  // nearest configured one (the stronger of two equally near). `compaction.contextWindowTokens`
+  // must be the window of the SMALLEST of these models: every step is fitted to it.
+  executorTiers?: Partial<Record<ModelTier, IAgentStageOverride>>
+  // When a step fails in a way a stronger model could fix (a blocker, no result, tool arguments
+  // that keep failing to parse, output cut by the cap, a failed model call), retry it on the next
+  // stronger configured tier BEFORE the replanner is consulted. The retry continues the step: it
+  // is shown what the first attempt already did, and a write that already succeeded is not
+  // executed again. Never on a stop, refused credentials (401 / 403), a rate limit (429), a spent
+  // budget or a tool the user denied. Default: on when `executorTiers` is on (false turns it off);
+  // without tiers it does nothing.
+  escalation?: boolean | IEscalationConfig
   // Deprecated single-string shortcuts. Equivalent to
   // `planner: { model }` / `synthesizer: { model }`. Kept for back-compat
   // with the pre-stage-override API; prefer the override blocks for new code.
@@ -474,6 +522,8 @@ export interface IPlanStep {
   // narrowed mode then falls back to the full toolset rather than running the
   // step with zero tools.
   requiresTools?: boolean
+  // How hard the planner rated the step. Only when config.executorTiers is on.
+  complexity?: StepComplexity
 }
 
 export interface IPlan {
@@ -492,6 +542,11 @@ export interface IStepResult {
   // True when the executor signalled it could not complete the step (via the
   // [BLOCKER] sentinel in its reply). The replanner is invoked on this signal.
   blocked: boolean
+  // Only when config.executorTiers is on: the tier (and its model id) the step FINISHED on, and
+  // the escalations that led there, in order. `toolCalls` then holds every attempt's calls.
+  tier?: ModelTier
+  model?: string
+  escalations?: IStepEscalation[]
 }
 
 // When the LLM replanner is consulted after a step; see IAgentConfig.replanAfter.
@@ -516,7 +571,26 @@ type AgentEventBody =
   | { type: 'plan.step-added'; step: IPlanStep; index: number }
   | { type: 'plan.created'; plan: IPlan }
   | { type: 'plan.revised'; plan: IPlan; reason: string }
-  | { type: 'step.start'; step: IPlanStep; index: number }
+  // tier / model / tierReason: only when config.executorTiers is on - the tier the step starts
+  // on, its model id, and why that tier (see TierReason).
+  | {
+      type: 'step.start'
+      step: IPlanStep
+      index: number
+      tier?: ModelTier
+      model?: string
+      tierReason?: TierReason
+    }
+  // The step failed on `from` and is retried on the stronger tier `to` (config.escalation);
+  // `model` is the model id of `to`. Fires between the step's start and its completion.
+  | {
+      type: 'step.escalated'
+      step: IPlanStep
+      from: ModelTier
+      to: ModelTier
+      model: string
+      reason: EscalationReason
+    }
   | { type: 'step.text-delta'; step: IPlanStep; delta: string }
   // The model's thoughts, when thinking is on and the provider streams them.
   | { type: 'step.reasoning-delta'; step: IPlanStep; delta: string }
@@ -707,6 +781,8 @@ export interface IRunSnapshot {
   // replanner has already weighed each. A resumed run keeps them: otherwise it would forget a
   // correction the user had already made.
   userUpdates?: { text: string; reconciled: boolean }[]
+  // Escalations so far (counts against escalation.maxPerRun on resume).
+  escalations?: number
 }
 
 // Optional persistence facade. Write hooks fire at run start, after each

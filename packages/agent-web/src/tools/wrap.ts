@@ -9,6 +9,7 @@ import {
   isReadOnlyTool,
   type ApprovalState,
 } from './approval.js'
+import { recordWrite, replayOutput, replayedWrite, type IStepWrites } from '../tiers.js'
 import { promptHintOf } from './types.js'
 
 /**
@@ -98,6 +99,37 @@ export interface WrapToolsOptions {
   runId?: string
   /** Shared with every call of the run, so a lesson can name what the run read. */
   fetched?: string[]
+  /**
+   * The writes of the step in flight, while that step may be escalated to a stronger tier (else
+   * undefined, and nothing changes): a write that already succeeded in an EARLIER attempt at the
+   * step is not executed again - the call gets the earlier result back (see `tiers.ts`).
+   */
+  stepWrites?: () => IStepWrites | undefined
+}
+
+const isAsyncIterable = (v: unknown): v is AsyncIterable<unknown> =>
+  typeof v === 'object' && v !== null && Symbol.asyncIterator in v
+
+/** Record a call's result once it is known, without changing what `execute` returns or when. */
+const recording = (out: unknown, record: (value: unknown) => void): unknown => {
+  if (isAsyncIterable(out)) {
+    return (async function* () {
+      let last: unknown
+      for await (const value of out) {
+        last = value
+        yield value
+      }
+      record(last)
+    })()
+  }
+  if (out && typeof (out as { then?: unknown }).then === 'function') {
+    return (out as Promise<unknown>).then((value) => {
+      record(value)
+      return value
+    })
+  }
+  record(out)
+  return out
 }
 
 /**
@@ -136,7 +168,12 @@ export const wrapToolsForRun = (tools: ToolSet, o: WrapToolsOptions): ToolSet =>
     }
     if (typeof execute === 'function') {
       wrapped.execute = (input: unknown, options: unknown) => {
-        const run = (): unknown => {
+        // A read-only or built-in tool is never held back or recorded.
+        const writes = readOnly ? undefined : o.stepWrites?.()
+        // Before the consent gate and the budget: a call that is not made costs neither.
+        const earlier = replayedWrite(writes, name, input)
+        if (earlier) return replayOutput(earlier.output)
+        const call = (): unknown => {
           if (!builtin) o.countCall()
           const agentRun: ToolRunContext = {
             emit: o.emit,
@@ -150,6 +187,8 @@ export const wrapToolsForRun = (tools: ToolSet, o: WrapToolsOptions): ToolSet =>
           }
           return execute.call(t, input, { ...(options as object), agentRun })
         }
+        const run = (): unknown =>
+          writes ? recording(call(), (value) => recordWrite(writes, name, input, value)) : call()
         if (builtin) return run()
         const permission = decideToolPermission({
           toolName: name,

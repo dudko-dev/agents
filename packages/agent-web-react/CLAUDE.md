@@ -143,7 +143,7 @@ publishes to npm via Trusted Publishing after CI passes on `main`. Pages
   `apps/site/scripts/sync-docs.mjs` and the sidebar), event → state logic in `pipelineStateReducer`.
   The core's pipeline API is imported statically from `@dudko.dev/agent-web`, as `use-agent` imports
   `createAgent` - it is in the core's main entry and has no optional peer behind it.
-- Docs ship in the npm package: a new prop, hook field, exported type or label goes in the README
+- Docs live next to the code (the README goes to npm; `docs/*.md` are published on the site, not in the npm package): a new prop, hook field, exported type or label goes in the README
   (hook table / components table) and `docs/chat.md`. `tests/chat.test.ts` fails when a label key is not
   listed in `docs/chat.md`'s label reference.
 - Don't import model providers, `ai`, or `zod` at runtime here — the core owns

@@ -104,11 +104,12 @@ Pass an event handler as the second argument to `createAgent`, or per run via `o
 | `plan.step-added` | A step of the plan is coherent enough to show (`step`, `index`). A hint for incremental UIs — it can still change before `plan.created`. |
 | `plan.created` | The canonical plan (`plan`). |
 | `plan.revised` | The replanner replaced the remaining steps (`plan`, `reason`). |
-| `step.start` | A step began (`step`, `index`). |
+| `step.start` | A step began (`step`, `index`). With [model tiers](#model-tiers-and-escalation): `tier`, `model`, `tierReason` - the tier it starts on and why. |
+| `step.escalated` | The step failed on tier `from` and is retried on the stronger tier `to` (`model`, `reason`). See [escalation](#model-tiers-and-escalation). |
 | `step.text-delta` | The executor's text for the step. |
 | `step.reasoning-delta` / `final.reasoning-delta` | The executor's / synthesizer's thoughts, when [thinking](#thinking-reasoning) is on and the provider streams them. |
 | `step.tool-call` / `step.tool-result` | A tool was called (`name`, `input`) / returned (`output`, `ok`). |
-| `step.complete` | The step finished (`result`). |
+| `step.complete` | The step finished (`result`; with tiers it carries `tier`, `model` and `escalations`). |
 | `replan.decision` | The replanner's verdict: `mode: 'continue' \| 'revise' \| 'finish'`, `reason`, and `cause: 'last-step' \| 'clean-step' \| 'llm-decision' \| 'user-message'`. `failed: true` when the replanner call itself failed and `continue` is the fallback (see [When the replanner fails](#when-the-replanner-fails)). |
 | `revisions.exceeded` | The cap on plan revisions (`cap`) was reached; the run goes on to synthesize. |
 | `final.text-delta` | The final answer, streamed. |
@@ -223,7 +224,7 @@ Caveats:
 - **Idempotency.** Resume re-enters the loop at the saved checkpoint (the iteration boundary after the last successful step). A crash mid-step means the in-flight step's tool calls are lost; on resume, the runner re-executes that step from scratch. If your tools have side effects (writes, payments, emails), the same call may fire twice. Design tools to be idempotent or guard against replay.
 - **Sandbox.** The per-run sandbox directory is auto-cleaned on completion. To resume, set `keepSandbox: true` so files written by earlier steps survive the crash. Without it, the trace's file references will point to a directory that no longer exists.
 - **Plan changes.** The saved `currentPlan` (post any revise) is what gets used on resume — the planner is not re-invoked.
-- **Caps inherit.** `iterations`, `revisions`, usage and the tool-call count (`toolCallCount`) carry over, so per-run caps still apply across the boundary; so do the active skills (`activeSkills`) and the trace summary (`traceSummary` / `traceSummaryUpTo`).
+- **Caps inherit.** `iterations`, `revisions`, usage, the tool-call count (`toolCallCount`) and the escalation count (`escalations`) carry over, so per-run caps still apply across the boundary; so do the active skills (`activeSkills`) and the trace summary (`traceSummary` / `traceSummaryUpTo`).
 - **Terminal status.** Resuming a run with `status: 'complete'` throws — re-read the saved `text` directly instead.
 - **Event semantics.** On resume the runner re-emits a `plan.created` event so consumers attaching mid-resume see the canonical plan; consumers that store every event will observe `plan.created` twice for the same `runId`. `onRunStart` is **not** re-fired (the original run already emitted it) — code that counts run starts must use `runId` for de-duplication. `onStepComplete` only fires for steps the resumed run actually executes; pre-resume steps are already in the loaded `trace`.
 - **Inputs are locked to the snapshot.** Both `options.input` and `options.history` passed to `agent.run({ resumeFromRunId })` are **silently ignored** in favor of the values stored at the original run start. This keeps the resumed prompt deterministic against the saved trace; pass an empty input (`input: ''`) to make the override explicit.
@@ -983,6 +984,8 @@ Consent is the host's job ([tool approval](#tool-approval-and-autopilot)) — th
 | `sandbox` | Off by default. `true` or `{ timeoutMs, memoryLimitBytes, maxOutputChars, maxCodeChars }` gives the model `run_js`: JavaScript it wrote runs in QuickJS/WebAssembly inside a worker thread that is killed at the deadline. Needs the optional peer `quickjs-emscripten`. See [Running code](#running-code-the-sandbox). |
 | `model` | Default model for every stage (executor / planner / synthesizer) when no per-stage override is set. |
 | `planner` / `synthesizer` | Optional per-stage override blocks: `{ providerType?, baseURL?, apiKey?, model? }`. Use these to mix providers (e.g. Gemini planner, Anthropic synthesizer). Cross-provider overrides MUST set their own `apiKey`. |
+| `executorTiers` | Off by default. `{ light?, standard?, strong? }`, each a stage override like `planner`: the planner rates every step `low` / `medium` / `high` and the executor runs it on that tier's model; a tier that is not configured falls back to the nearest one. See [Model tiers and escalation](#model-tiers-and-escalation). |
+| `escalation` | `true` (default once `executorTiers` is on) \| `false` \| `{ maxPerStep?, maxPerRun? }` (defaults 1 / 3). A step that fails in a way a stronger model could fix is retried on the next stronger tier before the replanner is consulted. Nothing without tiers. |
 | `plannerModel` / `synthesizerModel` | **Deprecated** model-only shortcuts. Equivalent to `planner: { model }` / `synthesizer: { model }`. The override block, if present, wins. |
 | `mcpServers` | `Record<name, { url, headers?, getHeaders?, authProvider?, fetch?, connectTimeoutMs? } \| { command, args?, env?, cwd?, connectTimeoutMs? }>` — StreamableHTTP for remote (legacy HTTP+SSE servers are **not** supported), stdio for locally-spawned servers. |
 | `tools` | Optional `ToolSet` of native AI-SDK tools registered alongside MCP-discovered ones. Names must not collide with MCP-prefixed names or the built-in tools (`createAgent` throws on conflict). Mark read-only tools with `markReadOnly(tool)`. |
@@ -1037,6 +1040,44 @@ Notes:
 - Replanner has no separate override — it always shares the planner's model and provider.
 - A too-weak executor with flaky tool-call JSON collapses the whole loop. The **low** tier only works for models specifically tuned for tool use.
 - The executor runs once per plan step (× multi-step tool calling inside each step), so it dominates per-run cost. Optimize there first.
+
+### Model tiers and escalation
+
+Most steps of a plan are mechanical and a few are hard. `executorTiers` lets the executor run each on a model that fits, and `escalation` catches the steps the planner rated too low.
+
+```ts
+const agent = await createAgent({
+  ...,
+  model: 'claude-sonnet-4-5',                      // the `standard` tier
+  executorTiers: {
+    light: { model: 'claude-haiku-4-5' },          // any stage override: provider, key, endpoint
+    strong: { model: 'claude-opus-4-5' },
+  },
+  // escalation: { maxPerStep: 1, maxPerRun: 3 },  // the defaults once tiers are on; false = off
+})
+```
+
+**Off unless `light` or `strong` is set.** Without tiers nothing changes: the plan schema, the prompts and the requests are byte for byte what they were (`tests/model-tiers.test.ts` compares them with a recording made before the feature existed). `executorTiers.standard` alone only replaces the executor's model.
+
+**Routing.** With tiers on, the planner marks every step with `complexity: 'low' | 'medium' | 'high'` (an optional enum in the plan schema, and a paragraph in the planner's - and the replanner's - system prompt that is there only with tiers, so the prompts stay run-stable). The executor runs the step on `light` / `standard` / `strong`. A step the planner left unmarked runs on `standard`. **Fallback:** a tier you did not configure falls back to the nearest configured one, and of two equally near the stronger - so with only `strong` configured a `low` step runs on `standard`, never on `strong`, and nothing ever runs on a weaker model than it had to. `step.start` says which tier and model the step starts on and why (`tierReason: 'planned' | 'default' | 'fallback'`); the step's result carries the tier and model it finished on.
+
+**Escalation.** When a step fails in a way a stronger model could fix, it is retried on the next stronger configured tier before the replanner is consulted: once per step and three times per run by default (`maxPerStep`, `maxPerRun`; the run count survives a resume). It is on by default once tiers are on, because routing easy steps to a light model without it trades quality for cost with no safety net - a mis-rated step would fail outright and the replanner, another paid call, would have to plan around a failure that a model you already configured would not have had. `escalation: false` turns it off; without tiers it does nothing.
+
+| Escalates (`reason`) | Does not |
+| --- | --- |
+| `blocked` - the executor ended with `[BLOCKER]` | a stop, a step aborted from `onStepStart`, a timeout |
+| `empty-result` - no text and no successful tool call | refused credentials (401 / 403): the run fails as before |
+| `tool-arguments` - the same tool got arguments that did not parse twice, and never a good call after | a rate limit (429): that is for retry and backoff |
+| `output-cut` - the output cap cut the answer (`finishReason: 'length'`) | a spent budget (`limits`, `maxToolCalls`) |
+| `error` - the model call failed (after `llmMaxRetries`) | a tool the user or the approval policy denied; a tool that failed for its own reasons (the replanner's business) |
+
+**Side effects.** An escalated attempt *continues* the step, it does not start it again. It is shown, in its user prompt, every tool call the earlier attempt made with its arguments and result, and is told that the calls that succeeded really happened. That is advice; this is the guarantee: a call to a tool that is not read-only, with the same arguments as a call that already **succeeded** in an earlier attempt at the step, is not executed again - it gets the earlier result back, marked as such, and costs neither a consent prompt nor a tool call of the budget. Read-only tools (`readOnlyHint`, `markReadOnly`) run again freely, a call that failed runs again, and within one attempt nothing is held back. The step's `toolCalls` holds every attempt's calls. The limit of the guarantee: a write the stronger model repeats with *different* arguments is a different call - mark tools read-only where they are, and keep writes idempotent where you can.
+
+**Events.** `step.start` gains `tier`, `model`, `tierReason`; `step.escalated` (`step`, `from`, `to`, `model`, `reason`) fires between a step's start and its completion; `step.complete`'s result gains `tier`, `model` and `escalations`. None of these fields exist without tiers.
+
+**Usage, limits, caps.** Every tier's calls are `usage` events of phase `execute` and count in `result.usage`, `agent.usage` and against `limits` - a failed attempt included. One context window governs the whole run: `compaction.contextWindowTokens` must be the window of the **smallest** model among the tiers, because the trace and the history are compacted before anyone knows which tier a step (or its escalation) will land on. The executor's default output cap is a share of that window for every tier; set `limits.perCall.executor` if the strong model should write more.
+
+**Elsewhere.** A resumed run keeps each step's `complexity` (in the saved plan), each finished step's tier (in the trace) and the escalation count. A subagent's config and a pipeline node's are agent configs: tiers pass through (a pipeline node that names another `model` drops the base's tiers, like its `planner` / `synthesizer` blocks, unless the registry entry brings its own). There is no router model: the planner is the only judge of a step's complexity.
 
 ## API
 
@@ -1118,6 +1159,8 @@ The CLI source lives in [`src/cli`](./src/cli) — [`env.example`](./env.example
 | `AGENT_PROVIDER_TYPE`, `AGENT_MODEL`, `AGENT_API_KEY`, `AGENT_BASE_URL` | The provider, the executor's model, its key and endpoint (`AGENT_BASE_URL` is required for `openai-compatible` and `azure`). |
 | `AGENT_PLANNER_MODEL`, `AGENT_SYNTHESIZER_MODEL` | A different model for the planner + replanner / the synthesizer; both default to `AGENT_MODEL`. |
 | `AGENT_PLANNER_*`, `AGENT_SYNTHESIZER_*` (`PROVIDER_TYPE`, `BASE_URL`, `API_KEY`, `PROVIDER_OPTIONS`) | Run a stage on another provider (see [Picking models per stage](#picking-models-per-stage)). A key is never inherited across vendors. |
+| `AGENT_EXECUTOR_LIGHT_MODEL`, `AGENT_EXECUTOR_STRONG_MODEL` | Executor models by tier (`AGENT_MODEL` is the `standard` one): steps the planner rates `low` / `high` run on them. Each takes the same `_PROVIDER_TYPE` / `_BASE_URL` / `_API_KEY` / `_PROVIDER_OPTIONS` block as the planner. See [Model tiers and escalation](#model-tiers-and-escalation). |
+| `AGENT_ESCALATION`, `AGENT_ESCALATION_MAX_PER_STEP`, `AGENT_ESCALATION_MAX_PER_RUN` | `off` keeps a failed step on its tier (with tier models the default is to retry it on a stronger one); the caps on those retries (default 1 / 3). Setting them without a tier model is an error. |
 | `AGENT_PROVIDER_OPTIONS` | JSON spread into the provider factory (`{"region":"us-east-1"}`, Azure's `resourceName`, …). |
 | `AGENT_MAX_ITERATIONS`, `AGENT_MAX_STEPS_PER_TASK`, `AGENT_MAX_REVISIONS` | Loop caps: plan/execute/replan rounds, LLM steps inside one executor call, replanner "revise" decisions. |
 | `AGENT_LLM_TIMEOUT_MS`, `AGENT_LLM_MAX_RETRIES` | Per-call timeout (`0` = off) and retries on 5xx / 429 / network errors (default 2). |
