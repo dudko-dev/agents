@@ -420,7 +420,55 @@ new BrowserOAuthProvider({
   (RFC 9207, `checkAuthorizationResponseIssuer`), then exchanges the code. See
   [security.md](./security.md#mcp-oauth-the-authorization-response).
 
-The Node package has the same options and functions (`createNodeOAuthProvider`).
+### Enterprise-managed authorization
+
+`createEnterpriseOAuthProvider` (class `BrowserEnterpriseOAuthProvider`) is the
+non-interactive provider for servers whose access the company's identity
+provider decides (ID-JAG; the README has the flow).
+
+```ts
+createEnterpriseOAuthProvider({
+  serverUrl,
+  clientId, clientSecret,            // this client at the MCP authorization server
+  expectedIssuer,                    // that server's issuer; anything else gets nothing
+  idp: { tokenEndpoint, clientId, clientSecret, clientAuthMethod },
+  getIdToken: () => idToken,         // called each time a new ID-JAG is needed
+  scope,                             // asked of the IdP
+  storage,                           // default: the encrypted vault
+  expirySkewSeconds,                 // default 30
+  fetch,                             // for the request to the IdP
+})
+```
+
+- **`idp.tokenEndpoint` is configured, not discovered**: it is where the ID
+  token and the IdP credentials go, so nothing fetched at run time chooses it.
+- **`idp.clientAuthMethod`**: `'client_secret_basic'` (default) or
+  `'client_secret_post'`; with no `clientSecret` only `client_id` is sent.
+- **The request to the IdP** (RFC 8693): `grant_type` token-exchange,
+  `requested_token_type` `urn:ietf:params:oauth:token-type:id-jag`, `audience`
+  = the issuer of the MCP server's authorization server, `resource` = the
+  resource the server published (else its URL), `subject_token` = the ID token,
+  optional `scope`. The answer must carry `issued_token_type` id-jag and the
+  token in `access_token`.
+- **The request to the authorization server** (RFC 7523): `grant_type`
+  jwt-bearer, `assertion` = the ID-JAG, the client authenticated as configured.
+- **Stored per server URL**: the access token and the discovery state. Not the
+  client (it is configuration), not the ID token, not the ID-JAG.
+- **Methods**: `authorize({ fetch })` runs the flow now; `isAccessTokenExpired()`,
+  `isAuthorized()`, `reset()` as on `BrowserOAuthProvider`. `connectMcpHttp`
+  calls `authorize` before connecting when there is no usable token, and
+  declares the extension in the client's capabilities.
+- **`EnterpriseOAuthError`**: `hop` (`'discovery' | 'idp' | 'authorization-server'`)
+  and `code` (the OAuth error). A token that dies mid-session is renewed by the
+  SDK; a refusal by the authorization server at that point is the SDK's own
+  OAuth error, without a `hop`.
+- **Not supported**: `private_key_jwt`, SAML assertions, a refresh token as the
+  subject token, DPoP-bound ID-JAGs.
+- Verified against a test identity provider (the Node package's
+  `tests/mcp-enterprise-oauth.test.ts`), not a commercial one.
+
+The Node package has the same options and functions (`createNodeOAuthProvider`,
+`createEnterpriseOAuthProvider`; `store` there is `storage` here).
 
 ## Subagents (in-process or Web Workers)
 

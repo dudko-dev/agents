@@ -325,11 +325,14 @@ export const startLocalMcp = async (opts: ILocalMcpOptions = {}): Promise<ILocal
       })
       await server.connect(transport)
       const raw = await readBody(req)
-      const message = raw ? (JSON.parse(raw) as { method?: string; params?: never }) : undefined
+      const message = raw
+        ? (JSON.parse(raw) as {
+            method?: string
+            params?: { capabilities?: Record<string, unknown> }
+          })
+        : undefined
       if (message?.method === 'initialize') {
-        initializeCapabilities.push(
-          (message.params as { capabilities?: Record<string, unknown> }).capabilities ?? {},
-        )
+        initializeCapabilities.push(message.params?.capabilities ?? {})
       }
       await transport.handleRequest(req, res, message)
     })().catch(() => {

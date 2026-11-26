@@ -280,6 +280,48 @@ on `provider.authorizationUrl` and the app decides when to use it.
 - `provider.reset()` forgets tokens, registration and discovery - use it when a
   server moved to another authorization server.
 
+### Enterprise-managed authorization (ID-JAG)
+
+When the company's identity provider decides who may use which MCP server (the
+MCP extension `io.modelcontextprotocol/enterprise-managed-authorization`, also
+called Cross App Access), there is no consent page and no redirect. Your app
+already holds the user's OpenID Connect ID token from single sign-on; the
+provider turns it into an access token in two POSTs: a token exchange at the IdP
+(ID token in, an **ID-JAG** out), then a `jwt-bearer` grant at the MCP server's
+authorization server (ID-JAG in, access token out).
+
+```ts
+import { connectMcpHttp, createEnterpriseOAuthProvider } from '@dudko.dev/agent-web/mcp'
+
+const provider = createEnterpriseOAuthProvider({
+  serverUrl: 'https://mcp.example.com/mcp',
+  clientId: 'agent-web',                        // at the MCP authorization server
+  expectedIssuer: 'https://auth.example.com',   // recommended
+  idp: { tokenEndpoint: 'https://acme.idp.example/oauth2/token', clientId: 'agent-web-at-idp' },
+  getIdToken: () => session.idToken,            // yours: called for every new ID-JAG
+})
+
+const mcp = await connectMcpHttp({ docs: { url: 'https://mcp.example.com/mcp', authProvider: provider } })
+```
+
+- It runs before the first request when there is no usable token, and again
+  when the token expires or the server answers 401 - a fresh ID token and a
+  fresh exchange each time. No refresh token is used.
+- Only the access token (and what discovery found) is stored, in the vault by
+  default (`storage`). The ID token and the ID-JAG are never stored, logged or
+  put in an error.
+- Errors are `EnterpriseOAuthError` with `hop`: `'idp'`, `'authorization-server'`
+  or `'discovery'`. A refusal fails that server's connect with the message in
+  `results[].error`; `needsAuthorization` stays unset.
+- **In a browser:** the IdP's token endpoint must allow your origin (CORS), and
+  a `clientSecret` (yours or `idp.clientSecret`) shipped to a page is readable
+  by whoever opens it. The grant is meant for confidential clients: either both
+  servers accept your page as a public client, or pass a `fetch` that sends the
+  IdP request through your backend, which adds the secret. See
+  [docs/security.md](docs/security.md#mcp-enterprise-managed-authorization-id-jag).
+- Verified against a test identity provider, not a commercial one. Options,
+  checks and limits: [docs/capabilities.md](docs/capabilities.md#mcp-servers-behind-oauth).
+
 ### CORS: what the server must send
 
 A browser tells JavaScript nothing about why it blocked a request — a CORS

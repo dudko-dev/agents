@@ -419,7 +419,7 @@ export class BrowserEnterpriseOAuthProvider implements OAuthClientProvider {
     }
     // Secrets and the token callback stay off anything that prints the provider.
     for (const field of ['opts', 'storage', 'pendingAssertion'] as const) {
-      void field
+      Object.defineProperty(this, field, { enumerable: false })
     }
   }
 

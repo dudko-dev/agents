@@ -78,7 +78,10 @@ behind every decision.
 - `src/files/` — `vfs` (VirtualFileSystem, IndexedDB `files` store) + `tools`
   (createFileTools).
 - `src/mcp/` — optional HTTP connector (`./mcp` subpath): `http` (transport,
-  mount, refresh) + `oauth` (OAuth 2.1 / DCR provider, vault-backed tokens).
+  mount, refresh) + `oauth` (OAuth 2.1 / DCR provider, vault-backed tokens) + `enterprise-oauth`
+  (enterprise-managed authorization / ID-JAG: token exchange at the IdP, then the SDK's `jwt-bearer`
+  grant; non-interactive). A copy of the Node package's `mcp-enterprise-oauth.ts` - change both.
+  Security boundary: every guard has a test in `tests/mcp-enterprise.test.ts` and a mutation check.
 - `src/webmcp/` — optional `./webmcp` subpath: publish a ToolSet through the browser's WebMCP API
   and use a page's WebMCP tools as one. No dependency; a no-op where the browser has no WebMCP.
 - `src/{parse,prompts,events,config,index}.ts`.

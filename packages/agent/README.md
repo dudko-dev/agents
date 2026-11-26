@@ -251,6 +251,45 @@ Nothing is printed or opened on your behalf; `onAuthorizationUrl` and the loopba
 - **Registration** describes a public PKCE client. `application_type` follows the redirect URL: `'native'` for a loopback address (the usual CLI callback), `'web'` for an https one. Change any field through `clientMetadata`.
 - **Discovery is stored** next to the tokens (the authorization server and its metadata), so later calls skip it and the issuer check has something to compare with. `auth.reset()` forgets it with everything else - use it when a server moved to another authorization server.
 
+### MCP with enterprise-managed authorization (ID-JAG)
+
+When the company's identity provider decides who may use which MCP server (the MCP extension `io.modelcontextprotocol/enterprise-managed-authorization`, also called Cross App Access), there is no consent page and nobody to send anywhere. Your application already holds the user's OpenID Connect ID token from single sign-on; the provider turns it into an access token in two POSTs:
+
+1. **at the IdP** - an RFC 8693 token exchange: the ID token goes in, an Identity Assertion JWT Authorization Grant (**ID-JAG**) addressed to the MCP server's authorization server comes out;
+2. **at the MCP server's authorization server** - an RFC 7523 `jwt-bearer` grant: the ID-JAG goes in, an ordinary access token comes out.
+
+```ts
+import { createAgent, createEnterpriseOAuthProvider } from '@dudko.dev/agent'
+
+const auth = createEnterpriseOAuthProvider({
+  serverUrl: 'https://mcp.example.com/mcp',
+  // This client as registered at the MCP server's authorization server.
+  clientId: 'agent',
+  clientSecret: process.env.MCP_AS_CLIENT_SECRET,
+  expectedIssuer: 'https://auth.example.com', // recommended: nothing is sent to any other
+  // This client as registered at the IdP (the audience of the ID token).
+  idp: {
+    tokenEndpoint: 'https://acme.idp.example/oauth2/token',
+    clientId: 'agent-at-idp',
+    clientSecret: process.env.IDP_CLIENT_SECRET,
+  },
+  getIdToken: () => session.idToken, // yours: called each time a new ID-JAG is needed
+  scope: 'mcp:tools', // optional
+})
+
+const agent = await createAgent({
+  ...config,
+  mcpServers: { docs: { url: 'https://mcp.example.com/mcp', authProvider: auth } },
+})
+```
+
+- **When it runs.** Before the first request when there is no usable token, and again whenever the token expires or the server answers 401. Each time is a fresh ID token from `getIdToken` and a fresh exchange: the ID-JAG takes the place of a refresh token, and a refresh token the authorization server returns anyway is not used.
+- **What is stored.** The access token and what discovery found, in the same kind of store as the interactive provider (`store`, default the `0600` file). The ID token and the ID-JAG are never stored, logged or put in an error. Use one store per user.
+- **What is checked before anything is sent.** `serverUrl`, the IdP token endpoint, the authorization server and its token endpoint must be https (or loopback). The ID-JAG is requested for the issuer and the resource that discovery found for this server - never for a value you pass - and the authorization server's metadata must name the URL it was fetched from as its issuer. With `expectedIssuer`, any other authorization server gets nothing. The IdP's answer must be a 200 with `issued_token_type` `urn:ietf:params:oauth:token-type:id-jag` and a token; otherwise nothing reaches the authorization server. A redirect from the IdP is refused.
+- **Errors say who refused.** `EnterpriseOAuthError` has `hop`: `'idp'` (the exchange: `Enterprise IdP token exchange failed: ...`), `'authorization-server'` (the grant: `MCP authorization server refused the ID-JAG grant: ...`) or `'discovery'`, and `code` with the OAuth error. A refusal fails that server's connect (`results[].error`) with no `needsAuthorization`: there is nobody to ask. `auth.authorize()` runs the flow on its own if you want to fail early. One exception: when a token dies mid-session the SDK renews it itself, and a refusal by the authorization server at that moment arrives as the SDK's own OAuth error, without the prefix.
+- **IdP client authentication** is `client_secret_basic` by default; `idp.clientAuthMethod: 'client_secret_post'` puts it in the body, and no `clientSecret` sends only `client_id`. `private_key_jwt` and SAML assertions are not supported.
+- **How it was verified.** Against a test identity provider that signs real tokens and an authorization server that verifies them (`tests/mcp-enterprise-oauth.test.ts`, over real sockets), following `draft-ietf-oauth-identity-assertion-authz-grant` and the extension's 2026-07-28 revision. It has **not** been run against a commercial IdP (Okta, Ping, ...); expect to find differences there.
+
 ## Thinking (reasoning)
 
 Turn on the model's reasoning for every stage with `thinking`, and override it per stage with `stageThinking` (a stage entry — even `false` — wins over the top-level value):

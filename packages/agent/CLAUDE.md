@@ -42,7 +42,11 @@
     recorded in `IRunState.userUpdates` and in run snapshots.
   - `provider.ts` (`resolveStage` / model factory per provider), `mcp.ts` (stdio + streamable-HTTP
     MCP connections, reconnect, paginated `tools/list`) + `mcp-oauth.ts` (OAuth 2.1 / DCR provider,
-    file-backed tokens), `tracing.ts` (OpenTelemetry spans, a no-op without an SDK), `utils.ts`
+    file-backed tokens) + `mcp-enterprise-oauth.ts` (enterprise-managed authorization / ID-JAG: token
+    exchange at the IdP, then the SDK's `jwt-bearer` grant; non-interactive. Security boundary: every
+    guard has a test in `tests/mcp-enterprise-oauth.test.ts`, which runs the flow against the test IdP
+    in `tests/helpers/idp-server.ts`, and a mutation check. The browser package carries a copy:
+    change both), `tracing.ts` (OpenTelemetry spans, a no-op without an SDK), `utils.ts`
     (retry / timeout / usage helpers).
   - `internal.ts` (`IRunState`: the per-run mutable state shared by the runner, the stages and the tool
     wrappers) + `context.ts` (`runContext`, the AsyncLocalStorage that carries run id, emit and state
