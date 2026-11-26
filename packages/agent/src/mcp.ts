@@ -1,17 +1,17 @@
-import { CallToolResultSchema } from '@modelcontextprotocol/core'
-import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotocol/client/stdio'
 import {
   auth,
-  UnauthorizedError,
   Client,
   StreamableHTTPClientTransport,
+  UnauthorizedError,
+  type CallToolResult,
+  type FetchLike,
+  type JsonSchemaType,
+  type JsonSchemaValidator,
+  type OAuthClientProvider,
+  type Transport,
 } from '@modelcontextprotocol/client'
-import type {
-  OAuthClientProvider,
-  FetchLike,
-  Transport,
-  CallToolResult,
-} from '@modelcontextprotocol/client'
+import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotocol/client/stdio'
+import { AjvJsonSchemaValidator } from '@modelcontextprotocol/client/validators/ajv'
 import { dynamicTool, jsonSchema, type ToolSet } from 'ai'
 import { randomUUID } from 'node:crypto'
 import { mkdir, writeFile } from 'node:fs/promises'
@@ -94,6 +94,7 @@ interface IMcpToolDescriptor {
   name: string
   description?: string
   inputSchema: unknown
+  outputSchema?: unknown
   annotations?: { readOnlyHint?: boolean }
 }
 
@@ -106,16 +107,26 @@ export const MAX_TOOL_LIST_PAGES = 100
 /**
  * Every tool of a server, following `nextCursor` (up to MAX_TOOL_LIST_PAGES
  * pages; a repeated cursor ends the walk).
+ *
+ * Page by page through `client.request`, not `client.listTools()`: called
+ * without a cursor, the typed verb of the 2.x SDK walks every page itself,
+ * throws past its own page cap, answers without asking when the server did not
+ * advertise the tools capability, and fills the cache that switches on the
+ * SDK's output-schema check in `callTool` (which this module does itself, see
+ * `outputSchemaViolation`). The raw request does none of that.
  */
 export const listAllTools = async (
-  client: Pick<Client, 'listTools'>,
+  client: Pick<Client, 'request'>,
   onTruncated?: () => void,
 ): Promise<IMcpToolDescriptor[]> => {
   const all: IMcpToolDescriptor[] = []
   let cursor: string | undefined
   const seen = new Set<string>()
   for (let page = 0; page < MAX_TOOL_LIST_PAGES; page++) {
-    const r = await client.listTools(cursor ? { cursor } : undefined)
+    const r = await client.request({
+      method: 'tools/list',
+      params: cursor ? { cursor } : undefined,
+    })
     all.push(...(r.tools as IMcpToolDescriptor[]))
     const next = typeof r.nextCursor === 'string' && r.nextCursor ? r.nextCursor : undefined
     if (!next || seen.has(next)) {
@@ -128,22 +139,40 @@ export const listAllTools = async (
   return all
 }
 
+/** The longest compile error repeated in a refusal (the SDK clips at the same length). */
+const OUTPUT_SCHEMA_ERROR_MAX_CHARS = 200
+
 /**
- * A result schema that hands every result it accepts to `onResult` first.
+ * Why a tool result does not follow the `outputSchema` its tool declared, or
+ * `undefined` when it does. The rule and the wording are those of the SDK's
+ * `Client.callTool`: a tool with an output schema must answer with
+ * `structuredContent`, and that value must validate. An `isError` result is
+ * not checked.
  *
- * `Client.callTool` validates `structuredContent` against the tool's
- * `outputSchema` AFTER the response was received and parsed, and throws when
- * it does not fit - taking the result with it. Reading the result here, where
- * the protocol layer parses it, is what lets a caller tell that throw (a
- * result exists) from a failed request (none does) and still use the result.
+ * The check is made here, on a result that was received, instead of inside
+ * `callTool`, which throws on a violation and takes the result with it: the
+ * call RAN on the server, so its result goes to the model with a note.
  */
-export const capturingResultSchema = (
-  onResult: (result: CallToolResult) => void,
-): typeof CallToolResultSchema =>
-  CallToolResultSchema.refine((result) => {
-    onResult(result as CallToolResult)
-    return true
-  }) as typeof CallToolResultSchema
+export const outputSchemaViolation = (
+  toolName: string,
+  result: Pick<CallToolResult, 'structuredContent' | 'isError'>,
+  validate: JsonSchemaValidator<unknown>,
+): string | undefined => {
+  if (result.isError === true) {
+    return undefined
+  }
+  if (result.structuredContent === undefined) {
+    return `Tool ${toolName} has an output schema but did not return structured content`
+  }
+  try {
+    const checked = validate(result.structuredContent)
+    return checked.valid
+      ? undefined
+      : `Structured content does not match the tool's output schema: ${checked.errorMessage}`
+  } catch (err) {
+    return `Failed to validate structured content: ${err instanceof Error ? err.message : String(err)}`
+  }
+}
 
 interface IServerConnect {
   name: string
@@ -356,6 +385,10 @@ export const connectMcpServers = async (
       }
     }
     const keys: string[] = []
+    // The SDK's own validator (Ajv, dialect by `$schema`), one per mount: a
+    // schema with an `$id` is remembered by the instance that compiled it, so
+    // it is never shared between servers nor kept across a refresh.
+    let schemaValidator: AjvJsonSchemaValidator | undefined
 
     let mounted = 0
     let skipped = 0
@@ -383,6 +416,27 @@ export const connectMcpServers = async (
       }
       const description = t.description ?? ''
       const readOnly = t.annotations?.readOnlyHint === true
+      // Compiled on the first call, as the SDK does, and once per mount.
+      let outputValidator: JsonSchemaValidator<unknown> | undefined
+      const outputValidatorOf = (): JsonSchemaValidator<unknown> | undefined => {
+        if (!t.outputSchema || outputValidator) {
+          return outputValidator
+        }
+        try {
+          schemaValidator ??= new AjvJsonSchemaValidator()
+          outputValidator = schemaValidator.getValidator(t.outputSchema as JsonSchemaType)
+        } catch (err) {
+          // Before anything is sent, so nothing ran on the server: a schema
+          // that cannot be compiled is refused as the SDK refuses it, and never
+          // silently skipped.
+          const reason = (err instanceof Error ? err.message : String(err)).slice(
+            0,
+            OUTPUT_SCHEMA_ERROR_MAX_CHARS,
+          )
+          throw new McpToolError(`Tool '${t.name}' has an invalid outputSchema: ${reason}`)
+        }
+        return outputValidator
+      }
       tools[prefixed] = dynamicTool({
         description,
         inputSchema: jsonSchema(t.inputSchema as Parameters<typeof jsonSchema>[0]),
@@ -409,36 +463,39 @@ export const connectMcpServers = async (
                   toSend = { _redacted: 'inputSanitizer failed' }
                 }
               }
+              let validate: JsonSchemaValidator<unknown> | undefined
               let result: CallToolResult
-              // Set when the SDK refused a result that had arrived (see below).
-              let schemaNote: string | undefined
-              let received: CallToolResult | undefined
               try {
-                result = (await client.callTool(
-                  { name: t.name, arguments: toSend },
-                  capturingResultSchema((r) => {
-                    received = r
-                  }),
+                validate = outputValidatorOf()
+                // `client.request`, not `client.callTool`: the typed verb also
+                // checks the result against the tool's outputSchema and throws
+                // when it does not fit - taking with it a result that DID
+                // arrive. The request is the same on the wire. (On the
+                // 2026-07-28 revision `callTool` also mirrors arguments into
+                // `Mcp-Param-*` headers; this client negotiates the 2025 one.)
+                result = await client.request(
+                  { method: 'tools/call', params: { name: t.name, arguments: toSend } },
                   opts?.abortSignal ? { signal: opts.abortSignal } : undefined,
-                )) as CallToolResult
+                )
               } catch (err) {
-                // The request itself failed (transport, protocol, abort): there
-                // is no result. The AI SDK records the throw as a failed call.
-                if (!received) {
-                  span.setAttribute(ATTR.TOOL_OK, false)
-                  throw err
-                }
-                // A result arrived and the SDK client threw afterwards: the
-                // only thing it does there is check structuredContent against
-                // the tool's outputSchema (missing, or not matching). The call
-                // RAN on the server, so the result is passed on with a note
-                // rather than reported as a failure - a tool the model is told
-                // failed is a tool it calls again, and this one may write.
-                result = received
-                schemaNote = outputSchemaNote(t.name, err)
+                // The request itself failed (transport, protocol, abort), or
+                // was never sent: there is no result. The AI SDK records the
+                // throw as a failed call.
+                span.setAttribute(ATTR.TOOL_OK, false)
+                throw err
+              }
+              // A result arrived. When it does not follow the tool's
+              // outputSchema (no structuredContent, or one that does not
+              // match) it is passed on with a note rather than reported as a
+              // failure - a tool the model is told failed is a tool it calls
+              // again, and this one may write.
+              let schemaNote: string | undefined
+              const violation = validate && outputSchemaViolation(t.name, result, validate)
+              if (violation) {
+                schemaNote = outputSchemaNote(t.name, violation)
                 log(
                   'warn',
-                  `[mcp] ${prefixed}: result does not follow the declared outputSchema - ${(err as Error).message}; passed on with a note`,
+                  `[mcp] ${prefixed}: result does not follow the declared outputSchema - ${violation}; passed on with a note`,
                 )
               }
               // outputSanitizer runs BEFORE flattenContent so the user can

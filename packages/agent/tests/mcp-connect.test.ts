@@ -1298,7 +1298,8 @@ test('checkAuthorizationResponseIssuer: the rule, case by case', () => {
     ...promised,
     authorizationServerMetadata: {
       ...metadata,
-      authorization_response_iss_parameter_supported: 'true',
+      // What a stored document can hold, whatever the SDK's type says.
+      authorization_response_iss_parameter_supported: 'true' as unknown as boolean,
     },
   })
 

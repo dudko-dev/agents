@@ -1,11 +1,11 @@
-import { auth } from '@modelcontextprotocol/client'
-import type {
-  OAuthClientProvider,
-  OAuthDiscoveryState,
-  OAuthClientInformationMixed,
-  OAuthClientMetadata,
-  OAuthTokens,
-  FetchLike,
+import {
+  auth,
+  type FetchLike,
+  type OAuthClientInformationMixed,
+  type OAuthClientMetadata,
+  type OAuthClientProvider,
+  type OAuthDiscoveryState,
+  type OAuthTokens,
 } from '@modelcontextprotocol/client'
 import {
   constants as cryptoConstants,

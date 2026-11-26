@@ -1,11 +1,11 @@
-import { auth } from '@modelcontextprotocol/client'
-import type {
-  OAuthClientProvider,
-  OAuthDiscoveryState,
-  OAuthClientInformationMixed,
-  OAuthClientMetadata,
-  OAuthTokens,
-  FetchLike,
+import {
+  auth,
+  type FetchLike,
+  type OAuthClientInformationMixed,
+  type OAuthClientMetadata,
+  type OAuthClientProvider,
+  type OAuthDiscoveryState,
+  type OAuthTokens,
 } from '@modelcontextprotocol/client'
 import { randomBytes } from 'node:crypto'
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
@@ -518,6 +518,9 @@ export const finishMcpOAuth = async (
   const result = await auth(provider, {
     serverUrl: provider.serverUrl,
     authorizationCode: callback.code,
+    // The SDK runs its own RFC 9207 check inside `auth()`, after ours: without
+    // the value it would read a response that carried `iss` as one that did not.
+    iss: callback.iss,
     fetchFn: opts.fetch,
   })
   if (result !== 'AUTHORIZED') {
