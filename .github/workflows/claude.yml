@@ -55,7 +55,7 @@ jobs:
       actions: write
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.branch || github.ref }}
           fetch-depth: 1
@@ -63,14 +63,16 @@ jobs:
       # used to verify on the runner's one Node only and push "fixes" that CI
       # then rejected on another version (jsdom 30, firebase-admin's optional
       # deps). The last setup wins the PATH and is the default `node`.
-      - name: Setup Node.js 22
-        uses: actions/setup-node@v6
-        with:
-          node-version: 22
+      - uses: pnpm/action-setup@v4
       - name: Setup Node.js 24
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v4
         with:
           node-version: 24
+      # Last, so it is the default `node`: the release and the demo build use 22.
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - name: Provide with-node for the other Node versions
         run: |
           mkdir -p "$RUNNER_TEMP/bin"
@@ -97,7 +99,7 @@ jobs:
           mkdir -p .git/info
           echo ci-failure.log >> .git/info/exclude
           : > ci-failure.log
-          for WF in pr-checks.yml test.yml; do
+          for WF in ci.yml live-model.yml; do
             RUN=$(gh run list --workflow "$WF" --commit "$CI_SHA" --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId // empty')
             [ -n "$RUN" ] || continue
             for JOB in $(gh run view "$RUN" --json jobs --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out") | .databaseId'); do
@@ -135,33 +137,36 @@ jobs:
           Run these commands and observe their exit codes via the Bash tool —
           not inferred:
 
-                  npm run typecheck
-                  npm run format:check
-                  npm run build
-                  npm test
+                  pnpm install --frozen-lockfile
+                  pnpm nx run-many -t typecheck format:check build test
+                  pnpm --filter @dudko.dev/agent-web-react exec playwright install --with-deps chromium
+                  pnpm nx test:e2e @dudko.dev/agent-web-react
 
-          CI runs the tests on Node 22, 24; the default \`node\`
-          here is the newest of them. Every one is installed: run a command
-          under another major with \`with-node <major> <command>\`, e.g.
-          \`with-node 22 npm ci\` then \`with-node 22 npm test\`, and run plain
-          \`npm ci\` again afterwards. A fix that is green on one Node only is
-          not done.
+          This is a pnpm workspace driven by nx (see CLAUDE.md in the repo
+          root, and the CLAUDE.md of each package you touch). CI runs the
+          checks on Node 22 and 24; the default \`node\` here is 22. Both are
+          installed: run a command under the other with
+          \`with-node 24 <command>\`, e.g.
+          \`with-node 24 pnpm nx run-many -t typecheck build test --skip-nx-cache\`.
+          A fix that is green on one Node only is not done.
 
           Hard rules:
           - Run those commands yourself before every push. Do not push
             if any of them is red.
-          - If \`npm install\` or \`npm ci\` is needed, run it first with
-            \`--no-audit --no-fund\` and confirm exit 0.
+          - If a dependency has to change, run \`pnpm install\` at the repo
+            root, confirm exit 0 and commit \`pnpm-lock.yaml\`. A package may
+            import only what its own package.json declares.
           - Limit edits to compatibility shims (types, renamed exports,
             breaking-change adjustments, eslint-config tweaks for new rule
             defaults). Do NOT change product logic.
-          - Do NOT bump the package version.
+          - Do NOT change any package version (the update already bumped
+            the ones it releases) and do NOT edit .github/workflows/release.yml.
           - When all commands are green, push commits with your fixes
-            (if any). Do NOT try to trigger \`pr-checks\` yourself: a push
+            (if any). Do NOT try to trigger CI yourself: a push
             made with \`GITHUB_TOKEN\` does not start a workflow run, and
             the \`pull_request\` run it queues stays in \`action_required\`.
-            This workflow re-dispatches \`pr-checks\` for you after this
-            step finishes.
+            This workflow re-dispatches CI for you after this step
+            finishes.
 
           ## MANDATORY final step
 
@@ -192,13 +197,13 @@ jobs:
           allowed_bots: "*"
           prompt: ${{ steps.prep.outputs.prompt }}
           claude_args: |
-            --allowedTools "Edit,Write,MultiEdit,Bash(with-node:*),Bash(git:*),Bash(gh:*),Bash(npm:*),Bash(npx:*),Bash(node:*),Bash(rm:*),Bash(mkdir:*),Bash(cat:*),Bash(ls:*),Bash(echo:*),Bash(grep:*),Bash(find:*),Bash(sed:*),Bash(awk:*),Bash(head:*),Bash(tail:*),Bash(diff:*),Bash(mv:*),Bash(cp:*),Bash(touch:*)"
+            --allowedTools "Edit,Write,MultiEdit,Bash(with-node:*),Bash(git:*),Bash(gh:*),Bash(pnpm:*),Bash(npm:*),Bash(npx:*),Bash(node:*),Bash(rm:*),Bash(mkdir:*),Bash(cat:*),Bash(ls:*),Bash(echo:*),Bash(grep:*),Bash(find:*),Bash(sed:*),Bash(awk:*),Bash(head:*),Bash(tail:*),Bash(diff:*),Bash(mv:*),Bash(cp:*),Bash(touch:*)"
       # Claude pushes with GITHUB_TOKEN, so its push fires no `push` run and the
       # `pull_request` run GitHub queues for it stays stuck in `action_required`.
       # Dispatch the checks explicitly — `workflow_dispatch` is the only trigger
       # that is not gated. Runs even if the step above failed, so the PR ends up
       # with a red check instead of no checks at all.
-      - name: Re-dispatch PR checks on the branch Claude pushed to
+      - name: Re-dispatch CI on the branch Claude pushed to
         if: always() && github.event_name == 'workflow_dispatch' && github.event.inputs.branch != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -206,8 +211,8 @@ jobs:
         run: |
           git fetch origin "$BRANCH"
           echo "Dispatching checks for $BRANCH @ $(git rev-parse --short "origin/$BRANCH")"
-          gh workflow run pr-checks.yml --ref "$BRANCH" || true
-          gh workflow run test.yml --ref "$BRANCH" || true
+          gh workflow run ci.yml --ref "$BRANCH" || true
+          gh workflow run live-model.yml --ref "$BRANCH" || true
       # Without this the autoupdate flow has no ending: the success path merges
       # itself, but a PR that needed a Claude fix stayed open forever even once
       # its checks were green, so these PRs just piled up week after week.
@@ -233,7 +238,7 @@ jobs:
             ALL=$(gh api "repos/$GITHUB_REPOSITORY/commits/$SHA/check-runs" --jq .check_runs)
             # Keep only the newest run of each check name. A check can appear
             # several times on one commit: autoupdate dispatches CI, then
-            # claude.yml dispatches it again, and pr-checks' concurrency group
+            # claude.yml dispatches it again, and CI's concurrency group
             # cancels the earlier one. Those cancelled leftovers are not a
             # verdict on the code, but counting them lost a fully green PR.
             RUNS=$(jq 'group_by(.name) | map(max_by(.id))' <<<"$ALL")
