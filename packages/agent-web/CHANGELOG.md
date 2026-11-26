@@ -1,3 +1,14 @@
+# 0.0.40 / 2026-11-26
+
+### :tada: Enhancements
+- **Breaking for hosts that use `./mcp`:** the optional peer is renamed - `npm uninstall @modelcontextprotocol/sdk && npm install @modelcontextprotocol/client` (^2.4). SDK types are imported from `@modelcontextprotocol/client`; stored tokens need no migration. See "Upgrading to the 2.x MCP SDK" in the README
+- MCP on the 2.x SDK with the wire unchanged (protocol 2025-11-25); output schemas are checked with the SDK's browser validator, which generates no code and so runs under a CSP without `unsafe-eval`
+- A 403 `insufficient_scope` in the middle of a session: an interactive OAuth provider fails the call with the scope the server asked for, a non-interactive one (enterprise) asks again once
+- `tools/list` stops on a repeated cursor and warns when a server is still paginating after 100 pages
+- An authorization finished without stored discovery state is refused: authorize again
+- Decision model: a question without a context is sent with its prompt as the state (the live API refuses an empty one); an option without a description is described by its id
+- `engines.node` is now `>=20` (what the MCP client declares)
+
 # 0.0.39 / 2026-11-26
 
 ### :tada: Enhancements

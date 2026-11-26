@@ -1,3 +1,10 @@
+# 0.0.48 / 2026-11-26
+
+### :tada: Enhancements
+- MCP runs on the 2.x SDK (`@modelcontextprotocol/client` ^2.4, a dependency: nothing to install); the wire is unchanged (protocol 2025-11-25). Errors from the SDK lost the `MCP error <code>: ` prefix, and an authorization finished without stored discovery state is refused: authorize again
+- A 403 `insufficient_scope` in the middle of a session: an interactive OAuth provider fails the call with the scope the server asked for, a non-interactive one asks again once
+- Decision model: a question without a context is sent with its prompt as the state (the live API refuses an empty one); an option without a description is described by its id
+
 # 0.0.47 / 2026-11-26
 
 ### :tada: Enhancements
