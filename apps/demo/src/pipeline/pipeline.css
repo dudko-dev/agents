@@ -1,0 +1,164 @@
+/*
+ * The pipeline page: the demo's shell (app.css - header, tokens, the Settings and MCP panels)
+ * with the editor in place of the chat and the workspace. The editor reads the same palette
+ * through its own variables, as the chat components do.
+ */
+:root :where(.awr-pipeline) {
+  --awr-bg: var(--panel);
+  --awr-fg: var(--fg);
+  --awr-muted: var(--muted);
+  --awr-border: var(--border);
+  --awr-subtle: var(--panel-2);
+  --awr-accent: var(--accent);
+  --awr-accent-fg: var(--on-accent);
+  --awr-danger: var(--danger);
+  --awr-warn: var(--warn);
+  --awr-ok: var(--ok);
+  --awr-radius: var(--radius);
+  /* The canvas is the page's own near-black; the cards on it are the surface colour. */
+  --awr-canvas-bg: var(--bg);
+  --awr-focus: var(--focus);
+  --awr-ease: var(--ease-settle);
+}
+
+/* The page is one screen tall at every width: the canvas takes what the header leaves. */
+.app.pl {
+  height: 100vh;
+  height: 100dvh;
+  min-height: 600px;
+}
+.pl__main {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+/* Model and MCP servers: a line each, side by side. Opened, they scroll inside at most 45% of
+   the page, so the editor always keeps the rest. */
+.pl__setup {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 45%;
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 10px;
+}
+.pl__mcp .mcp {
+  padding: 0;
+  border: 0;
+  background: none;
+  max-height: none;
+  overflow: visible;
+}
+.pl__editor {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.pl__editor > .awr-pipeline {
+  flex: 1 1 auto;
+  height: auto;
+}
+.pl__editor .awr-pipeline {
+  border-color: var(--border-strong);
+}
+
+/* The example picker sits where the demo has its tabs. */
+.pl__examples {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 3px 3px 3px 14px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+}
+.pl__examples-label {
+  flex: none;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.pl__examples-select {
+  min-width: 0;
+  max-width: 100%;
+  min-height: 34px;
+  padding: 0 30px 0 12px;
+  border: 0;
+  border-radius: 999px;
+  background-color: var(--panel-2);
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position:
+    calc(100% - 17px) 50%,
+    calc(100% - 12px) 50%;
+  background-size:
+    5px 5px,
+    5px 5px;
+  background-repeat: no-repeat;
+  color: var(--fg);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  appearance: none;
+  cursor: pointer;
+}
+
+/* Answers are Markdown (the demo's renderer). */
+.pl__editor .awr-presults__text :where(p, ul, ol, pre, h1, h2, h3, h4) {
+  margin: 0 0 0.6em;
+}
+.pl__editor .awr-presults__text :where(h1, h2, h3, h4) {
+  font-size: 1em;
+}
+.pl__editor .awr-presults__text :where(ul, ol) {
+  padding-left: 1.3em;
+}
+.pl__editor .awr-presults__text pre {
+  overflow-x: auto;
+}
+
+@media (max-width: 900px) {
+  /* A phone: the page may grow past one screen while the model panel is open - the editor keeps
+     a usable height instead of being squeezed - and is exactly one screen once it is folded. */
+  .app.pl {
+    height: auto;
+    min-height: 100dvh;
+  }
+  .pl__setup {
+    max-height: none;
+    overflow: visible;
+  }
+  .pl__editor {
+    flex: 1 1 auto;
+    min-height: 520px;
+  }
+  .pl__examples {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    justify-self: stretch;
+  }
+  .pl__examples-select {
+    flex: 1 1 0;
+    min-height: 44px;
+  }
+  .pl__setup {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+  .pl__main {
+    gap: 8px;
+  }
+  .pl .settings__summary {
+    min-height: 24px;
+  }
+}

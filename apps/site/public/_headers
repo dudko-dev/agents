@@ -6,5 +6,7 @@
 /_astro/*
   Cache-Control: public, max-age=31536000, immutable
 
+# The demo's hashed files. The pipeline editor (/pipeline/) is a page of the same build: its
+# scripts and styles are here too, so this rule is the one that caches them.
 /demo/assets/*
   Cache-Control: public, max-age=31536000, immutable

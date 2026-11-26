@@ -51,6 +51,23 @@ against its production build.
   statically imports the optional `@modelcontextprotocol/sdk` — so any reference from
   the main entry fails webpack/CRA builds of hosts that never use MCP.
   `tests/entries.test.ts` enforces it; don't move MCP back "for convenience".
+- `src/pipeline.ts` — the **`./pipeline` entry**: the pipeline editor. Like MCP, deliberately NOT in
+  `src/index.ts` (a chat host should not carry a canvas and a code generator, nor need a core that
+  has `createPipeline`); `tests/entries.test.ts` checks the main entry and every chunk it loads.
+  Two layers, kept apart:
+  - `src/canvas/` — a GENERIC canvas (`Canvas`, `CanvasPort`; `geometry.ts` is its maths as pure
+    functions). It knows nothing about agents and imports only `react` and its own files
+    (`tests/canvas.test.ts` fails otherwise): it must stay liftable into a package of its own.
+    Our own code, no canvas / graph / drag library - and no new dependency in this package at all.
+  - `src/pipeline/` — the editor: `PipelineEditor` (+ toolbar, issues, run bar, `PipelineResults`,
+    `PipelineCodeDialog`), `PipelineNodeCard`, `PipelineInspector`, `use-pipeline` (the hook),
+    `state` (the pure `pipelineStateReducer`, the pipeline's `agentStateReducer`), `edit` (pure
+    editing helpers: they keep edges and the entry consistent and return the same object when
+    nothing changes), `codegen` (`pipelineToCode`), `labels` (`PipelineLabels` - its own object,
+    not `AgentLabels`; `tests/pipeline.test.ts` fails when a key is missing from
+    `docs/pipeline.md`), `icons`.
+  - `src/pipeline.css` — its stylesheet, separate from `styles.css` and standing on its own (same
+    `awr-` prefix, same `--awr-*` tokens with the same light + dark defaults), copied to `dist`.
 - `src/context.tsx` — `AgentProvider` + `useAgentContext`.
 - `src/components/` — `AgentChat` (panel: history sidebar, transcript,
   composer, files panel; slots / render props / components / theme),
@@ -65,20 +82,30 @@ against its production build.
 - `src/index.ts` — public surface (+ curated re-exports from the core).
 - `tests/state.test.ts`, `tests/chat.test.ts` — `node --test` over the reducer,
   composer helpers, labels and the history store (imports from `dist`).
+- `tests/pipeline-state.test.ts` (the pipeline reducer against event sequences recorded from the
+  core's own runner with a scripted `runNode`: linear, fan-in, a capped loop, a failed node, an
+  abort), `tests/pipeline.test.ts` (editing helpers, the code generator, labels, the components
+  rendered to markup), `tests/canvas.test.ts` (the canvas maths and its markup).
 - `e2e/` — Playwright over the built demo. `mcp.spec.ts`: MCP (several servers, the OAuth
   redirect round-trip, IndexedDB reuse, CORS — `servers.ts` starts a real MCP server + authorization
   server on loopback). `agent.spec.ts`, `steering.spec.ts`, `learning.spec.ts`: the agent end to end
   (a run, typing to it while it works, the notebook and the fetched pages) against a scripted Gemini
   endpoint (`gemini.ts`, routed by the stage markers; it can script tool calls and the notebook's
-  `save_skill`).
+  `save_skill`). `pipeline.spec.ts`: the pipeline editor at `/pipeline/` - mouse, keyboard, a real
+  run against the scripted endpoint, a reload, a phone (touch pan and pinch through CDP).
 - `apps/demo/` (monorepo root) — the Vite + React demo (aliases the library to this package's `dist`).
+  One Vite project, two pages: the demo (`index.html`, served at `/demo/`) and the pipeline editor
+  (`pipeline/index.html`, `src/pipeline/`, served at `/pipeline/`). They share source - the model
+  state (`use-model.ts`), `Settings`, `McpPanel`, `models.ts`, `cloud.ts` - and one origin, so the
+  key vault, the chosen model and the MCP server list are the same on both. Change the shared
+  modules with both pages in mind.
 
 ## Commands
 
 ```bash
 pnpm nx typecheck @dudko.dev/agent-web-react     # tsc --noEmit (nx builds the core first)
 pnpm nx format:check @dudko.dev/agent-web-react  # prettier
-pnpm nx build @dudko.dev/agent-web-react         # tsup → dist (ESM + CJS + d.ts) + copy styles.css
+pnpm nx build @dudko.dev/agent-web-react         # tsup → dist (ESM + CJS + d.ts) + copy styles.css, pipeline.css
 pnpm nx test @dudko.dev/agent-web-react          # node --test tests/*.test.ts (nx builds first)
 pnpm nx test:e2e @dudko.dev/agent-web-react      # playwright over the built demo (browser flows)
 
@@ -106,6 +133,11 @@ publishes to npm via Trusted Publishing after CI passes on `main`. Pages
 - Every user-visible string goes through `labels` (add it to `AgentLabels` and
   `defaultLabels`); every new part of a component gets a `show*` prop or a
   render prop / slot — hosts must be able to hide, relabel or replace it.
+- The pipeline editor follows the same rules with its own names: strings through `PipelineLabels`
+  (`src/pipeline/labels.tsx`), docs in `docs/pipeline.md` (a page of the site: it is in
+  `apps/site/scripts/sync-docs.mjs` and the sidebar), event → state logic in `pipelineStateReducer`.
+  The core's pipeline API is imported statically from `@dudko.dev/agent-web`, as `use-agent` imports
+  `createAgent` - it is in the core's main entry and has no optional peer behind it.
 - Docs ship in the npm package: a new prop, hook field, exported type or label goes in the README
   (hook table / components table) and `docs/chat.md`. `tests/chat.test.ts` fails when a label key is not
   listed in `docs/chat.md`'s label reference.

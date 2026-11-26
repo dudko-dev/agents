@@ -8,7 +8,8 @@ const DESCRIPTION =
 
 // One site: the landing page (src/pages/index.astro), the documentation (Starlight, generated
 // from the packages' own Markdown by scripts/sync-docs.mjs) and the demo, which is built by
-// apps/demo and copied under /demo/ by scripts/assemble.mjs.
+// apps/demo and copied under /demo/ by scripts/assemble.mjs - with the pipeline editor, a second
+// page of that project, under /pipeline/.
 export default defineConfig({
   site: SITE,
   trailingSlash: 'always',
@@ -53,9 +54,11 @@ export default defineConfig({
           items: [
             { label: '@dudko.dev/agent-web-react', slug: 'docs/react' },
             { label: 'Chat components', slug: 'docs/react/chat' },
+            { label: 'Pipeline editor', slug: 'docs/react/pipeline' },
           ],
         },
         { label: 'Live demo', link: '/demo/', attrs: { 'data-astro-reload': '' } },
+        { label: 'Pipeline editor (live)', link: '/pipeline/', attrs: { 'data-astro-reload': '' } },
       ],
       plugins: [
         starlightLlmsTxt({

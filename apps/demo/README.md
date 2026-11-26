@@ -14,6 +14,13 @@ Phi-3.5 Vision for images), Chrome's built-in Gemini Nano (no download), and
 transformers.js (SmolVLM 256M and Gemma 4 E2B, images). Each provider and
 runtime is fetched the first time you pick one of its models.
 
+A second page, the **pipeline editor** (`pipeline/index.html`, `src/pipeline/`), is built by the
+same project and served at `/pipeline/`: a graph of agents drawn on a canvas
+(`@dudko.dev/agent-web-react/pipeline`), run in the browser. It imports the demo's own modules
+for the model list, the key entry, the MCP panel and the model state (`src/use-model.ts`), and it
+is the same origin - so a key saved on one page, the chosen model and the connected MCP servers
+are there on the other.
+
 Three tabs, sharing one "Agent settings" panel:
 
 - **Sticky notes** — the agent edits a board through locally defined tools.
