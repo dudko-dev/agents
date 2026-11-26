@@ -64,6 +64,15 @@ behind every decision.
   skills never overwritten. Knowledge only, never policy: a lesson is loaded under `learnedPreamble`.
   Browser sibling of the server's `learning.ts` (same names and guards). Every guard needs a test in
   `tests/learning*.test.ts` and a mutation check.
+- `src/pipeline/` — `createPipeline`: a graph of agents with conditions and loops, described in
+  plain JSON. `engine` (definition types, `validatePipeline`, the conditions with the
+  non-backtracking `matches` matcher, the wave scheduler; pure, no imports) is a COPY of the
+  server's `src/pipeline-engine.ts`, byte for byte — change both, with tests (the server's
+  `tests/pipeline-agent.test.ts` compares the two files and the two `tests/pipeline.test.ts`).
+  `index` is this package's adapter: a node run by `createAgent`, the route call
+  (`generateStructured`, then plain text), `nodeResolver`. A definition is untrusted input (see
+  docs/security.md): the caps, the `otherwise` rule, the condition input bound and the join
+  deferral each need a test and a mutation check.
 - `src/subagent/` — `tool` (createSubagentTool), `worker` (serveSubagentWorker),
   `protocol` (postMessage shapes).
 - `src/{thinking,limits,caching,skills,images}.ts` — see docs/capabilities.md.

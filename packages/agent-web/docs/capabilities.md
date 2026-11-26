@@ -23,6 +23,7 @@ implements the same features with the same field and event names.
 - [Steering a run that is already going](#steering-a-run-that-is-already-going)
 - [Learning: lessons that outlive the task](#learning-lessons-that-outlive-the-task)
 - [Egress: what the model may fetch](#egress-what-the-model-may-fetch)
+- [Pipelines: a graph of agents](#pipelines-a-graph-of-agents)
 - [Autonomy](#autonomy)
 - [Event reference](#event-reference)
 
@@ -784,6 +785,154 @@ Approval: an open-internet `web_fetch` is a way to leak data through the URL, so
 **write**; with an `allow` list it is **read-only**. Each request emits `egress.request`
 (`url` is origin and path only — no query string —, `allowed`, `status` or `reason`).
 
+## Pipelines: a graph of agents
+
+A pipeline is a graph of agents: each node is an agent with its own role, model and tools, each
+edge passes one node's output to the next, optionally on a condition, and loops are allowed. The
+whole graph is plain JSON, so it can be stored, shared and drawn by an editor.
+
+```ts
+import { createPipeline, nodeResolver } from '@dudko.dev/agent-web'
+
+const definition = {
+  version: 1,
+  entry: 'writer',
+  nodes: [
+    { id: 'writer', name: 'Writer', instructions: 'Write the text the request asks for.', model: 'smart' },
+    {
+      id: 'reviewer',
+      name: 'Reviewer',
+      instructions: 'Review the text. Be strict.',
+      routes: [{ label: 'approve', description: 'ready to publish' }, { label: 'revise' }],
+    },
+    { id: 'publisher', instructions: 'Format the approved text for publication.', tools: ['files'] },
+  ],
+  edges: [
+    { from: 'writer', to: 'reviewer' },
+    { from: 'reviewer', to: 'publisher', when: { kind: 'route', label: 'approve' } },
+    { from: 'reviewer', to: 'writer', when: { kind: 'otherwise' } }, // the loop
+  ],
+  limits: { maxNodeVisits: 3, maxRuns: 25 }, // the defaults
+}
+
+const pipeline = createPipeline(definition, {
+  // What the names in the definition stand for. A name that is not here fails its node.
+  resolveNode: nodeResolver({
+    base: { model, credentials }, // a BrowserAgentConfig: every node starts from it
+    models: { smart: smartModel, fast: fastModel }, // a LanguageModel or a ProviderModelSpec each
+    tools: { files: createFileTools(vfs) }, // named groups of tools
+    // skills: { tone: skill }, mcpServers: { docs: mcp } (a connectMcpHttp result),
+    // configure: (config, node) => config  // the place to read node.settings
+  }),
+})
+
+const result = await pipeline.run({ input: 'A release note for v2', signal, onEvent })
+```
+
+**The definition** is data: `{ version: 1, name?, entry, nodes, edges, limits? }`.
+
+| Field | Meaning |
+| --- | --- |
+| `entry` | The id of the node that receives the request. |
+| `nodes[].id`, `name?` | The id is unique; the name is what other nodes and a UI see. |
+| `nodes[].instructions?` | The node's role, added to its agent's system prompt. |
+| `nodes[].model?`, `skills?`, `tools?`, `mcpServers?` | **Names** the host resolves - never a model object, never a key. |
+| `nodes[].routes?` | `{ label, description? }[]`: after it answers, the node picks one. |
+| `nodes[].join?` | `'all'` (default) or `'any'`, see below. |
+| `nodes[].settings?` | Handed to the host's resolver untouched; never applied by itself. |
+| `nodes[].position?` | `{ x, y }` for an editor; the runner ignores it. |
+| `edges[]` | `{ id?, from, to, when? }`. Ids are unique; an edge without one is given `e<its position>` (`e0`, `e1`, ...). `pipeline.definition` and `normalizePipeline(definition)` return the definition with every id filled in. |
+| `limits?` | `maxNodeVisits` (per node, default 3, 1-100), `maxRuns` (all nodes, default 25, 1-1000). |
+
+**Conditions** (`edge.when`; absent = `always`):
+
+| `kind` | Fires when |
+| --- | --- |
+| `always` | Always. |
+| `contains` | The output contains `text` - a plain substring, case-insensitive unless `caseSensitive: true`. |
+| `matches` | `pattern` (with `flags` from `imsu`) occurs in the output. |
+| `route` | The node picked the route `label`. |
+| `otherwise` | No other edge of the same node fired. At most one per node. |
+
+`contains` and `matches` look at the first 50,000 characters of an output. A pattern is at most 500
+characters and is **not** run by `RegExp`: it is compiled to a matcher that cannot backtrack, so
+`(a+)+$` costs the same as any other pattern (time grows with input length x pattern size, both
+capped). The price is a subset of the syntax: literals, classes, `.`, `^ $ \b \B`, groups,
+alternation, `* + ? {n,m}`; no backreferences, no lookaround, no `\p{...}` - those are refused at
+validation. It answers the same as `RegExp.test` on what it accepts.
+
+**How it runs**
+
+- **Waves.** Wave 0 is the entry node. All nodes of a wave run concurrently. When a node finishes,
+  its outgoing edges are evaluated against its output: every edge whose condition holds fires;
+  `otherwise` fires only if none of the node's other edges did. A fired edge activates its target
+  for a later wave and carries the source's output to it.
+- **Join.** A node activated by several edges gets all their outputs in one visit. With
+  `join: 'all'` an activated node is *deferred* while any other activated node can still reach it
+  through the graph (conditions aside) - so a fan-in waits for its slower branch even when the
+  branches have different lengths. If every activated node is deferred (they wait for each other in
+  a cycle), all of them run. `join: 'any'` never defers: the node runs once per wave it is
+  activated in.
+- **Loops** are allowed. When starting a node would exceed `maxNodeVisits` for it, or `maxRuns` for
+  the pipeline, that activation is dropped (`pipeline.node.skipped`); the run goes on with what is
+  left, ends normally, and the result carries `stoppedBy: 'maxNodeVisits'` or `'maxRuns'`
+  (`maxRuns` wins when both happened).
+- **A fan-in inside a loop** has a limit: when a `join: 'all'` node and a slower branch that leads
+  to it can also reach each other through the loop, they wait for each other, so both run and the
+  join fires without that branch. Use `join: 'any'` there, or keep the fan-in out of the cycle (a
+  loop around the whole fan-out and fan-in works).
+- **The end.** The run ends when nothing is activated. A *terminal* visit is one that activated
+  nothing (no edge fired, or a cap dropped what it fired). `result.text` is the output of the last
+  terminal node to finish; several of the same wave are joined under `## <name>` headings.
+- **A node that throws fails the pipeline**: `run` rejects with a `PipelineNodeError` (`nodeId`,
+  `visit`, `cause`), the other running nodes are aborted through their signal, and the last event
+  is `pipeline.node.failed` (no `pipeline.finished`).
+- **Routes.** For a node with `routes`, the adapter asks the node's planner model to pick one
+  label with a small structured-output call after the node answered. An answer that is not one of
+  the labels - or a call that fails - is no route: only `always`, the text conditions and
+  `otherwise` can fire. Its tokens are part of the node's `usage`.
+- **A node's input** is the original request, then each activating node's output under its name.
+  One agent is created per node on its first visit and kept (with whatever memory its config gives
+  it) until `pipeline.close()`.
+- **What a node remembers.** Without `memory` in its config: nothing - every visit starts from its
+  input. With `memory` in `nodeResolver`'s `base`, each node gets a session of its own,
+  `<base sessionId>:<node id>` (`default:<node id>` when the base has none): a writer sees its
+  earlier drafts on its second visit, and no node reads another node's conversation. A
+  `sessionId` set in `configure` is kept as it is; a `resolveNode` of your own decides for itself.
+
+**The result**: `{ text, outputs, trace, usage, stoppedBy?, runs }` - `outputs[nodeId]` is
+`{ visit, text, route? }[]`, `trace` lists node runs, edge decisions and dropped activations in
+order, `usage` is the sum over all nodes.
+
+**Events** (through `run({ onEvent })`):
+
+| Event | Payload |
+| --- | --- |
+| `pipeline.started` | `pipeline?` - the definition's name |
+| `pipeline.node.started` | `nodeId, visit, from` - the ids of the nodes whose outputs it got |
+| `pipeline.node.finished` | `nodeId, visit, text, route?, usage?` |
+| `pipeline.node.failed` | `nodeId, visit, error` (a string) |
+| `pipeline.node.skipped` | `nodeId, from, reason: 'maxRuns' \| 'maxNodeVisits'` - an edge fired towards the node, a cap refused the visit |
+| `pipeline.edge` | `from, to, edgeId, visit, fired` - one per outgoing edge, right after the source finished; `visit` is the visit of the source node |
+| `pipeline.finished` | `stoppedBy?: 'maxRuns' \| 'maxNodeVisits' \| 'aborted', runs` |
+
+Every event of a node's own agent is forwarded unchanged, plus `nodeId` and `visit`.
+
+`validatePipeline(definition)` returns `{ ok, errors, warnings }` without running anything (each
+issue has a `code`, a `message` and the `nodeId` / `edgeId` / `edgeIndex` it is about) - errors for
+a wrong version, empty or duplicate ids, a missing entry, an edge to or from an unknown node, a
+duplicate edge id, a `route` edge whose label the source node does not have, a second `otherwise`, a bad pattern or
+flag, limits out of range; warnings for unreachable nodes, routes no edge uses, and a loop (allowed:
+the caps bound it). `createPipeline` throws a `PipelineValidationError` on errors.
+`options.runNode(node, input, ctx)` replaces the agent altogether - the pipeline then only
+schedules - which is also how to test a graph without a model.
+
+`signal` aborts every running node; `run` then **resolves** with what it has and
+`stoppedBy: 'aborted'`, as `agent.run` resolves with `stopped`. (The Node sibling rejects with an
+`AbortError`, as its `agent.run` does.) An agent run that ends on a run-level `error` event is a
+failed node. A route is picked with `generateStructured`; a model that cannot do structured output
+is asked again in plain text.
+
 ## Autonomy
 
 The default prompts make the agent act on its own:
@@ -855,3 +1004,17 @@ Subscribe with `onEvent` (per run) or the handler you pass to `createAgent`; ren
 | `subagent.start` / `subagent.event` / `subagent.complete` / `subagent.error` | `id, name` + `task, profile?` / `event` / `text, usage` / `error, stopped?` |
 | `message.queued` | `id, text` — a `RunControl.send()` is waiting for a boundary |
 | `message.delivered` | `id, text, at: 'round' \| 'step' \| 'final'` — the model has seen it |
+
+**Pipelines** ([pipelines](#pipelines-a-graph-of-agents))
+
+| Event | Payload |
+| --- | --- |
+| `pipeline.started` | `pipeline?` — the definition's name |
+| `pipeline.node.started` | `nodeId, visit, from` — a node visit began; `from` = the nodes whose outputs it got |
+| `pipeline.node.finished` | `nodeId, visit, text, route?, usage?` |
+| `pipeline.node.failed` | `nodeId, visit, error` — the run rejects; no `pipeline.finished` follows |
+| `pipeline.node.skipped` | `nodeId, from, reason: 'maxRuns' \| 'maxNodeVisits'` — an edge fired towards the node, a cap refused the visit |
+| `pipeline.edge` | `from, to, edgeId, visit, fired` — one per outgoing edge of a node that finished; `visit` is the source node's |
+| `pipeline.finished` | `stoppedBy?: 'maxRuns' \| 'maxNodeVisits' \| 'aborted', runs` |
+
+Every event a pipeline forwards from a node's agent carries `nodeId` and `visit`.

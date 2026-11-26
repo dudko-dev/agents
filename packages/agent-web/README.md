@@ -385,6 +385,62 @@ puts a message in front of the model at the next boundary (the replanner re-chec
 against it), `stopSubagent(id)` stops one subagent. `egress` (off by default) gives the model one safe `web_fetch` tool with allow / deny lists. `learning` (off by default) lets the agent write down what it figured out as skills of its own — in memory, or in the file system across sessions. Details, defaults and events:
 **[docs/capabilities.md](docs/capabilities.md)**.
 
+## Pipelines: a graph of agents
+
+A pipeline is a graph of agents - each node an agent with its own role, model and tools, each edge
+passing one node's output to the next, optionally on a condition, loops allowed - described in
+plain JSON, so it can be stored, shared and drawn by an editor.
+
+```ts
+import { createPipeline, nodeResolver } from '@dudko.dev/agent-web'
+
+const definition = {
+  version: 1,
+  entry: 'writer',
+  nodes: [
+    { id: 'writer', name: 'Writer', instructions: 'Write the text the request asks for.', model: 'smart' },
+    {
+      id: 'reviewer',
+      name: 'Reviewer',
+      instructions: 'Review the text. Be strict.',
+      routes: [{ label: 'approve', description: 'ready to publish' }, { label: 'revise' }],
+    },
+    { id: 'publisher', instructions: 'Format the approved text for publication.', tools: ['files'] },
+  ],
+  edges: [
+    { from: 'writer', to: 'reviewer' },
+    { from: 'reviewer', to: 'publisher', when: { kind: 'route', label: 'approve' } },
+    { from: 'reviewer', to: 'writer', when: { kind: 'otherwise' } }, // the loop
+  ],
+  limits: { maxNodeVisits: 3, maxRuns: 25 }, // the defaults
+}
+
+const pipeline = createPipeline(definition, {
+  // What the names in the definition stand for. A name that is not here fails its node.
+  resolveNode: nodeResolver({
+    base: { model, credentials }, // a BrowserAgentConfig: every node starts from it
+    models: { smart: { providerType: 'openai', model: 'gpt-4o-mini', credentialRef: 'openai' } },
+    tools: { files: createFileTools(vfs) },
+    // skills: { ... }, mcpServers: { docs: mcp }, configure: (config, node) => config
+  }),
+})
+
+const result = await pipeline.run({
+  input: 'A release note for v2',
+  onEvent: (e) => {
+    if (e.type === 'pipeline.node.started') highlightNode(e.nodeId)
+    if (e.type === 'pipeline.edge') highlightEdge(e.from, e.to, e.fired)
+  },
+})
+result.text // the last node's answer; result.outputs, result.trace, result.usage, result.stoppedBy
+```
+
+**Abort:** `signal` aborts every running node and `run` resolves with what it has and `stoppedBy: 'aborted'`, as `agent.run` resolves with `stopped` (the Node sibling rejects with an `AbortError`, as its `agent.run` does). **Memory:** with `memory` in `base`, every node keeps a conversation of its own (`<sessionId>:<node id>`).
+
+Conditions (`always`, `contains`, `matches`, `route`, `otherwise`), the scheduling rules (waves,
+join, the loop caps), validation and the events: **[docs/capabilities.md](docs/capabilities.md#pipelines-a-graph-of-agents)**.
+Loading a definition someone else wrote: [docs/security.md](docs/security.md#pipelines-a-definition-is-data).
+
 ## Configuration (highlights)
 
 | Option | Default | Purpose |
@@ -426,9 +482,9 @@ against it), `stopSubagent(id)` stops one subagent. `egress` (off by default) gi
 - [docs/design.md](docs/design.md) — architecture & rationale.
 - [docs/capabilities.md](docs/capabilities.md) — thinking, limits, compaction,
   caching, skills, tool consent / autopilot, large MCP catalogues, subagents,
-  steering a running agent, learning, egress, usage, resuming, autonomy, event reference.
+  steering a running agent, learning, egress, pipelines, usage, resuming, autonomy, event reference.steering a running agent, learning, egress, usage, resuming, autonomy, event reference.
 - [docs/providers.md](docs/providers.md) — every provider, CORS & direct-vs-proxy.
-- [docs/security.md](docs/security.md) — the token vault, egress and learning: threat models.
+- [docs/security.md](docs/security.md) — the token vault, egress, learning and pipelines: threat models.— the token vault, egress and learning: threat models.
 - [docs/tasks.md](docs/tasks.md) — status & roadmap.
 - [`@dudko.dev/agent-web-react`](https://www.npmjs.com/package/@dudko.dev/agent-web-react) —
   React bindings (`useAgent`, `<AgentProvider>`, pre-styled components) ·
