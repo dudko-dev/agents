@@ -65,6 +65,27 @@ const pickDtype = async (): Promise<'q4f16' | 'q4'> => {
   }
 }
 
+/**
+ * A vision model must also answer a message that has no picture. The Idefics3 processor of
+ * transformers.js (SmolVLM) reads `image_inputs.rows` even when it was given no image, so "hello"
+ * failed with "undefined is not an object (evaluating 'r.rows')". Without an image there is no
+ * image token to expand, and what the processor would return is exactly the tokenizer's output -
+ * so that is what a text-only call gets. Checked against the real model: unpatched it throws,
+ * patched it answers. Processors that have no such bug behave the same either way.
+ */
+const allowTextOnlyPrompts = (model: unknown): void => {
+  type Processor = {
+    _call: (text: unknown, images?: unknown, options?: unknown) => Promise<unknown>
+    tokenizer?: (text: unknown) => unknown
+  }
+  const processor = (model as { modelInstance?: [Processor?, unknown?] }).modelInstance?.[0]
+  if (!processor?.tokenizer || typeof processor._call !== 'function') return
+  const call = processor._call.bind(processor)
+  const tokenizer = processor.tokenizer
+  processor._call = async (text, images = null, options = {}) =>
+    images ? call(text, images, options) : tokenizer(text)
+}
+
 /** transformers.js (`@browser-ai/transformers-js`): ONNX models on WebGPU. */
 const transformersFor = (vision: boolean): LocalModelEngine => ({
   create: async (id) => {
@@ -82,6 +103,7 @@ const transformersFor = (vision: boolean): LocalModelEngine => ({
     ).createSessionWithProgress((p) =>
       onProgress({ progress: p, text: `Downloading the weights — ${Math.round(p * 100)}%` }),
     )
+    if (vision) allowTextOnlyPrompts(model)
   },
   // The provider keeps the loaded model private; dispose() frees its GPU buffers.
   unload: async (model) => {
