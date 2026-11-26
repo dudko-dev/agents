@@ -449,13 +449,34 @@ a gateway running the real safe fetch. See [security.md](./security.md).
 `web_fetch` needs an address; a model without search invents one. `search` adds `web_search`,
 and four decisions shape it.
 
-**No engine and no key ship with the library.** A search API costs money and has terms; the
-host picks one (`provider`) or passes a function (`engine`). The built-in adapters are
-deliberately thin - one documented HTTP call each, written as pure request builders and response
-parsers in `web-search-shared.ts`, a byte-for-byte copy of the Node sibling's file, so the two
-packages cannot drift on a parameter or a cap. Three were chosen: Tavily (an API made for
-agents, and the one that answers cross-origin calls), Brave (an independent index; no CORS, so a
-gateway from a page) and SearXNG (self-hosted, keyless - the option with no third party).
+**No key and no third-party search API ship with the library.** A search API costs money and
+has terms; the host passes one as a function (`engine`), and the docs carry recipes for Tavily,
+Brave and SearXNG. Adapters for those three were built in for one release and then moved out:
+each is a dozen lines a host can own, while inside the library each was an API to track, a key
+format to know and a CORS answer to keep re-checking. What stays shared with the Node sibling is
+everything a host should *not* have to write - the caps, the cleaning, the egress filter, the
+key redaction - in `web-search-shared.ts`, a byte-for-byte copy of the Node file.
+
+**One provider is built in: Google Search through Gemini grounding.** It is not a third party
+in the same sense - it goes through a model provider the agent already knows how to talk to,
+and needs that provider's key and no other. It is a *separate* `generateContent` call with the
+`google_search` tool rather than a switch on the agent's own model calls, because the Gemini API
+refuses built-in tools and function declarations in one request (HTTP 400, measured
+2026-11-26), and every step of an agent carries function declarations. The call holds a fixed
+instruction and the query - never the conversation. Its tokens are a `usage` event of phase
+`'search'`: a search that spends model tokens must show up where model tokens are counted.
+
+**Google's links are redirect links, and the agent does not resolve them.** The API returns
+`vertexaisearch.cloud.google.com/grounding-api-redirect/<token>` and the site's name, never the
+page's URL. Resolving them here would mean a request per result to an address the egress policy
+has not judged, so the links are handed over as they are and the consequences are stated: the
+result filter judges the redirect host; a title that names a site is used only to *drop* a
+denied one, never to allow; `web_fetch` follows a link under the ordinary redirect rules (from a
+page: only with `followRedirects` and a server-side `egress.fetch`, since the redirect host
+sends no CORS headers), and the tool's description stops promising `web_fetch` when it cannot
+open them. Snippets are the grounding model's sentences per source (`groundingSupports`); the
+whole answer is attached once, capped, only when no source has a sentence and nothing was
+filtered.
 
 **The key follows the providers' rule.** It is never in the config: `credentialRef` names it in
 the `CredentialStore`, it is read at each call and put into one header. An inline `apiKey` is an
@@ -465,7 +486,7 @@ thrown.
 
 **`search` and `egress` are independent, and neither loosens the other.** The tempting design -
 "add the search host to the egress allow list" - would make the search API fetchable by
-`web_fetch` and would make `search` unusable without opening `egress`. Instead the adapter's
+`web_fetch` and would make `search` unusable without opening `egress`. Instead the provider's
 request runs under its own policy (`searchEgressPolicy`): the allow list is exactly the API's
 host, scheme and port, redirects are never followed, and only the host's `deny` list is
 inherited. In the other direction, results are filtered by the model's egress policy: with an

@@ -19,7 +19,10 @@ import {
   redactSecret,
   sanitizeSearchResults,
   searchBaseUrl,
+  searchModel,
+  searchSiteUrl,
   searchStatusMessage,
+  searchToolResult,
   SEARCH_DEFAULT_MAX_RESULTS,
   SEARCH_MAX_QUERY_CHARS,
   SEARCH_MAX_RESPONSE_BYTES,
@@ -28,6 +31,7 @@ import {
   SEARCH_TIMEOUT_MS,
   WEB_SEARCH_TOOL,
   webSearchDescription,
+  type ISearchAnswer,
   type SearchEngine,
   type SearchFreshness,
   type SearchProvider,
@@ -36,39 +40,45 @@ import { toolRunContextOf } from './wrap.js'
 
 /**
  * `config.search`: the `web_search` tool, the companion of `web_fetch`. Off unless set. The
- * library ships no key and no engine of its own: the host names a hosted search API (a built-in
- * adapter, one HTTP call) or passes a function. Browser sibling of the server's `ISearchConfig`
- * - same names - except that a key is never written here: `credentialRef` names it in the
- * `CredentialStore` the agent was given (`config.credentials`).
+ * library ships no key: the host passes a search engine of its own (a function - any search API)
+ * or names the one built-in provider, Google Search through Gemini grounding. Browser sibling of
+ * the server's `ISearchConfig` - same names - except that a key is never written here:
+ * `credentialRef` names it in the `CredentialStore` the agent was given (`config.credentials`).
  *
- * A page can call an API only if that API allows cross-origin requests. Tavily does; Brave does
- * not answer a preflight (use a gateway of yours as `baseURL`); a SearXNG instance does only if
- * you configure it to (or serve it from your own origin). See docs/capabilities.md.
+ * The Gemini API answers a page directly (CORS). See docs/capabilities.md.
  */
 export interface ISearchConfig {
   /**
    * A search engine of your own: `(query, { maxResults, freshness, signal }) => results`. Its
    * requests are yours (like a tool you pass); its results are cleaned, capped and filtered like
-   * an adapter's. Exactly one of `engine` / `provider`.
+   * the provider's. Exactly one of `engine` / `provider`.
    */
   engine?: SearchEngine
-  /** A built-in adapter: 'brave' | 'tavily' | 'searxng'. */
+  /**
+   * The built-in provider: 'google' - Google Search through the Gemini API's grounding. One
+   * generateContent call per search with the `google_search` tool: it needs a Gemini (Google AI
+   * Studio) key and nothing else, and it spends that model's tokens (counted in the run's usage,
+   * phase 'search'). Result URLs are Google redirect links, snippets the model's own summary.
+   */
   provider?: SearchProvider
   /**
-   * Where the provider's API key is kept in the agent's `CredentialStore`. Read at each call and
-   * sent in a header to that API only; never in a URL, an event, a log line, an error or a result.
+   * Where the Gemini API key is kept in the agent's `CredentialStore` (it can be the ref of a
+   * Gemini model's own key). Read at each call and sent in a header to that API only; never in a
+   * URL, an event, a log line, an error or a result.
    */
   credentialRef?: string
+  /** The Gemini model that makes the grounding call. Default 'gemini-2.5-flash-lite'. */
+  model?: string
   /**
-   * Where the API lives. Required for 'searxng' (your instance); for the others it replaces the
-   * public endpoint (a gateway of yours that holds the key - `credentialRef` is then optional).
+   * Replaces the public endpoint (a gateway of yours that holds the key - `credentialRef` is
+   * then optional).
    */
   baseURL?: string
   /** Results per call when the model does not say (default 5, at most 10). */
   maxResults?: number
   /**
    * Let the SEARCH API itself be on a private / loopback address or an internal-looking name (a
-   * self-hosted SearXNG). It widens nothing else: the request can still reach only that one host.
+   * gateway of yours). It widens nothing else: the request can still reach only that one host.
    */
   allowPrivateNetwork?: boolean
   /** Whole request to the search API, in ms. Default 15_000. */
@@ -116,7 +126,7 @@ export const searchEgressPolicy = (
     ...(inherited.deny ? { deny: inherited.deny } : {}),
     protocols: [protocol],
     ports: [Number(base.port || (protocol === 'https' ? 443 : 80))],
-    methods: ['GET', 'POST'],
+    methods: ['POST'],
     allowPrivateNetwork: search.allowPrivateNetwork === true,
     followRedirects: false,
     maxResponseBytes: SEARCH_MAX_RESPONSE_BYTES,
@@ -147,13 +157,14 @@ const validate = (search: ISearchConfig, credentials: CredentialStore | undefine
     )
   }
   searchBaseUrl(provider, search.baseURL)
+  searchModel(search.model)
   if (search.credentialRef) {
     if (!credentials) {
       throw new Error(
         `search: credentialRef "${search.credentialRef}" is set but no CredentialStore was provided to the agent`,
       )
     }
-  } else if (provider !== 'searxng' && !search.baseURL) {
+  } else if (!search.baseURL) {
     throw new Error(`search: provider "${provider}" needs a credentialRef`)
   }
 }
@@ -163,6 +174,12 @@ const validate = (search: ISearchConfig, credentials: CredentialStore | undefine
  * request goes through the guarded fetch under `searchEgressPolicy`; what comes back is
  * third-party text and is cleaned, capped and - when the agent has an egress policy - filtered
  * to what `web_fetch` could open, so a search is not a way to read around the allow / deny lists.
+ *
+ * The google provider's links are Google redirect links: the filter can judge only that host
+ * (plus the site the API names, which is enough to drop a denied site and never to allow one).
+ * Nothing here follows them. `web_fetch` opens one only under `egress.followRedirects` (the
+ * guarded fetch then judges where it ended) and, from a page, only through an `egress.fetch`
+ * of the host's: the redirect host sends no CORS headers.
  */
 export const createWebSearchTool = (options: IWebSearchOptions): AgentTool => {
   const { search, egress, credentials } = options
@@ -173,15 +190,36 @@ export const createWebSearchTool = (options: IWebSearchOptions): AgentTool => {
     : undefined
   const modelPolicy = egress ? resolveEgressPolicy(egress === true ? {} : egress) : undefined
   const accepts = modelPolicy
-    ? (url: URL): boolean => {
+    ? (url: URL, title?: unknown): boolean => {
         try {
           checkEgressUrl(url, modelPolicy, 'GET')
-          return true
         } catch {
           return false
         }
+        // The site a grounded result names: a host on the deny list is dropped by name too.
+        const site = provider ? searchSiteUrl(title) : undefined
+        if (site) {
+          try {
+            checkEgressUrl(site, modelPolicy, 'GET')
+          } catch (err) {
+            if (err instanceof EgressError && err.code === 'denied-host') {
+              return false
+            }
+          }
+        }
+        return true
       }
     : undefined
+  // A grounded result is a redirect link on a host that sends no CORS headers: a page's own
+  // fetch cannot read through it. web_fetch opens one only when it follows redirects AND goes
+  // through a fetch of the host's (a gateway).
+  const canFetch =
+    Boolean(modelPolicy) &&
+    (!provider ||
+      (modelPolicy?.followRedirects === true &&
+        typeof egress === 'object' &&
+        typeof egress.fetch === 'function'))
+  const model = provider ? searchModel(search.model) : undefined
   const defaultMax = Math.max(
     1,
     Math.min(SEARCH_MAX_RESULTS, Math.floor(search.maxResults ?? SEARCH_DEFAULT_MAX_RESULTS) || 1),
@@ -208,7 +246,7 @@ export const createWebSearchTool = (options: IWebSearchOptions): AgentTool => {
     key: string | undefined,
     signal: AbortSignal | undefined,
     emit: ((event: AgentEvent) => void) | undefined,
-  ): Promise<unknown[]> => {
+  ): Promise<ISearchAnswer> => {
     const req = buildSearchRequest({
       provider: provider as SearchProvider,
       query,
@@ -216,6 +254,8 @@ export const createWebSearchTool = (options: IWebSearchOptions): AgentTool => {
       freshness,
       apiKey: key,
       baseURL: search.baseURL,
+      model,
+      now: Date.now(),
     })
     const shown = describeUrl(req.url)
     let res: Response
@@ -239,9 +279,15 @@ export const createWebSearchTool = (options: IWebSearchOptions): AgentTool => {
     }
     emit?.({ type: 'egress.request', url: shown, allowed: true, status: res.status })
     if (!res.ok) {
-      await res.body?.cancel().catch(() => {})
-      // The status only: an error body is third-party text, and may echo what was sent.
-      throw new Error(searchStatusMessage(provider as SearchProvider, res.status))
+      // The status and the API's own error code word, never the text of the body: that is
+      // third-party text, and may echo what was sent.
+      let body: unknown
+      try {
+        body = JSON.parse(await res.text())
+      } catch {
+        body = undefined
+      }
+      throw new Error(searchStatusMessage(provider as SearchProvider, res.status, model, body))
     }
     let json: unknown
     try {
@@ -256,7 +302,7 @@ export const createWebSearchTool = (options: IWebSearchOptions): AgentTool => {
   }
 
   const t = defineTool({
-    description: webSearchDescription(Boolean(egress)),
+    description: webSearchDescription(canFetch, provider),
     inputSchema: z.object({
       query: z.string().min(1).max(SEARCH_MAX_QUERY_CHARS).describe('What to search for'),
       maxResults: z
@@ -294,6 +340,7 @@ export const createWebSearchTool = (options: IWebSearchOptions): AgentTool => {
       )
       let key: string | undefined
       let raw: unknown
+      let answer: ISearchAnswer | undefined
       try {
         if (search.engine) {
           raw = await search.engine(q, {
@@ -303,7 +350,12 @@ export const createWebSearchTool = (options: IWebSearchOptions): AgentTool => {
           })
         } else {
           key = await readKey()
-          raw = await viaAdapter(q, max, freshness, key, abortSignal, run?.emit)
+          answer = await viaAdapter(q, max, freshness, key, abortSignal, run?.emit)
+          raw = answer.results
+          if (answer.usage) {
+            // A grounded search is a model call: its tokens count against the run like any other.
+            run?.addUsage(answer.usage, 'search')
+          }
         }
       } catch (err) {
         // Whatever failed, the key is not part of what the model, the events or the log see.
@@ -314,13 +366,7 @@ export const createWebSearchTool = (options: IWebSearchOptions): AgentTool => {
         throw err
       }
       const clean = sanitizeSearchResults(raw, { maxResults: max, accepts })
-      return {
-        query: q,
-        results: clean.results,
-        ...(clean.filtered ? { filtered: clean.filtered } : {}),
-        ...(clean.truncated ? { truncated: true } : {}),
-        untrusted: true,
-      }
+      return searchToolResult(q, clean, answer)
     },
   })
   return markReadOnly(t, search.readOnly !== false)

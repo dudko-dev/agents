@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { BrowserAgentConfig, Skill, ToolApprovalMode } from '@dudko.dev/agent-web'
+import { tavilyEngine } from './search-engine'
 import { BUILTIN_SKILLS, SKILL_TABS } from './skills'
 
 export type View = 'notes' | 'mcp' | 'chess'
@@ -201,9 +202,10 @@ export const useSettingsConfig = (s: DemoSettings, modelWindow: number | undefin
       // this agent's own pieces (its models, a subset of its tools, its consent mode) and spends
       // this run's budget; the defaults bound depth (1), count (8) and how many run at once (3).
       ...(s.helpers ? { subagents: { dynamic: true } } : {}),
-      // Web search: Tavily is the hosted API that answers a page directly (CORS). The key is the
-      // user's own, kept in the vault under SEARCH_CREDENTIAL and read at each call.
-      ...(s.search ? { search: { provider: 'tavily', credentialRef: SEARCH_CREDENTIAL } } : {}),
+      // Web search: Tavily is the hosted API that answers a page directly (CORS), here as an
+      // engine of the demo's own (search-engine.ts). The key is the user's own, kept in the vault
+      // under SEARCH_CREDENTIAL and read at each call.
+      ...(s.search ? { search: { engine: tavilyEngine(SEARCH_CREDENTIAL) } } : {}),
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [rebuildKey],
