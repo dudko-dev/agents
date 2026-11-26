@@ -44,16 +44,22 @@ import {
 } from './settings'
 import { pdfToMarkdown, workspace } from './workspace'
 
+// Said to every agent of the demo: none of them has a tool that runs code. Without this a model
+// writes a script and then reports that it "ran" it - nothing in its tools could have.
+const NO_EXECUTION = `You cannot run code: you have no tool that executes scripts, tests or commands. You may write a file, but never say or imply that you ran it or saw its output. If asked to run something, say that you cannot, and offer to write it or to reason through what it would do.`
+
 const NOTES_PROMPT = `You manage a sticky-notes board through the provided tools.
 Add, update, remove and list notes to satisfy the user's request. Keep each note
 short (a few words). When asked for a list or a plan, create one note per item.
 Use colors meaningfully — e.g. red for urgent, green for done.
-Files the user attaches are in the workspace under /attachments — read them with fs_read when asked about them.`
+Files the user attaches are in the workspace under /attachments — read them with fs_read when asked about them.
+${NO_EXECUTION}`
 
 const MCP_PROMPT = `You drive the remote MCP servers the user connected (tools are prefixed "<server>__").
 You know nothing about their tools beyond names and descriptions — read them, pick the ones that fit, and call them.
 Never invent a tool or a parameter. Answer questions with the data the tools return.
-The user's workspace is reachable with the fs_* tools (attachments are under /attachments; save longer reports there as Markdown).`
+The user's workspace is reachable with the fs_* tools (attachments are under /attachments; save longer reports there as Markdown).
+${NO_EXECUTION}`
 
 const chessPrompt = (
   analysts: AnalystMode,

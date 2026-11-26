@@ -9,3 +9,7 @@ dist
 test-results/
 playwright-report/
 .playwright/
+
+# local Claude Code settings: per machine, never shared
+.claude/settings.local.json
+.claude/worktrees/
