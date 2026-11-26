@@ -350,17 +350,34 @@ import { useMcp, useMcpServers } from '@dudko.dev/agent-web-react/mcp'
 ```
 
 The MCP hooks are **not** exported from `@dudko.dev/agent-web-react`. They load the
-core's `@dudko.dev/agent-web/mcp`, which imports `@modelcontextprotocol/sdk` — an
+core's `@dudko.dev/agent-web/mcp`, which imports the MCP SDK
+(`@modelcontextprotocol/client`) — an
 *optional* peer, so npm does not install it for you. A bundler cannot honour
 "optional": it resolves even a dynamic `import()` at build time, so a host that
 merely imported `useAgent` from the main entry used to fail webpack/CRA with
-`Module not found: @modelcontextprotocol/sdk/…` while never touching MCP. Behind a
+`Module not found` for the SDK while never touching MCP. Behind a
 subpath the decision is yours:
 
 - **Don't use MCP** → import only from the main entry. Nothing in your build
   mentions the SDK; install nothing extra.
-- **Use MCP** → import from `…/mcp` and `npm install @modelcontextprotocol/sdk`
+- **Use MCP** → import from `…/mcp` and `npm install @modelcontextprotocol/client`
   next to the core (it is bundled into an async chunk, loaded when you connect).
+
+> **The MCP SDK is the core's peer, and it was renamed.** A core on the 2.x MCP
+> SDK (later than `@dudko.dev/agent-web@0.0.39`) imports
+> `@modelcontextprotocol/client` (`^2.4.0`); cores up to 0.0.39 import
+> `@modelcontextprotocol/sdk` 1.x. Install the one your core asks for — when you
+> upgrade the core: `npm uninstall @modelcontextprotocol/sdk && npm install
+> @modelcontextprotocol/client`. This package imports neither, and its hooks
+> work with both. Nothing changes in the hooks' API: `ConnectedMcp`,
+> `BrowserOAuthProviderOptions`, `McpServerResult` and the other types exported
+> from `…/mcp` are structural types of this package, not the SDK's. The one
+> difference you can observe: `isUnauthorizedError(err)` now also recognises the
+> error by its `name` (the 2.x class sets it) and across two copies of the SDK.
+> A tool call refused with `403 insufficient_scope` fails with the SDK's
+> `InsufficientScopeError`, which is **not** an authorization failure for
+> `isUnauthorizedError` — the status stays `connected`. See the core's
+> [upgrade notes](https://github.com/dudko-dev/agents/blob/main/packages/agent-web/README.md#upgrading-to-the-2x-mcp-sdk).
 
 > **Migrating from ≤ 0.0.18.** `useMcp`, `useMcpServers` and their helpers
 > (`readCallbackParams`, `claimOAuthCallback`, `stripOAuthParams`,
@@ -475,8 +492,9 @@ Two notes:
 
 - The connector lives in the core's optional `@dudko.dev/agent-web/mcp` subpath
   and is loaded with a **dynamic import**, so the SDK stays out of your initial
-  bundle until `connect` runs. Install `@modelcontextprotocol/sdk` alongside the
-  core — importing these hooks is what puts it in your build.
+  bundle until `connect` runs. Install `@modelcontextprotocol/client` alongside the
+  core (`@modelcontextprotocol/sdk` for a core up to 0.0.39) — importing these
+  hooks is what puts it in your build.
 - `oauthSupported` is `false` on cores older than `@dudko.dev/agent-web@0.0.9`,
   which introduced `BrowserOAuthProvider`; header auth still works there. The
   peer floor is `>=0.0.39` — the first core with model tiers, dynamic subagents,

@@ -592,7 +592,7 @@ test('decision spec: the documented request, with the key from the CredentialSto
       decision: {
         type: 'choice',
         instructions: 'What next?',
-        criteria: { continue: 'carry on', finish: '', revise: '' },
+        criteria: { continue: 'carry on', finish: 'finish', revise: 'revise' },
       },
     })
     assert.doesNotMatch(JSON.stringify(outcome), new RegExp(KEY))

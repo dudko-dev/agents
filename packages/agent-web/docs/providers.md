@@ -103,5 +103,5 @@ e.g. `providerOptions: { fetch: myFetch }`, WebLLM engine settings, etc.
 Providers are optional peers imported dynamically. If your bundler tries to
 eagerly resolve or pre-bundle them, mark the ones you don't install as external
 (Vite: `optimizeDeps.exclude` / `build.rollupOptions.external`; webpack:
-`externals`). The `./mcp` subpath keeps `@modelcontextprotocol/sdk` out of the
+`externals`). The `./mcp` subpath keeps `@modelcontextprotocol/client` out of the
 core bundle automatically.

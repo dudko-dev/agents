@@ -808,7 +808,8 @@ test('decision adapter: Gemini Decisions through the AI SDK, against the documen
       decision: {
         type: 'choice',
         instructions: 'What next?',
-        criteria: { continue: 'carry on', finish: 'stop', revise: '' },
+        // An option without a description is described by its own id, not by an empty string.
+        criteria: { continue: 'carry on', finish: 'stop', revise: 'revise' },
       },
     })
 
@@ -821,6 +822,41 @@ test('decision adapter: Gemini Decisions through the AI SDK, against the documen
     })
     assert.equal(outcome.accepted, true)
     assert.deepEqual(outcome.usage, { inputTokens: 100, outputTokens: 0 })
+  } finally {
+    await api.close()
+  }
+})
+
+test('decision adapter: a question without a context is sent with its prompt as the state (the live API refuses an empty one)', async () => {
+  // What Google's API answered to an empty state on 2026-11-26: HTTP 400,
+  // {"error":{"message":"Missing text in content of type text.","code":"invalid_request"}}.
+  const api = await startLocalDecisions((req) => {
+    const texts = ((req.body.input ?? []) as { text?: string }[]).map((part) => part.text ?? '')
+    return texts.some((text) => !text.trim())
+      ? {
+          status: 400,
+          body: {
+            error: { message: 'Missing text in content of type text.', code: 'invalid_request' },
+          },
+        }
+      : { body: documentedAnswer({ yes: 0.97, no: 0.03 }) }
+  })
+  try {
+    const google = createGoogleGenerativeAI({ baseURL: api.baseURL, apiKey: 'test-key-not-real' })
+    const model = decisionModelFromAiSdk(google.decisionModel('gemini-decision-1'))
+    for (const context of [undefined, '', '   ']) {
+      const outcome = await askDecisionModel(model, {
+        id: 'route',
+        prompt: 'Is the draft ready to publish?',
+        options: [{ id: 'yes' }, { id: 'no' }],
+        ...(context === undefined ? {} : { context }),
+      })
+      assert.equal(outcome.accepted, true, JSON.stringify(context))
+      assert.equal(outcome.choice, 'yes')
+    }
+    for (const sent of api.requests) {
+      assert.match(JSON.stringify(sent.body.input), /Is the draft ready to publish\?/)
+    }
   } finally {
     await api.close()
   }

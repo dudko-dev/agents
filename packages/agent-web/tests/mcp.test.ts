@@ -39,8 +39,28 @@ interface MockOptions {
   cimd?: boolean
   /** Advertise `authorization_response_iss_parameter_supported` (RFC 9207). */
   issParameter?: boolean
-  tools?: { name: string; description?: string; inputSchema?: unknown; annotations?: unknown }[]
+  tools?: {
+    name: string
+    description?: string
+    inputSchema?: unknown
+    outputSchema?: unknown
+    annotations?: unknown
+  }[]
   failListTools?: boolean
+  /** Do not advertise the `tools` capability in the initialize result. */
+  noToolsCapability?: boolean
+  /** Never stop paginating: `same` repeats one cursor, `fresh` makes up a new one each page. */
+  endlessCursor?: 'same' | 'fresh'
+  /** Answer `tools/call` for this name with a JSON-RPC error, as a 2.x server does for an unknown tool. */
+  unknownTool?: string
+  /** The whole `tools/call` result for a tool, by name. */
+  results?: Record<string, Record<string, unknown>>
+  /** Answer `tools/call` for this tool with 403 `insufficient_scope`, asking for `scope`. */
+  forbidTool?: { name: string; scope: string }
+  /** Publish a token endpoint over plain http on a host that is not loopback. */
+  insecureTokenEndpoint?: boolean
+  /** The `issuer` the authorization server's metadata claims (default: its own URL). */
+  metadataIssuer?: string
   /** Paginate tools/list with this many tools per page. */
   pageSize?: number
   /** Never answer tools/list (a hung server). */
@@ -83,6 +103,12 @@ const createMockServer = (opts: MockOptions = {}) => {
     failRegistration: false,
     /** Set to answer refresh_token grants with a transient 503. */
     failRefresh: false,
+    /** tools/list requests answered, with the cursor each one carried. */
+    listCursors: [] as (string | undefined)[],
+    /** tools/call requests refused with 403 `insufficient_scope`. */
+    forbidden: 0,
+    /** The `scope` parameter of every token request, in order. */
+    tokenScopes: [] as (string | undefined)[],
   }
 
   const handleRpc = (msg: RpcMessage): unknown => {
@@ -92,7 +118,7 @@ const createMockServer = (opts: MockOptions = {}) => {
         id: msg.id,
         result: {
           protocolVersion: (msg.params as { protocolVersion: string }).protocolVersion,
-          capabilities: { tools: { listChanged: true } },
+          capabilities: opts.noToolsCapability ? {} : { tools: { listChanged: true } },
           serverInfo: { name: 'mock-mcp', version: '1.0.0' },
         },
       }
@@ -107,8 +133,15 @@ const createMockServer = (opts: MockOptions = {}) => {
           error: { code: -32000, message: 'tools/list exploded' },
         }
       }
+      const cursor = (msg.params as { cursor?: string } | undefined)?.cursor
+      state.listCursors.push(cursor)
+      if (opts.endlessCursor) {
+        const nextCursor =
+          opts.endlessCursor === 'same' ? 'again' : `page-${state.listCursors.length}`
+        return { jsonrpc: '2.0', id: msg.id, result: { tools: cursor ? [] : tools, nextCursor } }
+      }
       if (opts.pageSize) {
-        const start = Number((msg.params as { cursor?: string } | undefined)?.cursor ?? 0)
+        const start = Number(cursor ?? 0)
         const end = start + opts.pageSize
         return {
           jsonrpc: '2.0',
@@ -124,6 +157,15 @@ const createMockServer = (opts: MockOptions = {}) => {
     if (msg.method === 'tools/call') {
       state.toolCalls += 1
       const params = (msg.params ?? {}) as { name?: string; arguments?: unknown }
+      if (params.name === opts.unknownTool) {
+        return {
+          jsonrpc: '2.0',
+          id: msg.id,
+          error: { code: -32602, message: `Tool ${params.name} not found` },
+        }
+      }
+      const fixed = params.name ? opts.results?.[params.name] : undefined
+      if (fixed) return { jsonrpc: '2.0', id: msg.id, result: fixed }
       if (params.name === 'boom') {
         return {
           jsonrpc: '2.0',
@@ -171,9 +213,11 @@ const createMockServer = (opts: MockOptions = {}) => {
     ) {
       if (!href.startsWith(AS_URL)) return new Response('not found', { status: 404 })
       return jsonResponse({
-        issuer: AS_URL,
+        issuer: opts.metadataIssuer ?? AS_URL,
         authorization_endpoint: `${AS_URL}/authorize`,
-        token_endpoint: `${AS_URL}/token`,
+        token_endpoint: opts.insecureTokenEndpoint
+          ? `${AS_URL.replace('https:', 'http:')}/token`
+          : `${AS_URL}/token`,
         registration_endpoint: `${AS_URL}/register`,
         response_types_supported: ['code'],
         grant_types_supported: ['authorization_code', 'refresh_token'],
@@ -205,6 +249,7 @@ const createMockServer = (opts: MockOptions = {}) => {
       const grant = params.get('grant_type') ?? ''
       state.grants.push(grant)
       state.lastTokenClientId = params.get('client_id') ?? undefined
+      state.tokenScopes.push(params.get('scope') ?? undefined)
       // "The client you claim to be is not registered here" — what an AS says
       // after it has forgotten (or rotated away) a dynamic registration.
       if (state.rejectClient) {
@@ -258,6 +303,15 @@ const createMockServer = (opts: MockOptions = {}) => {
       const messages = Array.isArray(parsed) ? parsed : [parsed]
       if (opts.hangListTools && messages.some((m) => m.method === 'tools/list')) {
         return new Promise<Response>(() => {})
+      }
+      const forbidden = messages.find(
+        (m) => m.method === 'tools/call' && m.params?.name === opts.forbidTool?.name,
+      )
+      if (forbidden && opts.forbidTool) {
+        state.forbidden += 1
+        return jsonResponse({ error: 'insufficient_scope' }, 403, {
+          'www-authenticate': `Bearer error="insufficient_scope", scope="${opts.forbidTool.scope}", resource_metadata="${MCP_ORIGIN}/.well-known/oauth-protected-resource/mcp"`,
+        })
       }
       const replies = messages.map(handleRpc).filter((r) => r !== undefined)
       if (replies.length === 0) return new Response(null, { status: 202 })
@@ -890,13 +944,17 @@ test('the subpath re-exports UnauthorizedError so a host can identify auth failu
   })
   assert.equal(mcp.results[0].needsAuthorization, true)
 
-  // The SDK's class never assigns `this.name`, so it reads as "Error" —
-  // a host checking err.name would silently never match. Identity is the
-  // only reliable handle, and it has to be reachable from this package.
+  // The class has to be reachable from this package: a host that depends only
+  // on it has no other handle. On the 2.x SDK the class also names itself (the
+  // 1.x one read as "Error") and is recognised by a brand, not by prototype.
   const err = new UnauthorizedError()
-  assert.equal(err.name, 'Error', 'guards the assumption this export exists for')
+  assert.equal(err.name, 'UnauthorizedError', 'a host may check the name')
   assert.ok(err instanceof UnauthorizedError)
   assert.ok(err instanceof Error)
+  // A tool's own failure that merely talks about authorization is not one.
+  assert.ok(!(new Error('Unauthorized') instanceof UnauthorizedError))
+  const lookalike = Object.assign(new Error('Unauthorized'), { name: 'UnauthorizedError' })
+  assert.ok(!(lookalike instanceof UnauthorizedError), 'a name alone does not make an instance')
 })
 
 // ── The failure a browser refuses to explain ────────────────────────────────
@@ -1292,7 +1350,7 @@ test('RFC 9207: the state is checked first, so a forged callback never reaches t
   assert.deepEqual(mock.state.grants, [])
 })
 
-test('RFC 9207: a store without discovery state (older version) keeps working', async () => {
+test('RFC 9207: a flow without discovery state (older version) is refused, and nothing is lost', async () => {
   // Stamped client, no discovery state: iss is compared with the stamp.
   const mock = createMockServer({ requireAuth: true })
   const provider = hardened()
@@ -1309,10 +1367,26 @@ test('RFC 9207: a store without discovery state (older version) keeps working', 
   )
   assert.deepEqual(mock.state.grants, [])
 
+  // The right iss is not enough: the code belongs to the authorization server
+  // the user was sent to, and the record of which one that was is gone. The
+  // 2.x SDK refuses the exchange (1.x went ahead); we say so in our words.
   const again = createMockServer({ requireAuth: true })
   const second = hardened()
   await begin(second, again)
   await second.invalidateCredentials('discovery')
+  await assert.rejects(
+    () =>
+      finishMcpOAuth(
+        second,
+        { code: 'auth-code-1', state: issuedState(second), iss: AS_URL },
+        { fetch: again.fetchFn },
+      ),
+    /^Error: Authorization cannot be completed: .*start the authorization again$/,
+  )
+  assert.deepEqual(again.state.grants, [], 'the token endpoint saw nothing')
+  assert.equal(await second.tokens(), undefined)
+  // Starting again is all it takes.
+  await begin(second, again)
   await finishMcpOAuth(
     second,
     { code: 'auth-code-1', state: issuedState(second), iss: AS_URL },
@@ -1320,17 +1394,25 @@ test('RFC 9207: a store without discovery state (older version) keeps working', 
   )
   assert.equal((await second.tokens())?.access_token, 'access-2')
 
-  // Nothing to compare against at all: an unstamped registration, no discovery
-  // state. With or without iss the exchange goes ahead, as it did before.
+  // A flow a much older version started (an unstamped registration, no
+  // discovery state), with or without iss: the same refusal, and the token
+  // that is already in storage stays usable.
   for (const iss of [undefined, 'https://whoever.example.test']) {
     const old = createMockServer({ requireAuth: true })
     const legacy = hardened()
     await legacy.saveClientInformation({ client_id: 'old-client' })
+    await legacy.saveTokens({ access_token: 'access-1', token_type: 'Bearer' })
     await legacy.saveCodeVerifier('verifier-from-an-older-version')
     const state = await legacy.state()
-    await finishMcpOAuth(legacy, { code: 'auth-code-1', state, iss }, { fetch: old.fetchFn })
-    assert.deepEqual(old.state.grants, ['authorization_code'])
-    assert.equal((await legacy.tokens())?.access_token, 'access-2')
+    await assert.rejects(
+      () => finishMcpOAuth(legacy, { code: 'auth-code-1', state, iss }, { fetch: old.fetchFn }),
+      /start the authorization again/,
+    )
+    assert.deepEqual(old.state.grants, [])
+    assert.equal((await legacy.tokens())?.access_token, 'access-1')
+    const mcp = await begin(legacy, old)
+    assert.equal(mcp.results[0].connected, true)
+    await mcp.close()
   }
 })
 
@@ -1402,4 +1484,619 @@ test('readOAuthCallback: reads iss from the query string and from a hash route',
   assert.equal(readOAuthCallback('https://app.test/cb?code=abc&state=xyz')?.iss, undefined)
   // An error response carries it too (RFC 9207 section 2).
   assert.equal(readOAuthCallback(`https://app.test/cb?error=access_denied&iss=${q}`)?.iss, iss)
+})
+
+// ── on the 2.x SDK client: what this package does itself ────────────────────
+//
+// The 2.x client lists every page and checks every result on its own; the
+// connector keeps doing both by hand (`listAllTools`, `outputSchemaViolation`)
+// so that what it promised before still holds. These pin that. The same block
+// lives in the sibling package's suite (packages/agent/tests/mcp-connect.test.ts).
+
+const MAX_TOOL_LIST_PAGES = 100
+
+const collect = () => {
+  const lines: string[] = []
+  return {
+    lines,
+    onLog: (level: string, message: string) => void lines.push(`${level} ${message}`),
+  }
+}
+
+const REPORT_SCHEMA = {
+  type: 'object',
+  properties: { city: { type: 'string' }, temperature: { type: 'number' } },
+  required: ['city', 'temperature'],
+}
+
+test('tools/list: a repeated cursor ends the walk quietly', async () => {
+  const mock = createMockServer({ endlessCursor: 'same' })
+  const logs = collect()
+  const mcp = await connectMcpHttp({ docs: { url: MCP_URL, fetch: mock.fetchFn } }, logs)
+  assert.deepEqual(mcp.results, [{ name: 'docs', connected: true }])
+  assert.deepEqual(Object.keys(mcp.tools), ['docs__echo'])
+  assert.deepEqual(mock.state.listCursors, [undefined, 'again'])
+  assert.ok(!logs.lines.some((l) => /still paginating/.test(l)))
+  await mcp.close()
+})
+
+test('tools/list: a server that paginates forever is cut at the page cap, with a warning', async () => {
+  const mock = createMockServer({ endlessCursor: 'fresh' })
+  const logs = collect()
+  const mcp = await connectMcpHttp({ docs: { url: MCP_URL, fetch: mock.fetchFn } }, logs)
+  // Not a failed connect (the SDK's own aggregate walk throws past ITS cap of 64).
+  assert.deepEqual(mcp.results, [{ name: 'docs', connected: true }])
+  assert.deepEqual(Object.keys(mcp.tools), ['docs__echo'])
+  assert.equal(mock.state.listCursors.length, MAX_TOOL_LIST_PAGES)
+  assert.equal(
+    logs.lines.filter(
+      (l) => l.startsWith('warn ') && l.includes(`after ${MAX_TOOL_LIST_PAGES} pages`),
+    ).length,
+    1,
+  )
+  // A refresh walks under the same cap, and says so again.
+  await mcp.refreshServer('docs')
+  assert.equal(mock.state.listCursors.length, 2 * MAX_TOOL_LIST_PAGES)
+  assert.equal(logs.lines.filter((l) => l.includes(`after ${MAX_TOOL_LIST_PAGES} pages`)).length, 2)
+  await mcp.close()
+})
+
+test('tools/list: asked even when the server did not advertise the tools capability', async () => {
+  // The 2.x `listTools()` answers `{ tools: [] }` without asking. Servers that
+  // forget the capability and serve tools all the same exist; they keep working.
+  const mock = createMockServer({ noToolsCapability: true })
+  const mcp = await connectMcpHttp({ docs: { url: MCP_URL, fetch: mock.fetchFn } })
+  assert.deepEqual(Object.keys(mcp.tools), ['docs__echo'])
+  assert.deepEqual(mock.state.listCursors, [undefined])
+  await mcp.close()
+})
+
+test('tools/call: an unknown tool answered with a JSON-RPC error is a failed call the model can read', async () => {
+  // A 1.x server answers an unknown tool with an `isError` result (the `boom`
+  // test above); a 2.x server with a protocol error, -32602. Both must reach
+  // the AI SDK as a throw - a failed call - with the server's words.
+  const mock = createMockServer({
+    tools: [{ name: 'ghost', inputSchema: { type: 'object' } }],
+    unknownTool: 'ghost',
+  })
+  const mcp = await connectMcpHttp({ docs: { url: MCP_URL, fetch: mock.fetchFn } })
+  const err = await callTool(mcp.tools, 'docs__ghost', {}).then(
+    () => undefined,
+    (e: unknown) => e as Error & { code?: unknown },
+  )
+  assert.ok(err instanceof Error)
+  // Verbatim: the 1.x SDK put "MCP error -32602: " in front.
+  assert.equal(err.message, 'Tool ghost not found')
+  assert.equal(err.code, -32602)
+  assert.ok(!(err instanceof UnauthorizedError))
+  assert.equal(mock.state.toolCalls, 1, 'asked once, not retried')
+  // The connection survives it.
+  assert.deepEqual(mcp.results, [{ name: 'docs', connected: true }])
+  await mcp.close()
+})
+
+test('outputSchema: a result that follows it is passed on without a note', async () => {
+  const value = { city: 'Lisbon', temperature: 21 }
+  const mock = createMockServer({
+    tools: [{ name: 'report', inputSchema: { type: 'object' }, outputSchema: REPORT_SCHEMA }],
+    results: { report: { content: [], structuredContent: value } },
+  })
+  const logs = collect()
+  const mcp = await connectMcpHttp({ docs: { url: MCP_URL, fetch: mock.fetchFn } }, logs)
+  assert.deepEqual(await callTool(mcp.tools, 'docs__report', {}), value)
+  assert.ok(!logs.lines.some((l) => /outputSchema/.test(l)))
+  await mcp.close()
+})
+
+test('outputSchema: a mismatch and a missing value are each passed on with a note, the call made once', async () => {
+  const wrong = { city: 'Lisbon', temperature: 'warm' }
+  const mock = createMockServer({
+    tools: [
+      { name: 'wrong', inputSchema: { type: 'object' }, outputSchema: REPORT_SCHEMA },
+      { name: 'bare', inputSchema: { type: 'object' }, outputSchema: REPORT_SCHEMA },
+    ],
+    results: {
+      wrong: { content: [], structuredContent: wrong },
+      bare: { content: [{ type: 'text', text: 'just words' }] },
+    },
+  })
+  const logs = collect()
+  const mcp = await connectMcpHttp({ docs: { url: MCP_URL, fetch: mock.fetchFn } }, logs)
+
+  // The detail is the validator's: in a browser the SDK's default one is
+  // @cfworker/json-schema (the Node sibling's is Ajv, with other words).
+  assert.deepEqual(await callTool(mcp.tools, 'docs__wrong', {}), {
+    note:
+      'The tool "wrong" ran, but its result does not follow the output schema the server declared ' +
+      "for it (Structured content does not match the tool's output schema: #: Property " +
+      '"temperature" does not match schema.; #/temperature: Instance type "string" is invalid. ' +
+      'Expected "number".). The result is passed on as received: treat its shape with care, and ' +
+      'do not call the tool again only because of this note.',
+    structuredContent: wrong,
+  })
+  assert.deepEqual(await callTool(mcp.tools, 'docs__bare', {}), {
+    note:
+      'The tool "bare" ran, but its result does not follow the output schema the server declared ' +
+      'for it (Tool bare has an output schema but did not return structured content). The result ' +
+      'is passed on as received: treat its shape with care, and do not call the tool again only ' +
+      'because of this note.',
+    content: 'just words',
+  })
+  assert.equal(mock.state.toolCalls, 2, 'one request each: nothing is called again')
+  assert.equal(
+    logs.lines.filter((l) => /^warn .*result does not follow the declared outputSchema/.test(l))
+      .length,
+    2,
+  )
+  await mcp.close()
+})
+
+test('outputSchema: an isError result is a failed call, never a note', async () => {
+  const mock = createMockServer({
+    tools: [
+      { name: 'boom', inputSchema: { type: 'object' }, outputSchema: REPORT_SCHEMA },
+      { name: 'half', inputSchema: { type: 'object' }, outputSchema: REPORT_SCHEMA },
+    ],
+    // An error that also carries a value which breaks the schema: still an error.
+    results: {
+      half: {
+        content: [{ type: 'text', text: 'half done' }],
+        structuredContent: { city: 1 },
+        isError: true,
+      },
+    },
+  })
+  const logs = collect()
+  const mcp = await connectMcpHttp({ docs: { url: MCP_URL, fetch: mock.fetchFn } }, logs)
+  await assert.rejects(
+    () => callTool(mcp.tools, 'docs__boom', {}),
+    (err: unknown) => err instanceof Error && err.message === 'kaboom',
+  )
+  await assert.rejects(
+    () => callTool(mcp.tools, 'docs__half', {}),
+    (err: unknown) => err instanceof Error && err.message === 'half done',
+  )
+  assert.ok(!logs.lines.some((l) => /outputSchema/.test(l)))
+  await mcp.close()
+})
+
+test('outputSchema: one that cannot be compiled fails that tool before anything is sent', async () => {
+  // 1.x compiled every schema while listing, so this server did not connect at
+  // all; now it does, and only the tool with the bad schema is refused.
+  const mock = createMockServer({
+    tools: [
+      {
+        name: 'odd',
+        inputSchema: { type: 'object' },
+        outputSchema: { $schema: 'http://json-schema.org/draft-03/schema#', type: 'object' },
+      },
+      { name: 'echo', inputSchema: { type: 'object' } },
+    ],
+  })
+  const mcp = await connectMcpHttp({ docs: { url: MCP_URL, fetch: mock.fetchFn } })
+  assert.deepEqual(mcp.results, [{ name: 'docs', connected: true }])
+  for (let i = 0; i < 2; i++) {
+    await assert.rejects(
+      () => callTool(mcp.tools, 'docs__odd', {}),
+      (err: unknown) =>
+        err instanceof Error &&
+        /^Tool 'odd' has an invalid outputSchema: .*unsupported dialect/.test(err.message) &&
+        err.message.length <= "Tool 'odd' has an invalid outputSchema: ".length + 200,
+    )
+  }
+  assert.equal(mock.state.toolCalls, 0, 'nothing ran on the server')
+  assert.equal(await callTool(mcp.tools, 'docs__echo', { a: 1 }), 'echo:{"a":1}')
+  await mcp.close()
+})
+
+test('outputSchema: a validator that throws on the value is a note, not a failed call', async () => {
+  // The browser validator resolves a `$ref` when it validates, not when it
+  // compiles (Ajv, in the Node sibling, refuses such a schema up front). By
+  // then the call has run: the result is passed on, with the reason.
+  const value = { city: 'Lisbon' }
+  const mock = createMockServer({
+    tools: [
+      {
+        name: 'dangling',
+        inputSchema: { type: 'object' },
+        outputSchema: { type: 'object', properties: { city: { $ref: '#/$defs/nowhere' } } },
+      },
+    ],
+    results: { dangling: { content: [], structuredContent: value } },
+  })
+  const mcp = await connectMcpHttp({ docs: { url: MCP_URL, fetch: mock.fetchFn } })
+  const out = (await callTool(mcp.tools, 'docs__dangling', {})) as {
+    note: string
+    structuredContent: unknown
+  }
+  assert.match(out.note, /\(Failed to validate structured content: .+\)\. The result is passed on/)
+  assert.deepEqual(out.structuredContent, value)
+  assert.equal(mock.state.toolCalls, 1)
+  await mcp.close()
+})
+
+// ── on the 2.x SDK client: OAuth ────────────────────────────────────────────
+
+const authorized = async (provider: BrowserOAuthProvider): Promise<void> => {
+  await provider.saveClientInformation({ client_id: 'dcr-client-1', issuer: AS_URL })
+  await provider.saveTokens({
+    access_token: 'access-1',
+    token_type: 'Bearer',
+    expires_in: 3600,
+    refresh_token: 'refresh-1',
+    scope: 'mcp:tools',
+    issuer: AS_URL,
+  })
+}
+
+test('403 insufficient_scope, interactive provider: the call fails with the scope; no authorization is started', async () => {
+  const mock = createMockServer({
+    requireAuth: true,
+    tools: [
+      { name: 'admin', inputSchema: { type: 'object' } },
+      { name: 'echo', inputSchema: { type: 'object' } },
+    ],
+    forbidTool: { name: 'admin', scope: 'mcp:admin' },
+  })
+  const prompts: URL[] = []
+  const provider = hardened({ onRedirect: (url: URL) => void prompts.push(url) })
+  await authorized(provider)
+  // A flow the user has open: nothing a tool call does may replace its pair.
+  await provider.saveCodeVerifier('verifier-of-a-pending-flow')
+  const pendingState = await provider.state()
+
+  const mcp = await begin(provider, mock)
+  assert.deepEqual(mcp.results, [{ name: 'docs', connected: true }])
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const err = await callTool(mcp.tools, 'docs__admin', {}).then(
+      () => undefined,
+      (e: unknown) => e as Error & { requiredScope?: string },
+    )
+    assert.ok(err instanceof Error)
+    assert.equal(err.message, 'Insufficient scope: required "mcp:admin"')
+    assert.equal(err.requiredScope, 'mcp:admin')
+    // Not an "authorize again" signal for a UI that watches for UnauthorizedError.
+    assert.ok(!(err instanceof UnauthorizedError))
+    assert.equal(mock.state.forbidden, attempt, 'one request per call: no retry, no loop')
+  }
+  assert.deepEqual(mock.state.grants, [], 'no token request: neither a refresh nor a code')
+  assert.equal(mock.state.registrations, 0)
+  assert.deepEqual(prompts, [], 'nobody was asked to authorize')
+  assert.equal(provider.authorizationUrl, undefined)
+  assert.equal(await provider.codeVerifier(), 'verifier-of-a-pending-flow')
+  assert.equal(await provider.verifyState(pendingState), true, 'the pending state is still the one')
+  // The token is as good as it was for everything else.
+  assert.equal((await provider.tokens())?.access_token, 'access-1')
+  assert.equal(await callTool(mcp.tools, 'docs__echo', { a: 1 }), 'echo:{"a":1}')
+  await mcp.close()
+})
+
+test('403 insufficient_scope, provider without a human step: one wider grant per call, then it stops', async () => {
+  const mock = createMockServer({
+    requireAuth: true,
+    tools: [{ name: 'admin', inputSchema: { type: 'object' } }],
+    forbidTool: { name: 'admin', scope: 'mcp:admin' },
+  })
+  // The smallest non-interactive provider there is: a pre-registered client
+  // and a grant of its own (what the enterprise provider is, minus the IdP).
+  let tokens: Record<string, unknown> | undefined = {
+    access_token: 'access-1',
+    token_type: 'Bearer',
+    scope: 'mcp:tools',
+    issuer: AS_URL,
+  }
+  const redirects: URL[] = []
+  const machine = {
+    get redirectUrl() {
+      return undefined
+    },
+    get clientMetadata() {
+      return { redirect_uris: [], grant_types: ['client_credentials'] }
+    },
+    clientInformation: () => ({ client_id: 'machine', issuer: AS_URL }),
+    tokens: () => tokens,
+    saveTokens: (t: typeof tokens) => {
+      tokens = t
+    },
+    prepareTokenRequest: (scope?: string) =>
+      new URLSearchParams({ grant_type: 'client_credentials', ...(scope ? { scope } : {}) }),
+    redirectToAuthorization: (url: URL) => void redirects.push(url),
+    saveCodeVerifier: () => {
+      throw new Error('no interactive step')
+    },
+    codeVerifier: () => {
+      throw new Error('no interactive step')
+    },
+  }
+
+  const mcp = await connectMcpHttp({
+    docs: { url: MCP_URL, authProvider: machine as never, fetch: mock.fetchFn },
+  })
+  assert.deepEqual(mcp.results, [{ name: 'docs', connected: true }])
+
+  await assert.rejects(() => callTool(mcp.tools, 'docs__admin', {}), /403 insufficient_scope/)
+  // One grant for the union of what it had and what was asked, one retry, done.
+  assert.deepEqual(mock.state.grants, ['client_credentials'])
+  assert.deepEqual(mock.state.tokenScopes, ['mcp:tools mcp:admin'])
+  assert.equal(mock.state.forbidden, 2)
+  assert.equal(tokens?.access_token, 'access-2')
+
+  await assert.rejects(() => callTool(mcp.tools, 'docs__admin', {}), /403 insufficient_scope/)
+  assert.equal(mock.state.grants.length, 2, 'the next call may try once more, and only once')
+  assert.equal(mock.state.forbidden, 4)
+  assert.deepEqual(redirects, [])
+  await mcp.close()
+})
+
+test('issuer stamp: storage written before there was one keeps working and gets stamped', async (t) => {
+  // What earlier versions left behind: a registration and tokens with no
+  // `issuer`. They are used as they are and stamped on first use - never thrown
+  // away, and never a crash. (The SDK says so on the console; not in the test output.)
+  const warned = t.mock.method(console, 'warn', () => {})
+  let n = 0
+  for (const makeStore of [
+    () => new MemoryOAuthStorage(),
+    // The default storage: the encrypted IndexedDB vault.
+    () => new VaultOAuthStorage({ dbName: `unstamped-${++n}` }),
+  ]) {
+    const mock = createMockServer({ requireAuth: true })
+    const store = makeStore()
+    // Byte for byte what the previous version's provider wrote.
+    const ns = `mcp-oauth:${MCP_URL}`
+    await store.set(`${ns}:client`, JSON.stringify({ client_id: 'dcr-client-1' }))
+    await store.set(
+      `${ns}:tokens`,
+      JSON.stringify({
+        tokens: {
+          access_token: 'access-1',
+          token_type: 'Bearer',
+          expires_in: 3600,
+          refresh_token: 'refresh-1',
+        },
+        expiresAt: Date.now() - 1000, // known dead: the refresh token has to be used
+      }),
+    )
+    const provider = hardened({}, store)
+    assert.equal((await provider.tokens())?.access_token, 'access-1', 'the old record loads')
+    mock.state.validTokens.clear()
+
+    const mcp = await begin(provider, mock)
+    assert.deepEqual(mcp.results, [{ name: 'docs', connected: true }])
+    assert.deepEqual(mock.state.grants, ['refresh_token'])
+    assert.equal(mock.state.registrations, 0, 'the old registration was kept')
+    assert.equal(mock.state.lastTokenClientId, 'dcr-client-1')
+    assert.equal(provider.authorizationUrl, undefined, 'nobody was asked to authorize')
+    await mcp.close()
+
+    // What a reload reads: both carry the stamp now, exactly as the SDK wrote it.
+    const reloaded = hardened({}, store)
+    assert.deepEqual(await reloaded.clientInformation(), {
+      client_id: 'dcr-client-1',
+      issuer: AS_URL,
+    })
+    assert.equal((await reloaded.tokens())?.issuer, AS_URL)
+    assert.equal((await reloaded.tokens())?.access_token, 'access-2')
+    assert.equal(await reloaded.isAccessTokenExpired(), false)
+  }
+  assert.ok(warned.mock.calls.some((c) => /no 'issuer' stamp/.test(String(c.arguments[0]))))
+})
+
+test('issuer stamp: an unstamped token that is still good connects without a single OAuth request', async (t) => {
+  t.mock.method(console, 'warn', () => {})
+  const mock = createMockServer({ requireAuth: true })
+  const provider = hardened()
+  await provider.saveClientInformation({ client_id: 'dcr-client-1' })
+  await provider.saveTokens({ access_token: 'access-1', token_type: 'Bearer', expires_in: 3600 })
+  const mcp = await begin(provider, mock)
+  assert.deepEqual(mcp.results, [{ name: 'docs', connected: true }])
+  assert.deepEqual(mock.state.grants, [])
+  assert.equal(mock.requests.filter((r) => !r.url.startsWith(MCP_URL)).length, 0)
+  assert.equal(await callTool(mcp.tools, 'docs__echo', { a: 1 }), 'echo:{"a":1}')
+  await mcp.close()
+})
+
+test('proactive refresh: a refresh token the server no longer knows leads to ONE authorization', async () => {
+  // The other way a refresh ends in a new authorization (the test further up
+  // has a 503): an `invalid_grant`. That escalation must not happen inside the
+  // proactive refresh: it would issue a state and a PKCE verifier, and call
+  // `onRedirect`, a moment before the transport's own 401 handling does all of
+  // it again.
+  const mock = createMockServer({ requireAuth: true })
+  const redirects: URL[] = []
+  const logs = collect()
+  const provider = hardened({ onRedirect: (url: URL) => void redirects.push(url) })
+  await provider.saveClientInformation({ client_id: 'dcr-client-1', issuer: AS_URL })
+  await provider.saveTokens({
+    access_token: 'access-1',
+    token_type: 'Bearer',
+    expires_in: 5, // inside the skew window: the proactive refresh fires
+    refresh_token: 'bogus',
+    issuer: AS_URL,
+  })
+  mock.state.validTokens.clear()
+
+  const mcp = await connectMcpHttp(
+    { docs: { url: MCP_URL, authProvider: provider, fetch: mock.fetchFn } },
+    logs,
+  )
+  assert.equal(mcp.results[0].needsAuthorization, true)
+  assert.deepEqual(mock.state.grants, ['refresh_token'], 'the dead token was tried once')
+  assert.equal(redirects.length, 1, 'exactly one authorization was started')
+  assert.ok(
+    logs.lines.some((l) => /could not be refreshed; a new authorization is needed/.test(l)),
+    logs.lines.join(' | '),
+  )
+  // The state that reached the user is the state we can verify.
+  const state = redirects[0].searchParams.get('state') ?? undefined
+  await finishMcpOAuth(provider, { code: 'auth-code-1', state }, { fetch: mock.fetchFn })
+  assert.equal((await provider.tokens())?.access_token, 'access-2')
+})
+
+test('issuer stamp: credentials stamped for another authorization server are never presented to this one', async () => {
+  const mock = createMockServer({ requireAuth: true })
+  const provider = hardened()
+  await provider.saveClientInformation({
+    client_id: 'client-of-another-as',
+    issuer: 'https://other.example.test',
+  })
+  await provider.saveTokens({
+    access_token: 'access-1',
+    token_type: 'Bearer',
+    expires_in: 5,
+    refresh_token: 'refresh-1',
+    issuer: 'https://other.example.test',
+  })
+  mock.state.validTokens.clear()
+
+  const mcp = await begin(provider, mock)
+  // Read as if nothing were stored: a clean new authorization, not an error.
+  assert.equal(mcp.results[0].needsAuthorization, true)
+  assert.deepEqual(mock.state.grants, [], 'the refresh token went nowhere')
+  assert.equal(mock.state.registrations, 1)
+  assert.equal(provider.authorizationUrl?.searchParams.get('client_id'), 'dcr-client-1')
+  assert.equal((await provider.clientInformation())?.issuer, AS_URL)
+})
+
+test('invalid_client: the registration and the tokens go, what discovery found stays', async () => {
+  // The 2.x SDK asks for 'client' and then 'tokens' (1.x asked for 'all').
+  const mock = createMockServer({ requireAuth: true })
+  const provider = hardened()
+  const scopes: string[] = []
+  const invalidate = provider.invalidateCredentials.bind(provider)
+  provider.invalidateCredentials = async (scope) => {
+    scopes.push(scope)
+    await invalidate(scope)
+  }
+  await begin(provider, mock)
+  await finishMcpOAuth(
+    provider,
+    { code: 'auth-code-1', state: issuedState(provider) },
+    { fetch: mock.fetchFn },
+  )
+  const discovery = await provider.discoveryState()
+  assert.ok(discovery)
+  const discoveries = () => mock.requests.filter((r) => r.url.includes('/.well-known/')).length
+  const before = discoveries()
+
+  mock.state.validTokens.clear()
+  mock.state.rejectClient = true
+  const mcp = await begin(provider, mock)
+  assert.equal(discoveries(), before, 'nothing was discovered again: the record was never dropped')
+  assert.equal(mcp.results[0].needsAuthorization, true)
+  assert.deepEqual(scopes, ['client', 'tokens'])
+  assert.equal(await provider.tokens(), undefined)
+  assert.equal((await provider.clientInformation())?.client_id, 'dcr-client-2')
+  assert.deepEqual(await provider.discoveryState(), discovery)
+})
+
+test('refresh: storage that cannot save the new tokens fails the connect, and asks nobody to authorize', async () => {
+  // The authorization server has already rotated the refresh token when the
+  // save fails. 1.x swallowed the error and started a new authorization; 2.x
+  // lets it through, and the user sees what is actually wrong.
+  const mock = createMockServer({ requireAuth: true })
+  const inner = new MemoryOAuthStorage()
+  let broken = false
+  const store = {
+    get: (key: string) => inner.get(key),
+    delete: (key: string) => inner.delete(key),
+    set: async (key: string, value: string) => {
+      if (broken && key.endsWith(':tokens')) throw new Error('quota exceeded')
+      await inner.set(key, value)
+    },
+  }
+  const prompts: URL[] = []
+  const provider = hardened({ onRedirect: (url: URL) => void prompts.push(url) }, store as never)
+  await authorized(provider)
+  mock.state.validTokens.clear()
+  broken = true
+
+  const mcp = await begin(provider, mock)
+  // Not `needsAuthorization`: authorizing again would not make the quota any larger.
+  assert.deepEqual(mcp.results, [{ name: 'docs', connected: false, error: 'quota exceeded' }])
+  assert.deepEqual(prompts, [])
+  assert.deepEqual(mock.state.grants, ['refresh_token'])
+  assert.equal(mock.state.registrations, 0)
+})
+
+test('token endpoint over plain http on a host that is not loopback: nothing is sent to it', async () => {
+  const mock = createMockServer({ requireAuth: true, insecureTokenEndpoint: true })
+  const provider = hardened()
+  await begin(provider, mock)
+  await assert.rejects(
+    () =>
+      finishMcpOAuth(
+        provider,
+        { code: 'auth-code-1', state: issuedState(provider) },
+        { fetch: mock.fetchFn },
+      ),
+    /token endpoint/i,
+  )
+  // And a refresh is refused the same way, not turned into a new authorization.
+  const prompts: URL[] = []
+  const second = hardened({ onRedirect: (url: URL) => void prompts.push(url) })
+  await authorized(second)
+  mock.state.validTokens.clear()
+  const mcp = await begin(second, mock)
+  assert.equal(mcp.results[0].connected, false)
+  assert.match(mcp.results[0].error ?? '', /token endpoint/i)
+  assert.deepEqual(prompts, [])
+  assert.equal(mock.requests.filter((r) => r.url.endsWith('/token')).length, 0)
+  assert.deepEqual(mock.state.grants, [])
+})
+
+test('proactive refresh: the provider is read and written with the issuer the SDK resolved', async () => {
+  // A provider that keeps credentials per authorization server keys them on
+  // the second argument; the refresh-only view must hand it through.
+  const mock = createMockServer({ requireAuth: true })
+  const provider = hardened()
+  await provider.saveClientInformation({ client_id: 'dcr-client-1', issuer: AS_URL })
+  await provider.saveTokens({
+    access_token: 'access-1',
+    token_type: 'Bearer',
+    expires_in: 5, // known dead: refreshed before the first request
+    refresh_token: 'refresh-1',
+    issuer: AS_URL,
+  })
+  mock.state.validTokens.clear()
+
+  const seen: string[] = []
+  const spy =
+    <A extends unknown[], R>(name: string, fn: (...args: A) => R) =>
+    (...args: A): R => {
+      seen.push(`${name} ${JSON.stringify(args.at(-1))}`)
+      return fn(...args)
+    }
+  const keyed = provider as unknown as Record<string, (...args: never[]) => unknown>
+  for (const name of ['clientInformation', 'tokens', 'saveTokens']) {
+    keyed[name] = spy(name, keyed[name].bind(provider) as (...args: unknown[]) => unknown)
+  }
+
+  const mcp = await begin(provider, mock)
+  assert.deepEqual(mcp.results, [{ name: 'docs', connected: true }])
+  assert.deepEqual(mock.state.grants, ['refresh_token'])
+  const ctx = JSON.stringify({ issuer: AS_URL })
+  assert.ok(seen.includes(`clientInformation ${ctx}`), seen.join(' | '))
+  assert.ok(seen.includes(`tokens ${ctx}`), seen.join(' | '))
+  assert.ok(seen.includes(`saveTokens ${ctx}`), seen.join(' | '))
+  await mcp.close()
+})
+
+test('authorization server metadata that names another issuer is refused: no registration, no prompt', async () => {
+  // RFC 8414 section 3.3, enforced by the 2.x SDK (1.x took the document as it
+  // came): metadata fetched for one issuer that claims to be another.
+  const mock = createMockServer({
+    requireAuth: true,
+    metadataIssuer: 'https://someone-else.example.test',
+  })
+  const prompts: URL[] = []
+  const provider = hardened({ onRedirect: (url: URL) => void prompts.push(url) })
+  const mcp = await begin(provider, mock)
+  assert.equal(mcp.results[0].connected, false)
+  assert.equal(mcp.results[0].needsAuthorization, undefined)
+  assert.match(mcp.results[0].error ?? '', /issuer/i)
+  assert.match(mcp.results[0].error ?? '', /someone-else\.example\.test/)
+  assert.equal(mock.state.registrations, 0)
+  assert.deepEqual(prompts, [])
+  assert.equal(await provider.discoveryState(), undefined, 'nothing of it was kept')
 })

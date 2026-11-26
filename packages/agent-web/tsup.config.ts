@@ -12,7 +12,7 @@ const OPTIONAL_PEERS = [
   '@browser-ai/web-llm',
   '@browser-ai/core',
   '@mlc-ai/web-llm',
-  '@modelcontextprotocol/sdk',
+  '@modelcontextprotocol/client',
   'quickjs-emscripten',
 ]
 
@@ -20,7 +20,7 @@ export default defineConfig([
   // Three entry points:
   //   .        → the core agent (no MCP, no node:* — safe for any browser bundle)
   //   ./mcp    → the optional HTTP MCP connector, kept separate so
-  //              @modelcontextprotocol/sdk never enters the core bundle.
+  //              @modelcontextprotocol/client never enters the core bundle.
   //   ./webmcp → the optional bridge to the browser's WebMCP API (a page's tools
   //              published from / consumed as an agent ToolSet); no extra dependency.
   // All model providers, WebLLM, and the MCP SDK are external optional peers —

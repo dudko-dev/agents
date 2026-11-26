@@ -91,9 +91,25 @@ exchanged)
   stored metadata) - exactly, with no normalization. A different value is
   refused. A response with no `iss` is refused when that server's metadata says
   `authorization_response_iss_parameter_supported: true`.
+- **The record of the flow.** The code is exchanged only when the discovery
+  state saved when the flow began (which authorization server the user was sent
+  to) is still in storage. Without it the callback is refused - `Authorization
+  cannot be completed: ... start the authorization again` - whatever `iss` says,
+  and nothing reaches a token endpoint. Stored tokens are not touched.
 - **Credentials are bound to their issuer.** The SDK stamps the registration and
   the tokens with the authorization server they came from and never presents
-  them to another; the provider stores the stamp as it is.
+  them to another; the provider stores the stamp as it is. Stamped for another
+  server they read as absent; unstamped (written by an older version) they are
+  used and stamped on first use - the one read where the binding is not
+  enforced, which the SDK reports on the console.
+- **The authorization server's metadata** must name the issuer it was fetched
+  for (RFC 8414 section 3.3), and its **token endpoint** must be https or
+  loopback: the SDK refuses both before any credential is sent.
+- **`403 insufficient_scope` never starts an authorization** from inside a tool
+  call: the stored `state` and PKCE verifier of a flow the user has open are not
+  replaced by a server that keeps answering 403. The call fails with the scope
+  it asked for. (A provider without a human step - the enterprise one - may ask
+  for the wider scope once per request.)
 - **`clientMetadataUrl` (CIMD)** must be https with a non-root path. With it the
   `client_id` is a URL you control, and the authorization server reads the
   allowed `redirect_uris` from the document there - keep that list exact.
@@ -101,11 +117,8 @@ exchanged)
 **What it does not protect against**
 
 - An authorization server that does not send `iss` and does not promise to: the
-  response is accepted on `state` alone, as before. The same when storage holds
-  nothing to compare with (written by an older version).
-- A server that publishes its metadata only as `openid-configuration`: the MCP
-  SDK drops the "always sends `iss`" flag from that document, so a missing `iss`
-  is not refused there; a present one is still checked.
+  response is accepted on `state` and the stored record of the flow alone.
+- Tokens stored without an issuer stamp, until their first use (see above).
 - XSS on your origin, as with every key in the vault.
 
 ---
@@ -594,7 +607,8 @@ wider one than a tool result: it is there before the first call.
   for user-supplied ("bring your own MCP") servers unless you show the user what they sent
   (`connected.instructions`).
 - **Structured results are data, like any tool result.** A value that breaks the tool's
-  `outputSchema` is passed to the model with a note rather than refused (refusing would report
+  `outputSchema` (checked with the SDK's browser validator, which generates no code and needs no
+  `'unsafe-eval'`) is passed to the model with a note rather than refused (refusing would report
   a call that ran as failed, and invite a repeat): do not treat the schema as a validation
   boundary for what your own code does with `structuredContent`.
 

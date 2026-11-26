@@ -24,7 +24,7 @@
     "@dudko.dev/pdf-to-md-core": "^0.3.6",
     "@huggingface/transformers": "^4.3.2",
     "@mlc-ai/web-llm": "^0.2.89",
-    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@modelcontextprotocol/client": "^2.4.0",
     "@openrouter/ai-sdk-provider": "^3.1.0",
     "ai": "^7.0.183",
     "chess.js": "^1.4.0",

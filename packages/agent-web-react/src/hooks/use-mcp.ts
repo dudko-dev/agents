@@ -131,7 +131,7 @@ let modulePromise: Promise<McpModule> | undefined
 
 /**
  * Load the core's optional `./mcp` subpath. Kept dynamic so apps that never
- * touch MCP don't pull `@modelcontextprotocol/sdk` into their bundle, and so a
+ * touch MCP don't pull `@modelcontextprotocol/client` into their bundle, and so a
  * core without the OAuth half degrades to a clear message instead of a crash.
  */
 export const loadMcp = (): Promise<McpModule> => {
@@ -286,16 +286,24 @@ export const mcpOAuthProviderOptions = (
 /**
  * Did this error come from the server refusing our authorization?
  *
- * Identity, not strings: the SDK's `UnauthorizedError` never assigns
- * `this.name` (so it reads as "Error"), and its message would also match a
- * tool whose own error text mentions "unauthorized" — the connector throws a
- * failing tool's text verbatim. The class is re-exported by the core's `./mcp`
- * subpath for exactly this; `constructor.name` is the fallback for a core too
- * old to export it.
+ * Never by the message: it would also match a tool whose own error text
+ * mentions "unauthorized" — the connector throws a failing tool's text
+ * verbatim. Three handles, in order:
+ *
+ * 1. the class the core's `./mcp` subpath re-exports. On the 2.x MCP SDK
+ *    (`@modelcontextprotocol/client`) `instanceof` goes by a brand the error
+ *    carries, not by prototype, so it also holds when the error was made by
+ *    another copy of the SDK than the one the core module resolved to (two
+ *    bundles, an ESM and a CJS build on one page);
+ * 2. the error's own `name`, which the 2.x class sets to `'UnauthorizedError'`
+ *    (a string, so it survives a minifier; the 1.x class left it `'Error'`);
+ * 3. `constructor.name`, for a core on the 1.x SDK that is too old to export
+ *    the class (and only where the bundle keeps class names).
  */
 export const isUnauthorizedError = (err: unknown, mod?: McpModule): boolean => {
   if (!(err instanceof Error)) return false
   if (mod?.UnauthorizedError && err instanceof mod.UnauthorizedError) return true
+  if (err.name === 'UnauthorizedError') return true
   return err.constructor?.name === 'UnauthorizedError'
 }
 

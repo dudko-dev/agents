@@ -48,9 +48,15 @@ against its production build.
 - `src/mcp.ts` — the **`./mcp` entry**: `useMcp`, `useMcpServers` and their helpers
   and types. They are deliberately NOT in `src/index.ts`. A bundler resolves even a
   dynamic `import('@dudko.dev/agent-web/mcp')` at build time, and the core's `mcp.js`
-  statically imports the optional `@modelcontextprotocol/sdk` — so any reference from
+  statically imports the optional `@modelcontextprotocol/client` (the 2.x MCP SDK; it was
+  `@modelcontextprotocol/sdk` 1.x up to core 0.0.39) — so any reference from
   the main entry fails webpack/CRA builds of hosts that never use MCP.
-  `tests/entries.test.ts` enforces it; don't move MCP back "for convenience".
+  `tests/entries.test.ts` enforces it (and that no entry of THIS package imports the SDK at all);
+  don't move MCP back "for convenience". `isUnauthorizedError` recognises the SDK's error by the
+  class the core re-exports (a brand on 2.x, so it holds across two copies of the SDK), then by
+  `name`, then by `constructor.name` (1.x cores): `tests/mcp.test.ts` loads the real class through
+  the core's `./mcp` and a second copy of the SDK. The `@modelcontextprotocol/sdk` 1.x
+  devDependency is there for `e2e/servers.ts` only: a real 1.x MCP SERVER over real sockets.
 - `src/pipeline.ts` — the **`./pipeline` entry**: the pipeline editor. Like MCP, deliberately NOT in
   `src/index.ts` (a chat host should not carry a canvas and a code generator, nor need a core that
   has `createPipeline`); `tests/entries.test.ts` checks the main entry and every chunk it loads.
