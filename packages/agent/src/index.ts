@@ -12,6 +12,17 @@ export {
   NodeOAuthProvider,
 } from './mcp-oauth.ts'
 export type { INodeOAuthProviderOptions, IOAuthRequestOptions, IOAuthStore } from './mcp-oauth.ts'
+export {
+  createEnterpriseOAuthProvider,
+  ENTERPRISE_MANAGED_AUTHORIZATION_EXTENSION,
+  EnterpriseOAuthError,
+  NodeEnterpriseOAuthProvider,
+} from './mcp-enterprise-oauth.ts'
+export type {
+  EnterpriseOAuthHop,
+  IEnterpriseIdpOptions,
+  IEnterpriseOAuthProviderOptions,
+} from './mcp-enterprise-oauth.ts'
 
 // Thinking
 export { mergeProviderOptions, resolveThinking } from './thinking.ts'

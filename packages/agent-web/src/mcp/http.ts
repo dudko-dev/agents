@@ -201,6 +201,19 @@ interface ServerConnect {
   needsAuthorization?: boolean
 }
 
+/**
+ * The enterprise-managed provider (`enterprise-oauth.ts`), recognised by shape
+ * so a host's own subclass, or one from another bundle of this package, counts.
+ */
+const asEnterpriseProvider = (
+  provider: OAuthClientProvider,
+): { extension: string; authorize: (opts: { fetch?: FetchLike }) => Promise<void> } | undefined => {
+  const p = provider as { extension?: unknown; authorize?: unknown }
+  return typeof p.extension === 'string' && typeof p.authorize === 'function'
+    ? (provider as never)
+    : undefined
+}
+
 /** Thrown by the refresh-only view when the SDK reaches for a redirect. */
 class RefreshOnlyAbort extends Error {}
 
@@ -267,6 +280,22 @@ const refreshIfExpired = async (
     .isAccessTokenExpired
   if (typeof check !== 'function') return
   if (!(await check.call(provider))) return
+  const enterprise = asEnterpriseProvider(provider)
+  if (enterprise) {
+    // No human step and no refresh token (the ID-JAG replaces it): get the
+    // token now. A refusal by the IdP or the authorization server is final -
+    // asking again through the 401 path would only repeat the exchange - so it
+    // fails this server with the error that names who refused. Only a
+    // discovery failure is left to the transport: the server's 401 may say
+    // where its metadata lives, or it may need no authorization at all.
+    try {
+      await enterprise.authorize({ fetch: fetchFn })
+    } catch (err) {
+      if ((err as { hop?: unknown })?.hop !== 'discovery') throw err
+      log('info', `[mcp] ${name}: ${err instanceof Error ? err.message : String(err)}; continuing`)
+    }
+    return
+  }
   const tokens = await provider.tokens()
   // Nothing to refresh with: let the 401 path ask for a new authorization.
   if (!tokens?.refresh_token) return
@@ -431,10 +460,12 @@ const connectAndList = async (
   // teardown logged as a warning trains people to ignore warnings.
   transport.onclose = () => log('info', `[mcp] ${name}: transport closed`)
 
-  const client = new Client({
-    name: opts.clientName ?? 'agent-web',
-    version: opts.clientVersion ?? '0.0.0',
-  })
+  const enterprise = cfg.authProvider ? asEnterpriseProvider(cfg.authProvider) : undefined
+  const client = new Client(
+    { name: opts.clientName ?? 'agent-web', version: opts.clientVersion ?? '0.0.0' },
+    // An extension is opt-in: it is declared only by the client that uses it.
+    enterprise ? { capabilities: { extensions: { [enterprise.extension]: {} } } } : undefined,
+  )
   onClient(client)
   await client.connect(transport)
 
