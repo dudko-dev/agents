@@ -47,7 +47,9 @@ const main = () => {
 
   execFileSync('pnpm', ['update', '-r', '--latest', ...IGNORE.map((name) => `!${name}`)], {
     cwd: root,
-    stdio: ['ignore', 'inherit', 'inherit'],
+    // pnpm's report goes to stderr: this script's stdout is the step's outputs (GITHUB_OUTPUT), and
+    // a line of the report there ("Scope: all 6 workspace projects") fails the step.
+    stdio: ['ignore', 2, 'inherit'],
   })
 
   const today = new Date().toISOString().slice(0, 10)
