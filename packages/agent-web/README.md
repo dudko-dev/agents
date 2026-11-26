@@ -6,6 +6,8 @@
 [![last commit](https://img.shields.io/github/last-commit/dudko-dev/agents.svg?path=packages%2Fagent-web)](https://github.com/dudko-dev/agents/commits/main/packages/agent-web)
 [![release](https://img.shields.io/github/v/release/dudko-dev/agents.svg?filter=agent-web-v*&label=release)](https://github.com/dudko-dev/agents/releases)
 
+**[agent.dudko.dev](https://agent.dudko.dev)** · [live demo](https://agent.dudko.dev/demo/) · [source](https://github.com/dudko-dev/agents/tree/main/packages/agent-web)
+
 Headless, **universal**, configurable **in-browser** LLM agent built on the
 [Vercel AI SDK](https://ai-sdk.dev). One package drives **any** model from the
 browser:

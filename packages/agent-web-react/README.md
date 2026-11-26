@@ -6,6 +6,8 @@
 [![last commit](https://img.shields.io/github/last-commit/dudko-dev/agents.svg?path=packages%2Fagent-web-react)](https://github.com/dudko-dev/agents/commits/main/packages/agent-web-react)
 [![release](https://img.shields.io/github/v/release/dudko-dev/agents.svg?filter=agent-web-react-v*&label=release)](https://github.com/dudko-dev/agents/releases)
 
+**[agent.dudko.dev](https://agent.dudko.dev)** · [live demo](https://agent.dudko.dev/demo/) · [source](https://github.com/dudko-dev/agents/tree/main/packages/agent-web-react)
+
 React bindings for [`@dudko.dev/agent-web`](https://www.npmjs.com/package/@dudko.dev/agent-web) —
 the headless, universal **in-browser LLM agent**. Drop the agent into any React
 app with a single hook and (optionally) a set of pre-styled components:
