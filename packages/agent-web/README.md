@@ -330,6 +330,20 @@ const mcp = await connectMcpHttp({ docs: { url: 'https://mcp.example.com/mcp', a
   `RS256`, ...), optional `keyId`, and `idp.issuer` for the IdP. The assertion's
   only audience is the issuer of the server it is for, it lives 60 seconds and
   carries a new `jti` each time.
+- **`assertionAudience` / `assertionType`** (and the same two inside `idp`), for
+  a server built to RFC 7523 rather than to `draft-ietf-oauth-rfc7523bis`:
+
+  | Option | Values | Default |
+  | --- | --- | --- |
+  | `assertionAudience`, `idp.assertionAudience` | `'issuer'` or `'token-endpoint'`: what the assertion's `aud` is | `'issuer'` |
+  | `assertionType`, `idp.assertionType` | `'client-authentication+jwt'` or `'JWT'`: its `typ` header | `'client-authentication+jwt'` |
+
+  `'token-endpoint'` addresses the assertion to `idp.tokenEndpoint` (then
+  `idp.issuer` is not required) or, for the authorization server, to the token
+  endpoint of the discovered metadata once it matched `expectedIssuer`. It is
+  the weaker form - see
+  [docs/security.md](docs/security.md#mcp-enterprise-managed-authorization-id-jag) - so
+  use it only for a server that refuses the default.
 - **`clientId` may be the https URL of a client ID metadata document** (CIMD),
   with `private_key_jwt` or no credential, never with a `clientSecret`.
 - **In a browser:** the IdP's token endpoint must allow your origin (CORS), and

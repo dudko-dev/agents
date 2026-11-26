@@ -34,6 +34,8 @@ export {
 } from './enterprise-oauth.js'
 export type {
   EnterpriseAssertionAlgorithm,
+  EnterpriseAssertionAudience,
+  EnterpriseAssertionType,
   EnterpriseIdpOptions,
   EnterpriseOAuthHop,
   EnterpriseOAuthLog,

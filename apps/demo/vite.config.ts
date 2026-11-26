@@ -1,4 +1,13 @@
-import { mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import react from '@vitejs/plugin-react'
 import { defineConfig, type Plugin } from 'vite'
@@ -28,6 +37,58 @@ const siteRoot = (): Plugin => ({
     writeFileSync(at('dist/_redirects'), `/ ${base} 302\n`)
   },
 })
+
+// The pipeline editor is a second page of this project (pipeline/index.html): it shares the
+// demo's source, and therefore its chunks - React, the agent core, the providers and the runtimes
+// are downloaded once for both pages, from /demo/assets/. But it is SERVED at /pipeline/, at the
+// site's root, not under the demo's base. So after the build its HTML is moved from
+// dist/demo/pipeline/ to dist/pipeline/ (`dist` stays "the whole site as it is served"; the HTML
+// names its scripts and styles by absolute /demo/assets/ URLs, so it works from anywhere on the
+// origin), and the dev and preview servers answer /pipeline/ with it.
+const PIPELINE_PATH = '/pipeline/'
+const pipelinePage = (): Plugin => {
+  const answers = (url: string | undefined) => {
+    const path = (url ?? '').split(/[?#]/)[0]
+    return path === PIPELINE_PATH || path === '/pipeline' || path === '/pipeline/index.html'
+  }
+  return {
+    name: 'demo-pipeline-page',
+    closeBundle() {
+      if (base === '/' || this.meta.watchMode) return
+      const built = at(`dist${base}pipeline/index.html`)
+      if (!existsSync(built)) return
+      mkdirSync(at('dist/pipeline'), { recursive: true })
+      renameSync(built, at('dist/pipeline/index.html'))
+      rmSync(at(`dist${base}pipeline`), { recursive: true, force: true })
+    },
+    // `vite dev`: the page's source is pipeline/index.html under the base.
+    configureServer(server) {
+      if (base === '/') return
+      server.middlewares.use((req, _res, next) => {
+        if (answers(req.url)) {
+          req.url = `${base}pipeline/index.html${(req.url ?? '').replace(/^[^?#]*/, '')}`
+        }
+        next()
+      })
+    },
+    // `vite preview` serves dist/demo under the base; the page was moved out of it.
+    configurePreviewServer(server) {
+      if (base === '/') return
+      server.middlewares.use((req, res, next) => {
+        if (!answers(req.url)) return next()
+        if ((req.url ?? '').split(/[?#]/)[0] === '/pipeline') {
+          res.statusCode = 301
+          res.setHeader('Location', PIPELINE_PATH)
+          res.end()
+          return
+        }
+        res.statusCode = 200
+        res.setHeader('Content-Type', 'text/html; charset=utf-8')
+        res.end(readFileSync(at('dist/pipeline/index.html')))
+      })
+    },
+  }
+}
 
 // transformers.js loads the ONNX runtime's wasm from jsDelivr at run time (its default in a
 // page), yet the bundler also emits a copy because onnxruntime-web references it by URL. That copy
@@ -64,8 +125,13 @@ const assetSizeLimit = (): Plugin => ({
 
 export default defineConfig({
   base,
-  build: { outDir: `dist${base}`.replace(/\/$/, '') },
-  plugins: [react(), siteRoot(), dropOrtWasm(), assetSizeLimit()],
+  build: {
+    outDir: `dist${base}`.replace(/\/$/, ''),
+    // Two pages, one build: the demo and the pipeline editor (see `pipelinePage`).
+    rollupOptions: { input: { main: at('index.html'), pipeline: at('pipeline/index.html') } },
+  },
+  // `pipelinePage` before `assetSizeLimit`: the limit is checked on `dist` as it will be served.
+  plugins: [react(), siteRoot(), dropOrtWasm(), pipelinePage(), assetSizeLimit()],
   resolve: {
     // The library's dist sits outside this app; force ONE copy of each (two Reacts break every hook).
     dedupe: ['react', 'react-dom', '@dudko.dev/agent-web', 'ai', 'zod'],
@@ -73,6 +139,14 @@ export default defineConfig({
       {
         find: '@dudko.dev/agent-web-react/styles.css',
         replacement: at('../../packages/agent-web-react/dist/styles.css'),
+      },
+      {
+        find: '@dudko.dev/agent-web-react/pipeline.css',
+        replacement: at('../../packages/agent-web-react/dist/pipeline.css'),
+      },
+      {
+        find: '@dudko.dev/agent-web-react/pipeline',
+        replacement: at('../../packages/agent-web-react/dist/pipeline.js'),
       },
       // Before the bare name: a string alias also matches by prefix, so without this
       // `…/mcp` would resolve to `…/dist/index.js/mcp`.

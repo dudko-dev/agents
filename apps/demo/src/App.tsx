@@ -10,15 +10,12 @@ import {
   createFileTools,
   createSubagentTool,
   useAgent,
-  useCredentials,
-  useLocalModel,
   type AgentChatProps,
   type AgentToolSet,
 } from '@dudko.dev/agent-web-react'
 // The MCP hooks live behind their own subpath: a host that never imports it never needs
 // `@modelcontextprotocol/sdk` in its build.
 import { useMcpServers } from '@dudko.dev/agent-web-react/mcp'
-import type { LanguageModel } from 'ai'
 import { ANALYST_PROMPT, engineTools } from './chess/analyst-tools'
 import { ChessPanel } from './chess/ChessPanel'
 import { outcomeText, useChessGame } from './chess/game'
@@ -27,11 +24,10 @@ import { McpPanel } from './components/McpPanel'
 import { NotesBoard } from './components/NotesBoard'
 import { Settings } from './components/Settings'
 import { buildMockCatalog } from './mockCatalog'
-import { isLocal, MODELS } from './models'
+import { MODELS } from './models'
 import { useNotesBoard } from './notes'
-import { buildCloudModel } from './cloud'
-import { engineFor } from './local-engines'
 import { RU_LABELS } from './i18n'
+import { PIPELINE_URL } from './links'
 import { Markdown } from './markdown'
 import markUrl from './mark.svg'
 import {
@@ -42,6 +38,7 @@ import {
   type ThinkingChoice,
   type View,
 } from './settings'
+import { GPU_LOST, GPU_LOST_NOTICE, useDemoModel } from './use-model'
 import { pdfToMarkdown, workspace } from './workspace'
 
 const NOTES_PROMPT = `You manage a sticky-notes board through the provided tools.
@@ -80,98 +77,24 @@ const initialView = (): View => {
   return VIEWS.includes(hash) ? hash : 'notes'
 }
 
-const CUSTOM_MODEL_KEY = 'agent-web-demo:openrouter-model'
-const readCustomModelId = (fallback: string): string => {
-  try {
-    return localStorage.getItem(CUSTOM_MODEL_KEY) ?? fallback
-  } catch {
-    return fallback
-  }
-}
-const writeCustomModelId = (id: string) => {
-  try {
-    localStorage.setItem(CUSTOM_MODEL_KEY, id)
-  } catch {
-    /* private mode */
-  }
-}
-
-// The chosen model survives a reload (the weights of a local one are in the browser's cache, so
-// loading it again is quick - but only if the page still knows which one it was).
-const MODEL_KEY = 'agent-web-demo:model'
-const readModelId = (): string => {
-  try {
-    const id = localStorage.getItem(MODEL_KEY)
-    if (id && MODELS.some((m) => m.id === id)) return id
-  } catch {
-    /* private mode */
-  }
-  return 'google-flash'
-}
-
-// What a local runtime says once the GPU has dropped the model. The browser takes the device
-// away when memory runs out (a phone does it readily); WebLLM then disposes its objects and
-// unloads, and every later request fails with one of these.
-const GPU_LOST = /already been disposed|Model not loaded before|Device (was |is )?lost/i
-const GPU_LOST_NOTICE =
-  'The browser took the GPU away - most likely the device ran out of memory - and the model was dropped. Load it again, or pick a smaller model; a shorter chat needs less memory too.'
-
 export const App = () => {
-  const [modelId, setModelIdState] = useState(readModelId)
-  const setModelId = (id: string) => {
-    setModelIdState(id)
-    try {
-      localStorage.setItem(MODEL_KEY, id)
-    } catch {
-      /* private mode */
-    }
-  }
-  const model = MODELS.find((m) => m.id === modelId) ?? MODELS[0]
-  const local = isLocal(model)
-  // OpenRouter's "any model": the id the user typed (remembered).
-  const [customModelId, setCustomModelId] = useState(() =>
-    readCustomModelId(MODELS.find((m) => m.customModel)?.model ?? ''),
-  )
-  const cloudModelId = model.customModel ? customModelId.trim() || model.model : model.model
-
-  const credentials = useCredentials()
-  // One hook for every on-device runtime: WebLLM, the browser's built-in model,
-  // transformers.js (local-engines.ts). WebLLM models load with their own
-  // window, not WebLLM's 4096 default.
-  const localModel = useLocalModel(model.model, engineFor(model), {
-    contextWindowTokens: model.runtime === 'web-llm' ? model.contextWindow : undefined,
-  })
-
-  // Cloud models are built in-app from the vault-stored key and passed to the
-  // agent directly (see cloud.ts). Rebuilds when the key or model changes.
-  const [cloudModel, setCloudModel] = useState<LanguageModel | undefined>(undefined)
-  useEffect(() => {
-    if (local || !model.provider) {
-      setCloudModel(undefined)
-      return
-    }
-    let active = true
-    credentials.store
-      .getApiKey(model.credentialRef!)
-      .then(async (key) => {
-        const built = key ? await buildCloudModel(model.provider!, cloudModelId, key) : undefined
-        if (active) setCloudModel(built)
-      })
-      .catch(() => {
-        if (active) setCloudModel(undefined)
-      })
-    return () => {
-      active = false
-    }
-  }, [local, model, cloudModelId, credentials.store, credentials.version])
-  const resolvedModel = local ? localModel.model : cloudModel
+  // The chosen model, its key and the model object: shared with the pipeline page (use-model.ts).
+  const {
+    modelId,
+    setModelId,
+    model,
+    local,
+    customModelId,
+    setCustomModelId,
+    cloudModelId,
+    credentials,
+    localModel,
+    resolvedModel,
+    modelWindow,
+  } = useDemoModel()
 
   // ── Agent settings shared by every tab ─────────────────────────────────────
   const { settings, update, reset: resetSettings } = useDemoSettings()
-  // The window runs must fit: a loaded local model reports its own.
-  const modelWindow = local
-    ? (localModel.contextWindow ?? model.contextWindow)
-    : model.contextWindow
   const { config: settingsConfig, rebuildKey } = useSettingsConfig(settings, modelWindow)
   // The model's memory per conversation. With saved chats it lives in
   // IndexedDB too (keyed by the chat id), so a reopened chat continues with its
@@ -484,11 +407,13 @@ export const App = () => {
         </nav>
 
         <nav className="app__links" aria-label="Project">
+          <a href={PIPELINE_URL}>Pipeline</a>
           <a href="/docs/">Docs</a>
           <a href="https://github.com/dudko-dev/agents" target="_blank" rel="noreferrer">
             GitHub
           </a>
           <a
+            className="app__link--wide"
             href="https://www.npmjs.com/package/@dudko.dev/agent-web-react"
             target="_blank"
             rel="noreferrer"
@@ -514,10 +439,7 @@ export const App = () => {
               local={localModel}
               notice={gpuLost ? GPU_LOST_NOTICE : undefined}
               customModelId={customModelId}
-              onCustomModelId={(id) => {
-                setCustomModelId(id)
-                writeCustomModelId(id)
-              }}
+              onCustomModelId={setCustomModelId}
               onKeyChange={() => {
                 notesAgent.reload()
                 mcpAgent.reload()

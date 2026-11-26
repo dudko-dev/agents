@@ -154,6 +154,7 @@
     "@ai-sdk/openai-compatible": "^3.0.96",
     "@ai-sdk/provider-utils": "^5.0.85",
     "@ai-sdk/xai": "^5.0.52",
+    "@dudko.dev/test-servers": "workspace:*",
     "@types/node": "^22.9.0",
     "prettier": "^3.10.1",
     "quickjs-emscripten": "^0.32.0",

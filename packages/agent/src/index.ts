@@ -20,6 +20,8 @@ export {
 } from './mcp-enterprise-oauth.ts'
 export type {
   EnterpriseAssertionAlgorithm,
+  EnterpriseAssertionAudience,
+  EnterpriseAssertionType,
   EnterpriseOAuthHop,
   EnterpriseOAuthLog,
   EnterprisePrivateKey,
