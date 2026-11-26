@@ -34,6 +34,14 @@ pnpm --filter @dudko.dev/agent start       # the Node agent's REPL from source
 Packages depend on each other through `workspace:*`, so a change in the core is tested against
 the React package and the demo in the same pull request.
 
+## Releasing
+
+Bump `version` in the `package.json` of the package(s) to publish, in a pull request of its own.
+When CI has passed on `main`, the Release workflow publishes every package whose version is not on
+npm yet (npm Trusted Publishing, with provenance), tags it `<package-dir>-v<version>` and creates a
+GitHub release. The Node agent is published only after a smoke test against a real model.
+`node .github/scripts/release-plan.mjs --human` shows what the next run would publish.
+
 ## History
 
 The three packages were separate repositories (`dudko-dev/agent`, `dudko-dev/agent-web`,
