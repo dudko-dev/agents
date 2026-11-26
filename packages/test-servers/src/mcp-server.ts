@@ -1,6 +1,16 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
-import { createServer } from 'node:http'
+import { toNodeHandler, toWebRequest } from '@modelcontextprotocol/node'
+import {
+  createMcpHandler,
+  InMemoryServerEventBus,
+  inputRequired,
+  isLegacyRequest,
+  McpServer as ModernMcpServer,
+  type McpHttpHandler,
+} from '@modelcontextprotocol/server'
+import { AsyncLocalStorage } from 'node:async_hooks'
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { z } from 'zod'
 import {
   startLocalAuthorizationServer,
@@ -8,7 +18,26 @@ import {
   type ILocalAuthorizationServer,
   type ITokenRequest,
 } from './authorization-server.ts'
-import { applyCors, closeServer, json, listen, readBody, type IListenOptions } from './http.ts'
+import {
+  applyCors,
+  closeServer,
+  CORS_ALLOW_HEADERS_2025,
+  json,
+  listen,
+  readBody,
+  type IListenOptions,
+} from './http.ts'
+import {
+  createElicitation,
+  declaresElicitation,
+  type ElicitationRequest,
+  type IElicitationFaults,
+  type IElicitationRound,
+  type IElicitationTool,
+  type IStatePayload,
+  type IToolResult,
+  type IUrlElicitation,
+} from './mcp-elicitation.ts'
 
 /**
  * A real MCP server and a real OAuth authorization server, both on loopback.
@@ -17,9 +46,30 @@ import { applyCors, closeServer, json, listen, readBody, type IListenOptions } f
  * over actual sockets, so the client is validated against a peer rather than
  * against our idea of one — session headers, protocol negotiation, SSE framing
  * and the 401 challenge all come from the SDK itself.
+ *
+ * Two SDK generations sit behind one endpoint. The 2025 revisions (`legacy`)
+ * are served by `@modelcontextprotocol/sdk` 1.x exactly as before; the
+ * 2026-07-28 revision (`modern`) by `@modelcontextprotocol/server` 2.x, whose
+ * answers to a 2025 client differ on the wire (schema dialect, error shapes),
+ * which is why it does not serve both.
  */
 
+/**
+ * Which protocol revisions the endpoint speaks.
+ *
+ * - `'legacy'` (default): 2025-11-25 and earlier - the `initialize` handshake.
+ * - `'modern'`: 2026-07-28 only - no handshake, no session, per-request `_meta`.
+ * - `'dual'`: both on one endpoint; a request with the modern `_meta` is served
+ *   the modern way, anything else the legacy way.
+ */
+export type McpProtocol = 'legacy' | 'modern' | 'dual'
+
+/** How the version probe (`server/discover`) goes wrong (see `ILocalMcpServer.protocolFaults`). */
+export type ProbeFault = 'unauthorized' | 'server_error' | 'garbage' | 'cors'
+
 export interface ILocalMcpServerOptions extends IListenOptions {
+  /** The protocol revisions to speak. Default `'legacy'`. */
+  protocol?: McpProtocol
   /** Reject requests without a currently-valid bearer token. */
   requireAuth?: boolean
   /**
@@ -33,13 +83,31 @@ export interface ILocalMcpServerOptions extends IListenOptions {
    * own, empty until a test fills it.
    */
   validTokens?: Set<string>
-  /** The `instructions` the server returns in its `initialize` result. Default: none. */
+  /**
+   * The `instructions` the server returns in its `initialize` result (legacy)
+   * and its `server/discover` result (modern). Default: none.
+   */
   instructions?: string
   /**
    * Also mount the tools that declare an `outputSchema` and answer with
    * `structuredContent`: `report` and `report_mixed`. Default: off.
    */
   structuredTools?: boolean
+  /**
+   * Also mount the tools that ask the user something: `elicit_form`,
+   * `elicit_url`, `elicit_twice` and `elicit_state`. Default: off.
+   */
+  elicitationTools?: boolean
+  /**
+   * How long one round of `elicit_url` waits for its page to be submitted
+   * before it asks to be called again. Default 3000 ms.
+   */
+  urlElicitationWaitMs?: number
+  /**
+   * The cache hint on the modern `server/discover` and `tools/list` results.
+   * Default: the SDK's `ttlMs: 0`, `cacheScope: 'private'`.
+   */
+  cacheHint?: { ttlMs: number; cacheScope: 'public' | 'private' }
 }
 
 /** How the structured tools go wrong (see `ILocalMcpServer.structuredFaults`). */
@@ -52,11 +120,20 @@ export const REPORT_VALUE = { city: 'Lisbon', temperature: 21, tags: ['mild', 'c
 export const REPORT_IMAGE_BASE64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII='
 
+/** One JSON-RPC request or notification the endpoint received. */
+export interface IMcpRequestRecord {
+  /** `modern` when it carried the per-request protocol version in `_meta`, else `legacy`. */
+  era: 'legacy' | 'modern'
+  method: string
+}
+
 export interface ILocalMcpServer {
   /** The MCP endpoint to hand to `mcpServers[name].url`. */
   url: string
   /** The server's origin (the URL without `/mcp`). */
   origin: string
+  /** The protocol revisions it speaks. */
+  protocol: McpProtocol
   /**
    * A value only this server knows, returned by the `secret` tool. A task that
    * asks for it cannot be answered from the model's own knowledge, so "did the
@@ -64,12 +141,17 @@ export interface ILocalMcpServer {
    * one.
    */
   secret: string
-  /** Arguments every tool call received, in order. */
+  /**
+   * Arguments every tool call received, in order. A call to an elicitation
+   * tool is one entry however many rounds it took.
+   */
   calls: { name: string; args: unknown }[]
   /** Tokens currently accepted (with `requireAuth`). */
   validTokens: Set<string>
   /** The `capabilities` of every `initialize` request the MCP server received. */
   initializeCapabilities: Record<string, unknown>[]
+  /** Every JSON-RPC request and notification received, in order, with the era it claimed. */
+  requests: IMcpRequestRecord[]
   /**
    * Mutable: make the structured tools break their own `outputSchema` from now
    * on. `result: 'mismatch'` answers with `temperature` as a string;
@@ -78,70 +160,141 @@ export interface ILocalMcpServer {
    */
   structuredFaults: { result?: StructuredFault }
   /**
+   * Mutable: make the answer to `server/discover` - the request a client in
+   * "auto" mode probes with - go wrong, in every protocol mode. `unauthorized`:
+   * 401 with the challenge, whatever the token. `server_error`: 503.
+   * `garbage`: 200 `application/json` with a body that is not JSON. `cors`:
+   * every preflight answers with the request headers a pre-2026 deployment
+   * allows (no `Mcp-Method`, no `Mcp-Name`), so a browser blocks the probe.
+   */
+  protocolFaults: { probe?: ProbeFault }
+  /** Mutable: make the elicitation tools misbehave (with `elicitationTools`). */
+  elicitationFaults: IElicitationFaults
+  /** Every round of every elicitation tool: what the client declared, answered and echoed. */
+  elicitations: IElicitationRound[]
+  /** The pages URL-mode elicitations pointed at. `POST` to a page's `url` submits it. */
+  urlElicitations: IUrlElicitation[]
+  /**
    * Change (or, with `undefined`, drop) the `instructions` returned from the
-   * next `initialize` on: a client that is already connected keeps what it got.
+   * next `initialize` / `server/discover` on: a client that is already
+   * connected keeps what it got.
    */
   setInstructions: (instructions: string | undefined) => void
+  /**
+   * Tell every listening client that the tool list changed:
+   * `notifications/tools/list_changed` on each open `subscriptions/listen`
+   * stream that asked for it (modern) and on each open GET stream (legacy).
+   */
+  notifyToolsChanged: () => void
+  /** Add a tool (it answers `<name>:ok`) to the list from now on, then `notifyToolsChanged()`. */
+  addTool: (name: string) => void
+  /** How many streams `notifyToolsChanged()` would reach right now, both eras together. */
+  changeListeners: () => number
   close: () => Promise<void>
 }
 
+const PROTOCOL_VERSION_KEY = 'io.modelcontextprotocol/protocolVersion'
+const CLIENT_CAPABILITIES_KEY = 'io.modelcontextprotocol/clientCapabilities'
+
+/** The server drives at most this many rounds of one legacy tool call (the SDK's own shim stops at 8 too). */
+const LEGACY_MAX_ROUNDS = 8
+
+type JsonObject = Record<string, unknown>
+
+const isObject = (value: unknown): value is JsonObject =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+/** A tool that answers at once, registered the same way with both SDK generations. */
+interface IPlainTool {
+  name: string
+  description: string
+  input: Record<string, z.ZodType>
+  output?: Record<string, z.ZodType>
+  annotations?: { readOnlyHint: boolean }
+  run: (args: JsonObject) => IToolResult
+}
+
+/** What the modern side knows about the request it is serving (the SDK builds a server per request). */
+interface IModernRequest {
+  method: string | undefined
+  tool: string
+  /** The client capabilities the request really declared. */
+  capabilities: JsonObject
+  responses: JsonObject | undefined
+  rawState: string | undefined
+}
+
+/** The answer to a request this server sent to a legacy client. */
+interface IClientReply {
+  result?: JsonObject
+  error?: { code: number; message: string }
+}
+
 /**
- * Start an MCP server (the SDK's own, stateless streamable HTTP) with three
- * tools: `echo`, `secret` and `boom` (which always fails). `structuredTools`
- * adds `report` and `report_mixed`.
+ * Start an MCP server with three tools: `echo`, `secret` and `boom` (which
+ * always fails). `structuredTools` adds `report` and `report_mixed`,
+ * `elicitationTools` the four `elicit_*` tools. `protocol` picks the revisions
+ * it speaks; the default is the 2025 ones, served by the 1.x SDK, stateless.
  */
 export const startLocalMcpServer = async (
   opts: ILocalMcpServerOptions = {},
 ): Promise<ILocalMcpServer> => {
+  const protocol = opts.protocol ?? 'legacy'
   const calls: { name: string; args: unknown }[] = []
   const secret = `zq-${Math.random().toString(36).slice(2, 8)}`
   const validTokens = opts.validTokens ?? new Set<string>()
   const initializeCapabilities: Record<string, unknown>[] = []
+  const requests: IMcpRequestRecord[] = []
   const structuredFaults: { result?: StructuredFault } = {}
+  const protocolFaults: { probe?: ProbeFault } = {}
+  const extraTools: string[] = []
   let instructions = opts.instructions
+  let mcpOrigin = ''
+  const elicitation = createElicitation({
+    origin: () => mcpOrigin,
+    urlWaitMs: opts.urlElicitationWaitMs ?? 3000,
+  })
 
-  // Built per request: a stateless StreamableHTTP transport is single-use, and
-  // an McpServer can only be connected to one transport at a time. This is the
-  // SDK's own pattern for stateless mode.
-  //
-  // `method` is the JSON-RPC method this server instance will answer. The SDK's
-  // McpServer validates a result against the tool's outputSchema before it
-  // sends it, so a faulty answer is only possible from an instance that does
-  // not carry the schema: with a fault switched on, the instance answering
-  // `tools/call` registers the structured tools without one, while the one
-  // answering `tools/list` still declares it.
-  const buildServer = (method?: string): McpServer => {
-    const server = new McpServer(
-      { name: 'local-mcp', version: '1.0.0' },
-      instructions === undefined ? undefined : { instructions },
-    )
-    server.registerTool(
-      'echo',
-      { description: 'Echo the input back', inputSchema: { text: z.string() } },
-      ({ text }) => {
-        calls.push({ name: 'echo', args: { text } })
-        return { content: [{ type: 'text' as const, text: `echo:${text}` }] }
-      },
-    )
-    server.registerTool(
-      'secret',
+  // `method` is the JSON-RPC method the server instance will answer. Both SDKs
+  // validate a result against the tool's outputSchema before they send it, so a
+  // faulty answer is only possible from an instance that does not carry the
+  // schema: with a fault switched on, the instance answering `tools/call`
+  // registers the structured tools without one, while the one answering
+  // `tools/list` still declares it.
+  const plainTools = (method?: string): IPlainTool[] => {
+    const tools: IPlainTool[] = [
       {
+        name: 'echo',
+        description: 'Echo the input back',
+        input: { text: z.string() },
+        run: ({ text }) => {
+          calls.push({ name: 'echo', args: { text } })
+          return { content: [{ type: 'text', text: `echo:${String(text)}` }] }
+        },
+      },
+      {
+        name: 'secret',
         description: 'Return the server-side secret code. There is no other way to learn it.',
-        inputSchema: {},
+        input: {},
         annotations: { readOnlyHint: true },
+        run: () => {
+          calls.push({ name: 'secret', args: {} })
+          return { content: [{ type: 'text', text: secret }] }
+        },
       },
-      () => {
-        calls.push({ name: 'secret', args: {} })
-        return { content: [{ type: 'text' as const, text: secret }] }
+      {
+        name: 'boom',
+        description: 'Always fails',
+        input: {},
+        run: () => {
+          calls.push({ name: 'boom', args: {} })
+          return { content: [{ type: 'text', text: 'kaboom' }], isError: true }
+        },
       },
-    )
-    server.registerTool('boom', { description: 'Always fails', inputSchema: {} }, () => {
-      calls.push({ name: 'boom', args: {} })
-      return { content: [{ type: 'text' as const, text: 'kaboom' }], isError: true }
-    })
+    ]
     if (opts.structuredTools) {
       const fault = method === 'tools/call' ? structuredFaults.result : undefined
-      const outputSchema = fault
+      const output = fault
         ? undefined
         : { city: z.string(), temperature: z.number(), tags: z.array(z.string()) }
       const structured = (): Record<string, unknown> | undefined =>
@@ -150,116 +303,523 @@ export const startLocalMcpServer = async (
           : fault === 'mismatch'
             ? { ...REPORT_VALUE, temperature: 'warm' }
             : { ...REPORT_VALUE }
-      // The specification's backwards-compatible form: the same value as
-      // structuredContent and, serialized, as a text block.
-      server.registerTool(
-        'report',
+      tools.push(
+        // The specification's backwards-compatible form: the same value as
+        // structuredContent and, serialized, as a text block.
         {
+          name: 'report',
           description: 'Return a weather report as structured content',
-          inputSchema: {},
-          ...(outputSchema ? { outputSchema } : {}),
+          input: {},
+          output,
           annotations: { readOnlyHint: true },
+          run: () => {
+            calls.push({ name: 'report', args: {} })
+            const value = structured()
+            return {
+              content: [{ type: 'text', text: JSON.stringify(value ?? REPORT_VALUE) }],
+              ...(value ? { structuredContent: value } : {}),
+            }
+          },
         },
-        () => {
-          calls.push({ name: 'report', args: {} })
-          const value = structured()
-          return {
-            content: [{ type: 'text' as const, text: JSON.stringify(value ?? REPORT_VALUE) }],
-            ...(value ? { structuredContent: value } : {}),
-          }
+        // Structured content beside content that says something else: a sentence
+        // and an image.
+        {
+          name: 'report_mixed',
+          description: 'Return a weather report with a summary and a picture',
+          input: {},
+          output,
+          annotations: { readOnlyHint: true },
+          run: () => {
+            calls.push({ name: 'report_mixed', args: {} })
+            const value = structured()
+            return {
+              content: [
+                { type: 'text', text: 'A mild, clear day.' },
+                { type: 'image', data: REPORT_IMAGE_BASE64, mimeType: 'image/png' },
+              ],
+              ...(value ? { structuredContent: value } : {}),
+            }
+          },
         },
       )
-      // Structured content beside content that says something else: a sentence
-      // and an image.
-      server.registerTool(
-        'report_mixed',
-        {
-          description: 'Return a weather report with a summary and a picture',
-          inputSchema: {},
-          ...(outputSchema ? { outputSchema } : {}),
-          annotations: { readOnlyHint: true },
+    }
+    for (const name of extraTools) {
+      tools.push({
+        name,
+        description: 'A tool added while the server was running',
+        input: {},
+        run: () => {
+          calls.push({ name, args: {} })
+          return { content: [{ type: 'text', text: `${name}:ok` }] }
         },
-        () => {
-          calls.push({ name: 'report_mixed', args: {} })
-          const value = structured()
-          return {
-            content: [
-              { type: 'text' as const, text: 'A mild, clear day.' },
-              { type: 'image' as const, data: REPORT_IMAGE_BASE64, mimeType: 'image/png' },
-            ],
-            ...(value ? { structuredContent: value } : {}),
+      })
+    }
+    return tools
+  }
+
+  const elicitationTools = (): IElicitationTool[] =>
+    opts.elicitationTools ? elicitation.tools : []
+
+  const firstRound = (tool: IElicitationTool, first: boolean): void => {
+    if (first) {
+      calls.push({ name: tool.name, args: {} })
+    }
+  }
+
+  // ── legacy: the 1.x SDK, a server and a transport per request ─────────────
+
+  /** Requests this server sent to a legacy client and still waits on, by JSON-RPC id. */
+  const awaitedReplies = new Map<number, (reply: IClientReply | undefined) => void>()
+  /** The open GET streams of legacy clients: where a list change is announced. */
+  const legacyStreams = new Set<StreamableHTTPServerTransport>()
+  let serverRequestId = 0
+
+  /** Send one request to a legacy client on the stream of the call that needs it. */
+  type AskClient = (method: string, params: JsonObject) => Promise<IClientReply | undefined>
+
+  const legacyErrorResult = (text: string): IToolResult => ({
+    content: [{ type: 'text', text }],
+    isError: true,
+  })
+
+  /**
+   * The 2025 way to run an elicitation tool: there is no `input_required`
+   * there, so the server asks each question itself - a real
+   * `elicitation/create` request - and enters the tool again with the answers.
+   * The state it would have handed to a modern client never leaves it.
+   */
+  const driveLegacy = async (
+    tool: IElicitationTool,
+    ask: AskClient,
+    notify: (method: string, params: JsonObject) => Promise<void>,
+  ): Promise<IToolResult> => {
+    // No session: the handshake that declared the capabilities was another
+    // request. The latest one is the best this server can know.
+    const declared = initializeCapabilities.at(-1)?.elicitation
+    const capabilities = isObject(declared) ? declared : undefined
+    const opened: string[] = []
+    let responses: JsonObject | undefined
+    let rawState: string | undefined
+    let state: IStatePayload | undefined
+    firstRound(tool, true)
+    for (let round = 0; round < LEGACY_MAX_ROUNDS; round += 1) {
+      const outcome = await elicitation.advance(tool, {
+        era: 'legacy',
+        capabilities,
+        responses,
+        rawState,
+        state,
+      })
+      if ('result' in outcome) {
+        for (const elicitationId of opened.filter((id) => elicitation.completed(id))) {
+          await notify('notifications/elicitation/complete', { elicitationId })
+        }
+        return outcome.result
+      }
+      responses = outcome.ask ? {} : undefined
+      for (const [key, request] of Object.entries(outcome.ask ?? {})) {
+        if (
+          !elicitation.faults.undeclaredMode &&
+          !declaresElicitation(capabilities, request.mode)
+        ) {
+          return legacyErrorResult(
+            `The client did not declare the elicitation capability (${request.mode} mode)`,
+          )
+        }
+        if (request.mode === 'url') {
+          opened.push(request.elicitationId)
+        }
+        const reply = await ask('elicitation/create', { ...request })
+        if (!reply?.result) {
+          return legacyErrorResult(
+            reply?.error
+              ? `elicitation/create failed: ${reply.error.code} ${reply.error.message}`
+              : 'elicitation/create was never answered',
+          )
+        }
+        ;(responses as JsonObject)[key] = reply.result
+      }
+      if (!outcome.ask) {
+        // Nothing to ask, only "call me again": do not spin.
+        await new Promise((resolve) => setTimeout(resolve, 250))
+      }
+      rawState = outcome.state
+      state = undefined
+      if (rawState !== undefined) {
+        try {
+          state = elicitation.openState(rawState, tool.name)
+        } catch {
+          elicitation.refuseState({ era: 'legacy', capabilities, responses, rawState }, tool.name)
+          return legacyErrorResult('Invalid or expired requestState')
+        }
+      }
+    }
+    return legacyErrorResult(`${tool.name} still needs input after ${LEGACY_MAX_ROUNDS} rounds`)
+  }
+
+  // Built per request: a stateless StreamableHTTP transport is single-use, and
+  // an McpServer can only be connected to one transport at a time. This is the
+  // SDK's own pattern for stateless mode.
+  const buildServer = (
+    method: string | undefined,
+    send: (message: JsonObject, relatedRequestId: string | number) => Promise<void>,
+    gone: Promise<void>,
+  ): McpServer => {
+    const server = new McpServer(
+      { name: 'local-mcp', version: '1.0.0' },
+      instructions === undefined ? undefined : { instructions },
+    )
+    for (const tool of plainTools(method)) {
+      server.registerTool(
+        tool.name,
+        {
+          description: tool.description,
+          inputSchema: tool.input,
+          ...(tool.output ? { outputSchema: tool.output } : {}),
+          ...(tool.annotations ? { annotations: tool.annotations } : {}),
+        },
+        (args: JsonObject) => tool.run(args),
+      )
+    }
+    for (const tool of elicitationTools()) {
+      server.registerTool(
+        tool.name,
+        { description: tool.description, inputSchema: {} },
+        (_args: JsonObject, extra: { requestId: string | number }) =>
+          driveLegacy(
+            tool,
+            (requestMethod, params) => {
+              serverRequestId += 1
+              const id = serverRequestId
+              const reply = new Promise<IClientReply | undefined>((resolve) => {
+                awaitedReplies.set(id, resolve)
+              })
+              // The client hanging up is the only other way this ends.
+              void gone.then(() => awaitedReplies.get(id)?.(undefined))
+              void send({ jsonrpc: '2.0', id, method: requestMethod, params }, extra.requestId)
+              return reply.finally(() => awaitedReplies.delete(id))
+            },
+            (notification, params) =>
+              send({ jsonrpc: '2.0', method: notification, params }, extra.requestId),
+          ),
+      )
+    }
+    return server
+  }
+
+  const serveLegacy = async (
+    req: IncomingMessage,
+    res: ServerResponse,
+    raw: string,
+  ): Promise<void> => {
+    const message = raw
+      ? (JSON.parse(raw) as {
+          method?: string
+          params?: { capabilities?: Record<string, unknown> }
+        })
+      : undefined
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
+    const gone = new Promise<void>((resolve) => {
+      res.on('close', resolve)
+    })
+    const server = buildServer(
+      message?.method,
+      (outgoing, relatedRequestId) =>
+        transport.send(outgoing as never, { relatedRequestId }).catch(() => undefined),
+      gone,
+    )
+    res.on('close', () => {
+      legacyStreams.delete(transport)
+      void transport.close()
+      void server.close()
+    })
+    await server.connect(transport)
+    if (message?.method === 'initialize') {
+      initializeCapabilities.push(message.params?.capabilities ?? {})
+    }
+    if (req.method === 'GET') {
+      legacyStreams.add(transport)
+    }
+    await transport.handleRequest(req, res, message)
+  }
+
+  // ── modern: the 2.x SDK's per-request handler ─────────────────────────────
+
+  const modernRequest = new AsyncLocalStorage<IModernRequest>()
+  const bus = new InMemoryServerEventBus()
+
+  const buildModernServer = (): ModernMcpServer => {
+    const request = modernRequest.getStore()
+    const declared = request?.capabilities.elicitation
+    const round = {
+      era: 'modern' as const,
+      capabilities: isObject(declared) ? declared : undefined,
+      responses: request?.responses,
+      rawState: request?.rawState,
+    }
+    const server = new ModernMcpServer(
+      { name: 'local-mcp', version: '1.0.0' },
+      {
+        ...(instructions === undefined ? {} : { instructions }),
+        ...(opts.cacheHint
+          ? { cacheHints: { 'server/discover': opts.cacheHint, 'tools/list': opts.cacheHint } }
+          : {}),
+        // `requestState` comes back through the client: it is verified before
+        // any tool sees it, and a state that fails is answered -32602 by the SDK.
+        requestState: {
+          verify: (state: string) => {
+            try {
+              return elicitation.openState(state, request?.tool ?? '')
+            } catch (err) {
+              elicitation.refuseState(round, request?.tool ?? '')
+              throw err
+            }
+          },
+        },
+      },
+    )
+    for (const tool of plainTools(request?.method)) {
+      server.registerTool(
+        tool.name,
+        {
+          description: tool.description,
+          inputSchema: z.object(tool.input),
+          ...(tool.output ? { outputSchema: z.object(tool.output) } : {}),
+          ...(tool.annotations ? { annotations: tool.annotations } : {}),
+        },
+        (args) => tool.run(args as JsonObject),
+      )
+    }
+    for (const tool of elicitationTools()) {
+      server.registerTool(
+        tool.name,
+        { description: tool.description, inputSchema: z.object({}) },
+        async (_args, ctx) => {
+          firstRound(tool, round.responses === undefined && round.rawState === undefined)
+          const outcome = await elicitation.advance(tool, {
+            ...round,
+            state: ctx.mcpReq.requestState<IStatePayload>(),
+          })
+          if ('result' in outcome) {
+            return outcome.result
           }
+          const asked = Object.entries(outcome.ask ?? {}).map(([key, request]) => [
+            key,
+            request.mode === 'url'
+              ? inputRequired.elicitUrl({ message: request.message, url: request.url })
+              : inputRequired.elicit({
+                  message: request.message,
+                  requestedSchema: request.requestedSchema as never,
+                }),
+          ])
+          return inputRequired({
+            ...(outcome.ask ? { inputRequests: Object.fromEntries(asked) } : {}),
+            ...(outcome.state === undefined ? {} : { requestState: outcome.state }),
+          } as never)
         },
       )
     }
     return server
   }
 
-  const httpServer = createServer((req, res) => {
-    void (async () => {
-      if (applyCors(req, res, opts.cors)) {
-        return
+  let modern: McpHttpHandler | undefined
+  let modernNode: ReturnType<typeof toNodeHandler> | undefined
+  if (protocol !== 'legacy') {
+    // `legacy: 'reject'`: this handler is the modern era only. In `dual` mode
+    // the 2025 traffic never reaches it (see `serve`).
+    modern = createMcpHandler(buildModernServer, { legacy: 'reject', bus })
+    modernNode = toNodeHandler(modern)
+  }
+
+  /** The request again, as the SDK's adapter reads one: the body was already consumed here. */
+  const replay = (req: IncomingMessage, raw: string) => ({
+    method: req.method,
+    url: req.url,
+    headers: req.headers,
+    async *[Symbol.asyncIterator]() {
+      if (raw) {
+        yield Buffer.from(raw)
       }
-      const path = new URL(req.url ?? '/', `http://${req.headers.host}`).pathname
-      if (path.includes('/.well-known/oauth-protected-resource')) {
-        json(res, 200, {
-          resource: mcpUrl,
-          authorization_servers: opts.authorizationServers ?? [],
-          scopes_supported: ['mcp:tools'],
-        })
-        return
-      }
-      if (opts.requireAuth) {
-        const token = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '')
-        if (!validTokens.has(token)) {
-          json(
-            res,
-            401,
-            { error: 'unauthorized' },
-            {
-              'www-authenticate': `Bearer resource_metadata="${mcpOrigin}/.well-known/oauth-protected-resource/mcp"`,
-            },
-          )
-          return
-        }
-      }
-      const raw = await readBody(req)
-      const message = raw
-        ? (JSON.parse(raw) as {
-            method?: string
-            params?: { capabilities?: Record<string, unknown> }
-          })
-        : undefined
-      const server = buildServer(message?.method)
-      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
-      res.on('close', () => {
-        void transport.close()
-        void server.close()
+    },
+  })
+
+  const serveModern = async (
+    req: IncomingMessage,
+    res: ServerResponse,
+    raw: string,
+    message: unknown,
+  ): Promise<void> => {
+    const params = isObject(message) && isObject(message.params) ? message.params : {}
+    const meta = isObject(params._meta) ? params._meta : {}
+    const declared = meta[CLIENT_CAPABILITIES_KEY]
+    const capabilities = isObject(declared) ? declared : {}
+    const method = isObject(message) ? (message.method as string | undefined) : undefined
+    let body = raw
+    if (elicitation.faults.undeclaredMode && method === 'tools/call') {
+      // The SDK refuses (-32021) to ask for what the request did not declare.
+      // To make it ask anyway, it is shown a request that declares both modes;
+      // the tools and the record keep what the client really sent.
+      body = JSON.stringify({
+        ...(message as JsonObject),
+        params: {
+          ...params,
+          _meta: {
+            ...meta,
+            [CLIENT_CAPABILITIES_KEY]: { ...capabilities, elicitation: { form: {}, url: {} } },
+          },
+        },
       })
-      await server.connect(transport)
-      if (message?.method === 'initialize') {
-        initializeCapabilities.push(message.params?.capabilities ?? {})
+    }
+    const request: IModernRequest = {
+      method,
+      tool: typeof params.name === 'string' ? params.name : '',
+      capabilities,
+      responses: isObject(params.inputResponses) ? params.inputResponses : undefined,
+      rawState: typeof params.requestState === 'string' ? params.requestState : undefined,
+    }
+    await modernRequest.run(request, () =>
+      (modernNode as NonNullable<typeof modernNode>)(replay(req, body), res),
+    )
+  }
+
+  // ── the endpoint ──────────────────────────────────────────────────────────
+
+  const parse = (raw: string): unknown => {
+    try {
+      return raw ? JSON.parse(raw) : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  const record = (message: unknown): void => {
+    for (const one of Array.isArray(message) ? message : [message]) {
+      if (isObject(one) && typeof one.method === 'string') {
+        const meta = isObject(one.params) && isObject(one.params._meta) ? one.params._meta : {}
+        requests.push({
+          era: meta[PROTOCOL_VERSION_KEY] === undefined ? 'legacy' : 'modern',
+          method: one.method,
+        })
       }
-      await transport.handleRequest(req, res, message)
-    })().catch(() => {
+    }
+  }
+
+  const challenge = (): Record<string, string> => ({
+    'www-authenticate': `Bearer resource_metadata="${mcpOrigin}/.well-known/oauth-protected-resource/mcp"`,
+  })
+
+  /** Answer the probe wrongly, if a fault says so. Returns true when it did. */
+  const failProbe = (res: ServerResponse): boolean => {
+    switch (protocolFaults.probe) {
+      case 'unauthorized':
+        json(res, 401, { error: 'unauthorized' }, challenge())
+        return true
+      case 'server_error':
+        res.writeHead(503, { 'content-type': 'text/plain' })
+        res.end('upstream unavailable')
+        return true
+      case 'garbage':
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end('<!doctype html><title>Welcome</title><p>This is not an MCP answer.</p>')
+        return true
+      default:
+        return false
+    }
+  }
+
+  const serve = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    const oldCors = protocolFaults.probe === 'cors' ? CORS_ALLOW_HEADERS_2025 : undefined
+    if (applyCors(req, res, opts.cors, oldCors)) {
+      return
+    }
+    const path = new URL(req.url ?? '/', `http://${req.headers.host}`).pathname
+    if (path.includes('/.well-known/oauth-protected-resource')) {
+      json(res, 200, {
+        resource: mcpUrl,
+        authorization_servers: opts.authorizationServers ?? [],
+        scopes_supported: ['mcp:tools'],
+      })
+      return
+    }
+    // A browser opens these without the client's token: that is the point of URL mode.
+    if (opts.elicitationTools && elicitation.handlePage(req, res, path)) {
+      return
+    }
+    if (opts.requireAuth) {
+      const token = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '')
+      if (!validTokens.has(token)) {
+        json(res, 401, { error: 'unauthorized' }, challenge())
+        return
+      }
+    }
+    const raw = await readBody(req)
+    const message = parse(raw)
+    record(message)
+    if (isObject(message) && message.method === 'server/discover' && failProbe(res)) {
+      return
+    }
+    // The answer of a legacy client to a request this server sent it.
+    if (isObject(message) && message.method === undefined && typeof message.id === 'number') {
+      const deliver = awaitedReplies.get(message.id)
+      if (deliver) {
+        deliver(message as IClientReply)
+        res.writeHead(202)
+        res.end()
+        return
+      }
+    }
+    const legacy =
+      protocol === 'legacy' ||
+      (protocol === 'dual' && (await isLegacyRequest(await toWebRequest(replay(req, raw)))))
+    await (legacy ? serveLegacy(req, res, raw) : serveModern(req, res, raw, message))
+  }
+
+  const httpServer = createServer((req, res) => {
+    serve(req, res).catch(() => {
       if (!res.headersSent) json(res, 500, { error: 'server_error' })
     })
   })
-  const mcpOrigin = await listen(httpServer, opts)
+  mcpOrigin = await listen(httpServer, opts)
   const mcpUrl = `${mcpOrigin}/mcp`
+
+  const notifyToolsChanged = (): void => {
+    modern?.notify.toolsChanged()
+    for (const transport of legacyStreams) {
+      void transport
+        .send({ jsonrpc: '2.0', method: 'notifications/tools/list_changed' })
+        .catch(() => undefined)
+    }
+  }
 
   return {
     url: mcpUrl,
     origin: mcpOrigin,
+    protocol,
     secret,
     calls,
     validTokens,
     initializeCapabilities,
+    requests,
     structuredFaults,
+    protocolFaults,
+    elicitationFaults: elicitation.faults,
+    elicitations: elicitation.rounds,
+    urlElicitations: elicitation.urlElicitations,
     setInstructions: (next) => {
       instructions = next
     },
-    close: () => closeServer(httpServer),
+    notifyToolsChanged,
+    addTool: (name) => {
+      extraTools.push(name)
+      notifyToolsChanged()
+    },
+    changeListeners: () => legacyStreams.size + bus.listenerCount,
+    close: async () => {
+      elicitation.close()
+      // Ends every `subscriptions/listen` stream with its result, as a server shutting down should.
+      await modern?.close()
+      await closeServer(httpServer)
+    },
   }
 }
 
@@ -289,6 +849,14 @@ export interface ILocalMcpOptions extends Pick<IListenOptions, 'host' | 'cors'> 
   instructions?: string
   /** Also mount the structured tools (`report`, `report_mixed`). */
   structuredTools?: boolean
+  /** The protocol revisions the MCP server speaks. Default `'legacy'`. */
+  protocol?: McpProtocol
+  /** Also mount the elicitation tools (`elicit_form`, `elicit_url`, `elicit_twice`, `elicit_state`). */
+  elicitationTools?: boolean
+  /** How long one round of `elicit_url` waits for its page. Default 3000 ms. */
+  urlElicitationWaitMs?: number
+  /** The cache hint on the modern `server/discover` and `tools/list` results. */
+  cacheHint?: { ttlMs: number; cacheScope: 'public' | 'private' }
 }
 
 export interface ILocalMcp extends ILocalMcpServer {
@@ -341,6 +909,10 @@ export const startLocalMcp = async (opts: ILocalMcpOptions = {}): Promise<ILocal
       validTokens: as.validTokens,
       instructions: opts.instructions,
       structuredTools: opts.structuredTools,
+      protocol: opts.protocol,
+      elicitationTools: opts.elicitationTools,
+      urlElicitationWaitMs: opts.urlElicitationWaitMs,
+      cacheHint: opts.cacheHint,
     })
   } catch (err) {
     await as.close()

@@ -6,7 +6,8 @@
 
 The servers the other packages' tests run against: a test enterprise identity provider, a test MCP
 authorization server and a test MCP server. Real sockets, real signatures, the MCP SDK's own server
-implementation. `"private": true` — **never published**, never a runtime dependency of anything.
+implementations (1.x for the 2025 revisions, 2.x for 2026-07-28). `"private": true` — **never
+published**, never a runtime dependency of anything.
 
 ## Principles
 
@@ -22,6 +23,11 @@ implementation. `"private": true` — **never published**, never a runtime depen
   grant was issued to). A test that passes against a lax server proves nothing.
 - **Misbehaviour is a switch, off by default, one thing at a time** (`idp.misbehave`, `as.faults`,
   `assertionProfile`, ...). A new one goes in the README table and gets its own test.
+- **The default MCP wire does not move.** `protocol: 'legacy'` is what `packages/agent`,
+  `packages/agent-web` and the React e2e connect to with the 1.x client, and it stays on the 1.x
+  SDK: the 2.x SDK answers a 2025 client differently (schema dialect, `execution`, error shapes,
+  405 on GET). `tests/mcp-protocol.test.ts` pins the bytes of `initialize` and `tools/list`. A new
+  tool, option or switch is off by default and must not show in that wire.
 - **No build.** Source is TypeScript run by Node's type stripping, like the Node package's tests:
   `.ts` extensions in relative imports, no enums, no parameter properties, no path aliases.
   `package.json` `exports` points at `src/index.ts`; the packages that use it declare
@@ -32,23 +38,37 @@ implementation. `"private": true` — **never published**, never a runtime depen
 ## Layout
 
 - `src/http.ts` — binding (`listen`, `assertLoopbackHost`), CORS (`corsHeaders`, `applyCors`), and
-  the plain `node:http` helpers. The CORS header set mirrors the browser package's README ("CORS")
-  and `packages/agent-web-react/e2e/servers.ts`: change them together.
+  the plain `node:http` helpers. The CORS header set is the browser package's README ("CORS") and
+  `packages/agent-web-react/e2e/servers.ts` plus `Mcp-Method` / `Mcp-Name`, which 2026-07-28
+  adds (`CORS_ALLOW_HEADERS_2025` is the list without them): those two files still have the 2025
+  list and must get the two headers when the browser client learns the modern era.
 - `src/jwt.ts` — sign / verify (`node:crypto`), `verifyClientAssertion` with its two profiles
   (`'rfc7523bis'`: `aud` = issuer, `typ: client-authentication+jwt`; `'rfc7523'`: `aud` = token
   endpoint, `typ: JWT`), `generateClientKey`, `readClientAuth`, the grant and token-type constants.
 - `src/idp-server.ts` — `startLocalIdp`: ID tokens, JWKS, the RFC 8693 token exchange → ID-JAG.
 - `src/authorization-server.ts` — `startLocalAuthorizationServer`: metadata, registration, token
   endpoint; with `enterprise`, the `jwt-bearer` grant only (ID-JAG draft, section 4.4.1, in order).
-- `src/mcp-server.ts` — `startLocalMcpServer` (the SDK's stateless streamable-HTTP server, tools
-  `echo` / `secret` / `boom`; options add `instructions` and the structured tools `report` /
-  `report_mixed`, whose switch is `structuredFaults`) and `startLocalMcp`, the pair with its authorization server that most
-  tests use.
+- `src/mcp-server.ts` — `startLocalMcpServer` (tools `echo` / `secret` / `boom`; options add
+  `instructions`, the structured tools `report` / `report_mixed`, whose switch is
+  `structuredFaults`, and the elicitation tools) and `startLocalMcp`, the pair with its
+  authorization server that most tests use. `protocol` picks the era: `legacy` (default) is the
+  1.x SDK's stateless streamable-HTTP server, `modern` the 2.x SDK's `createMcpHandler`
+  (2026-07-28), `dual` routes between the two with the SDK's `isLegacyRequest`. The tools are
+  declared once (`plainTools`) and registered with both SDKs. Probe faults (`protocolFaults`), the
+  request log and the tool-list-change trigger live here.
+- `src/mcp-elicitation.ts` — the `elicit_*` tools as step functions (ask or finish), the signed
+  `requestState`, the URL-mode pages and `elicitationFaults`. It knows no transport: the modern
+  driver (an `input_required` result) and the legacy one (real `elicitation/create` requests on the
+  call's stream) are in `mcp-server.ts`.
 - `src/cli.ts` — `parseCliArgs`, `startFromCli`, and the entry that prints one JSON line.
 - `src/index.ts` — exports only.
 - `tests/` — `node:test` suites, one per server, plus CORS / loopback and the CLI (which is also
   spawned as a process). `tests/helpers.ts` signs assertions by hand, so the servers are checked
-  against something other than the providers they are later used to test.
+  against something other than the providers they are later used to test. For the same reason
+  `tests/mcp-protocol.test.ts` and `tests/mcp-elicitation.test.ts` speak MCP with `fetch` and
+  hand-built JSON-RPC (`tests/mcp-wire.ts`) and assert the wire: status codes, headers, error
+  codes, result shapes. A new behaviour of the MCP server is tested that way, not only through
+  the SDK client.
 
 ## Commands
 

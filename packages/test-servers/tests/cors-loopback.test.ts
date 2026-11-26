@@ -6,6 +6,8 @@ import test from 'node:test'
 import {
   assertLoopbackHost,
   closeServer,
+  CORS_ALLOW_HEADERS,
+  CORS_ALLOW_HEADERS_2025,
   corsHeaders,
   listen,
   startLocalAuthorizationServer,
@@ -58,7 +60,15 @@ const assertPreflight = async (url: string, label: string): Promise<void> => {
   )
   assert.deepEqual(
     lower(res.headers.get('access-control-allow-headers')),
-    ['authorization', 'content-type', 'last-event-id', 'mcp-protocol-version', 'mcp-session-id'],
+    [
+      'authorization',
+      'content-type',
+      'last-event-id',
+      'mcp-method',
+      'mcp-name',
+      'mcp-protocol-version',
+      'mcp-session-id',
+    ],
     `${label}: the request headers an MCP client sends`,
   )
   assert.equal(res.headers.get('access-control-max-age'), '86400')
@@ -74,10 +84,20 @@ test('cors: the exact header names the browser e2e server sends', () => {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
     'Access-Control-Allow-Headers':
-      'Content-Type, Authorization, mcp-session-id, MCP-Protocol-Version, Last-Event-ID',
+      'Content-Type, Authorization, mcp-session-id, MCP-Protocol-Version, Last-Event-ID, Mcp-Method, Mcp-Name',
     'Access-Control-Expose-Headers': 'WWW-Authenticate, mcp-session-id',
     'Access-Control-Max-Age': '86400',
   })
+  // The list a deployment made before 2026-07-28 has: the two new headers are what it lacks.
+  assert.equal(
+    CORS_ALLOW_HEADERS_2025,
+    'Content-Type, Authorization, mcp-session-id, MCP-Protocol-Version, Last-Event-ID',
+  )
+  assert.equal(CORS_ALLOW_HEADERS, `${CORS_ALLOW_HEADERS_2025}, Mcp-Method, Mcp-Name`)
+  assert.equal(
+    corsHeaders('*', CORS_ALLOW_HEADERS_2025)['Access-Control-Allow-Headers'],
+    CORS_ALLOW_HEADERS_2025,
+  )
   assert.equal(corsHeaders(ORIGIN).Vary, 'Origin')
 })
 
@@ -197,6 +217,47 @@ test('cors: without the option no CORS header is sent and OPTIONS is not special
   } finally {
     await pair.close()
     await idp.close()
+  }
+})
+
+test('cors: a preflight for what a 2026-07-28 browser client sends is allowed, Mcp-Param-* included', async () => {
+  const mcp = await startLocalMcpServer({ cors: ORIGIN, protocol: 'modern' })
+  try {
+    const ask = (headers: string) =>
+      fetch(mcp.url, {
+        method: 'OPTIONS',
+        headers: {
+          origin: ORIGIN,
+          'access-control-request-method': 'POST',
+          'access-control-request-headers': headers,
+        },
+      })
+    const modern = await ask(
+      'authorization, content-type, mcp-method, mcp-name, mcp-protocol-version',
+    )
+    assert.equal(modern.status, 204)
+    const allowed = lower(modern.headers.get('access-control-allow-headers'))
+    for (const name of ['mcp-method', 'mcp-name', 'mcp-protocol-version', 'authorization']) {
+      assert.ok(allowed.includes(name), `${name} must be allowed`)
+    }
+    // Mcp-Param-* names come from tool definitions: the ones asked about are
+    // allowed, and nothing else rides in with them.
+    const mirrored = await ask('content-type, mcp-method, Mcp-Param-Region, x-other, mcp-param-')
+    assert.deepEqual(
+      lower(mirrored.headers.get('access-control-allow-headers')).filter(
+        (name) => name.startsWith('mcp-param') || name.startsWith('x-'),
+      ),
+      ['mcp-param-region'],
+    )
+    // No CORS, no header: the answer to a real request never lists them.
+    const answer = await fetch(mcp.url, { method: 'POST', body: '{}' })
+    assert.equal(
+      answer.headers.get('access-control-allow-headers'),
+      CORS_ALLOW_HEADERS,
+      'only a preflight is asked about Mcp-Param-*',
+    )
+  } finally {
+    await mcp.close()
   }
 })
 

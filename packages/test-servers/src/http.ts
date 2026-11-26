@@ -58,40 +58,78 @@ export const closeServer = (server: Server): Promise<void> =>
   })
 
 /**
- * The CORS headers a browser MCP client needs (see the browser package's README,
- * "CORS"): `MCP-Protocol-Version` and `Last-Event-ID` among the allowed request
- * headers, and `WWW-Authenticate` and `mcp-session-id` exposed - without the
- * first of those two a page cannot read the 401 challenge and discovery never
- * starts.
+ * The request headers a browser MCP client sends. The first five are what the
+ * 2025-era protocol needs (see the browser package's README, "CORS");
+ * `Mcp-Method` and `Mcp-Name` are the request metadata headers the 2026-07-28
+ * revision requires on every POST (Streamable HTTP, "Request Metadata").
+ * `Mcp-Param-*` headers carry tool arguments under names only a tool definition
+ * knows, so they cannot be listed here: the preflight allows the ones it is
+ * asked about (see `applyCors`).
  */
-export const corsHeaders = (origin: string): Record<string, string> => ({
+export const CORS_ALLOW_HEADERS =
+  'Content-Type, Authorization, mcp-session-id, MCP-Protocol-Version, Last-Event-ID, Mcp-Method, Mcp-Name'
+
+/**
+ * The same list as a deployment configured before 2026-07-28 has it: a browser's
+ * preflight for a modern request fails against it. What the `cors` probe fault
+ * of the MCP server answers with.
+ */
+export const CORS_ALLOW_HEADERS_2025 =
+  'Content-Type, Authorization, mcp-session-id, MCP-Protocol-Version, Last-Event-ID'
+
+/**
+ * The CORS headers a browser MCP client needs (see the browser package's README,
+ * "CORS"): the request headers above, and `WWW-Authenticate` and
+ * `mcp-session-id` exposed - without the first of those two a page cannot read
+ * the 401 challenge and discovery never starts.
+ */
+export const corsHeaders = (
+  origin: string,
+  allowHeaders: string = CORS_ALLOW_HEADERS,
+): Record<string, string> => ({
   'Access-Control-Allow-Origin': origin,
   'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers':
-    'Content-Type, Authorization, mcp-session-id, MCP-Protocol-Version, Last-Event-ID',
+  'Access-Control-Allow-Headers': allowHeaders,
   'Access-Control-Expose-Headers': 'WWW-Authenticate, mcp-session-id',
   'Access-Control-Max-Age': '86400',
   ...(origin === '*' ? {} : { Vary: 'Origin' }),
 })
 
+/** `Mcp-Param-{name}`, where the name is an HTTP field-name token (RFC 9110, section 5.1). */
+const MCP_PARAM_HEADER = /^mcp-param-[!#$%&'*+.^_`|~0-9a-z-]+$/i
+
 /**
  * Put the CORS headers on the answer (when `cors` is set) and answer a
  * preflight. Returns true when the request was a preflight and is finished.
  * Call it first in a handler: whatever is written afterwards keeps the headers.
+ *
+ * A preflight that asks for `Mcp-Param-*` headers gets those names added to the
+ * allowed list (they are named by tool definitions, not known in advance) -
+ * unless `allowHeaders` is a list of its own, which is then answered as is.
  */
 export const applyCors = (
   req: IncomingMessage,
   res: ServerResponse,
   cors: string | undefined,
+  allowHeaders?: string,
 ): boolean => {
   if (cors === undefined) {
     return false
   }
-  for (const [name, value] of Object.entries(corsHeaders(cors))) {
+  for (const [name, value] of Object.entries(corsHeaders(cors, allowHeaders))) {
     res.setHeader(name, value)
   }
   if (req.method !== 'OPTIONS') {
     return false
+  }
+  if (allowHeaders === undefined) {
+    const asked = String(req.headers['access-control-request-headers'] ?? '')
+      .split(',')
+      .map((name) => name.trim())
+      .filter((name) => MCP_PARAM_HEADER.test(name))
+    if (asked.length > 0) {
+      res.setHeader('Access-Control-Allow-Headers', [CORS_ALLOW_HEADERS, ...asked].join(', '))
+    }
   }
   res.writeHead(204)
   res.end()
