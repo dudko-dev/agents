@@ -106,11 +106,7 @@ export const resolveAppSampling = (setting: unknown): ResolvedAppSampling => {
 
 /** Why a request was not answered. */
 export type AppSamplingErrorCode =
-  | 'disabled'
-  | 'invalid'
-  | 'unsupported'
-  | 'rate-limited'
-  | 'denied'
+  'disabled' | 'invalid' | 'unsupported' | 'rate-limited' | 'denied'
 
 /** The JSON-RPC code an app is answered with for each (`-1`: MCP's "user rejected sampling"). */
 export const APP_SAMPLING_RPC_CODES: Record<AppSamplingErrorCode, number> = {
