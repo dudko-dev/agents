@@ -164,6 +164,78 @@ test('loadConfig rejects MCP_SERVERS entry that mixes url and command', () => {
   assert.throws(() => loadConfig(), /not both/)
 })
 
+test('MCP_SERVERS: skills flows through for url and command entries, true or { consent }', () => {
+  setMinimalOpenAi()
+  process.env.MCP_SERVERS = JSON.stringify({
+    docs: { url: 'https://x', protocol: 'auto', skills: true },
+    ours: { url: 'https://y', protocol: 'modern', skills: { consent: 'never' } },
+    fs: { command: '/bin/fs', protocol: 'auto', skills: { consent: 'ask' } },
+    off: { url: 'https://z', skills: false },
+    none: { url: 'https://w' },
+  })
+  const c = loadConfig().mcpServers
+  assert.deepEqual(c.docs, {
+    url: 'https://x',
+    headers: undefined,
+    protocol: 'auto',
+    skills: true,
+  })
+  assert.deepEqual((c.ours as { skills?: unknown }).skills, { consent: 'never' })
+  assert.deepEqual((c.fs as { skills?: unknown }).skills, { consent: 'ask' })
+  assert.equal((c.off as { skills?: unknown }).skills, false, 'false is passed as it is: off')
+  assert.equal('skills' in c.none, false, 'no field: no key at all - the config is what it was')
+})
+
+test('MCP_SERVERS: skills without protocol auto / modern is refused by name - never silently off', () => {
+  setMinimalOpenAi()
+  for (const protocol of [undefined, 'legacy']) {
+    for (const skills of [true, { consent: 'ask' }]) {
+      process.env.MCP_SERVERS = JSON.stringify({
+        docs: { url: 'https://x', ...(protocol ? { protocol } : {}), skills },
+      })
+      assert.throws(
+        () => loadConfig(),
+        /MCP_SERVERS\.docs: "skills" needs "protocol": "auto" or "modern"/,
+        `protocol ${protocol}, skills ${JSON.stringify(skills)}`,
+      )
+    }
+  }
+  process.env.MCP_SERVERS = JSON.stringify({ fs: { command: '/bin/fs', skills: true } })
+  assert.throws(() => loadConfig(), /MCP_SERVERS\.fs: "skills" needs "protocol"/)
+  // Off needs no protocol.
+  process.env.MCP_SERVERS = JSON.stringify({ docs: { url: 'https://x', skills: false } })
+  assert.equal((loadConfig().mcpServers.docs as { skills?: unknown }).skills, false)
+})
+
+test("MCP_SERVERS: a wrong skills value or consent is refused by name, by the core's own rule", () => {
+  setMinimalOpenAi()
+  for (const skills of ['yes', 1, [], null, { consent: 'always' }, { consent: true }]) {
+    process.env.MCP_SERVERS = JSON.stringify({
+      docs: { url: 'https://x', protocol: 'auto', skills },
+    })
+    assert.throws(() => loadConfig(), /MCP_SERVERS\.docs/, JSON.stringify(skills))
+  }
+})
+
+test('MCP_SERVERS: connectTimeoutMs flows through (0 = no bound); anything but a non-negative integer is refused', () => {
+  setMinimalOpenAi()
+  process.env.MCP_SERVERS = JSON.stringify({
+    slow: { url: 'https://x', connectTimeoutMs: 60000 },
+    fs: { command: '/bin/fs', connectTimeoutMs: 0 },
+  })
+  const c = loadConfig().mcpServers
+  assert.equal((c.slow as { connectTimeoutMs?: number }).connectTimeoutMs, 60000)
+  assert.equal((c.fs as { connectTimeoutMs?: number }).connectTimeoutMs, 0)
+  for (const connectTimeoutMs of [-1, 1.5, '1000', null, true]) {
+    process.env.MCP_SERVERS = JSON.stringify({ slow: { url: 'https://x', connectTimeoutMs } })
+    assert.throws(
+      () => loadConfig(),
+      /MCP_SERVERS\.slow\.connectTimeoutMs must be a non-negative integer/,
+      JSON.stringify(connectTimeoutMs),
+    )
+  }
+})
+
 test('loadConfig parses CSV tool lists, trimming and dropping empties', () => {
   setMinimalOpenAi()
   process.env.AGENT_AVAILABLE_TOOLS = 'a, b ,c, '

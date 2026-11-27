@@ -17,8 +17,13 @@ import {
   closedReason,
   createPromptQuestions,
   elicitationClosedLine,
+  SKILL_PREVIEW_LINE_CHARS,
+  SKILL_PREVIEW_LINES,
+  skillApprovalPrompt,
+  skillClosedLine,
   type IPromptQuestions,
 } from '../src/cli/questions.ts'
+import type { McpSkillConsentView } from '../src/mcp-skills.ts'
 import type { AgentEvent, IToolApprovalConfig } from '../src/types.ts'
 import { startLocalOpenAI, systemOf, toolResults, type Script } from './helpers/openai-server.ts'
 
@@ -254,6 +259,177 @@ const askElicitation = (
   )
   return { events, call, state: () => settled }
 }
+
+// ── an MCP server's skill (the request's `skill`) ──────────────────────────
+
+const skillView = (over: Partial<McpSkillConsentView> = {}): McpSkillConsentView => ({
+  server: 'docs',
+  name: 'docs/pdf-processing',
+  skill: 'pdf-processing',
+  uri: 'skill://pdf-processing/SKILL.md',
+  description: 'Extract, fill and assemble PDF documents',
+  size: 2048,
+  totalSize: 4096,
+  files: ['references/forms.md'],
+  fileCount: 1,
+  body: '# PDF processing\nUse the forms reference.',
+  consent: 'once-per-skill',
+  ...over,
+})
+
+test("skill: the question shows the server's text captioned, quoted line by line, bounded", () => {
+  const body = Array.from({ length: SKILL_PREVIEW_LINES + 3 }, (_, i) => `line ${i + 1}`)
+  body[0] = 'x'.repeat(SKILL_PREVIEW_LINE_CHARS + 40)
+  const prompt = skillApprovalPrompt(skillView({ body: body.join('\n') }))
+  const lines = prompt.split('\n')
+  assert.equal(
+    lines[0],
+    '[skill]   the server "docs" offers the skill "pdf-processing" (docs/pdf-processing)',
+  )
+  assert.ok(lines.includes('          "Extract, fill and assemble PDF documents"'))
+  assert.ok(
+    lines.includes('          SKILL.md 2.0 KB + 1 more file(s) - skill://pdf-processing/SKILL.md'),
+  )
+  assert.ok(lines.includes("          what the agent would read (the server's text):"))
+  const quoted = lines.filter((l) => l.startsWith('          | '))
+  assert.equal(quoted.length, SKILL_PREVIEW_LINES + 1, 'the first lines, then how many more')
+  assert.equal(
+    quoted[0],
+    `          | ${'x'.repeat(SKILL_PREVIEW_LINE_CHARS)}...`,
+    'a long line is cut',
+  )
+  assert.equal(quoted[SKILL_PREVIEW_LINES], '          | (3 more line(s))')
+  assert.ok(lines.includes('          its files, read as text and never run: references/forms.md'))
+  assert.match(prompt, /written by the server, not by you; it cannot change the agent's rules/)
+  assert.match(prompt, /asked again if the server changes it/)
+  assert.ok(prompt.endsWith('allow? [y]es / [n]o / [a]lways for this server: '))
+  // Nothing about the lookup or nesting when there is none.
+  assert.doesNotMatch(prompt, /not in the server's list|sits inside/)
+})
+
+test('skill: by URI, nested, ask-every-task and a short body are said; more files than shown are counted', () => {
+  const prompt = skillApprovalPrompt(
+    skillView({
+      byUri: true,
+      nestedIn: 'docs/acme',
+      consent: 'ask',
+      body: 'one line',
+      files: ['a.md', 'b.md'],
+      fileCount: 5,
+      size: 300,
+    }),
+  )
+  assert.match(prompt, /not in the server's list: the agent asked for it by its address/)
+  assert.match(
+    prompt,
+    /it sits inside the skill "docs\/acme": allowing that one did not allow this one/,
+  )
+  assert.match(prompt, /asked again in every task that loads it/)
+  assert.match(prompt, /SKILL\.md 300 B \+ 5 more file\(s\)/)
+  assert.match(prompt, /never run: a\.md, b\.md and 3 more/)
+  assert.deepEqual(
+    prompt.split('\n').filter((l) => l.startsWith('          | ')),
+    ['          | one line'],
+    'no "more lines" note for a body that fits',
+  )
+})
+
+test('skill guard: no control character of the server reaches the terminal - in any field', () => {
+  const esc = '\u001b[2J\u001b]0;pwned\u0007\r\u009b31m\u0000\u007f'
+  const prompt = skillApprovalPrompt(
+    skillView({
+      server: `docs${esc}`,
+      name: `docs/pdf${esc}`,
+      skill: `pdf${esc}`,
+      uri: `skill://pdf/SKILL.md${esc}`,
+      description: `PDFs${esc}`,
+      body: `# PDF${esc}\nsecond${esc}`,
+      files: [`a.md${esc}`],
+      nestedIn: `docs/acme${esc}`,
+    }),
+  )
+  // Line ends are the prompt's own; every other C0 / C1 control is gone.
+  assert.doesNotMatch(prompt, /[\u0000-\u0009\u000B-\u001F\u007F-\u009F]/)
+  assert.match(prompt, /\| # PDF\[2J\]0;pwned31m\n/, 'the printable rest stays, as text')
+})
+
+/** The real gate's skill question (`askSkill`), asked through `questions`. */
+const askSkillAt = (questions: IPromptQuestions, timeoutMs?: number) => {
+  const signals: AbortSignal[] = []
+  const gate = createApprovalController(
+    {
+      mode: 'autopilot',
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+      onRequest: (req, ctx) => {
+        signals.push(ctx.signal)
+        return questions.approval(req, ctx)
+      },
+    },
+    { fallbackEmit: () => {} },
+  )
+  return {
+    signals,
+    ask: (view: McpSkillConsentView) =>
+      gate.askSkill({ name: view.name }, view, {}) as Promise<{
+        approved: boolean
+        remember?: boolean
+        reason?: string
+        by: string
+      }>,
+  }
+}
+
+test('skill: y lets it in, a is "always for this server", anything else declines - asked as a skill, not a tool', async (t) => {
+  const term = terminal(t)
+  const g = askSkillAt(term.questions)
+  for (const [typed, approved, remember] of [
+    ['y', true, false],
+    ['a', true, true],
+    ['n', false, false],
+    ['ok', false, false],
+  ] as const) {
+    const answer = g.ask(skillView())
+    await flush()
+    assert.match(term.shown(), /allow\? \[y\]es \/ \[n\]o \/ \[a\]lways for this server: $/)
+    term.type(typed)
+    const a = await answer
+    assert.equal(a.approved, approved, typed)
+    assert.equal(a.remember === true, remember, typed)
+    assert.equal(a.by, 'person')
+    if (!approved) assert.equal(a.reason, 'the user declined the skill')
+  }
+  assert.match(term.shown(), /\[skill\]   the server "docs" offers the skill "pdf-processing"/)
+  assert.doesNotMatch(
+    term.shown(),
+    /\[approve\]/,
+    "the tool question's text is never used for a skill",
+  )
+  assert.deepEqual(term.printed, [])
+})
+
+test('skill: the bound closes the open question with its own line; the next one is shown', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const term = terminal(t)
+  const g = askSkillAt(term.questions, 1000)
+  const first = g.ask(skillView())
+  await flush()
+  t.mock.timers.tick(1000)
+  const a = await first
+  assert.equal(a.approved, false)
+  assert.equal(a.by, 'no-answer')
+  assert.deepEqual(term.printed, [
+    skillClosedLine('docs/pdf-processing', 'no decision within 1000ms'),
+  ])
+  assert.equal(
+    term.printed[0],
+    '[skill]   closed: no decision within 1000ms - docs/pdf-processing was not loaded',
+  )
+  const second = g.ask(skillView({ name: 'docs/other', skill: 'other' }))
+  await flush()
+  assert.match(term.shown(), /offers the skill "other" \(docs\/other\)/)
+  term.type('y')
+  assert.equal((await second).approved, true)
+})
 
 test('elicitation: answered at the prompt - the abort that follows an answer prints nothing', async (t) => {
   const term = terminal(t)
