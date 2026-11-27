@@ -61,16 +61,24 @@ behind every decision.
 - `src/tools/egress.ts` — `config.egress` / `web_fetch`: the browser sibling of the server's
   `createSafeFetch` (same policy shape; the pure address/pattern core is a COPY of the server's —
   change both, with tests). Security boundary: a change needs a test and a mutation check.
-- `src/tools/web-search.ts` — `config.search` / `web_search`: a hosted search API (brave, tavily,
-  searxng) or the host's `engine` function. The adapter's request goes through the guarded fetch
-  under `searchEgressPolicy` (allow list = the search API's host only, no redirect); results are
-  filtered by the model's `egress` policy. The key is never in the config: `credentialRef` into
-  `config.credentials`, read at each call. `web-search-shared.ts` (pure, no imports: caps, result
-  cleaning, the adapters as request builders / response parsers, redaction, the description) is a
-  COPY of the server's `src/web-search-shared.ts`, byte for byte — change both (the server's
-  `tests/web-search-shared.test.ts` compares them and `tests/helpers/search-server.ts`). Security
-  boundary: every guard has a test in `tests/web-search.test.ts` and a mutation check. CORS decides
-  which API works from a page (docs/capabilities.md says which); tests never call a real API.
+- `src/tools/web-search.ts` — `config.search` / `web_search`: the host's `engine` function, or the
+  ONE built-in provider, `'google'` (Google Search through Gemini grounding: a separate
+  `generateContent` call with `google_search`, because the API refuses built-in tools next to
+  function declarations). Third-party search APIs are not built in - they are recipes for `engine`
+  in docs/capabilities.md; do not add adapters back. The provider's request goes through the
+  guarded fetch under `searchEgressPolicy` (allow list = the API's host only, POST only, no
+  redirect); its tokens are charged to the run (`addUsage(..., 'search')`); results are filtered
+  by the model's `egress` policy. Result URLs are Google redirect links and are NEVER resolved
+  here: the filter judges the redirect host, a site name (`searchSiteUrl`) is used only to drop a
+  denied site, and the description promises `web_fetch` only when it can open such a link
+  (`followRedirects` + a host `egress.fetch`: the redirect host sends no CORS headers). The key is
+  never in the config: `credentialRef` into `config.credentials`, read at each call.
+  `web-search-shared.ts` (pure, no imports, no clock: caps, result cleaning, the provider as
+  request builder / response parser, the error message, redaction, `searchToolResult`, the
+  description) is a COPY of the server's `src/web-search-shared.ts`, byte for byte — change both
+  (the server's `tests/web-search-shared.test.ts` compares them and
+  `tests/helpers/search-server.ts`). Security boundary: every guard has a test in
+  `tests/web-search.test.ts` and a mutation check; tests never call a real API.
 - `src/tools/media.ts` — `config.media`: `generate_image` / `generate_speech` / `transcribe_audio`
   (each mounted only when its model is set) and the transcription of audio attachments (`attach`,
   called from the runner before planning: the goal gets a fenced, marked transcript, the audio

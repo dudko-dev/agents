@@ -30,7 +30,7 @@ const PROGRAMS = [
   `for (;;) {}`,
 ]
 
-test('sandbox: off by default; on, run_js runs the code in a worker and returns its real output - and a runaway loop is stopped', async ({
+test('sandbox: on by default - run_js runs the code in a worker and returns its real output, and a runaway loop is stopped; switched off, the tool is not offered', async ({
   page,
 }) => {
   test.setTimeout(90_000)
@@ -46,30 +46,29 @@ test('sandbox: off by default; on, run_js runs the code in a worker and returns 
   })
   await openWithKey(page)
 
-  // Off: the model is not offered the tool.
+  // The default: nothing to switch on.
   await send(page, 'run the code')
-  await expect(page.locator('.awr-msg--assistant .awr-msg__bubble')).toHaveText('Done.')
-  expect(calls.filter((c) => c.stage === 'executor').flatMap((c) => c.tools)).not.toContain(
-    'run_js',
-  )
-
-  await page.locator('.agentset__title').click()
-  await page.getByLabel('Let it run code').check()
-  const before = calls.length
-  await send(page, 'run the code again')
   await expect(page.locator('.awr-msg--assistant .awr-msg__bubble').last()).toHaveText('Done.', {
     timeout: 60_000,
   })
 
   const results = JSON.stringify(
-    calls
-      .slice(before)
-      .filter((c) => c.stage === 'executor')
-      .at(-1)?.functionResponses,
+    calls.filter((c) => c.stage === 'executor').at(-1)?.functionResponses,
   )
   // The first program really ran: its output and its value, and nothing of the page in reach.
   expect(results).toContain('sum 6')
   expect(results).toMatch(/undefined\W+undefined\W+undefined/)
   // The second was stopped at the deadline and reported as a result the model can read.
   expect(results).toContain('TimeoutError')
+
+  // Off: the model is not offered the tool.
+  await page.locator('.agentset__title').click()
+  await expect(page.getByLabel('Let it run code')).toBeChecked()
+  await page.getByLabel('Let it run code').uncheck()
+  const before = calls.length
+  await send(page, 'run the code again')
+  await expect(page.locator('.awr-msg--assistant .awr-msg__bubble').last()).toHaveText('Done.')
+  const after = calls.slice(before).filter((c) => c.stage === 'executor')
+  expect(after.length).toBeGreaterThan(0)
+  expect(after.flatMap((c) => c.tools)).not.toContain('run_js')
 })

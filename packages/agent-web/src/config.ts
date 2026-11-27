@@ -105,12 +105,12 @@ export interface BrowserAgentConfig {
   egress?: boolean | IEgressPolicy
   /**
    * Let the model SEARCH the web (the `web_search` tool: a short list of title / url / snippet).
-   * Off unless set. The library ships no key: name a hosted search API (`provider` +
-   * `credentialRef` - the key stays in `credentials`, never here - or a SearXNG `baseURL`) or
-   * pass a function (`engine`). The adapter's request reaches that API's host only, through the
-   * guarded fetch; with `egress` set, results the model could not fetch are left out. Works
-   * without `egress` (then there is no `web_fetch` to open a link). The API must allow
-   * cross-origin calls from a page - see `ISearchConfig`.
+   * Off unless set. The library ships no key: pass a function (`engine` - any search API) or
+   * name the built-in provider (`provider: 'google'` + `credentialRef` - Google Search through
+   * Gemini grounding, which spends model tokens; the key stays in `credentials`, never here).
+   * The provider's request reaches that API's host only, through the guarded fetch; with
+   * `egress` set, results the model could not fetch are left out. Works without `egress` (then
+   * there is no `web_fetch` to open a link) - see `ISearchConfig`.
    */
   search?: ISearchConfig
   /**

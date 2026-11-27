@@ -401,8 +401,9 @@ export interface IAgentConfig {
   // own API calls or the MCP servers you configure - those are your configuration, not the model's.
   egress?: boolean | IEgressPolicy
   // Let the model SEARCH the web (the web_search tool: a short list of title / url / snippet). Off
-  // unless set. The library ships no key: name a hosted search API (`provider` + `apiKey`, or a
-  // SearXNG `baseURL`) or pass a function (`engine`). The adapter's request reaches that API's
+  // unless set. The library ships no key: pass a function (`engine` - any search API) or name
+  // the built-in provider (`provider: 'google'` + a Gemini `apiKey`: Google Search through
+  // Gemini grounding, which spends model tokens). The provider's request reaches that API's
   // host only, through createSafeFetch; with `egress` set, results the model could not fetch are
   // left out. Works without `egress` (then there is no web_fetch to open a link). See ISearchConfig.
   search?: ISearchConfig
@@ -660,6 +661,9 @@ export type UsagePhase =
   // A call to an image / speech / transcription model (config.media): its `usage` carries the
   // media fields and zero tokens.
   | 'media'
+  // A web_search through the google provider (config.search): the grounding call is a model
+  // call, and these are the tokens its API reported.
+  | 'search'
 
 type AgentEventBody =
   | { type: 'plan.thought-delta'; delta: string }

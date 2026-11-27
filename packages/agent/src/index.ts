@@ -114,7 +114,7 @@ export {
 } from './safe-fetch.ts'
 export type { EgressErrorCode, IEgressPolicy, IResolvedAddress, SafeFetch } from './safe-fetch.ts'
 export { createWebFetchTool, createEgressTools, htmlToText, WEB_FETCH_TOOL } from './web-fetch.ts'
-// Search: the web_search tool (a hosted search API through the safe fetch, or the host's function).
+// Search: the web_search tool (the host's function, or Google Search via Gemini grounding through the safe fetch).
 export {
   askDecisionModel,
   decisionModelFromAiSdk,
@@ -140,11 +140,16 @@ export {
   buildSearchRequest,
   parseSearchResponse,
   sanitizeSearchResults,
+  searchStatusMessage,
+  searchToolResult,
   SEARCH_API_BASE_URL,
   SEARCH_DEFAULT_MAX_RESULTS,
+  SEARCH_GOOGLE_DEFAULT_MODEL,
+  SEARCH_GOOGLE_NOTE,
   SEARCH_MAX_QUERY_CHARS,
   SEARCH_MAX_RESULTS,
   SEARCH_MAX_SNIPPET_CHARS,
+  SEARCH_MAX_SUMMARY_CHARS,
   SEARCH_MAX_TITLE_CHARS,
   SEARCH_MAX_TOTAL_CHARS,
   SEARCH_MAX_URL_CHARS,
@@ -153,9 +158,12 @@ export {
 } from './web-search-shared.ts'
 export type {
   ISanitizedSearch,
+  ISearchAnswer,
   ISearchOptions,
   ISearchRequest,
   ISearchResult,
+  ISearchToolResult,
+  ISearchUsage,
   SearchEngine,
   SearchFreshness,
   SearchProvider,

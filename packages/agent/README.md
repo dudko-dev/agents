@@ -125,7 +125,7 @@ Pass an event handler as the second argument to `createAgent`, or per run via `o
 | Event | When |
 | --- | --- |
 | `decision` | A [decision model](#decision-models) was asked a question: `point` (`'replan' \| 'route'`), `accepted`, `choice?`, `confidence?`, `threshold`, `reason?` (`'low-confidence' \| 'invalid-choice' \| 'invalid-confidence' \| 'error' \| 'timeout' \| 'needs-model'` - why the ordinary model call ran instead), `error?`, `durationMs`, `model?`. |
-| `usage` | Per LLM call; `phase` is `'plan' \| 'execute' \| 'replan' \| 'synthesize' \| 'compact' \| 'subagent' \| 'decision' \| 'media'`. Counted live into [`agent.usage`](#usage-what-a-session-has-spent). Phase `'decision'` is a decision-model call (`usage.decisionCalls: 1` plus the tokens its API reported). A call to a [media model](#media-images-speech-and-transcription) is a `usage` event of phase `'media'`: zero tokens, and the media fields of `usage` (`mediaCalls`, ...) with the units. |
+| `usage` | Per LLM call; `phase` is `'plan' \| 'execute' \| 'replan' \| 'synthesize' \| 'compact' \| 'subagent' \| 'decision' \| 'media' \| 'search'`. Counted live into [`agent.usage`](#usage-what-a-session-has-spent). Phase `'decision'` is a decision-model call (`usage.decisionCalls: 1` plus the tokens its API reported). A call to a [media model](#media-images-speech-and-transcription) is a `usage` event of phase `'media'`: zero tokens, and the media fields of `usage` (`mediaCalls`, ...) with the units. Phase `'search'` is the model call behind a [`web_search` through Google](#the-google-provider-google-search-through-gemini-grounding): the tokens its API reported. |
 | `budget.exceeded` | A run cap was crossed; `kind: 'input' \| 'output' \| 'reasoning' \| 'total' \| 'tool-calls'`, `tokens`, `cap`. |
 | `context.compacted` | History, trace or stale tool results were compacted (`scope: 'history' \| 'trace' \| 'tool-results'`, `beforeTokens`, `afterTokens`). |
 
@@ -913,43 +913,124 @@ What it is not: a sandbox for what a fetched *page says* — that stays data the
 
 ## Search: finding the page to fetch
 
-`web_fetch` reads a page the model already knows the address of. `search` is its companion: one tool, `web_search({ query, maxResults?, freshness? })`, that returns a short list of `{ title, url, snippet, date? }`. **Off by default**, and the library ships **no key and no engine**: you name a hosted search API, or pass a function.
+`web_fetch` reads a page the model already knows the address of. `search` is its companion: one tool, `web_search({ query, maxResults?, freshness? })`, that returns a short list of `{ title, url, snippet, date? }`. **Off by default**, and the library ships **no key and no third-party search API**: you pass a search engine of your own (a function - [recipes below](#search-engine-recipes) for Tavily, Brave and SearXNG), or name the one built-in provider, **Google Search through Gemini grounding**, which needs a Gemini API key and nothing else.
 
 ```ts
 const agent = await createAgent({
   // ...
-  search: { provider: 'brave', apiKey: process.env.BRAVE_API_KEY! }, // or 'tavily'
-  // search: { provider: 'searxng', baseURL: 'https://search.example.com' }, // your own instance, no key
+  search: { provider: 'google', apiKey: process.env.GEMINI_API_KEY! }, // Google Search via Gemini grounding
   // search: { engine: async (query, { maxResults, freshness, signal }) => myIndex.search(query) },
-  egress: { allow: ['docs.example.com', '*.github.com'] }, // optional: web_fetch, and the filter below
+  egress: true, // optional: web_fetch, and the filter below
 })
-// CLI: AGENT_SEARCH=brave AGENT_SEARCH_API_KEY=... (or AGENT_SEARCH=searxng AGENT_SEARCH_BASE_URL=...)
+// CLI: AGENT_SEARCH=google AGENT_SEARCH_API_KEY=...  (with AGENT_PROVIDER_TYPE=google the agent's own AGENT_API_KEY is used)
 ```
 
 | `search` field | |
 |---|---|
-| `provider` | A built-in adapter, one HTTP call each: `'brave'` ([Brave Search API](https://api-dashboard.search.brave.com/app/documentation/web-search/get-started): `GET /res/v1/web/search`, key in `X-Subscription-Token`), `'tavily'` ([Tavily Search](https://docs.tavily.com/documentation/api-reference/endpoint/search): `POST /search`, `Authorization: Bearer`), `'searxng'` (a [SearXNG](https://docs.searxng.org/dev/search_api.html) instance of yours: `GET /search?format=json`, no key - its `settings.yml` must list `json` under `search.formats`, or it answers 403). |
-| `apiKey` | The key of `brave` / `tavily`. Sent in a header to that API only. |
-| `baseURL` | Required for `searxng` (the instance). For the others it replaces the public endpoint with a gateway of yours (the key is then optional). No credentials, query or fragment in it. |
-| `engine` | Instead of `provider`: your own `(query, { maxResults, freshness, signal }) => Promise<{ title, url, snippet, date? }[]>`. Its requests are yours, like a tool you pass; its results get the same cleaning, caps and filter. |
+| `engine` | Your own `(query, { maxResults, freshness, signal }) => Promise<{ title, url, snippet, date? }[]>` - any search API, or an index of yours. Its requests are yours, like a tool you pass; its results get the same cleaning, caps and filter. Exactly one of `engine` / `provider`. |
+| `provider` | `'google'`: the built-in provider, see below. The only value. |
+| `apiKey` | `provider` only: a Gemini (Google AI Studio) API key. Sent in the `x-goog-api-key` header to that API only. |
+| `model` | `provider` only: the Gemini model that makes the grounding call. Default `'gemini-2.5-flash-lite'`. |
+| `baseURL` | `provider` only: replaces the public endpoint (`https://generativelanguage.googleapis.com`) with a gateway of yours (the key is then optional). No credentials, query or fragment in it. |
 | `maxResults` | Results per call when the model does not say. Default 5, never more than 10. |
-| `allowPrivateNetwork` | Let the **search API itself** be on a private or loopback address (a SearXNG on your network). It widens nothing else. Default `false`. |
-| `timeoutMs` | Whole request to the search API. Default 15 s. |
+| `allowPrivateNetwork` | `provider` only: let the **search API itself** (your gateway) be on a private or loopback address. It widens nothing else. Default `false`. |
+| `timeoutMs` | `provider` only: the whole request to the search API. Default 15 s. |
 | `readOnly` | How the approval gate sees a search. Default `true`; `false` makes it ask like a write. |
+
+### The `google` provider: Google Search through Gemini grounding
+
+One search is **one extra model call**: `POST /v1beta/models/<model>:generateContent` with the built-in `google_search` tool, a fixed instruction ("search, then report what the sources say in a few sentences") and the query - **nothing of the conversation**. Google runs the search, the model writes a short answer, and the API returns the sources it used (`groundingMetadata`). What you should know before turning it on:
+
+- **Why a separate call.** The Gemini API refuses a request that carries both its built-in search and function declarations (measured 2026-11-26 on `gemini-2.5-flash-lite`: HTTP 400 *"Built-in tools ({google_search}) and Function Calling cannot be combined in the same request"*), and an agent's every step carries function declarations. So the agent cannot simply switch on the model's own search; it asks for it in a call of its own. This also means the provider works whatever model the agent itself runs on - only the key has to be a Gemini one.
+- **It spends model tokens.** The grounding call is billed like any `generateContent` call. What the API reports (`usageMetadata`: prompt + tool-use prompt tokens as input, answer + thinking tokens as output) is a `usage` event of phase `'search'` and counts in `result.usage`, `agent.usage` and against [`limits`](#token-limits-and-step-caps). Measured: 135-300 tokens per search on `gemini-2.5-flash-lite`. The answer is capped at 1024 output tokens. A failed call (a quota, a wrong key) reports no usage and counts none. Nothing is retried.
+- **Which models answer a free-tier key.** Measured on 2026-11-26 with five free-tier Google AI Studio keys: `gemini-2.5-flash-lite` and `gemini-2.5-flash` answered with grounding on three of them and **HTTP 404 on the two newest accounts** (*"no longer available to new users"*); `gemini-3.1-flash-lite`, `gemini-3.5-flash-lite`, `gemini-3.8-flash` and `gemini-flash-lite-latest` answered **HTTP 429** on every key (whether grounding has no free quota there or the day's quota was spent is not known). The default is the cheapest one that worked, `gemini-2.5-flash-lite`; on a key it does not serve, set `model`. Quotas are Google's and change - an error names the model and says which of the two happened. The free tier that did answer allowed **20 requests a day per model and key** (the API's own error: `GenerateRequestsPerDayPerProjectPerModel-FreeTier`, limit 20) - every search is one of them, and so is every call of an agent that runs on the same model and key.
+- **Result URLs are Google redirect links**, not the pages' own addresses: `https://vertexaisearch.cloud.google.com/grounding-api-redirect/<token>`, which answers `302` to the page. The API gives no other address; the `title` is the site's name as Google reports it (`nodejs.org`). The agent **does not resolve the links** - that would be a request per result to wherever each points, outside your policy. `web_fetch` follows one like any redirect, and the safe fetch judges every hop. Consequences for [`egress`](#egress-what-the-model-may-fetch):
+  - With an `egress.allow` list, a result is on the list only if `vertexaisearch.cloud.google.com` is: without it every result is filtered out. Adding it is **not** an open redirect through your allow list: the redirect's target is judged again against the same list, and a page on a host you did not allow is refused before it is contacted. So add the redirect host *and* the hosts you want read.
+  - The filter can see only the redirect host, not the page's. A result whose site name is on your `deny` list is dropped by that name as well (best effort: it is Google's word for the site, good enough to drop a result, never used to let one through). A page on a host outside your allow list still shows up as a result - and is refused when `web_fetch` follows the link.
+  - The links are long (150-300 characters) and expire; they are not something to show a user as a citation.
+- **Snippets are the grounding model's sentences, not quotes.** A result's `snippet` is what the model's answer says of that source (`groundingSupports`), not text from the page. When the API attributes nothing to any source, the answer is attached once as `summary` (1000 characters at most) - and only when no result was filtered out. Every result of this provider carries a `note` saying what its links and its text are. All of it is untrusted text like any search result: a model wrote it from third-party pages.
+- **No result count.** The API has no such parameter: you get the sources the model used (3-10 in the measurements) and the list is cut to `maxResults`. `freshness` becomes the API's time range filter (a day is asked for as 25 hours: the API wants more than 24).
 
 **How it relates to `egress`.** They are independent switches, and neither loosens the other:
 
-- **The adapter's own request is pinned.** It goes through `createSafeFetch` under a policy of its own (`searchEgressPolicy`), not the model's: the allow list is exactly the search API's host, with its scheme and port; no redirect is followed; the answer is capped at 1 MB and 15 s; private and metadata addresses are refused as everywhere (DNS pinned). So you never add the search API to `egress.allow` - and the tool cannot be steered to any other host. From `egress` it inherits only what narrows or is plumbing: the `deny` list (deny still wins), `ca` and `lookup`.
-- **Results are filtered by the model's egress policy.** With `egress` set, a result whose URL `web_fetch` would refuse (not on the allow list, on the deny list, plain http, an IP in a private range, an odd port) is left out - title and snippet too - and counted in `filtered`. The model is not handed links it cannot open, and a search is not a way to read text from hosts you did not allow.
+- **The provider's own request is pinned.** It goes through `createSafeFetch` under a policy of its own (`searchEgressPolicy`), not the model's: the allow list is exactly the API's host (`generativelanguage.googleapis.com`, or your `baseURL`'s), with its scheme and port, `POST` only; no redirect is followed; the answer is capped at 1 MB and 15 s; private and metadata addresses are refused as everywhere (DNS pinned). So you never add it to `egress.allow` - and the tool cannot be steered to any other host. From `egress` it inherits only what narrows or is plumbing: the `deny` list (deny still wins), `ca` and `lookup`. An `engine` makes its own requests: bind them yourself (the recipes do).
+- **Results are filtered by the model's egress policy** - an engine's and the provider's alike. With `egress` set, a result whose URL `web_fetch` would refuse (not on the allow list, on the deny list, plain http, an IP in a private range, an odd port) is left out - title and snippet too - and counted in `filtered`. The model is not handed links it cannot open, and a search is not a way to read text from hosts you did not allow.
 - **`search` works without `egress`.** Then there is no `web_fetch`: the model gets the snippets as leads (the tool's description says so) and nothing is filtered, because there is no list to filter by. The search API's host does not become fetchable either way.
 
 **Results are untrusted third-party text.** Whatever the API (or your function) returns, only `title`, `url`, `snippet` and `date` survive; a result needs a valid `http(s)` URL without credentials; every field is a single line with control, zero-width and bidirectional-override characters and highlight markup removed, capped (title 200, snippet 500, URL 2000 characters; 6000 for one call in total; a query 400). The result carries `untrusted: true`, and the tool's description tells the model that snippets are facts to weigh, never instructions, and to read the page with `web_fetch` before relying on it.
 
-**The key** lives in your config (or the CLI's `AGENT_SEARCH_API_KEY`) and goes into one request header. It is never in a URL, an event, a log line, an error or a tool result: an API error is reported by status only (the body may echo what was sent), and any error text is redacted before it is thrown.
+**The key** lives in your config (or the CLI's `AGENT_SEARCH_API_KEY`) and goes into one request header, to one host. It is never in a URL (not as `?key=` either), an event, a log line, an error, a tool result or a run snapshot: an API error is reported by its status and the API's own code word (`RESOURCE_EXHAUSTED`, `NOT_FOUND`) - never the error's text, which may echo what was sent - and any error text is redacted before it is thrown.
+
+### Search engine recipes
+
+Any other search API is a function you pass as `engine`. Three, each one request; the agent cleans, caps and filters what they return. Bind the request to the API's host with `createSafeFetch` (the key then cannot travel anywhere else, and no redirect is followed), keep the key in a header, and put only the status into an error.
+
+```ts
+import { createSafeFetch, type SearchEngine } from '@dudko.dev/agent'
+
+// Tavily - https://docs.tavily.com/documentation/api-reference/endpoint/search
+// Host: api.tavily.com. Key: Authorization: Bearer.
+const tavilyFetch = createSafeFetch({ allow: ['api.tavily.com'], methods: ['POST'], maxRedirects: 0 })
+export const tavily = (apiKey: string): SearchEngine => async (query, { maxResults, freshness, signal }) => {
+  const res = await tavilyFetch('https://api.tavily.com/search', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ query, max_results: maxResults, ...(freshness ? { time_range: freshness } : {}) }),
+    signal,
+  })
+  if (!res.ok) throw new Error(`web_search failed: Tavily answered HTTP ${res.status}`)
+  const { results = [] } = (await res.json()) as { results?: any[] }
+  return results.map((r) => ({ title: r.title, url: r.url, snippet: r.content, date: r.published_date }))
+}
+
+// Brave Search - https://api-dashboard.search.brave.com/app/documentation/web-search/get-started
+// Host: api.search.brave.com. Key: X-Subscription-Token.
+const braveFetch = createSafeFetch({ allow: ['api.search.brave.com'], maxRedirects: 0 })
+const BRAVE_FRESHNESS = { day: 'pd', week: 'pw', month: 'pm', year: 'py' } as const
+export const brave = (apiKey: string): SearchEngine => async (query, { maxResults, freshness, signal }) => {
+  const url = new URL('https://api.search.brave.com/res/v1/web/search')
+  url.searchParams.set('q', query)
+  url.searchParams.set('count', String(maxResults))
+  url.searchParams.set('text_decorations', 'false')
+  if (freshness) url.searchParams.set('freshness', BRAVE_FRESHNESS[freshness])
+  const res = await braveFetch(url, { headers: { 'x-subscription-token': apiKey, accept: 'application/json' }, signal })
+  if (!res.ok) throw new Error(`web_search failed: Brave answered HTTP ${res.status}`)
+  const body = (await res.json()) as { web?: { results?: any[] } }
+  return (body.web?.results ?? []).map((r) => ({ title: r.title, url: r.url, snippet: r.description, date: r.page_age ?? r.age }))
+}
+
+// SearXNG (your own instance, no key) - https://docs.searxng.org/dev/search_api.html
+// Host: yours. Its settings.yml must list `json` under search.formats, or it answers 403.
+export const searxng = (baseURL: string, allowPrivateNetwork = false): SearchEngine => {
+  const base = new URL(baseURL)
+  const sxFetch = createSafeFetch({
+    allow: [base.hostname],
+    protocols: [base.protocol === 'http:' ? 'http' : 'https'],
+    ports: [Number(base.port || (base.protocol === 'http:' ? 80 : 443))],
+    allowPrivateNetwork, // true for an instance on your own network
+    maxRedirects: 0,
+  })
+  const RANGE = { day: 'day', week: 'month', month: 'month', year: 'year' } as const // no "week" in SearXNG
+  return async (query, { freshness, signal }) => {
+    const url = new URL(`${base.origin}${base.pathname.replace(/\/+$/, '')}/search`)
+    url.searchParams.set('q', query)
+    url.searchParams.set('format', 'json')
+    if (freshness) url.searchParams.set('time_range', RANGE[freshness])
+    const res = await sxFetch(url, { headers: { accept: 'application/json' }, signal })
+    if (!res.ok) throw new Error(`web_search failed: SearXNG answered HTTP ${res.status}`)
+    const { results = [] } = (await res.json()) as { results?: any[] }
+    return results.map((r) => ({ title: r.title, url: r.url, snippet: r.content, date: r.publishedDate ?? undefined }))
+  }
+}
+
+// search: { engine: tavily(process.env.TAVILY_API_KEY!) }
+```
+
+The engine's host does not go into `egress.allow`: the function's requests are yours, not the model's. A query leaves for that service all the same - the note on approval below applies to an engine as it does to the provider.
 
 **Approval.** `web_fetch` is read-only only when the policy names the hosts, because an open GET can carry data anywhere. A search reaches exactly one host and you named it, so by the same rule it is **read-only** (`ask-writes` and `read-only` let it run). That host still *sees the query*: a model that was talked into it could put private data into one. If queries must not leave unreviewed, set `search: { ..., readOnly: false }` (it then asks like a write) or a rule: `toolApproval: { rules: { web_search: 'ask' } }`. It is an ordinary tool otherwise: `maxToolCalls`, the tool-output cap, `excludedTools` and tool search all apply, and a tool of your own named `web_search` wins.
 
-**Events.** The adapter's request emits the same `egress.request` as `web_fetch` (`url` is the API's origin and path - never the query string; `allowed`, `status` / `reason`). The query itself is in the ordinary `tool.call` event. A function `engine` makes its own requests and emits none.
+**Events.** The provider's request emits the same `egress.request` as `web_fetch` (`url` is the API's origin and path - never the query string; `allowed`, `status` / `reason`), and its tokens a `usage` event of phase `'search'`. The query itself is in the ordinary `tool.call` event. A function `engine` makes its own requests and emits neither.
 
 What it is not: the providers' server-side search tools (Anthropic, OpenAI, Google). Those run inside the provider's API call, outside this policy; they are not wired here.
 
@@ -1483,7 +1564,7 @@ dd-agent --env-file=.env
 
 `--env-file=<path>` is loaded via Node's built-in `process.loadEnvFile`, so no `dotenv` dependency is needed. Without the flag the CLI reads the ambient process env. `-h` / `--help` prints the supported flags and the in-REPL slash commands (`/status`, `/usage`, `/tools`, `/history`, `/reset`, `/compact`, `/autopilot`, `/approval <mode>`, `/reconnect`, `/skills`, `/forget <name>`, `/agents`, `/stop [n]`, `/exit` — `/quit` does the same).
 
-The newer features are env-driven too: `AGENT_THINKING` (`off | minimal | low | medium | high | xhigh | <budget tokens>`), `AGENT_MAX_INPUT_TOKENS` / `AGENT_MAX_OUTPUT_TOKENS` / `AGENT_MAX_REASONING_TOKENS` / `AGENT_MAX_TOTAL_TOKENS`, `AGENT_MAX_TOOL_CALLS`, `AGENT_PER_CALL_TOKENS` (JSON `{"executor":16000,"synthesizer":0}` — per-stage output caps, `0` = no cap, see [Token limits](#token-limits-and-step-caps)), `AGENT_TOOL_APPROVAL` (`autopilot | ask-writes | ask-all | read-only`), `AGENT_TOOL_RULES` (JSON `{ "<tool or glob*>": "allow" | "ask" | "deny" }`, beats the mode — e.g. `{"github__delete_*":"deny"}`), `AGENT_EGRESS` (`on | off`; with `AGENT_EGRESS_ALLOW`, `AGENT_EGRESS_DENY`, `AGENT_EGRESS_PROTOCOLS`, `AGENT_EGRESS_ALLOW_PRIVATE` — see [Egress](#egress-what-the-model-may-fetch)), `AGENT_SEARCH` (`brave | tavily | searxng | off`; with `AGENT_SEARCH_API_KEY`, `AGENT_SEARCH_BASE_URL`, `AGENT_SEARCH_MAX_RESULTS`, `AGENT_SEARCH_ALLOW_PRIVATE` — see [Search](#search-finding-the-page-to-fetch)), `AGENT_SANDBOX` (`on | off`; with `AGENT_SANDBOX_TIMEOUT_MS`, `AGENT_SANDBOX_MEMORY_MB` — see [Running code](#running-code-the-sandbox)), `AGENT_SUBAGENTS` (`on | off`; with `AGENT_SUBAGENTS_MAX_DEPTH`, `AGENT_SUBAGENTS_MAX_CHILDREN`, `AGENT_SUBAGENTS_MAX_CONCURRENT` — see [Dynamic subagents](#dynamic-subagents-helpers-the-model-starts-itself); `/agents` and `/stop` list and stop helpers, and an approval prompt says when a helper is asking), `AGENT_IMAGE_MODEL` / `AGENT_SPEECH_MODEL` / `AGENT_TRANSCRIPTION_MODEL` (a model id each; each mounts its tool - with `AGENT_MEDIA_PROVIDER_TYPE` / `AGENT_MEDIA_API_KEY` / `AGENT_MEDIA_BASE_URL` / `AGENT_MEDIA_PROVIDER_OPTIONS` when those models live at another provider than the main one, `AGENT_MEDIA_DIR` (default `./agent-media`), `AGENT_MEDIA_MAX_CALLS`, `AGENT_SPEECH_VOICE` — see [Media](#media-images-speech-and-transcription); in the REPL `/audio <file> [question]` attaches an audio file, and `/usage` shows the media calls beside the tokens), `AGENT_SKILLS_DIR`, `AGENT_LEARNING` (`on | off`; `AGENT_LEARNING_DIR` keeps the lessons across sessions — see [Learning](#learning-lessons-that-outlive-the-task)), `AGENT_TOOL_SELECTION_STRATEGY` (`auto | all | plan-narrowed | search`), `AGENT_CONTEXT_WINDOW_TOKENS`, `AGENT_COMPACTION_THRESHOLD` (percent of the window where auto-compaction starts, default 85) and `AGENT_COMPACTION=off`. The REPL prints the model's thoughts dimmed, auto-compacts its history with the same settings, and — when the approval mode asks — prompts `allow? [y]es / [n]o / [a]lways` right in the terminal; `/autopilot` toggles between autopilot and the last asking mode.
+The newer features are env-driven too: `AGENT_THINKING` (`off | minimal | low | medium | high | xhigh | <budget tokens>`), `AGENT_MAX_INPUT_TOKENS` / `AGENT_MAX_OUTPUT_TOKENS` / `AGENT_MAX_REASONING_TOKENS` / `AGENT_MAX_TOTAL_TOKENS`, `AGENT_MAX_TOOL_CALLS`, `AGENT_PER_CALL_TOKENS` (JSON `{"executor":16000,"synthesizer":0}` — per-stage output caps, `0` = no cap, see [Token limits](#token-limits-and-step-caps)), `AGENT_TOOL_APPROVAL` (`autopilot | ask-writes | ask-all | read-only`), `AGENT_TOOL_RULES` (JSON `{ "<tool or glob*>": "allow" | "ask" | "deny" }`, beats the mode — e.g. `{"github__delete_*":"deny"}`), `AGENT_EGRESS` (`on | off`; with `AGENT_EGRESS_ALLOW`, `AGENT_EGRESS_DENY`, `AGENT_EGRESS_PROTOCOLS`, `AGENT_EGRESS_ALLOW_PRIVATE` — see [Egress](#egress-what-the-model-may-fetch)), `AGENT_SEARCH` (`google | off` - Google Search through Gemini grounding, the one provider the CLI offers: another search API is a function, which an environment cannot carry; with `AGENT_SEARCH_API_KEY` (a Gemini key; `AGENT_API_KEY` is used when `AGENT_PROVIDER_TYPE=google`), `AGENT_SEARCH_MODEL`, `AGENT_SEARCH_BASE_URL`, `AGENT_SEARCH_MAX_RESULTS`, `AGENT_SEARCH_ALLOW_PRIVATE` — see [Search](#search-finding-the-page-to-fetch)), `AGENT_SANDBOX` (`on | off`; with `AGENT_SANDBOX_TIMEOUT_MS`, `AGENT_SANDBOX_MEMORY_MB` — see [Running code](#running-code-the-sandbox)), `AGENT_SUBAGENTS` (`on | off`; with `AGENT_SUBAGENTS_MAX_DEPTH`, `AGENT_SUBAGENTS_MAX_CHILDREN`, `AGENT_SUBAGENTS_MAX_CONCURRENT` — see [Dynamic subagents](#dynamic-subagents-helpers-the-model-starts-itself); `/agents` and `/stop` list and stop helpers, and an approval prompt says when a helper is asking), `AGENT_IMAGE_MODEL` / `AGENT_SPEECH_MODEL` / `AGENT_TRANSCRIPTION_MODEL` (a model id each; each mounts its tool - with `AGENT_MEDIA_PROVIDER_TYPE` / `AGENT_MEDIA_API_KEY` / `AGENT_MEDIA_BASE_URL` / `AGENT_MEDIA_PROVIDER_OPTIONS` when those models live at another provider than the main one, `AGENT_MEDIA_DIR` (default `./agent-media`), `AGENT_MEDIA_MAX_CALLS`, `AGENT_SPEECH_VOICE` — see [Media](#media-images-speech-and-transcription); in the REPL `/audio <file> [question]` attaches an audio file, and `/usage` shows the media calls beside the tokens), `AGENT_SKILLS_DIR`, `AGENT_LEARNING` (`on | off`; `AGENT_LEARNING_DIR` keeps the lessons across sessions — see [Learning](#learning-lessons-that-outlive-the-task)), `AGENT_TOOL_SELECTION_STRATEGY` (`auto | all | plan-narrowed | search`), `AGENT_CONTEXT_WINDOW_TOKENS`, `AGENT_COMPACTION_THRESHOLD` (percent of the window where auto-compaction starts, default 85) and `AGENT_COMPACTION=off`. The REPL prints the model's thoughts dimmed, auto-compacts its history with the same settings, and — when the approval mode asks — prompts `allow? [y]es / [n]o / [a]lways` right in the terminal; `/autopilot` toggles between autopilot and the last asking mode.
 
 **`AGENT_MCP_ELICITATION`** (`off` by default, `form`, `all`) lets a connected MCP server ask *you* something in the middle of a tool call ([MCP elicitation](#mcp-elicitation-a-server-asks-the-user)). The question is printed as a quotation (`| …` in front of every line: the server's words, not the CLI's) and answered at the prompt, in the same queue as the approval questions: `y` fills in the form field by field (Enter takes a field's default or skips an optional one, a value of the wrong kind is asked for again up to three times, `/cancel` dismisses), `n` declines, anything else cancels. `all` also accepts URL mode: the link is printed for you to open yourself - the CLI never opens it. What you type goes to that server only; a question nobody decided (a cap, a timeout, a form that cannot be shown) is reported as `!! <tool>: the server's question was answered "cancel" automatically (<reason>)`. The defaults of the library apply (5 minutes per question, 5 per tool call, 20 per run); helpers started with `AGENT_SUBAGENTS` cannot ask.
 

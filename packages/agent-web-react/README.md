@@ -626,7 +626,7 @@ from one place.
   kind in the transcript, a chat saved and restored after a reload, an image
   attached (shown, sent as a file part, saved in the workspace), a file
   dropped anywhere on the page, consent in "Ask" mode, slash commands, the
-  chess move that triggers the agent, and Russian labels; the agent's
+  chess move that triggers the agent, and Spanish and German labels; the agent's
   notebook (a lesson written, kept in the workspace across a reload, seen by the
   planner, forgotten on request) and web access (off by default; an allowed page
   is read, a metadata address is refused). The MCP and authorization servers it

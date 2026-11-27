@@ -297,7 +297,9 @@ Turned on, the model gets one tool: a GET that returns text.
 ## Search (`web_search`)
 
 Without `search` in the config there is no tool. Turned on, the model can send a query to one
-search service and read a short list of results.
+search service and read a short list of results. The service is a function you pass (`engine` -
+any search API) or the one built-in provider: Google Search through Gemini grounding
+(`provider: 'google'`), which is a model call to the Gemini API with its `google_search` tool.
 
 **The threats**
 
@@ -307,28 +309,55 @@ search service and read a short list of results.
   removed, capped (and the whole list capped); the result is flagged `untrusted: true` and the
   tool's description frames it as facts, never instructions. A mitigation, not a guarantee.
 - **A query is data leaving.** Whatever the model puts into a query reaches the search service
-  (and, with SearXNG, the engines behind it). The destination is one host the operator chose -
+  (Google, with the built-in provider). The destination is one host the operator chose -
   which is why a search is read-only for consent, like an allow-listed `web_fetch` - but an
   injected model could still put something private into a query. If that matters, set
-  `search.readOnly: false` or a `web_search: 'ask'` rule, or use an instance you run.
+  `search.readOnly: false` or a `web_search: 'ask'` rule, or use an engine you run. The grounding
+  call carries the query and a fixed instruction: nothing else of the conversation is sent.
 - **The key.** A key in a page is readable by the page's user: use the user's own key (BYOK,
   `credentialRef` into the encrypted vault) or a gateway that holds yours (`baseURL`). It is never
-  written into the config (an inline `apiKey` is refused), never put into a URL, and never
-  reaches an event, a log line, an error or a tool result - API errors are reported by status
-  only and error text is redacted.
-- **Using the tool to get around `egress`.** The adapter's request is pinned to the search API's
-  host, scheme and port, follows no redirect, sends no cookies or referrer and is bounded in size
-  and time; the host's `deny` list still wins. Results that `web_fetch` would refuse are dropped
-  with their snippets, so a search does not read text from hosts outside the allow list.
+  written into the config (an inline `apiKey` is refused), never put into a URL (the Gemini key
+  goes in the `x-goog-api-key` header, not `?key=`), and never reaches an event, a log line, an
+  error, a tool result or a run snapshot - an API error is reported by its status and the API's
+  own code word, never its text, and error text is redacted. An `engine` holds its own key: read
+  it from the `CredentialStore` at each call, as the recipes do.
+- **Using the tool to get around `egress`.** The provider's request is pinned to the API's host
+  (`generativelanguage.googleapis.com`), scheme and port, `POST` only, follows no redirect, sends
+  no cookies or referrer and is bounded in size and time; the host's `deny` list still wins.
+  Results that `web_fetch` would refuse are dropped with their snippets, so a search does not
+  read text from hosts outside the allow list.
+- **Google's redirect links.** The built-in provider's result URLs are not the pages' addresses
+  but `https://vertexaisearch.cloud.google.com/grounding-api-redirect/<token>`, and the API gives
+  no other. The agent never resolves them: that would be a request per result to wherever each
+  points. So the filter above judges the *redirect host*, and what follows is deliberate:
+  - With an `egress.allow` list, results appear only if you list that host. Listing it does not
+    turn the allow list into an open redirect for reading: when `web_fetch` follows a link
+    (`followRedirects`), the address it ended at is judged against the same list and the answer
+    is withheld if it is not on it. From a page it rarely gets that far - the redirect host
+    sends no CORS headers, so only an `egress.fetch` through a server of yours reads through it.
+  - The grounding model has already read the pages on Google's side: its sentences about a
+    source (the snippets, or the one `summary`) reach the model even when the page's own host is
+    not on your allow list - the filter cannot know that host. If text from outside the allow
+    list must never reach the model, do not list the redirect host (every result is then
+    dropped, and no summary is attached when anything was dropped), or use an `engine` whose
+    results carry real URLs.
+  - A site on your `deny` list is dropped by the site name Google reports for it. That is best
+    effort - the name is the API's word, not the link's host - and it is only ever used to drop.
+- **A model wrote the snippets.** With the built-in provider, a snippet is the grounding model's
+  sentence about a source, not a quote: it can be wrong, and a hostile page can shape it. Same
+  handling as any result (cleaned, capped, `untrusted: true`), and each result says so (`note`).
+- **Cost.** Each search through the built-in provider is a model call on the user's key. Its
+  tokens are counted (`usage`, phase `'search'`) and bounded by `limits` and `maxToolCalls`; the
+  answer is capped at 1024 output tokens; nothing is retried.
 - **SSRF through a search API on a private address.** Refused unless `search.allowPrivateNetwork`
-  is set (meant for a SearXNG on your network); metadata addresses stay refused. As with
+  is set (meant for a gateway on your network); metadata addresses stay refused. As with
   `web_fetch`, a page cannot pin DNS: a public-looking name that resolves inward is invisible.
 
 **What a browser limits**
 
-- Only an API that allows cross-origin requests can be called from a page. Tavily does; Brave
-  does not (use a gateway); SearXNG only when you configure it. See
-  [capabilities.md](./capabilities.md#search-finding-the-page-to-fetch).
+- Only an API that allows cross-origin requests can be called from a page. The Gemini API does;
+  of the engines in the recipes Tavily does, Brave does not (use a gateway), SearXNG only when
+  you configure it. See [capabilities.md](./capabilities.md#search-finding-the-page-to-fetch).
 - An `engine` function is host code: its requests are outside this policy, like any tool you pass.
   Its *results* still go through the same cleaning and filtering.
 

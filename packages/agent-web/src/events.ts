@@ -17,10 +17,12 @@ export type Phase = 'plan' | 'execute' | 'replan' | 'synthesize'
 /**
  * Phases a `usage` event can be charged to: the four stages plus compaction and subagents;
  * `decision` - a call to `config.decisionModel` (`usage.decisionCalls`, plus the tokens its API
- * reported); and 'media' - a call to an image / speech / transcription model (`config.media`),
- * whose `usage` carries the media fields and zero tokens.
+ * reported); 'media' - a call to an image / speech / transcription model (`config.media`),
+ * whose `usage` carries the media fields and zero tokens; and 'search' - a `web_search` through
+ * the google provider (`config.search`): the grounding call is a model call, and these are the
+ * tokens its API reported.
  */
-export type UsagePhase = Phase | 'compact' | 'subagent' | 'decision' | 'media'
+export type UsagePhase = Phase | 'compact' | 'subagent' | 'decision' | 'media' | 'search'
 
 /**
  * Everything the agent does is streamed as a typed event so any UI (or none)

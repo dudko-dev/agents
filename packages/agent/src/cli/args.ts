@@ -60,11 +60,12 @@ Optional env vars (see env.example for the full list):
   AGENT_EGRESS_ALLOW / _DENY  comma lists: host, *.host, IP or CIDR (deny wins; allow limits to these)
   AGENT_EGRESS_PROTOCOLS      https (default) | http | https,http
   AGENT_EGRESS_ALLOW_PRIVATE  on lets it reach private networks (cloud metadata stays refused)
-  AGENT_SEARCH                brave | tavily | searxng lets the model search the web (web_search); off (default)
-  AGENT_SEARCH_API_KEY        the search API's key (brave, tavily); never logged
-  AGENT_SEARCH_BASE_URL       the SearXNG instance (required for searxng), or a gateway for the others
+  AGENT_SEARCH                google lets the model search the web (web_search: Google Search via Gemini grounding); off (default)
+  AGENT_SEARCH_API_KEY        a Gemini API key (default: AGENT_API_KEY when AGENT_PROVIDER_TYPE=google); never logged
+  AGENT_SEARCH_MODEL          the Gemini model that makes the grounding call (default gemini-2.5-flash-lite); spends its tokens
+  AGENT_SEARCH_BASE_URL       a gateway in place of the public Gemini endpoint
   AGENT_SEARCH_MAX_RESULTS    results per search (default 5, at most 10)
-  AGENT_SEARCH_ALLOW_PRIVATE  on lets the search API itself be on a private address (a local SearXNG)
+  AGENT_SEARCH_ALLOW_PRIVATE  on lets that gateway be on a private address
   AGENT_IMAGE_MODEL           an image model id: the model can generate images (generate_image)
   AGENT_SPEECH_MODEL          a speech model id: the model can speak text to a file (generate_speech)
   AGENT_TRANSCRIPTION_MODEL   a transcription model id: /audio <file> attaches audio as text (transcribe_audio)

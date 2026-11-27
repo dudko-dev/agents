@@ -25,7 +25,8 @@ export interface ToolRunContext {
   signal?: AbortSignal
   /**
    * Add what was spent on the parent's behalf to the run: a subagent's tokens (the default
-   * phase, 'subagent'), or a media model's call (phase 'media').
+   * phase, 'subagent'), a media model's call (phase 'media'), or a grounded search's tokens
+   * (phase 'search').
    */
   addUsage: (usage: IUsage, phase?: UsagePhase) => void
   /** The run's usage so far (media tools read their per-run call count from it). */
