@@ -422,21 +422,27 @@ export const parseEgress = (env: NodeJS.ProcessEnv = process.env): IEgressPolicy
   }
 }
 
-// AGENT_SEARCH=brave | tavily | searxng lets the model search the web (the web_search tool); off
-// (the default) means no tool. AGENT_SEARCH_API_KEY is the API's key (brave, tavily),
-// AGENT_SEARCH_BASE_URL the SearXNG instance (or a gateway for the others),
-// AGENT_SEARCH_MAX_RESULTS the results per call, AGENT_SEARCH_ALLOW_PRIVATE=on lets the search API
-// itself be on a private address. Setting any of them while AGENT_SEARCH is off is an error.
+// AGENT_SEARCH=google lets the model search the web (the web_search tool) with Google Search
+// through Gemini grounding; off (the default) means no tool. It is the one provider the CLI
+// offers: any other search API is a function (`search.engine`), which an environment cannot carry.
+// AGENT_SEARCH_API_KEY is the Gemini API key - when it is not set and the agent itself runs on
+// Gemini (AGENT_PROVIDER_TYPE=google), AGENT_API_KEY is used: one key for both.
+// AGENT_SEARCH_MODEL is the model that makes the grounding call, AGENT_SEARCH_BASE_URL a gateway
+// in place of the public endpoint, AGENT_SEARCH_MAX_RESULTS the results per call,
+// AGENT_SEARCH_ALLOW_PRIVATE=on lets that gateway be on a private address. Setting any of them
+// while AGENT_SEARCH is off is an error.
 export const parseSearch = (env: NodeJS.ProcessEnv = process.env): ISearchConfig | undefined => {
   const raw = env.AGENT_SEARCH?.trim().toLowerCase()
   const on = Boolean(raw) && !['off', 'false', '0', 'no'].includes(raw as string)
-  const apiKey = env.AGENT_SEARCH_API_KEY?.trim()
+  const ownKey = env.AGENT_SEARCH_API_KEY?.trim()
+  const model = env.AGENT_SEARCH_MODEL?.trim()
   const baseURL = env.AGENT_SEARCH_BASE_URL?.trim()
   const max = env.AGENT_SEARCH_MAX_RESULTS?.trim()
   const priv = env.AGENT_SEARCH_ALLOW_PRIVATE?.trim().toLowerCase()
   if (!on) {
     const stray = [
-      apiKey && 'AGENT_SEARCH_API_KEY',
+      ownKey && 'AGENT_SEARCH_API_KEY',
+      model && 'AGENT_SEARCH_MODEL',
       baseURL && 'AGENT_SEARCH_BASE_URL',
       max && 'AGENT_SEARCH_MAX_RESULTS',
       priv && 'AGENT_SEARCH_ALLOW_PRIVATE',
@@ -454,11 +460,13 @@ export const parseSearch = (env: NodeJS.ProcessEnv = process.env): ISearchConfig
       `AGENT_SEARCH must be ${SEARCH_PROVIDERS.join(' | ')} | off, got: ${env.AGENT_SEARCH}`,
     )
   }
-  if (provider === 'searxng' && !baseURL) {
-    throw new Error('AGENT_SEARCH=searxng needs AGENT_SEARCH_BASE_URL (your instance)')
-  }
-  if (provider !== 'searxng' && !apiKey && !baseURL) {
-    throw new Error(`AGENT_SEARCH=${provider} needs AGENT_SEARCH_API_KEY`)
+  const sharedKey =
+    env.AGENT_PROVIDER_TYPE?.trim() === 'google' ? env.AGENT_API_KEY?.trim() : undefined
+  const apiKey = ownKey || (baseURL ? undefined : sharedKey)
+  if (!apiKey && !baseURL) {
+    throw new Error(
+      `AGENT_SEARCH=${provider} needs AGENT_SEARCH_API_KEY (a Gemini API key; AGENT_API_KEY is used when AGENT_PROVIDER_TYPE=google)`,
+    )
   }
   const maxResults = max ? Number(max) : undefined
   if (
@@ -475,6 +483,7 @@ export const parseSearch = (env: NodeJS.ProcessEnv = process.env): ISearchConfig
   return {
     provider,
     ...(apiKey ? { apiKey } : {}),
+    ...(model ? { model } : {}),
     ...(baseURL ? { baseURL } : {}),
     ...(maxResults ? { maxResults } : {}),
     ...(priv && ['on', 'true', '1', 'yes'].includes(priv) ? { allowPrivateNetwork: true } : {}),

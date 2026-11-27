@@ -127,9 +127,10 @@ Status of the work. See [design.md](./design.md) for the architecture,
 - [x] **Egress** — `egress` / `web_fetch`: off by default, host lists, IP-literal
       and internal-name refusal, no ambient credentials, redirects fail by default;
       the same policy shape as the server's `createSafeFetch`.
-- [x] **Search** — `search` / `web_search`: a search API the host names (Tavily, Brave
-      through a gateway, SearXNG) or a function; the key in the credential store; the
-      request pinned to that API, results cleaned, capped and filtered by `egress`.
+- [x] **Search** — `search` / `web_search`: a function of the host (any search API; recipes
+      for Tavily, Brave, SearXNG in the docs) or the built-in Google Search through Gemini
+      grounding; the key in the credential store; the request pinned to that API, results
+      cleaned, capped and filtered by `egress`; the grounding call's tokens in the usage.
 - [x] **Media** — `media`: `generate_image` / `generate_speech` / `transcribe_audio` on the AI
       SDK's image / speech / transcription models, each mounted only when configured; files
       in the virtual file system (never bytes in the context), types read from the bytes,

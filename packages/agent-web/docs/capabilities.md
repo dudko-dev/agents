@@ -1351,60 +1351,185 @@ Approval: an open-internet `web_fetch` is a way to leak data through the URL, so
 `web_fetch` reads a page the model already knows the address of. `search` is its companion: one
 tool, `web_search({ query, maxResults?, freshness? })`, that returns a short list of
 `{ title, url, snippet, date? }`. **Off by default**, and the library ships **no key and no
-engine**: you name a hosted search API, or pass a function. Same names and semantics as the Node
-sibling's `search` - except that a key is never written into the config.
+third-party search API**: you pass a search engine of your own (a function -
+[recipes below](#search-engine-recipes)), or name the one built-in provider, **Google Search
+through Gemini grounding**, which needs a Gemini API key and nothing else. Same names and
+semantics as the Node sibling's `search` - except that a key is never written into the config.
 
 ```ts
 const credentials = new VaultCredentialStore()
-await credentials.setApiKey('search', keyTheUserTyped) // encrypted at rest, like a model key
+await credentials.setApiKey('gemini', keyTheUserTyped) // encrypted at rest; may be the model's own ref
 
 createAgent({
   model,
   credentials,
-  search: { provider: 'tavily', credentialRef: 'search' },
-  // search: { provider: 'searxng', baseURL: 'https://search.example.com' }, // your instance, no key
-  // search: { provider: 'brave', baseURL: 'https://my-gateway.example.com/brave' }, // gateway holds the key
+  search: { provider: 'google', credentialRef: 'gemini' }, // Google Search via Gemini grounding
   // search: { engine: async (query, { maxResults, freshness, signal }) => mySearch(query) },
-  egress: { allow: ['docs.example.com'] }, // optional: web_fetch, and the filter below
+  egress: true, // optional: web_fetch, and the filter below
 })
 ```
 
 | `search` field | |
 |---|---|
-| `provider` | a built-in adapter, one HTTP call each: `'brave'`, `'tavily'`, `'searxng'` (see the table below) |
-| `credentialRef` | where the provider's key is kept in `config.credentials`. Read at each call (a rotated key is picked up), sent in a header to that API only. An inline `apiKey` is refused. |
-| `baseURL` | required for `searxng` (the instance); for the others it replaces the public endpoint with a gateway of yours (`credentialRef` is then optional) |
-| `engine` | instead of `provider`: your own `(query, { maxResults, freshness, signal }) => Promise<{ title, url, snippet, date? }[]>`. Its requests are yours; its results get the same cleaning, caps and filter. |
+| `engine` | your own `(query, { maxResults, freshness, signal }) => Promise<{ title, url, snippet, date? }[]>` - any search API, or an index of yours. Its requests are yours; its results get the same cleaning, caps and filter. Exactly one of `engine` / `provider`. |
+| `provider` | `'google'`: the built-in provider, see below. The only value. |
+| `credentialRef` | `provider` only: where the Gemini (Google AI Studio) API key is kept in `config.credentials` - it can be the same ref a Gemini model uses. Read at each call (a rotated key is picked up), sent in the `x-goog-api-key` header to that API only. An inline `apiKey` is refused. |
+| `model` | `provider` only: the Gemini model that makes the grounding call. Default `'gemini-2.5-flash-lite'`. |
+| `baseURL` | `provider` only: replaces the public endpoint (`https://generativelanguage.googleapis.com`) with a gateway of yours (`credentialRef` is then optional) |
 | `maxResults` | results per call when the model does not say. Default 5, never more than 10. |
-| `allowPrivateNetwork` | let the **search API itself** be on a private address or an internal-looking name (a SearXNG on your network). Widens nothing else. |
-| `timeoutMs` | whole request to the search API (default 15 s) |
+| `allowPrivateNetwork` | `provider` only: let the **search API itself** (your gateway) be on a private address or an internal-looking name. Widens nothing else. |
+| `timeoutMs` | `provider` only: whole request to the search API (default 15 s) |
 | `readOnly` | how the consent gate sees a search. Default `true`; `false` makes it ask like a write. |
-| `fetch` | the fetch the adapter uses (default `globalThis.fetch`); it stays bound to the search policy |
+| `fetch` | `provider` only: the fetch the provider uses (default `globalThis.fetch`); it stays bound to the search policy |
 
-**Which API works from a page.** A browser only lets a page read an API that allows cross-origin
-requests, and a key in a page is a key the user can read - so it must be *the user's own* key
-(BYOK), or the call goes through your gateway:
+### The `google` provider: Google Search through Gemini grounding
 
-| provider | request | cross-origin from a page? |
-|---|---|---|
-| `tavily` | `POST https://api.tavily.com/search`, `Authorization: Bearer` ([docs](https://docs.tavily.com/documentation/api-reference/endpoint/search)) | **Yes** - its preflight answers `Access-Control-Allow-Origin: *` and allows the `authorization` header (checked 2026-11; not a documented promise). |
-| `brave` | `GET https://api.search.brave.com/res/v1/web/search`, `X-Subscription-Token` ([docs](https://api-dashboard.search.brave.com/app/documentation/web-search/get-started)) | **No** - the API answers a preflight with 405 and no CORS headers (checked 2026-11), and a custom header always triggers one. Use it through a gateway of yours: `baseURL: 'https://your-gateway/...'` (the gateway adds the key), or from the Node package. |
-| `searxng` | `GET {baseURL}/search?format=json`, no key ([docs](https://docs.searxng.org/dev/search_api.html)) | **Only if you make it so** - SearXNG sends no CORS headers of its own: serve the instance from your page's origin or have your reverse proxy add them. The instance must list `json` under `search.formats` (else 403). |
+One search is **one extra model call**: `POST /v1beta/models/<model>:generateContent` with the
+built-in `google_search` tool, a fixed instruction ("search, then report what the sources say in
+a few sentences") and the query - **nothing of the conversation**. Google runs the search, the
+model writes a short answer, and the API returns the sources it used (`groundingMetadata`). The
+Gemini API answers a page directly (its preflight allows the `x-goog-api-key` header; checked
+2026-11-26). A key in a page is a key its user can read: it must be *the user's own* (BYOK), or
+the call goes through your gateway (`baseURL`).
+
+- **Why a separate call.** The Gemini API refuses a request that carries both its built-in search
+  and function declarations (measured 2026-11-26 on `gemini-2.5-flash-lite`: HTTP 400 *"Built-in
+  tools ({google_search}) and Function Calling cannot be combined in the same request"*), and an
+  agent's every step carries function declarations. So the agent cannot switch on the model's own
+  search; it asks for it in a call of its own - which also works when the agent itself runs on
+  another model, a local one included.
+- **It spends model tokens.** The grounding call is billed like any `generateContent` call. What
+  the API reports (`usageMetadata`: prompt + tool-use prompt tokens as input, answer + thinking
+  tokens as output) is a `usage` event of phase `'search'` and counts in `result.usage`,
+  `agent.usage`, `sessionUsage` and against `limits`. Measured: 135-300 tokens per search on
+  `gemini-2.5-flash-lite`. The answer is capped at 1024 output tokens. A failed call (a quota, a
+  wrong key) reports no usage and counts none. Nothing is retried.
+- **Which models answer a free-tier key.** Measured on 2026-11-26 with five free-tier Google AI
+  Studio keys: `gemini-2.5-flash-lite` and `gemini-2.5-flash` answered with grounding on three of
+  them and **HTTP 404 on the two newest accounts** (*"no longer available to new users"*);
+  `gemini-3.1-flash-lite`, `gemini-3.5-flash-lite`, `gemini-3.8-flash` and
+  `gemini-flash-lite-latest` answered **HTTP 429** on every key (whether grounding has no free
+  quota there or the day's quota was spent is not known). The default is the cheapest one that
+  worked, `gemini-2.5-flash-lite`; on a key it does not serve, set `model`. Quotas are Google's
+  and change - an error names the model and says which of the two happened. The free tier that did answer allowed **20 requests a day per model and key** (the API's own error: `GenerateRequestsPerDayPerProjectPerModel-FreeTier`, limit 20) - every search is one of them, and so is every call of an agent that runs on the same model and key.
+- **Result URLs are Google redirect links**, not the pages' own addresses:
+  `https://vertexaisearch.cloud.google.com/grounding-api-redirect/<token>`, which answers `302`
+  to the page. The API gives no other address; the `title` is the site's name as Google reports
+  it (`nodejs.org`). The agent **does not resolve the links**. What follows from that here:
+  - **A page cannot read through them.** The redirect host sends no CORS headers (checked
+    2026-11-26), so `web_fetch` from a page fails on such a link whatever `egress` says. It opens
+    one only with `egress.followRedirects: true` **and** an `egress.fetch` of yours that goes
+    through a server (a gateway with a safe fetch, which can judge each hop). Unless both are
+    set, the tool's description tells the model it has no tool to open the links: the results are
+    leads - a site's name and what Google's model said of it. A user who clicks one in your UI
+    is taken to the page.
+  - With an `egress.allow` list, a result is on the list only if `vertexaisearch.cloud.google.com`
+    is: without it every result is filtered out. With it, where a followed redirect *ended* is
+    still judged against the same list, and the answer is withheld when it is not on it (after
+    the fact - a browser cannot stop the hop; see [Egress](#egress-what-the-model-may-fetch)).
+  - The filter can see only the redirect host, not the page's. A result whose site name is on
+    your `deny` list is dropped by that name as well (best effort: it is Google's word for the
+    site, good enough to drop a result, never used to let one through).
+  - The links are long (150-300 characters) and expire.
+- **Snippets are the grounding model's sentences, not quotes.** A result's `snippet` is what the
+  model's answer says of that source (`groundingSupports`), not text from the page. When the API
+  attributes nothing to any source, the answer is attached once as `summary` (1000 characters at
+  most) - and only when no result was filtered out. Every result of this provider carries a
+  `note` saying what its links and its text are. All of it is untrusted text like any search
+  result: a model wrote it from third-party pages.
+- **No result count.** The API has no such parameter: you get the sources the model used (3-10
+  in the measurements), cut to `maxResults`. `freshness` becomes the API's time range filter.
 
 A refused cross-origin call surfaces as the egress error `network` ("the server may not allow
 cross-origin reads, or is unreachable").
 
+### Search engine recipes
+
+Any other search API is a function you pass as `engine`. A browser only lets a page read an API
+that allows cross-origin requests, and that decides which of them work from a page:
+
+| API | request | cross-origin from a page? |
+|---|---|---|
+| Tavily | `POST https://api.tavily.com/search`, `Authorization: Bearer` ([docs](https://docs.tavily.com/documentation/api-reference/endpoint/search)) | **Yes** - its preflight answers `Access-Control-Allow-Origin: *` and allows the `authorization` header (checked 2026-11; not a documented promise). |
+| Brave | `GET https://api.search.brave.com/res/v1/web/search`, `X-Subscription-Token` ([docs](https://api-dashboard.search.brave.com/app/documentation/web-search/get-started)) | **No** - the API answers a preflight with 405 and no CORS headers (checked 2026-11). Call a gateway of yours that adds the key, or use the Node package. |
+| SearXNG | `GET {instance}/search?format=json`, no key ([docs](https://docs.searxng.org/dev/search_api.html)) | **Only if you make it so** - serve the instance from your page's origin or have your reverse proxy add the CORS headers. The instance must list `json` under `search.formats` (else 403). |
+
+Bind the engine's request to the API's host with `createGuardedFetch` (no cookies, no referrer,
+no redirect followed, bounded in size and time), read the key from the `CredentialStore` at each
+call, keep it in a header, and put only the status into an error:
+
+```ts
+import { createGuardedFetch, type CredentialStore, type SearchEngine } from '@dudko.dev/agent-web'
+
+// Tavily. Host: api.tavily.com. Key: Authorization: Bearer, from the vault.
+const tavilyFetch = createGuardedFetch({ allow: ['api.tavily.com'], methods: ['POST'] })
+export const tavily = (credentials: CredentialStore, ref: string): SearchEngine =>
+  async (query, { maxResults, freshness, signal }) => {
+    const key = await credentials.getApiKey(ref)
+    if (!key) throw new Error('web_search failed: no Tavily API key is saved')
+    const res = await tavilyFetch('https://api.tavily.com/search', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ query, max_results: maxResults, ...(freshness ? { time_range: freshness } : {}) }),
+      signal,
+    })
+    if (!res.ok) throw new Error(`web_search failed: Tavily answered HTTP ${res.status}`)
+    const { results = [] } = (await res.json()) as { results?: any[] }
+    return results.map((r) => ({ title: r.title, url: r.url, snippet: r.content, date: r.published_date }))
+  }
+
+// SearXNG (your instance, CORS enabled, no key). Host: yours.
+export const searxng = (baseURL: string): SearchEngine => {
+  const base = new URL(baseURL)
+  const sxFetch = createGuardedFetch({ allow: [base.hostname] })
+  const RANGE = { day: 'day', week: 'month', month: 'month', year: 'year' } as const // no "week" in SearXNG
+  return async (query, { freshness, signal }) => {
+    const url = new URL(`${base.origin}${base.pathname.replace(/\/+$/, '')}/search`)
+    url.searchParams.set('q', query)
+    url.searchParams.set('format', 'json')
+    if (freshness) url.searchParams.set('time_range', RANGE[freshness])
+    const res = await sxFetch(url.href, { headers: { accept: 'application/json' }, signal })
+    if (!res.ok) throw new Error(`web_search failed: SearXNG answered HTTP ${res.status}`)
+    const { results = [] } = (await res.json()) as { results?: any[] }
+    return results.map((r) => ({ title: r.title, url: r.url, snippet: r.content, date: r.publishedDate ?? undefined }))
+  }
+}
+
+// Brave, through a gateway of yours that adds X-Subscription-Token (Brave has no CORS).
+// Host: your gateway's. No key in the page.
+const gatewayFetch = createGuardedFetch({ allow: ['gateway.example.com'] })
+const BRAVE_FRESHNESS = { day: 'pd', week: 'pw', month: 'pm', year: 'py' } as const
+export const brave: SearchEngine = async (query, { maxResults, freshness, signal }) => {
+  const url = new URL('https://gateway.example.com/brave/res/v1/web/search')
+  url.searchParams.set('q', query)
+  url.searchParams.set('count', String(maxResults))
+  url.searchParams.set('text_decorations', 'false')
+  if (freshness) url.searchParams.set('freshness', BRAVE_FRESHNESS[freshness])
+  const res = await gatewayFetch(url.href, { headers: { accept: 'application/json' }, signal })
+  if (!res.ok) throw new Error(`web_search failed: Brave answered HTTP ${res.status}`)
+  const body = (await res.json()) as { web?: { results?: any[] } }
+  return (body.web?.results ?? []).map((r) => ({ title: r.title, url: r.url, snippet: r.description, date: r.page_age ?? r.age }))
+}
+
+// createAgent({ ..., credentials, search: { engine: tavily(credentials, 'tavily') } })
+```
+
+The engine's host does not go into `egress.allow`: the function's requests are yours, not the
+model's. A query leaves for that service all the same.
+
 **How it relates to `egress`.** Independent switches; neither loosens the other:
 
-- **The adapter's own request is pinned.** It goes through the guarded fetch under a policy of its
-  own (`searchEgressPolicy`), not the model's: the allow list is exactly the search API's host,
-  with its scheme and port; a redirect is never followed; no cookies, credentials or referrer;
-  capped at 1 MB and 15 s. You never add the search API to `egress.allow`, and the tool cannot be
-  steered to another host. From `egress` it inherits only the `deny` list (deny still wins) - not
-  `allow`, not `allowPrivateNetwork`, not `followRedirects`, not `fetch`.
-- **Results are filtered by the model's egress policy.** With `egress` set, a result `web_fetch`
-  would refuse (not on the allow list, on the deny list, plain http, a private IP, an
-  internal-looking name) is left out - title and snippet too - and counted in `filtered`.
+- **The provider's own request is pinned.** It goes through the guarded fetch under a policy of
+  its own (`searchEgressPolicy`), not the model's: the allow list is exactly the API's host
+  (`generativelanguage.googleapis.com`, or your `baseURL`'s), with its scheme and port, `POST`
+  only; a redirect is never followed; no cookies, credentials or referrer; capped at 1 MB and
+  15 s. You never add it to `egress.allow`, and the tool cannot be steered to another host. From
+  `egress` it inherits only the `deny` list (deny still wins) - not `allow`, not
+  `allowPrivateNetwork`, not `followRedirects`, not `fetch`.
+- **Results are filtered by the model's egress policy** - an engine's and the provider's alike.
+  With `egress` set, a result `web_fetch` would refuse (not on the allow list, on the deny list,
+  plain http, a private IP, an internal-looking name) is left out - title and snippet too - and
+  counted in `filtered`.
 - **`search` works without `egress`.** Then there is no `web_fetch`: the model gets the snippets as
   leads (the tool's description says so) and nothing is filtered.
 
@@ -1422,10 +1547,12 @@ allow-listed `web_fetch` read-only - it is **read-only**. That host still sees t
 when queries must not leave unreviewed. Otherwise an ordinary tool: `maxToolCalls`, the output
 cap, `excludedTools` and tool search apply; a tool of your own named `web_search` wins.
 
-**Events.** The adapter's request emits `egress.request` (`url` is the API's origin and path -
-never the query string). The query is in the ordinary tool-call event. A function `engine` emits
-none. The key appears in no event, error, log line or result: an API error is reported by status
-only, and error text is redacted before it is thrown.
+**Events.** The provider's request emits `egress.request` (`url` is the API's origin and path -
+never the query string), and its tokens a `usage` event of phase `'search'`. The query is in the
+ordinary tool-call event. A function `engine` emits neither. The key appears in no event, error, log
+line, result or run snapshot: an API error is reported by its status and the API's own code word
+(`RESOURCE_EXHAUSTED`, `NOT_FOUND`) - never the error's text - and error text is redacted before
+it is thrown.
 
 The providers' server-side search tools (Anthropic, OpenAI, Google) are not wired here: they run
 inside the provider's API call, outside this policy.
@@ -1858,7 +1985,7 @@ Subscribe with `onEvent` (per run) or the handler you pass to `createAgent`; ren
 | Event | Payload |
 | --- | --- |
 | `decision` | `point: 'replan' \| 'route', accepted, choice?, confidence?, threshold, reason?, error?, durationMs, model?` — a [decision model](#decision-models) was asked a question; `reason` (`'low-confidence' \| 'invalid-choice' \| 'invalid-confidence' \| 'error' \| 'timeout' \| 'needs-model'`) says why the ordinary model call ran instead |
-| `usage` | `phase: 'plan' \| 'execute' \| 'replan' \| 'synthesize' \| 'compact' \| 'subagent' \| 'decision' \| 'media', usage` — per LLM call; counted live into [`agent.usage`](#usage-what-a-session-has-spent). Phase `'decision'` is a decision-model call (`usage.decisionCalls: 1` plus the tokens its API reported). Phase `'media'` is a call to a [media model](#media-images-speech-and-transcription): zero tokens, and the media fields of `usage` (`mediaCalls`, ...) with the units |
+| `usage` | `phase: 'plan' \| 'execute' \| 'replan' \| 'synthesize' \| 'compact' \| 'subagent' \| 'decision' \| 'media' \| 'search', usage` — per LLM call; counted live into [`agent.usage`](#usage-what-a-session-has-spent). Phase `'search'` is the model call behind a [`web_search` through Google](#the-google-provider-google-search-through-gemini-grounding): the tokens its API reported. Phase `'decision'` is a decision-model call (`usage.decisionCalls: 1` plus the tokens its API reported). Phase `'media'` is a call to a [media model](#media-images-speech-and-transcription): zero tokens, and the media fields of `usage` (`mediaCalls`, ...) with the units |
 | `budget.exceeded` | `kind: 'input' \| 'output' \| 'reasoning' \| 'total' \| 'tool-calls', tokens, cap` |
 | `context.compacted` | `scope: 'history' \| 'trace' \| 'tool-results', beforeTokens, afterTokens` |
 

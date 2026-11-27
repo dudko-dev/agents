@@ -58,16 +58,25 @@
     ranges refused, allow/deny, redirects re-judged, size/time bounded) + `web-fetch.ts` (the
     `web_fetch` tool that `config.egress` switches on). Security boundary: every change needs a
     test in `tests/safe-fetch.test.ts` and a mutation check.
-  - `web-search.ts` (`config.search`: the `web_search` tool; the adapter's request goes through
-    `createSafeFetch` under `searchEgressPolicy` - the allow list is exactly the search API's host,
-    no redirect - and results are filtered by the model's `egress` policy) + `web-search-shared.ts`
-    (pure, no imports: caps, cleaning of results, the built-in adapters as request builders /
-    response parsers - brave, tavily, searxng -, key redaction, the tool's description). The shared
+  - `web-search.ts` (`config.search`: the `web_search` tool - the host's `engine` function, or the
+    ONE built-in provider, `'google'`: Google Search through Gemini grounding, a separate
+    `generateContent` call with `google_search`, because the API refuses built-in tools next to
+    function declarations. Third-party search APIs are not built in - they are README recipes for
+    `engine`; do not add adapters back. The provider's request goes through `createSafeFetch`
+    under `searchEgressPolicy` - the allow list is exactly the API's host, POST only, no redirect -
+    its tokens are a `usage` event of phase `'search'`, and results are filtered by the model's
+    `egress` policy. Result URLs are Google redirect links and are NEVER resolved here: the
+    filter judges the redirect host, a site name (`searchSiteUrl`) is used only to drop a denied
+    site, `web_fetch` follows a link with every hop re-judged) + `web-search-shared.ts` (pure, no
+    imports, no clock: caps, cleaning of results, the provider as request builder / response
+    parser, the error message - status and the API's code word, never its text -, key redaction,
+    `searchToolResult`, the tool's description). The shared
     file is a COPY of the browser sibling's `src/tools/web-search-shared.ts`, byte for byte: change
     both (`tests/web-search-shared.test.ts` compares them, and the two copies of
-    `tests/helpers/search-server.ts`, the local imitation of the three APIs). Security boundary:
+    `tests/helpers/search-server.ts`, the local imitation of a grounded Gemini answer in the
+    shapes recorded live on 2026-11-26). Security boundary:
     every guard has a test in `tests/web-search*.test.ts` and a mutation check; the key must never
-    reach an event, an error or a result. Tests never call a real search API.
+    reach a URL, an event, an error, a result or a snapshot. Tests never call a real search API.
   - `media.ts` (`config.media`: `generate_image` / `generate_speech` / `transcribe_audio`, each
     mounted only when its model is set, and `run({ files })` - audio attachments transcribed once
     and put under the input as a fenced, marked transcript by `attachRunFiles`, called from

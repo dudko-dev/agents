@@ -290,7 +290,7 @@ export type {
   IResolvedEgressPolicy,
   IWebFetchOptions,
 } from './tools/egress.js'
-// Search: the web_search tool (a hosted search API through the guarded fetch, or the host's function).
+// Search: the web_search tool (the host's function, or Google Search via Gemini grounding through the guarded fetch).
 export {
   askDecisionModel,
   decisionModelFromAiSdk,
@@ -322,11 +322,16 @@ export {
   buildSearchRequest,
   parseSearchResponse,
   sanitizeSearchResults,
+  searchStatusMessage,
+  searchToolResult,
   SEARCH_API_BASE_URL,
   SEARCH_DEFAULT_MAX_RESULTS,
+  SEARCH_GOOGLE_DEFAULT_MODEL,
+  SEARCH_GOOGLE_NOTE,
   SEARCH_MAX_QUERY_CHARS,
   SEARCH_MAX_RESULTS,
   SEARCH_MAX_SNIPPET_CHARS,
+  SEARCH_MAX_SUMMARY_CHARS,
   SEARCH_MAX_TITLE_CHARS,
   SEARCH_MAX_TOTAL_CHARS,
   SEARCH_MAX_URL_CHARS,
@@ -335,9 +340,12 @@ export {
 } from './tools/web-search-shared.js'
 export type {
   ISanitizedSearch,
+  ISearchAnswer,
   ISearchOptions,
   ISearchRequest,
   ISearchResult,
+  ISearchToolResult,
+  ISearchUsage,
   SearchEngine,
   SearchFreshness,
   SearchProvider,
