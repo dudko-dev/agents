@@ -37,6 +37,17 @@ export interface ToolApprovalRequest {
   subagent?: { id: string; depth: number }
 }
 
+/** What the gate hands `onRequest` beside the request. */
+export interface ToolApprovalContext {
+  /**
+   * Aborted when the question ends WITHOUT your answer: no decision within `timeoutMs`
+   * (`signal.reason` is an Error named 'TimeoutError'), the run was stopped ('AbortError'), or
+   * the handler failed. Take the prompt down then: an answer given later is ignored. Never
+   * aborted once you have answered.
+   */
+  signal: AbortSignal
+}
+
 /**
  * `true`/`false`, or an object. `remember: true` on an approval allows this
  * tool for the rest of the agent's life ("always allow").
@@ -53,13 +64,40 @@ export interface ToolApprovalConfig {
    */
   rules?: Record<string, ToolPermission>
   /** Resolves an approval request (a UI prompt, a policy service, …). */
-  onRequest?: (req: ToolApprovalRequest) => ToolApprovalDecision | Promise<ToolApprovalDecision>
+  onRequest?: (
+    req: ToolApprovalRequest,
+    ctx: ToolApprovalContext,
+  ) => ToolApprovalDecision | Promise<ToolApprovalDecision>
   /**
-   * No decision within this many ms → deny. Default: wait indefinitely (until the run is
-   * stopped). The only bound on the wait: the step's `chatTimeoutMs` (and a subagent's
+   * No decision within this many ms → deny. Default 300 000 ({@link TOOL_APPROVAL_TIMEOUT_MS}).
+   * `0` or `Infinity`: no bound - the question waits until the run is stopped; so does a value
+   * above 2^31 - 1 (about 24.8 days, the most a timer holds). Negative or NaN: `createAgent`
+   * throws. The only bound on the wait: the step's `chatTimeoutMs` (and a subagent's
    * `timeoutMs`) stop while a person decides.
    */
   timeoutMs?: number
+}
+
+/** How long a question waits for a decision when `toolApproval.timeoutMs` is not set: 5 minutes. */
+export const TOOL_APPROVAL_TIMEOUT_MS = 300_000
+
+// The longest delay a timer holds (2^31 - 1 ms, about 24.8 days). `setTimeout` fires a longer one
+// - Infinity included - after about 1 ms, so a bound past it is taken as no bound at all.
+const MAX_TIMER_MS = 2_147_483_647
+
+/**
+ * `toolApproval.timeoutMs` as the gate uses it: absent = {@link TOOL_APPROVAL_TIMEOUT_MS}; `0`,
+ * `Infinity` or more than a timer holds = no bound (0: the question waits until the run is
+ * stopped). Anything that is not a number of at least 0 is a configuration error.
+ */
+export const resolveApprovalTimeout = (value: unknown): number => {
+  if (value === undefined || value === null) return TOOL_APPROVAL_TIMEOUT_MS
+  if (typeof value !== 'number' || Number.isNaN(value) || value < 0) {
+    throw new Error(
+      `toolApproval.timeoutMs must be a number of milliseconds of at least 0 (0 or Infinity: no limit), got: ${typeof value === 'number' ? String(value) : JSON.stringify(value)}`,
+    )
+  }
+  return value === 0 || value > MAX_TIMER_MS ? 0 : Math.max(1, Math.floor(value))
 }
 
 /** Raised by a denied tool call; recorded as a failed call the replanner sees. */
@@ -147,13 +185,17 @@ const normalizeDecision = (
 export interface ApprovalState {
   mode: ToolApprovalMode
   readonly config: ToolApprovalConfig
+  /** The wait's bound, `config.timeoutMs` resolved (resolveApprovalTimeout): 0 = none. */
+  readonly timeoutMs: number
   /** Tools the user chose to "always allow". */
   readonly remembered: Set<string>
 }
 
+/** Throws on a `timeoutMs` that is not a usable number: a configuration error, at `createAgent`. */
 export const createApprovalState = (config: ToolApprovalConfig | undefined): ApprovalState => ({
   mode: config?.mode ?? 'autopilot',
   config: config ?? {},
+  timeoutMs: resolveApprovalTimeout(config?.timeoutMs),
   remembered: new Set<string>(),
 })
 
@@ -217,14 +259,23 @@ export const gateToolCall = async (
   const req: ToolApprovalRequest = { id, ...call }
   events.requested(req)
   let decision: { approved: boolean; reason?: string; remember?: boolean }
+  // The host's own signal: aborted when the question ends without its answer (the bound, a
+  // stop, a failed handler), so a prompt left open can be taken down. Never after an answer.
+  const asked = new AbortController()
   // A person is being asked: the step's limit is about models and tools, and does not run
   // meanwhile. The wait has its own bound, `timeoutMs`, and a stop still ends it at once.
   const resume = events.wait?.()
   try {
     decision = normalizeDecision(
-      await withDeadline(Promise.resolve(onRequest(req)), state.config.timeoutMs, signal),
+      await withDeadline(
+        Promise.resolve(onRequest(req, { signal: asked.signal })),
+        state.timeoutMs,
+        signal,
+      ),
     )
   } catch (err) {
+    // Before the resolved event: a host that closes its prompt hears of it first.
+    asked.abort(err)
     resume?.()
     const reason = err instanceof Error ? err.message : String(err)
     events.resolved({ id, name: call.toolName, approved: false, reason, automatic: true })
@@ -242,12 +293,13 @@ export const gateToolCall = async (
   if (!decision.approved) throw new ToolDeniedError(decision.reason)
 }
 
-const withDeadline = <T>(
-  p: Promise<T>,
-  timeoutMs: number | undefined,
-  signal?: AbortSignal,
-): Promise<T> => {
-  if ((!timeoutMs || timeoutMs <= 0) && !signal) return p
+// Named like the reasons of `AbortSignal.timeout` / `abort()`: they are the host signal's too.
+const namedError = (message: string, name: string): Error =>
+  Object.assign(new Error(message), { name })
+
+// `timeoutMs` is resolved (resolveApprovalTimeout): 0 = no bound, else what a timer can hold.
+const withDeadline = <T>(p: Promise<T>, timeoutMs: number, signal?: AbortSignal): Promise<T> => {
+  if (!(timeoutMs > 0) && !signal) return p
   return new Promise<T>((resolve, reject) => {
     let timer: ReturnType<typeof setTimeout> | undefined
     const done = () => {
@@ -256,14 +308,14 @@ const withDeadline = <T>(
     }
     const onAbort = () => {
       done()
-      reject(new Error('the run was stopped while waiting for approval'))
+      reject(namedError('the run was stopped while waiting for approval', 'AbortError'))
     }
     if (signal?.aborted) return onAbort()
     signal?.addEventListener('abort', onAbort, { once: true })
-    if (timeoutMs && timeoutMs > 0) {
+    if (timeoutMs > 0) {
       timer = setTimeout(() => {
         done()
-        reject(new Error(`no approval decision within ${timeoutMs} ms`))
+        reject(namedError(`no approval decision within ${timeoutMs} ms`, 'TimeoutError'))
       }, timeoutMs)
     }
     p.then(

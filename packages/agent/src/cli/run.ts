@@ -6,18 +6,16 @@ import type {
   AgentEvent,
   IConversationTurn,
   IRunFile,
-  IToolApprovalRequest,
   IUsage,
-  McpElicitationResult,
   RunControl,
   ThinkingSetting,
-  ToolApprovalDecision,
   ToolApprovalMode,
 } from '../index.ts'
 import { createAgent, createRunControl, loadSkillsFromDir } from '../index.ts'
 import { isSummaryTurn, resolveCompaction } from '../compaction.ts'
 import { loadConfig, skillsDirFromEnv } from './config.ts'
-import { answerElicitationAtPrompt, parseElicitationMode } from './elicit.ts'
+import { parseElicitationMode } from './elicit.ts'
+import { createPromptQuestions, type IPromptQuestions } from './questions.ts'
 import { describeSubagents, parseLiveLine, resolveSubagent, shortId } from './live.ts'
 
 const HISTORY_LIMIT = 16
@@ -118,6 +116,9 @@ export const runRepl = async (): Promise<void> => {
   let streaming: 'none' | 'thought' | 'reasoning' | 'final' = 'none'
   // What the user said to the agent mid-run that it has shown the model (for the history).
   const deliveredNow: string[] = []
+  // The questions put at the prompt (made with the readline below); the event log asks it which
+  // closed questions it already reported.
+  let questions: IPromptQuestions | undefined
   const endLine = (): void => {
     if (streaming !== 'none') {
       process.stdout.write(streaming === 'reasoning' ? `${UNDIM}\n` : '\n')
@@ -206,8 +207,9 @@ export const runRepl = async (): Promise<void> => {
         )
         break
       case 'mcp.elicitation-answered':
-        // What was answered at the prompt is visible there; show what nobody decided.
-        if (event.automatic) {
+        // What was answered at the prompt is visible there; show what nobody decided (unless
+        // the prompt already said so when it closed the question).
+        if (event.automatic && !questions?.closedAtPrompt(event.id)) {
           endLine()
           console.log(
             `  !! ${event.tool}: the server's question was answered "${event.action}" automatically (${event.reason ?? 'no reason'})`,
@@ -215,8 +217,9 @@ export const runRepl = async (): Promise<void> => {
         }
         break
       case 'tool.approval-resolved':
-        // Prompted decisions are visible at the prompt; show the automatic ones.
-        if (event.automatic && !event.approved) {
+        // Prompted decisions are visible at the prompt; show the automatic ones (unless the
+        // prompt already said so when it closed the question).
+        if (event.automatic && !event.approved && !questions?.closedAtPrompt(event.id)) {
           endLine()
           console.log(`  !! ${event.name} denied: ${event.reason ?? 'no reason'}`)
         }
@@ -365,50 +368,25 @@ export const runRepl = async (): Promise<void> => {
   // Said too late for a run (or just as it ended): sent as the next prompt.
   let followUp: string | undefined
 
-  // Approval prompts go through the REPL's readline. Parallel tool calls
-  // would otherwise interleave questions, so they are asked one at a time.
-  let approvalQueue: Promise<unknown> = Promise.resolve()
-  const askApproval = (req: IToolApprovalRequest): Promise<ToolApprovalDecision> => {
-    const ask = async (): Promise<ToolApprovalDecision> => {
-      endLine()
-      const answer = (
-        await rl.question(
-          `[approve] ${req.subagent ? `helper ${shortId(req.subagent.id)} wants: ` : ''}${req.toolName} ${formatJson(req.input)}${req.readOnly ? ' (read-only)' : ''}\n          allow? [y]es / [n]o / [a]lways: `,
-          runController ? { signal: runController.signal } : {},
-        )
-      )
-        .trim()
-        .toLowerCase()
-      if (answer === 'a' || answer === 'always') {
-        return { approved: true, remember: true }
-      }
-      if (answer === 'y' || answer === 'yes') {
-        return true
-      }
-      return { approved: false, reason: 'denied at the prompt' }
-    }
-    const next = approvalQueue.then(ask, ask)
-    approvalQueue = next.catch(() => {})
-    return next
-  }
-  config.toolApproval = { ...config.toolApproval, onRequest: askApproval }
+  // Approval prompts and MCP questions go through the REPL's readline, one at a time (parallel
+  // tool calls would otherwise interleave them). A question the agent stops waiting for - its
+  // bound ran out, the run was stopped (Ctrl-C) - is closed at once with one line, so the next
+  // one is not stuck behind it (questions.ts).
+  questions = createPromptQuestions({
+    question: (prompt, options) => rl.question(prompt, options),
+    print: (line) => console.log(`\n${line}`),
+    beforeAsk: endLine,
+    runSignal: () => runController?.signal,
+    approvalPrompt: (req) =>
+      `[approve] ${req.subagent ? `helper ${shortId(req.subagent.id)} wants: ` : ''}${req.toolName} ${formatJson(req.input)}${req.readOnly ? ' (read-only)' : ''}\n          allow? [y]es / [n]o / [a]lways: `,
+  })
+  config.toolApproval = { ...config.toolApproval, onRequest: questions.approval }
 
   // MCP elicitation (AGENT_MCP_ELICITATION): a server's question to the user is put at this
   // prompt, in the same queue as the approval questions. Off by default: without the callback
   // the agent declares no capability and a server cannot ask.
   if (parseElicitationMode(process.env.AGENT_MCP_ELICITATION) !== 'off') {
-    config.onElicitation = (request, ctx) => {
-      const ask = (): Promise<McpElicitationResult> => {
-        endLine()
-        // ctx.signal ends the question when the run stops or its time runs out.
-        return answerElicitationAtPrompt(request, (prompt) =>
-          rl.question(prompt, { signal: ctx.signal }),
-        )
-      }
-      const next = approvalQueue.then(ask, ask)
-      approvalQueue = next.catch(() => {})
-      return next
-    }
+    config.onElicitation = questions.elicitation
   }
 
   const agent = await createAgent(config, onEvent)

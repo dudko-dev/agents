@@ -78,6 +78,7 @@ export {
   isReadOnlyTool,
   markReadOnly,
   matchToolRule,
+  TOOL_APPROVAL_TIMEOUT_MS,
   ToolDeniedError,
 } from './approval.ts'
 export type { IToolDecision, IToolDecisionInput } from './approval.ts'
@@ -309,6 +310,7 @@ export type {
   IThinkingConfig,
   ITokenLimits,
   IToolApprovalConfig,
+  IToolApprovalContext,
   IToolApprovalRequest,
   IToolCatalogEntry,
   IUsage,

@@ -13,8 +13,8 @@ import {
   type RunResult,
   type ToolApprovalDecision,
   type ToolApprovalMode,
-  type ToolApprovalRequest,
 } from '@dudko.dev/agent-web'
+import { createApprovalQueue } from '../approval-queue.js'
 import { agentStateReducer, createInitialAgentState, lessonsOf } from '../state.js'
 import type { AgentUiState, ApprovalView, ChatAttachment, ChatMessage } from '../types.js'
 import { errMessage } from '../util.js'
@@ -159,19 +159,14 @@ export const useAgent = (
   const optionsRef = useRef(options)
   optionsRef.current = options
 
-  // Consent requests waiting for approve()/deny(), by request id.
-  const resolversRef = useRef(new Map<string, (d: ToolApprovalDecision) => void>())
-  const settleAll = useCallback((decision: ToolApprovalDecision) => {
-    for (const resolve of resolversRef.current.values()) resolve(decision)
-    resolversRef.current.clear()
-  }, [])
-  const uiOnRequest = useCallback(
-    (req: ToolApprovalRequest) =>
-      new Promise<ToolApprovalDecision>((resolve) => {
-        resolversRef.current.set(req.id, resolve)
-      }),
-    [],
+  // Consent requests waiting for approve()/deny(), by request id. One the core stops waiting
+  // for (its timeoutMs ran out, the run stopped) leaves the queue by its signal.
+  const [approvals] = useState(createApprovalQueue)
+  const settleAll = useCallback(
+    (decision: ToolApprovalDecision) => approvals.settleAll(decision),
+    [approvals],
   )
+  const uiOnRequest = approvals.handler
 
   // The memory session runs go to; a chat-history switch changes it.
   const [sessionId, setSessionId] = useState(config.sessionId ?? 'default')
@@ -377,19 +372,19 @@ export const useAgent = (
     )
   }, [])
 
-  const approve = useCallback((id: string, opts?: ApproveOptions) => {
-    const resolve = resolversRef.current.get(id)
-    if (!resolve) return
-    resolversRef.current.delete(id)
-    resolve({ approved: true, remember: opts?.remember })
-  }, [])
+  const approve = useCallback(
+    (id: string, opts?: ApproveOptions) => {
+      approvals.approve(id, { remember: opts?.remember })
+    },
+    [approvals],
+  )
 
-  const deny = useCallback((id: string, reason?: string) => {
-    const resolve = resolversRef.current.get(id)
-    if (!resolve) return
-    resolversRef.current.delete(id)
-    resolve({ approved: false, reason })
-  }, [])
+  const deny = useCallback(
+    (id: string, reason?: string) => {
+      approvals.deny(id, reason)
+    },
+    [approvals],
+  )
 
   const compact = useCallback(async (): Promise<CompactResult | undefined> => {
     const agent = agentRef.current

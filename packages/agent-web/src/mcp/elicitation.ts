@@ -21,6 +21,11 @@
 
 /** How long one question waits for the host's answer, by default: a human is reading it. */
 export const MCP_ELICITATION_TIMEOUT_MS = 300_000
+/**
+ * The longest wait a timer holds (2^31 - 1 ms, about 24.8 days). `setTimeout` fires a longer one -
+ * Infinity included - after about 1 ms, so a `timeoutMs` past it is taken as no limit at all.
+ */
+export const MCP_ELICITATION_TIMEOUT_MAX_MS = 2_147_483_647
 /** The most questions one tool call may ask, by default. */
 export const MCP_ELICITATION_MAX_PER_TOOL_CALL = 5
 /** The most questions one run may be asked, by default (its helpers' calls included). */
@@ -136,7 +141,11 @@ export type McpElicitationHandler = (
 
 /** The `elicitation` settings beside `onElicitation`. */
 export interface McpElicitationOptions {
-  /** How long one question waits for an answer. Default 300 000; 0 = no limit of its own. */
+  /**
+   * How long one question waits for an answer. Default 300 000. `0` or `Infinity` = no limit of
+   * its own (the question waits until the run is stopped), and so is a value above 2^31 - 1 (about
+   * 24.8 days, the most a timer holds). Negative or NaN: a configuration error.
+   */
   timeoutMs?: number
   /** Questions one tool call may ask. Default 5. */
   maxPerToolCall?: number
@@ -152,6 +161,7 @@ export interface McpElicitationOptions {
 }
 
 export interface McpResolvedElicitationOptions {
+  /** 0 = no limit of its own; otherwise at most {@link MCP_ELICITATION_TIMEOUT_MAX_MS}. */
   timeoutMs: number
   maxPerToolCall: number
   maxPerRun: number
@@ -216,23 +226,40 @@ export class McpElicitationError extends Error {
 
 // ── settings ─────────────────────────────────────────────────────────────
 
+const shownValue = (value: unknown): string =>
+  typeof value === 'number' ? String(value) : (JSON.stringify(value) ?? String(value))
+
 const settingOf = (value: unknown, name: string, fallback: number, min: number): number => {
   if (value === undefined || value === null) {
     return fallback
   }
   if (typeof value !== 'number' || !Number.isFinite(value) || value < min) {
     throw new Error(
-      `elicitation.${name} must be a number of at least ${min} (got ${JSON.stringify(value) ?? String(value)})`,
+      `elicitation.${name} must be a number of at least ${min} (got ${shownValue(value)})`,
     )
   }
   return Math.floor(value)
+}
+
+// `timeoutMs`: 0, Infinity and anything past what a timer holds are no limit (0); a positive
+// fraction waits at least 1 ms rather than becoming "no limit".
+const timeoutOf = (value: unknown): number => {
+  if (value === undefined || value === null) {
+    return MCP_ELICITATION_TIMEOUT_MS
+  }
+  if (typeof value !== 'number' || Number.isNaN(value) || value < 0) {
+    throw new Error(
+      `elicitation.timeoutMs must be a number of at least 0 (0 or Infinity: no limit) (got ${shownValue(value)})`,
+    )
+  }
+  return value === 0 || value > MCP_ELICITATION_TIMEOUT_MAX_MS ? 0 : Math.max(1, Math.floor(value))
 }
 
 /** The settings with their defaults. A value that is not a usable number is a configuration error. */
 export const resolveMcpElicitationOptions = (
   raw: McpElicitationOptions | undefined,
 ): McpResolvedElicitationOptions => ({
-  timeoutMs: settingOf(raw?.timeoutMs, 'timeoutMs', MCP_ELICITATION_TIMEOUT_MS, 0),
+  timeoutMs: timeoutOf(raw?.timeoutMs),
   maxPerToolCall: settingOf(
     raw?.maxPerToolCall,
     'maxPerToolCall',

@@ -182,6 +182,11 @@ test("elicitationTimeoutOf: the core's default, a whole number of ms, or no limi
   assert.equal(elicitationTimeoutOf({}), 300_000)
   assert.equal(elicitationTimeoutOf({ timeoutMs: 1500.9 }), 1500)
   assert.equal(elicitationTimeoutOf({ timeoutMs: 0 }), undefined)
+  // As the core: Infinity and more than a timer holds are no limit, a positive fraction is 1 ms.
+  assert.equal(elicitationTimeoutOf({ timeoutMs: Infinity }), undefined)
+  assert.equal(elicitationTimeoutOf({ timeoutMs: 2 ** 31 - 1 }), 2 ** 31 - 1)
+  assert.equal(elicitationTimeoutOf({ timeoutMs: 2 ** 31 }), undefined)
+  assert.equal(elicitationTimeoutOf({ timeoutMs: 0.5 }), 1)
 })
 
 test('the queue and the connect options are in ./mcp; the prompt and the form helpers in the main entry', () => {
