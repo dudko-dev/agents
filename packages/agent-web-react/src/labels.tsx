@@ -563,7 +563,7 @@ export const defaultLabels: AgentLabels = {
       : `The MCP server “${server}” asks for your input (a call by a helper)`,
   elicitationDuring: 'during',
   elicitationCount: (index, total) => `${index} of ${total}`,
-  elicitationFrom: (server) => `Written by ${server}, not by this app`,
+  elicitationFrom: (server) => `From the server “${server}”`,
   elicitationRequired: 'required',
   elicitationChoose: 'Choose…',
   elicitationSubmit: 'Submit',

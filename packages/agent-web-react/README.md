@@ -621,7 +621,7 @@ A host that calls the core's `connectMcpHttp` itself can use the same queue the 
 
 > **Security.** The question is the SERVER's text, and the prompt treats it so. Its message, the
 > field titles and descriptions and the option names are shown as plain text (never as markup)
-> inside a box captioned "Written by *server*, not by this app"; the header above it is the
+> inside a box captioned "From the server “*server*”"; the header above it is the
 > app's own. A link is never followed by itself: there is no `<a>`, nothing opens it before the
 > user's click on **Open**, which calls `window.open(url, '_blank', 'noopener,noreferrer')`, and
 > there is no Open at all for anything but https (or http on a loopback host) without credentials -

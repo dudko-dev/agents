@@ -478,7 +478,7 @@ test("prompt: the host's header says which server asks during which tool; the se
   )
   assert.match(out, /The MCP server “crm” asks for your input/)
   assert.match(out, /during <code class="awr-tool__name">crm__create_contact<\/code>/)
-  assert.match(out, /class="awr-elicit__from">Written by crm, not by this app</)
+  assert.match(out, /class="awr-elicit__from">From the server “crm”</)
   // Markup from the server is shown as characters, never rendered.
   assert.match(out, /Please &lt;b&gt;confirm&lt;\/b&gt; &lt;script&gt;/)
   assert.doesNotMatch(out, /<script>|<b>/)

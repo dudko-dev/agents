@@ -605,8 +605,8 @@ What it shows:
 
 - **The host's header** - which server asks, during which tool (its name as the model called it),
   and "1 of 3" when several are waiting. One question is shown at a time, oldest first.
-- **The server's words** under a caption that says whose they are ("Written by *server*, not by
-  this app"), as plain text: markup in a message is shown as characters. The field titles,
+- **The server's words** under a caption that says whose they are ("From the server
+  “*server*”"), as plain text: markup in a message is shown as characters. The field titles,
   descriptions and option names are the server's text too, and sit in the same box.
 - **A form** with exactly the fields the core lets through: text (plain, email, URL, date, date and
   time; length limits), numbers and whole numbers (bounds), a tick box, a select (plain options,

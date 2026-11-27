@@ -97,7 +97,7 @@ test('form: a filled-in form reaches the server and the tool call completes; wha
   await expect(card.locator('.awr-elicit__head')).toContainText('The MCP server “mcp” asks')
   await expect(card.locator('.awr-elicit__head code')).toHaveText('mcp__elicit_form')
   // The server's words, marked as the server's.
-  await expect(card.locator('.awr-elicit__from')).toHaveText('Written by mcp, not by this app')
+  await expect(card.locator('.awr-elicit__from')).toHaveText('From the server “mcp”')
   await expect(card.locator('.awr-elicit__message')).toHaveText('Fill in the profile')
   await expect(card.locator('.awr-elicit__expiry')).toContainText(
     /Cancelled automatically in \d:\d\d/,
