@@ -18,6 +18,10 @@ private apps:
   and `docs/*.md` (`scripts/sync-docs.mjs`): edit the source file in the package, never the copy.
   A new docs file needs an entry in that script's `PAGES` and in the sidebar (`astro.config.mjs`).
   Dark theme only; colours, type and motion come from `src/styles/tokens.css`.
+  The link-preview cards (`public/og.png`, `public/og/demo.png`, `public/og/pipeline.png`) are
+  rendered from `scripts/og-card.html` by `pnpm nx build site && pnpm --filter site og-cards`
+  (Chromium and the Inter font; not part of the Cloudflare build) - run it after a visible change
+  to the demo or the editor and commit the PNGs.
   Files for machines (`llms.txt`, `robots.txt`, the sitemap, the manifest) are never linked from the
   interface - no footer or menu entry: crawlers find them by their well-known paths. Check every
   page at phone width for sideways scroll before pushing.
