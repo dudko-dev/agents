@@ -32,6 +32,9 @@
     byte: change both (`tests/sandbox-engine.test.ts` compares them). The memory limit is the
     WebAssembly memory's maximum, NOT QuickJS's `setMemoryLimit` (which undercounts in this build:
     see the comment at `newBoundedModule`). Computation only here: the Node agent has no workspace.
+    The limit's clock starts at `onStart` (the program's first instruction), not at the engine's own
+    start, which `startupMs` bounds instead; `tests/helpers/sandbox-slow-start.ts` reproduces a slow
+    start (a busy machine) on every run.
     Security boundary: every guard has a test in `tests/sandbox*.test.ts` and a mutation check.
   - `structured.ts` (`generateStructured` / `streamStructured`): structured output for the planner,
     the replanner and the pipeline's route call, as `generateText` / `streamText` with
