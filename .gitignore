@@ -13,3 +13,6 @@ playwright-report/
 # local Claude Code settings: per machine, never shared
 .claude/settings.local.json
 .claude/worktrees/
+
+# wrangler dev (the Worker, run locally)
+.wrangler/

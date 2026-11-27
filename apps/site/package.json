@@ -26,7 +26,8 @@
     "demo": "workspace:*",
     "playwright": "^1.65.1",
     "prettier": "^3.10.1",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "worker": "workspace:*"
   },
   "nx": {
     "targets": {

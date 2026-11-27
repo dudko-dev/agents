@@ -775,6 +775,21 @@ a:hover {
   border-radius: 10px;
 }
 
+.mcp__try {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 13px;
+  color: var(--muted);
+  padding: 10px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+}
+.mcp__try span {
+  flex: 1 1 220px;
+}
+
 /* ── Agent settings ───────────────────────────────────────────────────────── */
 .agentset {
   /* Block, not flex: a flex <details> keeps a gap for its hidden content. */
