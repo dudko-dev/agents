@@ -22,7 +22,18 @@ import path from 'node:path'
 import { URL } from 'node:url'
 import packageJson from '../package.json' with { type: 'json' }
 import { markReadOnly } from './approval.ts'
-import { getCurrentRunSandbox } from './context.ts'
+import { getCurrentRunSandbox, runContext } from './context.ts'
+import type { IRunState } from './internal.ts'
+import {
+  createMcpElicitationSession,
+  McpElicitationError,
+  resolveMcpElicitationOptions,
+  type McpElicitationCallInfo,
+  type McpElicitationEvent,
+  type McpElicitationHandler,
+  type McpElicitationOptions,
+  type McpElicitationSession,
+} from './mcp-elicitation.ts'
 import { assertSecureOAuthUrl } from './mcp-oauth.ts'
 import {
   cleanMcpInstructions,
@@ -39,7 +50,7 @@ import {
   type McpServerProtocol,
 } from './mcp-shared.ts'
 import { ATTR, withSpan } from './tracing.ts'
-import type { IMcpServerConfig } from './types.ts'
+import type { EventHandler, IMcpServerConfig } from './types.ts'
 
 const isStdioConfig = (
   cfg: IMcpServerConfig,
@@ -119,6 +130,24 @@ export const MCP_STDIO_PROBE_TIMEOUT_MS = 5_000
 // 2026-07-28: how long the `subscriptions/listen` stream may take to be
 // acknowledged before the connect goes on without tool-list change notices.
 export const MCP_LISTEN_ACK_TIMEOUT_MS = 10_000
+// The longest delay a timer takes (2^31 - 1 ms): the SDK's own request timeout is set to it for
+// a 2025 tool call that may ask the user something, whose time is kept by the elicitation
+// session instead (it does not count the time a question waits).
+const MAX_TIMER_MS = 2_147_483_647
+
+// The run's count of questions asked of the user, kept on the state of the run the HOST started:
+// a helper's calls count on the same number.
+const elicitationCounter = (state: IRunState | undefined): { count: number } | undefined => {
+  if (!state) {
+    return undefined
+  }
+  let root = state
+  while (root.spawn?.parent) {
+    root = root.spawn.parent
+  }
+  root.elicitations ??= { count: 0 }
+  return root.elicitations
+}
 
 /** The SDK's typed error with this code (by name too: a second copy of the SDK is another class). */
 const isSdkError = (err: unknown, code: SdkErrorCode): boolean =>
@@ -391,8 +420,34 @@ export const connectMcpServers = async (
     // Default per-server connect + tools/list budget (a server's own
     // connectTimeoutMs wins). Default 30_000; 0 disables.
     connectTimeoutMs?: number
+    // Elicitation: a server may ask the user for input during a tool call, and
+    // this callback answers. Without it nothing is declared and nothing is
+    // sent that was not sent before (see mcp-elicitation.ts).
+    onElicitation?: McpElicitationHandler
+    elicitation?: McpElicitationOptions
+    // Where the elicitation events of a tool called outside a run go.
+    emit?: EventHandler
   } = {},
 ): Promise<IConnectedMcp> => {
+  // Read first: a setting that is not a usable number is a configuration error.
+  const elicitationOptions = resolveMcpElicitationOptions(options.elicitation)
+  const elicitationDeps = options.onElicitation
+    ? { handler: options.onElicitation, options: elicitationOptions, log }
+    : undefined
+  // One per server, made before its client: the capability it declares is part
+  // of the handshake.
+  const elicitationSessions = new Map<string, McpElicitationSession>()
+  const elicitationSessionOf = (name: string): McpElicitationSession | undefined => {
+    if (!elicitationDeps) {
+      return undefined
+    }
+    let session = elicitationSessions.get(name)
+    if (!session) {
+      session = createMcpElicitationSession(name, elicitationDeps)
+      elicitationSessions.set(name, session)
+    }
+    return session
+  }
   const clients = new Map<string, Client>()
   const tools: ToolSet = {}
   const catalog: IConnectedMcp['catalog'] = []
@@ -504,6 +559,7 @@ export const connectMcpServers = async (
               }
               let validate: JsonSchemaValidator<unknown> | undefined
               let result: CallToolResult
+              const elicitation = elicitationSessionOf(name)
               try {
                 validate = outputValidatorOf()
                 // `client.request`, not `client.callTool`: the typed verb also
@@ -515,10 +571,63 @@ export const connectMcpServers = async (
                 // the `Mcp-Param-*` headers are the typed verb's own - a
                 // mirror of arguments a tool marked with `x-mcp-header`, for
                 // intermediaries; this client does not send them.
-                result = await client.request(
-                  { method: 'tools/call', params: { name: t.name, arguments: toSend } },
-                  opts?.abortSignal ? { signal: opts.abortSignal } : undefined,
-                )
+                if (elicitation) {
+                  // The server may ask the user something during this call
+                  // (`onElicitation`). The session answers - on the 2025
+                  // revisions a request of the server's own, on 2026-07-28 an
+                  // `input_required` result followed by the same call sent
+                  // again with the answers and the server's state - and keeps
+                  // the caps; see mcp-elicitation.ts.
+                  const store = runContext.getStore()
+                  const emit = store?.emit ?? options.emit
+                  const step = store?.currentStep
+                  const scope = store?.state?.spawn
+                  const run = elicitationCounter(store?.state)
+                  const era = client.getProtocolEra() ?? 'legacy'
+                  const info: McpElicitationCallInfo = {
+                    tool: prefixed,
+                    toolName: t.name,
+                    ...(opts?.abortSignal ? { signal: opts.abortSignal } : {}),
+                    ...(emit
+                      ? {
+                          emit: (event: McpElicitationEvent) =>
+                            emit(
+                              event.type === 'mcp.elicitation-requested' && step
+                                ? { ...event, step }
+                                : event,
+                            ),
+                        }
+                      : {}),
+                    ...(store?.runId ? { runId: store.runId } : {}),
+                    // A call made by a helper the model started says so: it may
+                    // ask the user only when the host allowed that.
+                    ...(scope?.id ? { subagent: { id: scope.id, depth: scope.depth } } : {}),
+                    ...(run ? { run } : {}),
+                  }
+                  result = await elicitation.call(
+                    era,
+                    info,
+                    (leg) =>
+                      client.request(
+                        {
+                          method: 'tools/call',
+                          params: { name: t.name, arguments: toSend, ...leg.retry },
+                        },
+                        {
+                          ...(leg.signal ? { signal: leg.signal } : {}),
+                          ...(leg.ownTimeout ? { timeout: MAX_TIMER_MS } : {}),
+                          // Hand an `input_required` result back instead of
+                          // failing on it: the session answers it.
+                          ...(era === 'modern' ? { allowInputRequired: true } : {}),
+                        },
+                      ) as Promise<CallToolResult>,
+                  )
+                } else {
+                  result = await client.request(
+                    { method: 'tools/call', params: { name: t.name, arguments: toSend } },
+                    opts?.abortSignal ? { signal: opts.abortSignal } : undefined,
+                  )
+                }
               } catch (err) {
                 // The request itself failed (transport, protocol, abort), or
                 // was never sent: there is no result. The AI SDK records the
@@ -529,6 +638,12 @@ export const connectMcpServers = async (
                 // state). Not supported here, and the call is not repeated.
                 if (isSdkError(err, SdkErrorCode.UnsupportedResultType)) {
                   throw new McpToolError(mcpInputRequiredMessage(t.name))
+                }
+                // A question of this call was answered without the host
+                // deciding (a guard, a cap, a timeout, a failed handler): the
+                // call fails with the reason, and was not sent again.
+                if (err instanceof McpElicitationError) {
+                  throw new McpToolError(err.message)
                 }
                 throw err
               }
@@ -844,25 +959,43 @@ export const connectMcpServers = async (
           ? Math.min(MCP_STDIO_PROBE_TIMEOUT_MS, timeoutMs > 0 ? timeoutMs / 2 : Infinity)
           : undefined,
       )
+      // Only with `onElicitation`: without a handler no capability is declared,
+      // and a server cannot ask.
+      const elicitation = elicitationSessionOf(name)
       const clientOptions: ClientOptions | undefined =
-        enterprise || negotiation
+        enterprise || negotiation || elicitation
           ? {
               // An extension is opt-in: it is declared only by the client that uses it.
-              ...(enterprise
-                ? { capabilities: { extensions: { [enterprise.extension]: {} } } }
+              ...(enterprise || elicitation
+                ? {
+                    capabilities: {
+                      ...(enterprise ? { extensions: { [enterprise.extension]: {} } } : {}),
+                      ...(elicitation ? { elicitation: elicitation.capability } : {}),
+                    },
+                  }
                 : {}),
               ...(negotiation
                 ? {
                     versionNegotiation: negotiation,
                     // 2026-07-28: an `input_required` result is NOT answered and
                     // the call is NOT sent again by the SDK (its default would
-                    // try both); it fails the tool call, see `execute`.
+                    // try both). Without `onElicitation` it fails the tool call;
+                    // with it, `execute` answers it through the session, which
+                    // keeps the caps the SDK's own loop does not have.
                     inputRequired: { autoFulfill: false },
                   }
                 : {}),
             }
           : undefined
       client = new Client({ name: clientName, version: CLIENT_VERSION }, clientOptions)
+      if (elicitation) {
+        // 2025 revisions: the server's question is a request of its own. (On
+        // 2026-07-28 the SDK drops inbound requests; the question is then the
+        // tool call's `input_required` result.)
+        client.setRequestHandler('elicitation/create', (request) =>
+          elicitation.onRequest(request.params),
+        )
+      }
       onClient(client)
       await client.connect(transport)
       probing = false

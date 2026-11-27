@@ -67,6 +67,8 @@ export interface SpawnSeed {
   control?: RunControlPort
   /** Set when the helper was given `run_js`: the notes the caller's prompts carry about it. */
   sandboxNotes?: SpawnSandboxNotes
+  /** The caller's count of questions MCP servers asked the user: one number for the tree. */
+  elicitations?: { count: number }
 }
 
 const seeds = new WeakMap<object, SpawnSeed>()
@@ -278,6 +280,7 @@ export const createDynamicSubagentTool = (deps: DynamicSubagentDeps): AgentTool 
           maySpawn,
           ...(runCtx.control ? { control: runCtx.control } : {}),
           ...(sandboxNotes && tools.run_js ? { sandboxNotes } : {}),
+          ...(runCtx.elicitations ? { elicitations: runCtx.elicitations } : {}),
         })
 
         parentSignal?.addEventListener('abort', onParentAbort, { once: true })

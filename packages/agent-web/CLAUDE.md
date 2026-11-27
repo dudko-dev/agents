@@ -61,16 +61,24 @@ behind every decision.
 - `src/tools/egress.ts` — `config.egress` / `web_fetch`: the browser sibling of the server's
   `createSafeFetch` (same policy shape; the pure address/pattern core is a COPY of the server's —
   change both, with tests). Security boundary: a change needs a test and a mutation check.
-- `src/tools/web-search.ts` — `config.search` / `web_search`: a hosted search API (brave, tavily,
-  searxng) or the host's `engine` function. The adapter's request goes through the guarded fetch
-  under `searchEgressPolicy` (allow list = the search API's host only, no redirect); results are
-  filtered by the model's `egress` policy. The key is never in the config: `credentialRef` into
-  `config.credentials`, read at each call. `web-search-shared.ts` (pure, no imports: caps, result
-  cleaning, the adapters as request builders / response parsers, redaction, the description) is a
-  COPY of the server's `src/web-search-shared.ts`, byte for byte — change both (the server's
-  `tests/web-search-shared.test.ts` compares them and `tests/helpers/search-server.ts`). Security
-  boundary: every guard has a test in `tests/web-search.test.ts` and a mutation check. CORS decides
-  which API works from a page (docs/capabilities.md says which); tests never call a real API.
+- `src/tools/web-search.ts` — `config.search` / `web_search`: the host's `engine` function, or the
+  ONE built-in provider, `'google'` (Google Search through Gemini grounding: a separate
+  `generateContent` call with `google_search`, because the API refuses built-in tools next to
+  function declarations). Third-party search APIs are not built in - they are recipes for `engine`
+  in docs/capabilities.md; do not add adapters back. The provider's request goes through the
+  guarded fetch under `searchEgressPolicy` (allow list = the API's host only, POST only, no
+  redirect); its tokens are charged to the run (`addUsage(..., 'search')`); results are filtered
+  by the model's `egress` policy. Result URLs are Google redirect links and are NEVER resolved
+  here: the filter judges the redirect host, a site name (`searchSiteUrl`) is used only to drop a
+  denied site, and the description promises `web_fetch` only when it can open such a link
+  (`followRedirects` + a host `egress.fetch`: the redirect host sends no CORS headers). The key is
+  never in the config: `credentialRef` into `config.credentials`, read at each call.
+  `web-search-shared.ts` (pure, no imports, no clock: caps, result cleaning, the provider as
+  request builder / response parser, the error message, redaction, `searchToolResult`, the
+  description) is a COPY of the server's `src/web-search-shared.ts`, byte for byte — change both
+  (the server's `tests/web-search-shared.test.ts` compares them and
+  `tests/helpers/search-server.ts`). Security boundary: every guard has a test in
+  `tests/web-search.test.ts` and a mutation check; tests never call a real API.
 - `src/tools/media.ts` — `config.media`: `generate_image` / `generate_speech` / `transcribe_audio`
   (each mounted only when its model is set) and the transcription of audio attachments (`attach`,
   called from the runner before planning: the goal gets a fenced, marked transcript, the audio
@@ -194,6 +202,31 @@ behind every decision.
   (`agent/internal.ts`) for the planner and the executor only, from text fixed in `createAgent`.
   A result that breaks its tool's `outputSchema` is passed on with a note, never thrown
   (`outputSchemaViolation` in `http.ts`).
+- `src/mcp/elicitation.ts` (pure, no imports; `ConnectMcpOptions.onElicitation` /
+  `.elicitation`) — MCP elicitation: a server asks the USER for input during a tool call and the
+  host's callback answers. The limits, what a request must be before the host sees it
+  (third-party text cleaned and capped, the form restricted to the flat subset of the
+  specification, a link only https or loopback http - handed over, never opened: no
+  `window.open`, no fetch), what an answer must be before the server sees it, the one function
+  that asks (helpers refused unless `elicitation.subagents`, caps per tool call and per run,
+  timeout, abort, a failed handler = cancel) and the session that drives a tool call in both
+  revisions (2025: the `elicitation/create` handler, calls to that server ONE AT A TIME, the
+  call's own 60 s clock stopped while a question waits; 2026-07-28: `input_required` answered
+  and the same call sent again, never after an automatic answer). A COPY of the server's
+  `src/mcp-elicitation.ts`, byte for byte — change both (the server's
+  `tests/mcp-elicitation-shared.test.ts` compares them and tests every guard). `http.ts` wires
+  it and reads the run STRUCTURALLY from `options.agentRun` (`emit`, `step`, `runId`,
+  `subagent`, `elicitations` - set by `tools/wrap.ts`; the per-run counter is made in
+  `agent/runner.ts` and handed to helpers through `SpawnSeed`) and `options.subagentCall` (the
+  mark `subagent/tool.ts` puts on every tool it gives a child: a new way to hand a child tools
+  must mark them too). The option is on the CONNECTION because the capability is in the
+  handshake; the Node sibling has the same names on its agent config. OFF without
+  `onElicitation`: no capability, the same `client.request` call, no new header
+  (`tests/mcp-elicitation.test.ts` compares the wire with the fixture). A consent boundary: the
+  answer must never reach the model's context, an event, a log or a checkpoint
+  (`tests/mcp-elicitation-agent.test.ts` looks for it in each); every guard has a test and
+  needs a mutation check. Docs: README (MCP), `docs/capabilities.md`, `docs/security.md`,
+  `docs/design.md`.
 - The MCP client is the official 2.x SDK, `@modelcontextprotocol/client` (the optional peer of
   `./mcp`; `@modelcontextprotocol/sdk` 1.x is gone from this package - the test servers and the
   React package's e2e servers keep it, as real 1.x SERVERS). The JSON Schema validator is imported
@@ -213,7 +246,7 @@ behind every decision.
   `client.request` is enough; `Mcp-Param-*` is `callTool`'s own and is not sent), tool list
   changes need `client.listen` (opened at connect when `onToolsChanged` is given; never opened
   again), `inputRequired.autoFulfill` is off and an `input_required` answer fails the call
-  (elicitation is not implemented). CORS: a page's SDK reads a BLOCKED probe as "a 2025 server"
+  unless `onElicitation` is set (then `elicitation.ts` answers it). CORS: a page's SDK reads a BLOCKED probe as "a 2025 server"
   (it decides by `window` + `document`), so `http.ts` remembers a network-level failure seen
   during the probe (`ProbeState.blocked`) and `diagnoseMcpCors(url, fetch, { protocol })` tries
   each 2026 header on its own to name the ones the server's `Access-Control-Allow-Headers`

@@ -9,6 +9,7 @@ import type {
 } from './agent/loop-types.js'
 import type { IDecisionEvent } from './decision.js'
 import type { LimitKind } from './limits.js'
+import type { McpElicitationReason, McpElicitationSchema } from './mcp/elicitation.js'
 import type { PipelineEvent } from './pipeline/engine.js'
 
 export type ReplanMode = 'continue' | 'revise' | 'finish'
@@ -16,10 +17,12 @@ export type Phase = 'plan' | 'execute' | 'replan' | 'synthesize'
 /**
  * Phases a `usage` event can be charged to: the four stages plus compaction and subagents;
  * `decision` - a call to `config.decisionModel` (`usage.decisionCalls`, plus the tokens its API
- * reported); and 'media' - a call to an image / speech / transcription model (`config.media`),
- * whose `usage` carries the media fields and zero tokens.
+ * reported); 'media' - a call to an image / speech / transcription model (`config.media`),
+ * whose `usage` carries the media fields and zero tokens; and 'search' - a `web_search` through
+ * the google provider (`config.search`): the grounding call is a model call, and these are the
+ * tokens its API reported.
  */
-export type UsagePhase = Phase | 'compact' | 'subagent' | 'decision' | 'media'
+export type UsagePhase = Phase | 'compact' | 'subagent' | 'decision' | 'media' | 'search'
 
 /**
  * Everything the agent does is streamed as a typed event so any UI (or none)
@@ -183,6 +186,41 @@ type AgentEventBody =
       approved: boolean
       reason?: string
       automatic: boolean
+    }
+  /**
+   * An MCP server asked the user for input during a tool call (the connection's `onElicitation`
+   * is being called). `message`, `requestedSchema` and `url` are the SERVER's text: cleaned and
+   * capped, for a UI to show - never instructions.
+   */
+  | {
+      type: 'mcp.elicitation-requested'
+      id: string
+      server: string
+      /** The tool call that asks: the tool's name as the model called it. */
+      tool: string
+      mode: 'form' | 'url'
+      message: string
+      requestedSchema?: McpElicitationSchema
+      url?: string
+      step?: IPlanStep
+      /** Set when a helper (a subagent) is the one whose call asks. */
+      subagent?: { id: string; depth: number }
+    }
+  /**
+   * The question was answered. Never carries a value the user entered: `fields` are the NAMES
+   * of the fields an accepted form was answered with. `automatic`: nobody decided (a guard, a
+   * cap, a timeout, a failed handler, a stopped run) - `reason` says which, the tool call
+   * fails, and no `mcp.elicitation-requested` may have preceded it.
+   */
+  | {
+      type: 'mcp.elicitation-answered'
+      id: string
+      server: string
+      tool: string
+      action: 'accept' | 'decline' | 'cancel'
+      automatic: boolean
+      reason?: McpElicitationReason
+      fields?: string[]
     }
   /**
    * `profile` is set when the parent chose one of the subagent's named profiles for this call.

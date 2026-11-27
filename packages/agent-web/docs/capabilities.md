@@ -531,11 +531,127 @@ Both errors come in one exchange, not after a timeout. `ConnectedMcp.protocols` 
 - **Sessions and reconnection** do not exist in that revision: no `mcp-session-id`, no GET
   stream, no `Last-Event-ID`; `reconnection` on the config applies to 2025 connections only.
 - **`input_required`.** The SDK is told not to answer it (`inputRequired.autoFulfill: false`), so
-  nothing is retried; the call fails with `MCP tool "x" did not finish: the server asked for more
-  input …`. The client declares no elicitation capability, and a server that checks refuses such
-  a tool with `-32021` before it runs. Elicitation is not implemented yet.
+  nothing is retried by it. Without `onElicitation` the call fails with `MCP tool "x" did not
+  finish: the server asked for more input …`: the client declares no elicitation capability, and
+  a server that checks refuses such a tool with `-32021` before it runs. With `onElicitation` the
+  connector answers it itself - see [MCP elicitation](#mcp-elicitation-a-server-asks-the-user).
 - **OAuth** works as on 2025: the probe is the first request to be answered 401, and the token
   is refreshed on a 401 in the middle of a session.
+
+## MCP elicitation: a server asks the user
+
+A tool of an MCP server may need something only the user has and ask for it in the middle of
+the call. That is *elicitation*: the server asks, the **host** answers through a callback, and
+the call goes on. The option is on the MCP connection (`@dudko.dev/agent-web/mcp`), because the
+capability is declared in the handshake:
+
+```ts
+const mcp = await connectMcpHttp(servers, {
+  onElicitation: async (request, { signal }) => {
+    const values = await showForm(request, signal) // your UI; undefined when dismissed
+    return values ? { action: 'accept', content: values } : { action: 'cancel' }
+  },
+  elicitation: { timeoutMs: 300_000, maxPerToolCall: 5, maxPerRun: 20, url: false, subagents: false },
+})
+const agent = await createAgent({ model, tools: mcp.tools })
+```
+
+**Off by default; off = the same wire.** Without `onElicitation` no capability is declared, so a
+server cannot ask (a 2026-07-28 server refuses such a tool with `-32021`; one that answers
+`input_required` anyway gets the error it always got), and every request - method, headers,
+body - is what it was: `tests/mcp-elicitation.test.ts` compares the session with the fixture
+recorded before the option existed. `elicitation` without a callback changes nothing. Turning it
+on adds a capability to `initialize` (2025) or to each request's `_meta` (2026-07-28) and **no
+request header**.
+
+| `elicitation` | Default | |
+| --- | --- | --- |
+| `timeoutMs` | `300000` | How long one question waits for the callback (a person is answering). `0` = no limit of its own. |
+| `maxPerToolCall` | `5` | Questions one tool call may ask. |
+| `maxPerRun` | `20` | Questions one run may be asked, its helpers' calls included. |
+| `url` | `false` | Also accept URL mode: the server sends a link for the user to open. |
+| `subagents` | `false` | Let a tool call made by a helper (a subagent) ask too. |
+
+**The callback** gets a `McpElicitationRequest` - `id`, `server` (its key in the servers you
+connected), `tool` (the tool's name as the model called it), `mode`, `message`, and
+`requestedSchema` (form mode) or `url` (+ `elicitationId` on the 2025 revisions); `runId`; and
+`subagent: { id, depth }` when a helper's call asks - and `ctx.signal`, which aborts when the
+answer is no longer wanted (the run stopped, the time ran out), so a dialog left open can be
+taken down. It returns `{ action: 'accept', content }`, `{ action: 'decline' }` or
+`{ action: 'cancel' }`. An answer the user gave - accept, decline, cancel - goes to the server,
+and the tool call ends with what the server then answers.
+
+**What the form may be.** The specification allows a flat object of: strings (`minLength`,
+`maxLength`, `format: 'email' | 'uri' | 'date' | 'date-time'`), numbers and integers (`minimum`,
+`maximum`), booleans, single-selects (`enum`, optionally `enumNames`; or `oneOf: [{ const,
+title }]`) and multi-selects (`type: 'array'` with `items.enum` or `items.anyOf`, `minItems`,
+`maxItems`); `title`, `description`, `default`, and `required` at the top. That is all a host
+ever receives: keywords outside it are dropped, texts are cleaned and capped, and a form that
+is not flat (a nested object, a list of objects, a type union), has an unknown format, more than
+50 fields or 100 options, or a name that could not be sent back verbatim is **declined without
+the callback being called**. `normalizeMcpElicitationSchema` and `validateMcpElicitationContent`
+are exported from `./mcp` for a UI that wants to check a form before submitting it.
+
+**Guards** (each has a test and a mutation check; the rationale is in
+[security.md](security.md#mcp-elicitation-a-server-asks-the-user-in-the-middle-of-a-tool-call)):
+
+- The server's text is cleaned (control, zero-width and bidi-override characters removed) and
+  capped (2000 characters for the message, 200 for a title, 500 for a description) and never
+  put into a prompt.
+- The answer is checked against the form before it is sent: every value of its field's type and
+  within its limits, every required field there, no field the form did not ask for. One that
+  does not fit is not sent.
+- The answer goes to the server that asked and nowhere else: not the model's context, not an
+  event (`mcp.elicitation-answered` has the field *names*), not a log line, not a run
+  checkpoint. A callback that throws is reported by the kind of error only.
+- URL mode: `https:` only (`http:` on a loopback host), no credentials in the link; the link is
+  handed to the callback and never fetched or opened by this package - no `window.open`.
+- Nobody decided - the callback threw, nobody answered within `timeoutMs`, the answer did not
+  fit, a cap was reached, the form could not be shown - means the question is answered `cancel`
+  (or `decline`) automatically and the **tool call fails** with one sentence that says why.
+  Nothing is retried.
+- Caps: `maxPerToolCall`, `maxPerRun`, and 10 `input_required` rounds per call on 2026-07-28.
+- Subagents: see below.
+
+**Time.** A question waits `elicitation.timeoutMs` at most - and no longer than the step that
+made the tool call. `chatTimeoutMs` (default 120 000) bounds a step; when it ends, the pending
+question is cancelled with `reason: 'step-timeout'` and a `warn` line says so. **Raise
+`chatTimeoutMs` on an agent whose servers may ask** (to at least `elicitation.timeoutMs`), or
+lower `elicitation.timeoutMs` to fit. The MCP SDK's own request timeout (60 s) is handled for
+you: on the 2025 revisions, where the tool call is one request that stays open while the user
+answers, the connector keeps that minute itself and stops it while a question waits. Stopping
+the run cancels a pending question (`reason: 'aborted'`).
+
+**Both protocol revisions.** On the 2025 revisions the server sends an `elicitation/create`
+request while the call is open. The request does not say which call it belongs to, so with
+`onElicitation` the calls to that server run **one at a time** (other servers are not affected).
+On 2026-07-28 the call itself answers `input_required`; the connector asks the callback and
+sends the same call again with the answers and the server's `requestState`, byte for byte: the
+server's way of continuing **one** call. Only elicitation is answered - a server that asks for
+sampling or roots that way fails the call. A result that breaks its `outputSchema` is still
+passed on with a note.
+
+**Subagents.** A question reaches the user only from a call of the run the host started:
+
+| Who calls the tool | Default | With `elicitation: { subagents: true }` |
+| --- | --- | --- |
+| The run itself | asks | asks |
+| A helper the model started (`subagents.dynamic`) | cancelled, callback not called | asks; the request has `subagent: { id, depth }` |
+| A subagent tool's child that was given the tools (`config.tools`, or host `tools` - in-process or behind a worker) | cancelled, callback not called | asks; the request has `subagent` |
+| A worker subagent that connects on its own inside the worker | its own connection, its own `onElicitation` | - |
+
+**Events** (inside a run; outside one the callback is still called, and nothing is emitted):
+`mcp.elicitation-requested` when the callback is called, `mcp.elicitation-answered` when the
+question is settled - see the [event reference](#event-reference). `automatic: true` means nobody
+decided; `reason` is one of `unsupported-schema`, `unsupported-mode`, `insecure-url`,
+`invalid-request`, `subagent`, `cap-per-call`, `cap-per-run`, `handler-error`, `timeout`,
+`invalid-answer`, `aborted`, `step-timeout`, `after-failure`. A question refused before it could
+be shown has an answered event and no requested one.
+
+**Not done.** The `-32042` "URL elicitation required" error of 2025-11-25 is passed on as the
+tool error it is; `notifications/elicitation/complete` is not surfaced; a resumed run starts its
+`maxPerRun` count again. The React package has the view state (`state.elicitations`) but no
+component yet.
 
 ## MCP servers behind OAuth
 
@@ -1362,60 +1478,185 @@ Approval: an open-internet `web_fetch` is a way to leak data through the URL, so
 `web_fetch` reads a page the model already knows the address of. `search` is its companion: one
 tool, `web_search({ query, maxResults?, freshness? })`, that returns a short list of
 `{ title, url, snippet, date? }`. **Off by default**, and the library ships **no key and no
-engine**: you name a hosted search API, or pass a function. Same names and semantics as the Node
-sibling's `search` - except that a key is never written into the config.
+third-party search API**: you pass a search engine of your own (a function -
+[recipes below](#search-engine-recipes)), or name the one built-in provider, **Google Search
+through Gemini grounding**, which needs a Gemini API key and nothing else. Same names and
+semantics as the Node sibling's `search` - except that a key is never written into the config.
 
 ```ts
 const credentials = new VaultCredentialStore()
-await credentials.setApiKey('search', keyTheUserTyped) // encrypted at rest, like a model key
+await credentials.setApiKey('gemini', keyTheUserTyped) // encrypted at rest; may be the model's own ref
 
 createAgent({
   model,
   credentials,
-  search: { provider: 'tavily', credentialRef: 'search' },
-  // search: { provider: 'searxng', baseURL: 'https://search.example.com' }, // your instance, no key
-  // search: { provider: 'brave', baseURL: 'https://my-gateway.example.com/brave' }, // gateway holds the key
+  search: { provider: 'google', credentialRef: 'gemini' }, // Google Search via Gemini grounding
   // search: { engine: async (query, { maxResults, freshness, signal }) => mySearch(query) },
-  egress: { allow: ['docs.example.com'] }, // optional: web_fetch, and the filter below
+  egress: true, // optional: web_fetch, and the filter below
 })
 ```
 
 | `search` field | |
 |---|---|
-| `provider` | a built-in adapter, one HTTP call each: `'brave'`, `'tavily'`, `'searxng'` (see the table below) |
-| `credentialRef` | where the provider's key is kept in `config.credentials`. Read at each call (a rotated key is picked up), sent in a header to that API only. An inline `apiKey` is refused. |
-| `baseURL` | required for `searxng` (the instance); for the others it replaces the public endpoint with a gateway of yours (`credentialRef` is then optional) |
-| `engine` | instead of `provider`: your own `(query, { maxResults, freshness, signal }) => Promise<{ title, url, snippet, date? }[]>`. Its requests are yours; its results get the same cleaning, caps and filter. |
+| `engine` | your own `(query, { maxResults, freshness, signal }) => Promise<{ title, url, snippet, date? }[]>` - any search API, or an index of yours. Its requests are yours; its results get the same cleaning, caps and filter. Exactly one of `engine` / `provider`. |
+| `provider` | `'google'`: the built-in provider, see below. The only value. |
+| `credentialRef` | `provider` only: where the Gemini (Google AI Studio) API key is kept in `config.credentials` - it can be the same ref a Gemini model uses. Read at each call (a rotated key is picked up), sent in the `x-goog-api-key` header to that API only. An inline `apiKey` is refused. |
+| `model` | `provider` only: the Gemini model that makes the grounding call. Default `'gemini-2.5-flash-lite'`. |
+| `baseURL` | `provider` only: replaces the public endpoint (`https://generativelanguage.googleapis.com`) with a gateway of yours (`credentialRef` is then optional) |
 | `maxResults` | results per call when the model does not say. Default 5, never more than 10. |
-| `allowPrivateNetwork` | let the **search API itself** be on a private address or an internal-looking name (a SearXNG on your network). Widens nothing else. |
-| `timeoutMs` | whole request to the search API (default 15 s) |
+| `allowPrivateNetwork` | `provider` only: let the **search API itself** (your gateway) be on a private address or an internal-looking name. Widens nothing else. |
+| `timeoutMs` | `provider` only: whole request to the search API (default 15 s) |
 | `readOnly` | how the consent gate sees a search. Default `true`; `false` makes it ask like a write. |
-| `fetch` | the fetch the adapter uses (default `globalThis.fetch`); it stays bound to the search policy |
+| `fetch` | `provider` only: the fetch the provider uses (default `globalThis.fetch`); it stays bound to the search policy |
 
-**Which API works from a page.** A browser only lets a page read an API that allows cross-origin
-requests, and a key in a page is a key the user can read - so it must be *the user's own* key
-(BYOK), or the call goes through your gateway:
+### The `google` provider: Google Search through Gemini grounding
 
-| provider | request | cross-origin from a page? |
-|---|---|---|
-| `tavily` | `POST https://api.tavily.com/search`, `Authorization: Bearer` ([docs](https://docs.tavily.com/documentation/api-reference/endpoint/search)) | **Yes** - its preflight answers `Access-Control-Allow-Origin: *` and allows the `authorization` header (checked 2026-11; not a documented promise). |
-| `brave` | `GET https://api.search.brave.com/res/v1/web/search`, `X-Subscription-Token` ([docs](https://api-dashboard.search.brave.com/app/documentation/web-search/get-started)) | **No** - the API answers a preflight with 405 and no CORS headers (checked 2026-11), and a custom header always triggers one. Use it through a gateway of yours: `baseURL: 'https://your-gateway/...'` (the gateway adds the key), or from the Node package. |
-| `searxng` | `GET {baseURL}/search?format=json`, no key ([docs](https://docs.searxng.org/dev/search_api.html)) | **Only if you make it so** - SearXNG sends no CORS headers of its own: serve the instance from your page's origin or have your reverse proxy add them. The instance must list `json` under `search.formats` (else 403). |
+One search is **one extra model call**: `POST /v1beta/models/<model>:generateContent` with the
+built-in `google_search` tool, a fixed instruction ("search, then report what the sources say in
+a few sentences") and the query - **nothing of the conversation**. Google runs the search, the
+model writes a short answer, and the API returns the sources it used (`groundingMetadata`). The
+Gemini API answers a page directly (its preflight allows the `x-goog-api-key` header; checked
+2026-11-26). A key in a page is a key its user can read: it must be *the user's own* (BYOK), or
+the call goes through your gateway (`baseURL`).
+
+- **Why a separate call.** The Gemini API refuses a request that carries both its built-in search
+  and function declarations (measured 2026-11-26 on `gemini-2.5-flash-lite`: HTTP 400 *"Built-in
+  tools ({google_search}) and Function Calling cannot be combined in the same request"*), and an
+  agent's every step carries function declarations. So the agent cannot switch on the model's own
+  search; it asks for it in a call of its own - which also works when the agent itself runs on
+  another model, a local one included.
+- **It spends model tokens.** The grounding call is billed like any `generateContent` call. What
+  the API reports (`usageMetadata`: prompt + tool-use prompt tokens as input, answer + thinking
+  tokens as output) is a `usage` event of phase `'search'` and counts in `result.usage`,
+  `agent.usage`, `sessionUsage` and against `limits`. Measured: 135-300 tokens per search on
+  `gemini-2.5-flash-lite`. The answer is capped at 1024 output tokens. A failed call (a quota, a
+  wrong key) reports no usage and counts none. Nothing is retried.
+- **Which models answer a free-tier key.** Measured on 2026-11-26 with five free-tier Google AI
+  Studio keys: `gemini-2.5-flash-lite` and `gemini-2.5-flash` answered with grounding on three of
+  them and **HTTP 404 on the two newest accounts** (*"no longer available to new users"*);
+  `gemini-3.1-flash-lite`, `gemini-3.5-flash-lite`, `gemini-3.8-flash` and
+  `gemini-flash-lite-latest` answered **HTTP 429** on every key (whether grounding has no free
+  quota there or the day's quota was spent is not known). The default is the cheapest one that
+  worked, `gemini-2.5-flash-lite`; on a key it does not serve, set `model`. Quotas are Google's
+  and change - an error names the model and says which of the two happened. The free tier that did answer allowed **20 requests a day per model and key** (the API's own error: `GenerateRequestsPerDayPerProjectPerModel-FreeTier`, limit 20) - every search is one of them, and so is every call of an agent that runs on the same model and key.
+- **Result URLs are Google redirect links**, not the pages' own addresses:
+  `https://vertexaisearch.cloud.google.com/grounding-api-redirect/<token>`, which answers `302`
+  to the page. The API gives no other address; the `title` is the site's name as Google reports
+  it (`nodejs.org`). The agent **does not resolve the links**. What follows from that here:
+  - **A page cannot read through them.** The redirect host sends no CORS headers (checked
+    2026-11-26), so `web_fetch` from a page fails on such a link whatever `egress` says. It opens
+    one only with `egress.followRedirects: true` **and** an `egress.fetch` of yours that goes
+    through a server (a gateway with a safe fetch, which can judge each hop). Unless both are
+    set, the tool's description tells the model it has no tool to open the links: the results are
+    leads - a site's name and what Google's model said of it. A user who clicks one in your UI
+    is taken to the page.
+  - With an `egress.allow` list, a result is on the list only if `vertexaisearch.cloud.google.com`
+    is: without it every result is filtered out. With it, where a followed redirect *ended* is
+    still judged against the same list, and the answer is withheld when it is not on it (after
+    the fact - a browser cannot stop the hop; see [Egress](#egress-what-the-model-may-fetch)).
+  - The filter can see only the redirect host, not the page's. A result whose site name is on
+    your `deny` list is dropped by that name as well (best effort: it is Google's word for the
+    site, good enough to drop a result, never used to let one through).
+  - The links are long (150-300 characters) and expire.
+- **Snippets are the grounding model's sentences, not quotes.** A result's `snippet` is what the
+  model's answer says of that source (`groundingSupports`), not text from the page. When the API
+  attributes nothing to any source, the answer is attached once as `summary` (1000 characters at
+  most) - and only when no result was filtered out. Every result of this provider carries a
+  `note` saying what its links and its text are. All of it is untrusted text like any search
+  result: a model wrote it from third-party pages.
+- **No result count.** The API has no such parameter: you get the sources the model used (3-10
+  in the measurements), cut to `maxResults`. `freshness` becomes the API's time range filter.
 
 A refused cross-origin call surfaces as the egress error `network` ("the server may not allow
 cross-origin reads, or is unreachable").
 
+### Search engine recipes
+
+Any other search API is a function you pass as `engine`. A browser only lets a page read an API
+that allows cross-origin requests, and that decides which of them work from a page:
+
+| API | request | cross-origin from a page? |
+|---|---|---|
+| Tavily | `POST https://api.tavily.com/search`, `Authorization: Bearer` ([docs](https://docs.tavily.com/documentation/api-reference/endpoint/search)) | **Yes** - its preflight answers `Access-Control-Allow-Origin: *` and allows the `authorization` header (checked 2026-11; not a documented promise). |
+| Brave | `GET https://api.search.brave.com/res/v1/web/search`, `X-Subscription-Token` ([docs](https://api-dashboard.search.brave.com/app/documentation/web-search/get-started)) | **No** - the API answers a preflight with 405 and no CORS headers (checked 2026-11). Call a gateway of yours that adds the key, or use the Node package. |
+| SearXNG | `GET {instance}/search?format=json`, no key ([docs](https://docs.searxng.org/dev/search_api.html)) | **Only if you make it so** - serve the instance from your page's origin or have your reverse proxy add the CORS headers. The instance must list `json` under `search.formats` (else 403). |
+
+Bind the engine's request to the API's host with `createGuardedFetch` (no cookies, no referrer,
+no redirect followed, bounded in size and time), read the key from the `CredentialStore` at each
+call, keep it in a header, and put only the status into an error:
+
+```ts
+import { createGuardedFetch, type CredentialStore, type SearchEngine } from '@dudko.dev/agent-web'
+
+// Tavily. Host: api.tavily.com. Key: Authorization: Bearer, from the vault.
+const tavilyFetch = createGuardedFetch({ allow: ['api.tavily.com'], methods: ['POST'] })
+export const tavily = (credentials: CredentialStore, ref: string): SearchEngine =>
+  async (query, { maxResults, freshness, signal }) => {
+    const key = await credentials.getApiKey(ref)
+    if (!key) throw new Error('web_search failed: no Tavily API key is saved')
+    const res = await tavilyFetch('https://api.tavily.com/search', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ query, max_results: maxResults, ...(freshness ? { time_range: freshness } : {}) }),
+      signal,
+    })
+    if (!res.ok) throw new Error(`web_search failed: Tavily answered HTTP ${res.status}`)
+    const { results = [] } = (await res.json()) as { results?: any[] }
+    return results.map((r) => ({ title: r.title, url: r.url, snippet: r.content, date: r.published_date }))
+  }
+
+// SearXNG (your instance, CORS enabled, no key). Host: yours.
+export const searxng = (baseURL: string): SearchEngine => {
+  const base = new URL(baseURL)
+  const sxFetch = createGuardedFetch({ allow: [base.hostname] })
+  const RANGE = { day: 'day', week: 'month', month: 'month', year: 'year' } as const // no "week" in SearXNG
+  return async (query, { freshness, signal }) => {
+    const url = new URL(`${base.origin}${base.pathname.replace(/\/+$/, '')}/search`)
+    url.searchParams.set('q', query)
+    url.searchParams.set('format', 'json')
+    if (freshness) url.searchParams.set('time_range', RANGE[freshness])
+    const res = await sxFetch(url.href, { headers: { accept: 'application/json' }, signal })
+    if (!res.ok) throw new Error(`web_search failed: SearXNG answered HTTP ${res.status}`)
+    const { results = [] } = (await res.json()) as { results?: any[] }
+    return results.map((r) => ({ title: r.title, url: r.url, snippet: r.content, date: r.publishedDate ?? undefined }))
+  }
+}
+
+// Brave, through a gateway of yours that adds X-Subscription-Token (Brave has no CORS).
+// Host: your gateway's. No key in the page.
+const gatewayFetch = createGuardedFetch({ allow: ['gateway.example.com'] })
+const BRAVE_FRESHNESS = { day: 'pd', week: 'pw', month: 'pm', year: 'py' } as const
+export const brave: SearchEngine = async (query, { maxResults, freshness, signal }) => {
+  const url = new URL('https://gateway.example.com/brave/res/v1/web/search')
+  url.searchParams.set('q', query)
+  url.searchParams.set('count', String(maxResults))
+  url.searchParams.set('text_decorations', 'false')
+  if (freshness) url.searchParams.set('freshness', BRAVE_FRESHNESS[freshness])
+  const res = await gatewayFetch(url.href, { headers: { accept: 'application/json' }, signal })
+  if (!res.ok) throw new Error(`web_search failed: Brave answered HTTP ${res.status}`)
+  const body = (await res.json()) as { web?: { results?: any[] } }
+  return (body.web?.results ?? []).map((r) => ({ title: r.title, url: r.url, snippet: r.description, date: r.page_age ?? r.age }))
+}
+
+// createAgent({ ..., credentials, search: { engine: tavily(credentials, 'tavily') } })
+```
+
+The engine's host does not go into `egress.allow`: the function's requests are yours, not the
+model's. A query leaves for that service all the same.
+
 **How it relates to `egress`.** Independent switches; neither loosens the other:
 
-- **The adapter's own request is pinned.** It goes through the guarded fetch under a policy of its
-  own (`searchEgressPolicy`), not the model's: the allow list is exactly the search API's host,
-  with its scheme and port; a redirect is never followed; no cookies, credentials or referrer;
-  capped at 1 MB and 15 s. You never add the search API to `egress.allow`, and the tool cannot be
-  steered to another host. From `egress` it inherits only the `deny` list (deny still wins) - not
-  `allow`, not `allowPrivateNetwork`, not `followRedirects`, not `fetch`.
-- **Results are filtered by the model's egress policy.** With `egress` set, a result `web_fetch`
-  would refuse (not on the allow list, on the deny list, plain http, a private IP, an
-  internal-looking name) is left out - title and snippet too - and counted in `filtered`.
+- **The provider's own request is pinned.** It goes through the guarded fetch under a policy of
+  its own (`searchEgressPolicy`), not the model's: the allow list is exactly the API's host
+  (`generativelanguage.googleapis.com`, or your `baseURL`'s), with its scheme and port, `POST`
+  only; a redirect is never followed; no cookies, credentials or referrer; capped at 1 MB and
+  15 s. You never add it to `egress.allow`, and the tool cannot be steered to another host. From
+  `egress` it inherits only the `deny` list (deny still wins) - not `allow`, not
+  `allowPrivateNetwork`, not `followRedirects`, not `fetch`.
+- **Results are filtered by the model's egress policy** - an engine's and the provider's alike.
+  With `egress` set, a result `web_fetch` would refuse (not on the allow list, on the deny list,
+  plain http, a private IP, an internal-looking name) is left out - title and snippet too - and
+  counted in `filtered`.
 - **`search` works without `egress`.** Then there is no `web_fetch`: the model gets the snippets as
   leads (the tool's description says so) and nothing is filtered.
 
@@ -1433,10 +1674,12 @@ allow-listed `web_fetch` read-only - it is **read-only**. That host still sees t
 when queries must not leave unreviewed. Otherwise an ordinary tool: `maxToolCalls`, the output
 cap, `excludedTools` and tool search apply; a tool of your own named `web_search` wins.
 
-**Events.** The adapter's request emits `egress.request` (`url` is the API's origin and path -
-never the query string). The query is in the ordinary tool-call event. A function `engine` emits
-none. The key appears in no event, error, log line or result: an API error is reported by status
-only, and error text is redacted before it is thrown.
+**Events.** The provider's request emits `egress.request` (`url` is the API's origin and path -
+never the query string), and its tokens a `usage` event of phase `'search'`. The query is in the
+ordinary tool-call event. A function `engine` emits neither. The key appears in no event, error, log
+line, result or run snapshot: an API error is reported by its status and the API's own code word
+(`RESOURCE_EXHAUSTED`, `NOT_FOUND`) - never the error's text - and error text is redacted before
+it is thrown.
 
 The providers' server-side search tools (Anthropic, OpenAI, Google) are not wired here: they run
 inside the provider's API call, outside this policy.
@@ -1869,7 +2112,7 @@ Subscribe with `onEvent` (per run) or the handler you pass to `createAgent`; ren
 | Event | Payload |
 | --- | --- |
 | `decision` | `point: 'replan' \| 'route', accepted, choice?, confidence?, threshold, reason?, error?, durationMs, model?` — a [decision model](#decision-models) was asked a question; `reason` (`'low-confidence' \| 'invalid-choice' \| 'invalid-confidence' \| 'error' \| 'timeout' \| 'needs-model'`) says why the ordinary model call ran instead |
-| `usage` | `phase: 'plan' \| 'execute' \| 'replan' \| 'synthesize' \| 'compact' \| 'subagent' \| 'decision' \| 'media', usage` — per LLM call; counted live into [`agent.usage`](#usage-what-a-session-has-spent). Phase `'decision'` is a decision-model call (`usage.decisionCalls: 1` plus the tokens its API reported). Phase `'media'` is a call to a [media model](#media-images-speech-and-transcription): zero tokens, and the media fields of `usage` (`mediaCalls`, ...) with the units |
+| `usage` | `phase: 'plan' \| 'execute' \| 'replan' \| 'synthesize' \| 'compact' \| 'subagent' \| 'decision' \| 'media' \| 'search', usage` — per LLM call; counted live into [`agent.usage`](#usage-what-a-session-has-spent). Phase `'search'` is the model call behind a [`web_search` through Google](#the-google-provider-google-search-through-gemini-grounding): the tokens its API reported. Phase `'decision'` is a decision-model call (`usage.decisionCalls: 1` plus the tokens its API reported). Phase `'media'` is a call to a [media model](#media-images-speech-and-transcription): zero tokens, and the media fields of `usage` (`mediaCalls`, ...) with the units |
 | `budget.exceeded` | `kind: 'input' \| 'output' \| 'reasoning' \| 'total' \| 'tool-calls', tokens, cap` |
 | `context.compacted` | `scope: 'history' \| 'trace' \| 'tool-results', beforeTokens, afterTokens` |
 
@@ -1881,6 +2124,8 @@ Subscribe with `onEvent` (per run) or the handler you pass to `createAgent`; ren
 | `tools.discovered` | `step?, query, names` — `find_tools` activated more tools |
 | `tool.approval-requested` | `id, name, input, readOnly, step?, subagent?` (`subagent: { id, depth }` when a helper the model started is asking) |
 | `tool.approval-resolved` | `id, name, approved, reason?, automatic` |
+| `mcp.elicitation-requested` | `id, server, tool, mode: 'form' \| 'url', message, requestedSchema?, url?, step?, subagent?` — an MCP server asked the user for input during a tool call and the connection's `onElicitation` is being called. The server's text, cleaned and capped ([elicitation](#mcp-elicitation-a-server-asks-the-user)) |
+| `mcp.elicitation-answered` | `id, server, tool, action: 'accept' \| 'decline' \| 'cancel', automatic, reason?, fields?` — the question was settled. `fields`: the NAMES of the fields an accepted form was answered with, never a value. `automatic`: nobody decided, the tool call fails, `reason` says why |
 | `egress.request` | `url` (origin + path), `allowed`, `status?`, `reason?` — a `web_fetch` request (or `web_search`'s call to its [search API](#search-finding-the-page-to-fetch)), allowed or refused ([egress](#egress-what-the-model-may-fetch)) |
 | `media.generated` | `kind: 'image' \| 'speech'`, `path`, `mediaType`, `bytes`, `model`, `step?` — a media tool wrote a file to the virtual file system; read it with `vfs.readDataUrl(path)` ([media](#media-images-speech-and-transcription)) |
 | `file.written` | `path`, `mediaType`, `bytes`, `step?` — `fs_write` or the sandbox's `fs.writeFile` wrote a file to the virtual file system (after the write succeeded; the content is not in the event) ([virtual file system](#virtual-file-system)) |

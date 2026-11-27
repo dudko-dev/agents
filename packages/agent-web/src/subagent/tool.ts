@@ -210,13 +210,46 @@ export const createSubagentTool = (opts: SubagentToolOptions): AgentTool => {
   const acquire = createSemaphore(Math.max(1, opts.maxConcurrent ?? 4))
   const outputMax = opts.outputMaxChars ?? 8_000
 
+  // Every call a subagent makes says that it is the subagent's (`options.subagentCall`), not a
+  // call of the run the host started: an MCP tool lets such a call ask the user something only
+  // when its connection allows helpers to (`elicitation.subagents`). `id` is the delegated task;
+  // `elicitations` the parent run's count of such questions, so the child's count on it too.
+  const asSubagentCalls = (
+    tools: ToolSet | undefined,
+    id: string,
+    elicitations: { count: number } | undefined,
+  ): ToolSet => {
+    const subagentCall = { id, depth: 1, ...(elicitations ? { elicitations } : {}) }
+    return Object.fromEntries(
+      Object.entries(tools ?? {}).map(([name, t]) => {
+        const execute = (t as { execute?: (i: unknown, o: unknown) => unknown }).execute
+        if (typeof execute !== 'function') return [name, t]
+        // A copy with every own property as it was (a spread would drop the hidden marks some
+        // tools carry, e.g. the file tools' binding), and only `execute` replaced.
+        const copy = Object.defineProperties({}, Object.getOwnPropertyDescriptors(t))
+        Object.defineProperty(copy, 'execute', {
+          value: (input: unknown, o: unknown) =>
+            execute.call(t, input, { ...(o as object), subagentCall }),
+          enumerable: true,
+          writable: true,
+          configurable: true,
+        })
+        return [name, copy]
+      }),
+    ) as ToolSet
+  }
+
   const gatedHostTools = (
     approve: ((name: string, input: unknown, readOnly: boolean) => Promise<void>) | undefined,
-  ): ToolSet =>
-    Object.fromEntries(
-      Object.entries(opts.tools ?? {}).map(([name, t]) => {
+    id: string,
+    elicitations: { count: number } | undefined,
+  ): ToolSet => {
+    const marked = asSubagentCalls(opts.tools, id, elicitations)
+    if (!approve) return marked
+    return Object.fromEntries(
+      Object.entries(marked).map(([name, t]) => {
         const execute = (t as { execute?: (i: unknown, o: unknown) => unknown }).execute
-        if (typeof execute !== 'function' || !approve) return [name, t]
+        if (typeof execute !== 'function') return [name, t]
         return [
           name,
           {
@@ -229,6 +262,7 @@ export const createSubagentTool = (opts: SubagentToolOptions): AgentTool => {
         ]
       }),
     )
+  }
 
   const runInProcess = async (
     task: string,
@@ -236,11 +270,17 @@ export const createSubagentTool = (opts: SubagentToolOptions): AgentTool => {
     forward: (e: AgentEvent) => void,
     hostTools: ToolSet,
     profile: SubagentProfile | undefined,
+    id: string,
+    elicitations: { count: number } | undefined,
   ): Promise<ChildOutcome> => {
     const config = { ...(opts.config as BrowserAgentConfig), ...profile?.config }
     // One child per task: its host tools are gated by THIS parent run. A
     // direct model (incl. a loaded WebLLM engine) is passed through, not rebuilt.
-    const agent: Agent = await createAgent({ ...config, tools: { ...config.tools, ...hostTools } })
+    // The child's own tools are marked as a subagent's calls too (the host tools already are).
+    const agent: Agent = await createAgent({
+      ...config,
+      tools: { ...asSubagentCalls(config.tools, id, elicitations), ...hostTools },
+    })
     let runError: string | undefined
     const result = await agent.run(task, {
       signal,
@@ -439,20 +479,26 @@ export const createSubagentTool = (opts: SubagentToolOptions): AgentTool => {
             name: opts.name,
             event: adoptSubagentEvent(event, id),
           })
-        const hostTools = gatedHostTools(runCtx?.approve)
+        const hostTools = gatedHostTools(runCtx?.approve, id, runCtx?.elicitations)
         const run = opts.worker ? runInWorker : runInProcess
-        const out = await run(task, controller.signal, forward, hostTools, profile).catch(
-          (err: unknown) => {
-            // The user's stop wins over a deadline that fired at the same moment.
-            if (stoppedByUser)
-              throw new Error(
-                `subagent "${opts.name}" was stopped by the user before it finished — carry on without its result, or take another approach`,
-              )
-            if (timedOut)
-              throw new Error(`subagent "${opts.name}" timed out after ${opts.timeoutMs} ms`)
-            throw err
-          },
-        )
+        const out = await run(
+          task,
+          controller.signal,
+          forward,
+          hostTools,
+          profile,
+          id,
+          runCtx?.elicitations,
+        ).catch((err: unknown) => {
+          // The user's stop wins over a deadline that fired at the same moment.
+          if (stoppedByUser)
+            throw new Error(
+              `subagent "${opts.name}" was stopped by the user before it finished — carry on without its result, or take another approach`,
+            )
+          if (timedOut)
+            throw new Error(`subagent "${opts.name}" timed out after ${opts.timeoutMs} ms`)
+          throw err
+        })
         runCtx?.addUsage(out.usage)
         emit({ type: 'subagent.complete', id, name: opts.name, text: out.text, usage: out.usage })
         return clip(out.text, outputMax)

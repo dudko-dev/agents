@@ -43,6 +43,14 @@ against its production build.
   kinds/refusals, notices); `src/image-resize.ts` — `downscaleImage`.
 - `src/labels.tsx` — every UI string (`defaultLabels`, `AgentLabelsProvider`,
   `useLabels`); components take `labels` overrides.
+- MCP elicitation: STATE ONLY so far. The reducer folds the core's `mcp.elicitation-requested` /
+  `mcp.elicitation-answered` into `AgentUiState.elicitations` (`ElicitationView`; optional - absent
+  until a server asks, so a state without the feature is what it was; a subagent's question
+  surfaces on the run; `stopped` cancels the pending ones). It is deliberately NOT mirrored onto
+  the run's `ChatMessage` (a saved conversation must not hold a server's form) and never holds an
+  answer. `src/mcp-types.ts` has the structural request / result / handler / options types. No
+  hook passes `onElicitation` yet and there is no component: that is the next step (a prompt
+  beside `ToolApprovalPrompt`, labels, `docs/chat.md`).
 - `src/mcp-types.ts` — structural types for the core's optional `./mcp` subpath,
   which `use-mcp` loads with a dynamic import (never a static one).
 - `src/mcp.ts` — the **`./mcp` entry**: `useMcp`, `useMcpServers` and their helpers

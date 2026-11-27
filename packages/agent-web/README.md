@@ -260,10 +260,10 @@ On 2026-07-28: there is no session (`mcp-session-id`), no GET stream and no
   advertises `tools.listChanged`. If that stream ends it is **not opened
   again**: a `warn` line says so, and changes are not announced until you
   connect again. `refreshServer(name)` always works.
-- **`input_required` is not supported.** A tool that asks the user something
-  (elicitation), or asks for the call to be sent again with a state, fails with
-  `MCP tool "x" did not finish: the server asked for more input …`; the call
-  is not repeated.
+- **`input_required` needs `onElicitation`.** Without it, a tool that asks the
+  user something (elicitation), or asks for the call to be sent again with a
+  state, fails with `MCP tool "x" did not finish: the server asked for more
+  input …`; the call is not repeated. With it, see [Elicitation](#elicitation-a-server-asks-the-user).
 
 Pass several servers at once — they connect concurrently, each with its own
 deadline (`connectTimeoutMs`, default 30 s), every page of a paginated
@@ -293,6 +293,62 @@ followed for up to 100 pages (a repeated cursor ends the walk; past the cap a
 agent built from them picks up a server's new tool list (react to it via the
 `onToolsChanged` option) without being rebuilt. Filtering is plain object work:
 delete the keys you don't want before merging.
+
+### Elicitation: a server asks the user
+
+A tool may need something only the user has - a name to confirm, a choice, a
+page to visit - and ask for it **in the middle of the call**. Off until you give
+the connection a callback:
+
+```ts
+const pending = new Map<string, (r: McpElicitationResult) => void>()
+
+const mcp = await connectMcpHttp(servers, {
+  // The HOST decides, never the model. `request` is the SERVER's text: show it as such.
+  onElicitation: (request, { signal }) =>
+    new Promise((resolve) => {
+      pending.set(request.id, resolve) // your UI resolves it: accept / decline / cancel
+      signal.addEventListener('abort', () => pending.delete(request.id)) // no longer wanted
+    }),
+  elicitation: { timeoutMs: 300_000, maxPerToolCall: 5, maxPerRun: 20 }, // the defaults
+})
+// later, from the form the user filled in:
+pending.get(id)?.({ action: 'accept', content: { name: 'Ada' } })
+```
+
+- **Off = nothing changes.** Without `onElicitation` no capability is declared, a
+  server cannot ask, and every request is byte for byte what it was (no new
+  request header either: a server's CORS list needs nothing for this).
+- **The request** (`McpElicitationRequest`): `id`, `server`, `tool` (the call
+  that asks), `mode: 'form' | 'url'`, `message`, and `requestedSchema` (a flat
+  form: strings, numbers, booleans, selects) or `url`. All of it is third-party
+  text, cleaned and capped; none of it reaches a prompt. A form that is not flat,
+  or too large, is declined without the callback being called.
+- **The answer** is checked against the form before it is sent (types, limits,
+  required fields, no field the form did not ask for) and goes **only to the
+  server that asked**: not into the model's context, an event, a log or a run
+  checkpoint.
+- **URL mode** is opt-in (`elicitation: { url: true }`). The link is only handed
+  to your callback: this package never fetches it and never calls
+  `window.open`. Only `https:` (or loopback `http:`) links get that far. Open it
+  from a user gesture, in a new tab, showing the host name first.
+- **Nobody decided = the call fails.** A callback that throws or does not answer
+  within `timeoutMs`, an answer that does not fit, a cap: the question is
+  cancelled, the tool call fails with one sentence that says why, and nothing is
+  retried.
+- **Subagents do not ask** unless the connection says so
+  (`elicitation: { subagents: true }`): a helper the model started, and a
+  subagent tool's child that was handed these tools, have their questions
+  cancelled without the callback being called.
+- **Time.** A question waits `timeoutMs` (5 minutes) at most, **and no longer
+  than the step it belongs to**: `chatTimeoutMs` (default 120 s) ends the step
+  and the question with it (`mcp.elicitation-answered`, `reason: 'step-timeout'`,
+  and a warning). Raise `chatTimeoutMs` on an agent whose servers may ask.
+- **Events** inside a run: `mcp.elicitation-requested` and
+  `mcp.elicitation-answered` (field names, never a value).
+
+The whole of it, with every guard: [docs/capabilities.md](docs/capabilities.md#mcp-elicitation-a-server-asks-the-user)
+and [docs/security.md](docs/security.md#mcp-elicitation-a-server-asks-the-user-in-the-middle-of-a-tool-call).
 
 ### OAuth 2.1 + Dynamic Client Registration
 
@@ -599,7 +655,7 @@ that run's limits. Give `persistence` a store
 last checkpoint with `run('', { resumeFromRunId })` — the planner does not run again and
 no finished step is repeated. `createRunControl()` steers a run that is going: `send()`
 puts a message in front of the model at the next boundary (the replanner re-checks the plan
-against it), `stopSubagent(id)` stops one subagent. `egress` (off by default) gives the model one safe `web_fetch` tool with allow / deny lists. `search` (off by default) adds `web_search` over a search API you name (Tavily, Brave through a gateway, your SearXNG) or a function of yours — the key stays in the credential store. `sandbox` (off by default) gives the model `run_js`: the code it wrote runs in QuickJS-in-WebAssembly inside a Web Worker that is killed at the deadline, so "I ran it" is a tool call you can see. `media` (off by default) mounts `generate_image`, `generate_speech` and `transcribe_audio` — each only when you configure its model — writes what they make into the virtual file system instead of the context, and turns attached audio into text for a model that cannot listen. `learning` (off by default) lets the agent write down what it figured out as skills of its own — in memory, or in the file system across sessions. Details, defaults and events:
+against it), `stopSubagent(id)` stops one subagent. `egress` (off by default) gives the model one safe `web_fetch` tool with allow / deny lists. `search` (off by default) adds `web_search` over a function of yours (any search API — recipes for Tavily, Brave and SearXNG are in the docs) or the built-in Google Search through Gemini grounding, which needs only a Gemini key and spends its tokens — the key stays in the credential store. `sandbox` (off by default) gives the model `run_js`: the code it wrote runs in QuickJS-in-WebAssembly inside a Web Worker that is killed at the deadline, so "I ran it" is a tool call you can see. `media` (off by default) mounts `generate_image`, `generate_speech` and `transcribe_audio` — each only when you configure its model — writes what they make into the virtual file system instead of the context, and turns attached audio into text for a model that cannot listen. `learning` (off by default) lets the agent write down what it figured out as skills of its own — in memory, or in the file system across sessions. Details, defaults and events:
 **[docs/capabilities.md](docs/capabilities.md)**.
 
 ## Pipelines: a graph of agents
@@ -674,7 +730,7 @@ Loading a definition someone else wrote: [docs/security.md](docs/security.md#pip
 | `toolApproval` | autopilot | consent policy: `{ mode, rules, onRequest, timeoutMs }`; `agent.setToolApprovalMode()` |
 | `skills` | — | SKILL.md bundles (`defineSkill` / `parseSkillMarkdown` / `loadSkillFromUrl`) |
 | `egress` | off | what the **model** may fetch (`web_fetch`): `true` = any public host over https, or `{ allow, deny, protocols, allowPrivateNetwork, fetch, ... }`; a browser can't pin DNS, so prefer an `allow` list — see [Egress](docs/capabilities.md#egress-what-the-model-may-fetch) |
-| `search` | off | the model may **search the web** (`web_search`: a short list of title / url / snippet): `{ provider: 'tavily' \| 'brave' \| 'searxng', credentialRef, baseURL, maxResults, allowPrivateNetwork, readOnly, fetch }` or `{ engine: fn }`. No key ships with the library and none is written in the config (`credentialRef` names it in `credentials`); the request reaches only the search API; with `egress`, results the model could not fetch are left out. Brave needs a gateway from a page (no CORS) — see [Search](docs/capabilities.md#search-finding-the-page-to-fetch) |
+| `search` | off | the model may **search the web** (`web_search`: a short list of title / url / snippet): `{ engine: fn }` - a search engine of yours, any API - or `{ provider: 'google', credentialRef, model, baseURL, maxResults, allowPrivateNetwork, readOnly, fetch }` - Google Search through Gemini grounding: one extra `generateContent` call per search on a Gemini key (default model `gemini-2.5-flash-lite`), which **spends model tokens** (`usage` phase `'search'`) and returns **Google redirect links**, not the pages' URLs. No key ships with the library and none is written in the config (`credentialRef` names it in `credentials`); the request reaches only that API; with `egress`, results the model could not fetch are left out. Recipes for Tavily / Brave / SearXNG as an `engine`, the free-tier models and what the redirect links mean — see [Search](docs/capabilities.md#search-finding-the-page-to-fetch) |
 | `media` | off | image generation, speech and transcription as tools, each mounted only when its model is set: `{ imageModel, speechModel, transcriptionModel, maxCalls, timeoutMs, files, folder, voice, speechFormat, transcribeAttachments }`. A model is an AI SDK image / speech / transcription model object or a `ProviderModelSpec` (key by `credentialRef`). Generated files go to the virtual file system and the model gets a path, never the bytes; attached audio is transcribed to text; calls are counted in `usage.mediaCalls` (and the other media fields) and capped per run — see [Media](docs/capabilities.md#media-images-speech-and-transcription) |
 | `decisionModel` | off | a **decision model** - answers a closed question with one option and a probability instead of writing text: `{ providerType: 'google', model: 'gemini-decision-1', credentialRef }` (the key stays in `credentials`; the request reaches only that API) or an object with `decide(question, { abortSignal })`. Where it is confident it replaces the replanner's continue / finish call and a pipeline node's route call; never consulted for tool approval or egress — see [Decision models](docs/capabilities.md#decision-models) |
 | `decision` | `{}` | `{ confidenceThreshold, timeoutMs, replan, route }` (defaults 0.8, 5000 ms, on, on): below the threshold, on an error, a timeout or an answer that is not an option, the ordinary model call runs unchanged |

@@ -598,12 +598,27 @@ state = agentStateReducer(state, { type: 'event', event }) // fold each AgentEve
 ```
 
 The state is made of plain, exported view types you can render with your own components:
-`StepView` (a step and its `ToolCallView`s; `StepEscalationView` for its escalations), `ApprovalView`, `SubagentView`, `UserNoteView` /
+`StepView` (a step and its `ToolCallView`s; `StepEscalationView` for its escalations), `ApprovalView`, `ElicitationView` (a question an MCP server put to the user in the middle of a tool call - `state.elicitations`, see below), `SubagentView`, `UserNoteView` /
 `QueuedMessageView` (steering), `LessonView` / `FetchView` (the notebook and the pages fetched),
 `BudgetView`, `CompactionView`, `AttachmentView`, `ChatMessage` (a transcript entry that keeps its
 own steps, usage and duration). Outside `<AgentChat>`, `useAgentContext()` returns the controller of
 the enclosing `<AgentProvider>` (it throws outside one; `useOptionalAgentContext()` returns
 `undefined` instead), and `useLabels()` the labels in effect.
+
+**MCP elicitation (state only, no component yet).** When an MCP connection was given the core's
+`onElicitation`, a server may ask the user something in the middle of a tool call; the core's
+`mcp.elicitation-requested` / `mcp.elicitation-answered` events fold into `state.elicitations`
+(absent until the first one): an `ElicitationView` per question with `id`, `server`, `tool`,
+`mode`, `message`, `requestedSchema` or `url`, `stepId`, `subagent?`, and a `status` of
+`pending | accepted | declined | cancelled` (`automatic` / `reason` when nobody decided, `fields`
+- the names an accepted form was answered with). The view never holds an answer, and it is a
+per-run view: it is not copied into the transcript, so a saved conversation never contains a
+server's form. `message`, the schema's titles and `url` are the SERVER's text - render them as
+text, as the server's. The hooks do not pass `onElicitation` to the core yet; a host that calls
+`connectMcpHttp` itself gets the structural types (`McpElicitationRequest`,
+`McpElicitationResult`, `McpElicitationHandler`, `McpElicitationOptions`) from
+`@dudko.dev/agent-web-react/mcp`, and answers a pending view by resolving the promise its own
+`onElicitation` returned for the same `id`.
 
 ## How it fits together
 

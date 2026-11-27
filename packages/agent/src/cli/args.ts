@@ -51,6 +51,8 @@ Optional env vars (see env.example for the full list):
                               (default: a share of the context window; 0 = no cap)
   AGENT_TOOL_APPROVAL         autopilot | ask-writes | ask-all | read-only
   AGENT_TOOL_RULES            JSON: { "<tool or glob*>": "allow" | "ask" | "deny" } - beats the mode
+  AGENT_MCP_ELICITATION       form lets an MCP server ask YOU something during a tool call (a form at the
+                              prompt); all also accepts a link to open yourself; off (default): servers cannot ask
   AGENT_SKILLS_DIR            folder of <skill>/SKILL.md skills
   AGENT_LEARNING              on lets the agent write down lessons as skills (for this session)
   AGENT_LEARNING_DIR          keep them as <dir>/<name>/SKILL.md across sessions (needs AGENT_LEARNING=on)
@@ -58,11 +60,12 @@ Optional env vars (see env.example for the full list):
   AGENT_EGRESS_ALLOW / _DENY  comma lists: host, *.host, IP or CIDR (deny wins; allow limits to these)
   AGENT_EGRESS_PROTOCOLS      https (default) | http | https,http
   AGENT_EGRESS_ALLOW_PRIVATE  on lets it reach private networks (cloud metadata stays refused)
-  AGENT_SEARCH                brave | tavily | searxng lets the model search the web (web_search); off (default)
-  AGENT_SEARCH_API_KEY        the search API's key (brave, tavily); never logged
-  AGENT_SEARCH_BASE_URL       the SearXNG instance (required for searxng), or a gateway for the others
+  AGENT_SEARCH                google lets the model search the web (web_search: Google Search via Gemini grounding); off (default)
+  AGENT_SEARCH_API_KEY        a Gemini API key (default: AGENT_API_KEY when AGENT_PROVIDER_TYPE=google); never logged
+  AGENT_SEARCH_MODEL          the Gemini model that makes the grounding call (default gemini-2.5-flash-lite); spends its tokens
+  AGENT_SEARCH_BASE_URL       a gateway in place of the public Gemini endpoint
   AGENT_SEARCH_MAX_RESULTS    results per search (default 5, at most 10)
-  AGENT_SEARCH_ALLOW_PRIVATE  on lets the search API itself be on a private address (a local SearXNG)
+  AGENT_SEARCH_ALLOW_PRIVATE  on lets that gateway be on a private address
   AGENT_IMAGE_MODEL           an image model id: the model can generate images (generate_image)
   AGENT_SPEECH_MODEL          a speech model id: the model can speak text to a file (generate_speech)
   AGENT_TRANSCRIPTION_MODEL   a transcription model id: /audio <file> attaches audio as text (transcribe_audio)
@@ -93,6 +96,11 @@ Commands inside the REPL:
 
 When the approval mode asks, answer y (allow once), n (deny) or a (always
 allow this tool for the session).
+
+With AGENT_MCP_ELICITATION, a question from an MCP server is shown as a quotation
+("| ..."): answer y to fill in its fields one by one (Enter takes a default or
+skips an optional field, /cancel dismisses), n to decline, anything else to
+cancel. What you type goes to that server only - not to the model.
 `
 
 const FLAG_TO_ENV: Record<string, string> = {

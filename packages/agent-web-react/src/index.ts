@@ -65,12 +65,15 @@ export type { AgentProviderProps } from './context.js'
 // ── Headless state (the pure event → UI reducer, for custom UIs) ─────────────
 export { agentStateReducer, createInitialAgentState, lessonsOf, subagentTree } from './state.js'
 export type { AgentAction } from './state.js'
+// The form inside an `ElicitationView` (types only: the MCP hooks are the `./mcp` entry).
+export type { McpElicitationFieldSchema, McpElicitationSchema } from './mcp-types.js'
 export type {
   AgentUiState,
   AgentStatus,
   QueuedMessageView,
   UserNoteView,
   ApprovalView,
+  ElicitationView,
   BudgetView,
   ChatAttachment,
   ChatMessage,
