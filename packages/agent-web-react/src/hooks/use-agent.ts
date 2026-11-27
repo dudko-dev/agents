@@ -421,7 +421,8 @@ export const useAgent = (
         (event) => {
           // Decided (or given up on): nothing waits on the answer any more. The queue drops a
           // request whose signal aborted; this also covers a core that sends no signal.
-          if (event.type === 'tool.approval-resolved') appApprovals.deny(event.id, 'no longer asked')
+          if (event.type === 'tool.approval-resolved')
+            appApprovals.deny(event.id, 'no longer asked')
           dispatch({
             type: 'event',
             event,

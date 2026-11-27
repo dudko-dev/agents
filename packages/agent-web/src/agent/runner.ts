@@ -1504,6 +1504,7 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
         {
           mode: approval.mode === 'autopilot' ? 'ask-writes' : approval.mode,
           config: approval.config,
+          timeoutMs: approval.timeoutMs,
           remembered: appRemembered,
         },
         {
