@@ -128,7 +128,8 @@
     and per run, timeout, abort, a failed handler = cancel) and the session that drives a tool
     call in both revisions (`createMcpElicitationSession`: 2025 = the `elicitation/create`
     request handler, calls to that server ONE AT A TIME because the request does not name its
-    call, the call's own 60 s clock stopped while a question waits; 2026-07-28 = `input_required`
+    call, the call's own 60 s clock stopped while a question waits - and the run's clock too,
+    `call.pause`, see `wait-clock.ts`; 2026-07-28 = `input_required`
     answered and the same call sent again with `inputResponses` + `requestState`, never after an
     automatic answer). A COPY of the browser sibling's `src/mcp/elicitation.ts`, byte for byte:
     change both (`tests/mcp-elicitation-shared.test.ts` compares them and tests every guard).
@@ -221,6 +222,21 @@
     call counts on every run above it), the approval label in `approval.ts`. OFF without the
     switch: the same golden fixture as the tiers. Privilege boundary: every guard has a test in
     `tests/subagent-dynamic.test.ts` and a mutation check. In-process only.
+  - `wait-clock.ts` (pure, no imports): time limits that do not count the time a PERSON takes. One
+    clock per run (`IRunState.clock`, made in `runner.ts`); the executor's step limit
+    (`llmTimeoutMs`, `deadlineSignal` in `executor.ts`) and the `timeoutMs` of every subagent the
+    run's tool calls start (`subagent.ts`, `subagent-dynamic.ts`) are its deadlines. The approval
+    gate (`approval.ts`) and an MCP question (`answerMcpElicitation`, `call.pause`, wired in
+    `mcp.ts`) pause it for the wait; it goes on with what it had left - never reset, never
+    extended past the wait. The waits' own bounds (`toolApproval.timeoutMs`, `elicitation.timeoutMs`)
+    are plain timers, NOT on the clock, and a stop is passed on at once. A subagent tool follows its
+    child's events (`followHumanWaits`: `…-requested` → `…-resolved` / `…-answered`, any depth), so
+    the caller's clock stops while anything below waits; a worker child is told by `tool-wait`
+    messages and a proxied call in flight follows (`followClock`) the calling run's clock. A COPY
+    of the browser sibling's `src/wait-clock.ts`, byte for byte: change both
+    (`tests/wait-clock.test.ts` compares them and tests the clock on mocked timers;
+    `tests/human-wait.test.ts` drives the whole loop). Every guard has a test and a mutation check.
+    Without a wait nothing changes: the golden fixtures pass untouched.
   - `internal.ts` (`IRunState`: the per-run mutable state shared by the runner, the stages and the tool
     wrappers) + `context.ts` (`runContext`, the AsyncLocalStorage that carries run id, emit and state
     into tools). Neither is public API.

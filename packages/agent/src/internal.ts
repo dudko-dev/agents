@@ -4,6 +4,7 @@ import type { RunControlPort } from './control.ts'
 import type { ISpawnReservation } from './subagent-dynamic-shared.ts'
 import type { IMedia } from './media.ts'
 import type { IResolvedEscalation, IStepWrites } from './tiers.ts'
+import type { IWaitClock } from './wait-clock.ts'
 import type {
   EventHandler,
   IAgentConfig,
@@ -77,6 +78,10 @@ export interface IRunState {
   // Questions MCP servers asked the user in this run (`onElicitation`), its helpers' calls
   // included: counted on the state of the run the host started (elicitation.maxPerRun).
   elicitations?: { count: number }
+  // The run's clock (wait-clock.ts): its step limit (`llmTimeoutMs`) and the time limits of the
+  // subagents it calls are deadlines of it, and it is stopped while a tool call of the run - or
+  // of a subagent below it - waits for a person (a tool approval, an MCP elicitation).
+  clock?: IWaitClock
 }
 
 // The executor models by tier, when config.executorTiers is on. `standard` is always there (it

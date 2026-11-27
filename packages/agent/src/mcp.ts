@@ -603,6 +603,8 @@ export const connectMcpServers = async (
                     // ask the user only when the host allowed that.
                     ...(scope?.id ? { subagent: { id: scope.id, depth: scope.depth } } : {}),
                     ...(run ? { run } : {}),
+                    // While the user is asked, the step's time limit does not run.
+                    ...(store?.state?.clock ? { pause: store.state.clock.pause } : {}),
                   }
                   result = await elicitation.call(
                     era,
