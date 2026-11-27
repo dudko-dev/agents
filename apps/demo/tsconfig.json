@@ -14,6 +14,9 @@
     "isolatedModules": true,
     "verbatimModuleSyntax": true,
     "noEmit": true,
+    // vite.config.ts imports the demo MCP server from apps/worker, TypeScript that Node runs as
+    // it is (type stripping), so its relative imports name `.ts` files.
+    "allowImportingTsExtensions": true,
     "paths": {
       "@dudko.dev/agent-web-react": ["../../packages/agent-web-react/dist/index.d.ts"],
       "@dudko.dev/agent-web-react/mcp": ["../../packages/agent-web-react/dist/mcp.d.ts"],

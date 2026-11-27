@@ -39,6 +39,11 @@ Three tabs, sharing one "Agent settings" panel:
   search** (a compact catalogue + `find_tools`) instead of sending every schema.
   Each server must send CORS headers for this origin (including
   `Access-Control-Expose-Headers: WWW-Authenticate, mcp-session-id`).
+  No server of your own? **Try the demo server** adds the site's own one,
+  `<this origin>/mcp/demo` (a Cloudflare Worker, [`apps/worker`](../worker/); same origin, so no
+  CORS): `echo`, `current_time`, `roll_dice` (structured content), and two tools that ask *you*
+  something in the middle of the call — `plan_trip` (a form) and `open_docs` (a link). It is
+  connected with the protocol on "Auto": its questions need the 2026-07-28 revision.
 - **Chess vs agent** — you play White; **your move is the trigger**: the agent
   reads the position with `get_position`, weighs candidates (`evaluate_moves`,
   or analyst **subagents** — each in its own **Web Worker**, or in-process),
@@ -121,9 +126,14 @@ pnpm --filter demo dev
 The demo aliases `@dudko.dev/agent-web-react` to the built `packages/agent-web-react/dist` (see
 [`vite.config.ts`](vite.config.ts)), so rebuild the library after editing its source.
 
+There is no Worker behind `vite dev` and `vite preview`: both serve `/mcp/demo` themselves, with the
+Worker's own handler running on Node (`demoMcpServer` in `vite.config.ts`, from
+`apps/worker/src/node.ts`), so "Try the demo server" works locally and in the browser tests.
+
 ## Deployment
 
-Cloudflare builds and serves it (Workers static assets, the root `wrangler.jsonc`): every push to
+Cloudflare builds and serves it (Workers static assets, the root `wrangler.jsonc`; the one
+Worker script there answers `/mcp/*` only - the demo MCP server): every push to
 `main` that touches the demo or the browser packages is built with `pnpm nx build demo` and
 deployed; pull requests get a preview. The Vite `base` is `/demo/` — the build lands in
 `dist/demo`, with a `dist/_redirects` that sends the site's root there until the documentation
