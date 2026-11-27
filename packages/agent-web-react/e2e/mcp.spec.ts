@@ -28,11 +28,11 @@ const openMcpPanel = async (page: Page) => {
   await expect(page.getByPlaceholder('https://your-server.example/mcp')).toBeVisible()
 }
 
-const addServer = async (page: Page, url: string, auth?: 'OAuth + DCR') => {
+const addServer = async (page: Page, url: string, auth?: 'OAuth') => {
   await page.getByPlaceholder('https://your-server.example/mcp').fill(url)
   // The name is the tool prefix: "mcp" keeps the tool called mcp__echo.
   await page.getByLabel('Name (tool prefix)').fill('mcp')
-  if (auth) await page.getByRole('radio', { name: auth }).check()
+  if (auth) await page.getByRole('radio', { name: auth, exact: true }).check()
   await page.getByRole('button', { name: 'Add server' }).click()
 }
 
@@ -50,7 +50,7 @@ test('connects to a server that needs no auth and lists its tools', async ({ pag
 
 test('OAuth: authorize, come back, and end up connected', async ({ page }) => {
   await openMcpPanel(page)
-  await addServer(page, servers.mcpUrl, 'OAuth + DCR')
+  await addServer(page, servers.mcpUrl, 'OAuth')
 
   // The server challenges; the app registers itself and asks the user to go.
   await expect(status(page)).toContainText('Authorization required')
@@ -77,7 +77,7 @@ test('OAuth: a reload reconnects with the stored tokens, without re-authorizing'
   page,
 }) => {
   await openMcpPanel(page)
-  await addServer(page, servers.mcpUrl, 'OAuth + DCR')
+  await addServer(page, servers.mcpUrl, 'OAuth')
   await expect(status(page)).toContainText('Authorization required')
   await page.getByRole('button', { name: /Authorize/ }).click()
   await expect(status(page)).toContainText('Connected', { timeout: 15_000 })

@@ -4,6 +4,7 @@ import type {
   McpProtocolMode,
   UseMcpServersReturn,
 } from '@dudko.dev/agent-web-react/mcp'
+import { demoClientMetadataUrl } from '../oauth-client'
 
 export interface McpPanelProps {
   mcp: UseMcpServersReturn
@@ -85,6 +86,7 @@ export const McpPanel = ({
     if (mode === 'oauth') void check()
   }, [mode, check])
   const demoUrl = demoServerUrl()
+  const cimdUrl = demoClientMetadataUrl()
   const oauthUnavailable = mode === 'oauth' && mcp.oauthSupported === false
   const canAdd = url.trim().length > 0 && !oauthUnavailable
 
@@ -287,7 +289,7 @@ export const McpPanel = ({
             [
               ['none', 'No auth'],
               ['bearer', 'Bearer token'],
-              ['oauth', 'OAuth + DCR'],
+              ['oauth', 'OAuth'],
             ] as [McpAuthMode, string][]
           ).map(([value, label]) => (
             <label key={value} className={`mcp__mode${mode === value ? ' is-active' : ''}`}>
@@ -302,6 +304,23 @@ export const McpPanel = ({
             </label>
           ))}
         </div>
+
+        {mode === 'oauth' && (
+          <p className="settings__note">
+            {cimdUrl ? (
+              <>
+                The demo signs in as <code>{cimdUrl}</code>, its client ID metadata document (CIMD),
+                where the server’s authorization server accepts one; otherwise it registers itself
+                (DCR).
+              </>
+            ) : (
+              <>
+                The demo registers itself (DCR). Its client ID metadata document (CIMD) is used on
+                agent.dudko.dev only: it names that site’s pages as the redirect addresses.
+              </>
+            )}
+          </p>
+        )}
 
         <label className="settings__field">
           <span className="settings__label">Protocol revision</span>

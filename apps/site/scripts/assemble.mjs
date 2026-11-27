@@ -50,4 +50,28 @@ for (const path of ['/demo/', '/pipeline/']) {
 }
 writeFileSync(sitemap, xml)
 
+// The demo's OAuth client ID metadata document (CIMD, public/oauth/client.json): an authorization
+// server takes its address as the client's ID and sends the user back only to the addresses it
+// lists. It must name itself, and the two pages that sign in to MCP servers - exactly the
+// redirect address the React hooks compute there (origin + path).
+const cimdUrl = `${SITE}/oauth/client.json`
+const cimdPath = resolve(dist, 'oauth/client.json')
+if (!existsSync(cimdPath))
+  throw new Error('oauth/client.json (the demo’s CIMD) is missing from the build')
+const cimd = JSON.parse(readFileSync(cimdPath, 'utf8'))
+const redirects = ['/demo/', '/pipeline/'].map((path) => `${SITE}${path}`)
+if (cimd.client_id !== cimdUrl) {
+  throw new Error(`oauth/client.json: client_id must be its own address, ${cimdUrl}`)
+}
+if (JSON.stringify(cimd.redirect_uris) !== JSON.stringify(redirects)) {
+  throw new Error(`oauth/client.json: redirect_uris must be ${redirects.join(', ')}`)
+}
+if (cimd.token_endpoint_auth_method !== 'none') {
+  throw new Error('oauth/client.json: a page holds no secret - token_endpoint_auth_method "none"')
+}
+const demoCimd = readFileSync(resolve(here, '../../demo/src/oauth-client.ts'), 'utf8')
+if (!demoCimd.includes(`'${cimdUrl}'`)) {
+  throw new Error(`apps/demo/src/oauth-client.ts does not name ${cimdUrl}`)
+}
+
 console.log('assembled: the demo is under dist/demo/, the pipeline editor under dist/pipeline/')

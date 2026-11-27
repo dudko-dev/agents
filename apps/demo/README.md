@@ -32,8 +32,13 @@ Three tabs, sharing one "Agent settings" panel:
   system in IndexedDB) the agent reads and writes with its `fs_*` tools.
 - **MCP servers** — connect **any number** of remote MCP endpoints; their tools
   merge into one agent (`<server>__<tool>`). Auth per server is none, a bearer
-  token, or **OAuth 2.1 + dynamic client registration**: the app registers
-  itself, runs PKCE, keeps the tokens encrypted in IndexedDB and refreshes them.
+  token, or **OAuth 2.1**: on agent.dudko.dev the demo's client ID is its **client ID metadata
+  document** (CIMD, `https://agent.dudko.dev/oauth/client.json`, served from
+  `apps/site/public/oauth/`; `src/oauth-client.ts`) where the server's authorization server
+  accepts one, and it **registers itself** (DCR) where it does not - and on every other origin
+  (previews, `vite dev`, the browser tests), whose addresses that document does not list. Either
+  way it runs PKCE, keeps the tokens encrypted in IndexedDB and refreshes them. The site's build
+  checks the document names itself and the demo's two pages (`apps/site/scripts/assemble.mjs`).
   The list is remembered and reconnects on load. Tick the **mock catalogue** to
   add 185 tools on six pretend servers and watch the agent switch to **tool
   search** (a compact catalogue + `find_tools`) instead of sending every schema.
