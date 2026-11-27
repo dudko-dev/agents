@@ -587,4 +587,20 @@ test('a setting that is not a usable number is a configuration error', async () 
     createAgent(baseConfig('http://127.0.0.1:1', { elicitation: { maxPerToolCall: 0 } })),
     /elicitation\.maxPerToolCall must be a number of at least 1/,
   )
+  for (const timeoutMs of [-1, Number.NaN]) {
+    await assert.rejects(
+      createAgent(baseConfig('http://127.0.0.1:1', { elicitation: { timeoutMs } })),
+      new RegExp(`elicitation\\.timeoutMs must be a number of at least 0 .*\\(got ${timeoutMs}\\)`),
+    )
+  }
+  // 0, Infinity and more than a timer holds are "no limit", not a configuration error.
+  for (const timeoutMs of [0, Infinity, 2 ** 31]) {
+    const agent = await createAgent(
+      baseConfig('http://127.0.0.1:1', {
+        onElicitation: () => ({ action: 'decline' }),
+        elicitation: { timeoutMs },
+      }),
+    )
+    await agent.close()
+  }
 })

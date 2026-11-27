@@ -815,8 +815,19 @@ form is ordinary, and the step used to end under them (the elicitation answered 
   a loaded machine cannot end a step that real but short limits would, and what a step had left
   is checked to the millisecond; one test keeps the real timers. It is a test seam, not an API:
   nothing exports it, and it gives no power that the globals it stands for do not.
-- **Approval's bound has no default.** A question without `toolApproval.timeoutMs` waits until
-  the run is stopped - as documented before, but the step's limit no longer caps it by accident.
+- **Approval's bound is 5 minutes by default**, as an elicitation's is. The step's limit stops
+  while a person decides, so without a bound of its own nothing but a stop would end a question
+  nobody answers: a run left alone would wait for ever with its tool call half done. Five minutes
+  is long enough to read a request and short enough that an abandoned run moves on (the call is
+  denied, the replanner routes around it). A host that wants the person to take as long as they
+  need says so: `0` or `Infinity`.
+- **A bound a timer cannot hold is no bound.** `setTimeout` takes a 32-bit delay: `Infinity` or
+  anything above 2^31 - 1 ms (about 24.8 days) fires after about 1 ms. Both waits resolve their
+  `timeoutMs` before a timer sees it: `0`, `Infinity` and more than 2^31 - 1 mean "until the run
+  is stopped". Not clamped to 2^31 - 1: that would end a wait the host asked to be longer, with a
+  denial quoting a number nobody set - and a wait of more than 24 days outlives any page and any
+  run anyway. A negative number or `NaN` is a configuration error at `createAgent` (or the
+  connect, for an elicitation), never a silent "no bound".
 
 ## Secrets
 

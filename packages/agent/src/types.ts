@@ -240,6 +240,15 @@ export interface IToolApprovalRequest {
   subagent?: { id: string; depth: number }
 }
 
+// What the gate hands `onRequest` beside the request.
+export interface IToolApprovalContext {
+  // Aborted when the question ends WITHOUT your answer: no decision within `timeoutMs`
+  // (`signal.reason` is an Error named 'TimeoutError'), the run was stopped (the run's own
+  // reason), or the handler failed. Take the prompt down then: an answer given later is ignored.
+  // Never aborted once you have answered.
+  signal: AbortSignal
+}
+
 // `remember: true` on an approval allows the tool for the rest of this agent
 // instance's life without asking again.
 export type ToolApprovalDecision =
@@ -252,8 +261,13 @@ export interface IToolApprovalConfig {
   // The most specific match wins (exact > longest glob) and beats the mode.
   rules?: Record<string, ToolPermission>
   // Called for every 'ask'. Without it an 'ask' is a denial.
-  onRequest?: (req: IToolApprovalRequest) => ToolApprovalDecision | Promise<ToolApprovalDecision>
-  // No decision within this many ms -> deny. Default: wait forever (until the run is stopped).
+  onRequest?: (
+    req: IToolApprovalRequest,
+    ctx: IToolApprovalContext,
+  ) => ToolApprovalDecision | Promise<ToolApprovalDecision>
+  // No decision within this many ms -> deny. Default 300_000 (TOOL_APPROVAL_TIMEOUT_MS). 0 or
+  // Infinity: no bound - the question waits until the run is stopped; so does a value above
+  // 2^31 - 1 (about 24.8 days, the most a timer holds). Negative or NaN: createAgent throws.
   // The only bound on the wait: the step's `llmTimeoutMs` (and a subagent's `timeoutMs`) stop
   // while a person decides.
   timeoutMs?: number
@@ -515,9 +529,10 @@ export interface IAgentConfig {
   // tool call; nothing is retried. See the README, "MCP elicitation".
   onElicitation?: McpElicitationHandler
   // Its settings: `timeoutMs` (default 300_000: a human is answering; the step's `llmTimeoutMs`
-  // stops while a question waits), `maxPerToolCall` (5), `maxPerRun` (20), `url` (also accept
-  // URL mode; default false), `subagents` (let a call made by a spawn_subagent helper ask too;
-  // default false: a helper's question is cancelled without the callback being called).
+  // stops while a question waits; 0 or Infinity = no limit of its own), `maxPerToolCall` (5),
+  // `maxPerRun` (20), `url` (also accept URL mode; default false), `subagents` (let a call made
+  // by a spawn_subagent helper ask too; default false: a helper's question is cancelled without
+  // the callback being called).
   elicitation?: McpElicitationOptions
   // Show the model the `instructions` a connected MCP server returned in its
   // initialize result (planner and executor system prompts, under a preamble

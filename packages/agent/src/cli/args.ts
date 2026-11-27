@@ -95,7 +95,8 @@ Commands inside the REPL:
   /approval <mode>            autopilot | ask-writes | ask-all | read-only
 
 When the approval mode asks, answer y (allow once), n (deny) or a (always
-allow this tool for the session).
+allow this tool for the session). A question nobody answers within 5 minutes
+is denied and closed with one line; Ctrl-C closes it with the run.
 
 With AGENT_MCP_ELICITATION, a question from an MCP server is shown as a quotation
 ("| ..."): answer y to fill in its fields one by one (Enter takes a default or

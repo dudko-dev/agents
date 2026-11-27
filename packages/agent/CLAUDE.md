@@ -229,7 +229,10 @@
     gate (`approval.ts`) and an MCP question (`answerMcpElicitation`, `call.pause`, wired in
     `mcp.ts`) pause it for the wait; it goes on with what it had left - never reset, never
     extended past the wait. The waits' own bounds (`toolApproval.timeoutMs`, `elicitation.timeoutMs`)
-    are plain timers, NOT on the clock, and a stop is passed on at once. A subagent tool follows its
+    are plain timers, NOT on the clock, and a stop is passed on at once. Both default to 5 minutes;
+    `0`, `Infinity` and more than 2^31 - 1 ms are "no bound", resolved before a timer sees them
+    (`resolveApprovalTimeout`, the shared file's `timeoutOf`: `setTimeout` fires those after ~1 ms);
+    negative / NaN throw at creation; each rule has a test on mocked timers. A subagent tool follows its
     child's events (`followHumanWaits`: `…-requested` → `…-resolved` / `…-answered`, any depth), so
     the caller's clock stops while anything below waits; a worker child is told by `tool-wait`
     messages and a proxied call in flight follows (`followClock`) the calling run's clock. A COPY
@@ -249,7 +252,10 @@
     into tools). Neither is public API.
   - `cli/` — the `dd-agent` REPL (`start.ts` entry, `args.ts` flags + `--help`, `config.ts` env →
     `IAgentConfig`, `run.ts` the REPL and its slash commands, `live.ts` what a line typed *while* a
-    run goes means). A new env var / flag / command goes in `args.ts` (help), `config.ts` /
+    run goes means, `questions.ts` the approval / elicitation questions at the prompt: one at a
+    time, and one the agent stops waiting for - its `signal` aborted - closed with one line, the
+    event's own line skipped via `closedAtPrompt`; `tests/cli-questions.test.ts` drives it over a
+    real `readline/promises` interface and the real REPL). A new env var / flag / command goes in `args.ts` (help), `config.ts` /
     `run.ts`, `env.example` **and** the README's CLI section.
   - `index.ts` is exports only.
 - `tests/` — `node:test` suites, run via `node --experimental-strip-types`
