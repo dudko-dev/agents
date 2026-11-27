@@ -10,6 +10,7 @@ import {
 import { DEMO_INSTRUCTIONS } from '../src/demo-server.ts'
 import { demoMcpMiddleware } from '../src/node.ts'
 import { DEMO_TOOL_NAMES, DOCS_PATH } from '../src/tools.ts'
+import { APP_ONLY_TOOLS, bookingCode, TRIP_BOARD_URI } from '../src/trip-board.ts'
 
 // The demo server as the demo's own client meets it: `connectMcpHttp` of @dudko.dev/agent-web
 // (the official 2.x client SDK inside) over a real socket, through the Node adapter that `vite
@@ -49,21 +50,26 @@ type Execute = (args: unknown, options: unknown) => Promise<unknown>
 const connect = async (
   protocol: 'legacy' | 'auto' | undefined,
   onElicitation?: McpElicitationHandler,
+  apps = false,
 ) => {
   const server = await listen()
   const logs: string[] = []
+  const events: { type: string }[] = []
   const mcp = await connectMcpHttp(
     { demo: { url: server.url, ...(protocol ? { protocol } : {}) } },
     {
       clientName: 'worker-test',
       onLog: (level, message) => logs.push(`${level} ${message}`),
       ...(onElicitation ? { onElicitation, elicitation: { url: true } } : {}),
+      ...(apps ? { apps: true } : {}),
     },
   )
   const call = async (name: string, args: Record<string, unknown> = {}): Promise<string> => {
     const tool = mcp.tools[`demo__${name}`] as unknown as { execute: Execute }
     try {
-      const value = await tool.execute(args, { agentRun: { emit: () => {} } })
+      const value = await tool.execute(args, {
+        agentRun: { emit: (event: { type: string }) => events.push(event) },
+      })
       return typeof value === 'string' ? value : JSON.stringify(value)
     } catch (err) {
       return `threw: ${String(err)}`
@@ -72,6 +78,7 @@ const connect = async (
   return {
     mcp,
     logs,
+    events,
     call,
     origin: new URL(server.url).origin,
     close: async () => {
@@ -81,14 +88,14 @@ const connect = async (
   }
 }
 
-test('auto: the 2026-07-28 revision, the five tools, the instructions', async () => {
+test('auto: the 2026-07-28 revision, every tool (no MCP Apps: the app tools too), the instructions', async () => {
   const demo = await connect('auto')
   try {
     assert.deepEqual(demo.mcp.results, [{ name: 'demo', connected: true }])
     assert.deepEqual(demo.mcp.protocols, [{ server: 'demo', version: '2026-07-28', era: 'modern' }])
     assert.deepEqual(
-      demo.mcp.catalog.map((t) => [t.name, t.readOnly]),
-      DEMO_TOOL_NAMES.map((name) => [`demo__${name}`, true]),
+      demo.mcp.catalog.map((t) => [t.name, t.readOnly === true]),
+      DEMO_TOOL_NAMES.map((name) => [`demo__${name}`, name !== 'book_trip']),
     )
     assert.deepEqual(
       demo.mcp.instructions.map((i) => [i.server, i.instructions]),
@@ -158,3 +165,70 @@ test('2025 (the client default): plain tools work; a question is an error that n
     await demo.close()
   }
 })
+
+const LISBON = {
+  destination: 'Lisbon',
+  start: '2026-12-01',
+  nights: 3,
+  travellers: 2,
+  budget: 'comfortable',
+}
+
+for (const protocol of ['auto', 'legacy'] as const) {
+  test(`apps: true (${protocol}): the app tools are not the model's; the app is read, and calls them`, async () => {
+    const demo = await connect(protocol, undefined, true)
+    try {
+      assert.equal(demo.mcp.protocols[0]?.era, protocol === 'auto' ? 'modern' : 'legacy')
+      // The model's tools: all but the two that are for the app only.
+      assert.deepEqual(
+        demo.mcp.catalog.map((t) => t.name),
+        DEMO_TOOL_NAMES.filter((n) => !(APP_ONLY_TOOLS as readonly string[]).includes(n)).map(
+          (n) => `demo__${n}`,
+        ),
+      )
+      for (const name of APP_ONLY_TOOLS) assert.equal(demo.mcp.tools[`demo__${name}`], undefined)
+      assert.deepEqual(
+        demo.mcp.catalog.filter((t) => t.app).map((t) => [t.name, t.app]),
+        [['demo__trip_board', TRIP_BOARD_URI]],
+      )
+      const apps = demo.mcp.apps
+      assert.ok(apps)
+      // The model's call comes with the event a host draws the app from.
+      await demo.call('trip_board', LISBON)
+      const event = demo.events.find((e) => e.type === 'mcp.app') as any
+      assert.equal(event.resourceUri, TRIP_BOARD_URI)
+      assert.equal(event.toolName, 'trip_board')
+      assert.equal(event.result.structuredContent.trip.destination, 'Lisbon')
+      // The app's document, as the core checks it: the MIME type, no origin to reach.
+      const resource = await apps.readUiResource('demo', TRIP_BOARD_URI)
+      assert.match(resource.html, /^<!doctype html>/)
+      assert.ok(resource.html.includes(JSON.stringify(`${demo.origin}/docs/browser/`).slice(0, -1)))
+      assert.deepEqual(resource.csp, {
+        connectDomains: [],
+        resourceDomains: [],
+        frameDomains: [],
+        baseUriDomains: [],
+      })
+      assert.deepEqual(resource.refusedDomains, [])
+      assert.deepEqual(resource.permissions, {})
+      // The app may call its two tools: one a write, as far as the host knows (it asks first).
+      assert.equal(apps.appTool('demo', 'book_trip')?.readOnly, false)
+      assert.deepEqual(apps.appTool('demo', 'book_trip')?.visibility, ['app'])
+      assert.equal(apps.appTool('demo', 'reshuffle_day')?.readOnly, true)
+      const booked = await apps.callAppTool('demo', 'book_trip', { ...LISBON, variants: [0, 2] })
+      assert.equal(
+        (booked.structuredContent as { confirmation: string }).confirmation,
+        bookingCode({ ...LISBON, end: '2026-12-04' } as never, [0, 2]),
+      )
+      const day = await apps.callAppTool('demo', 'reshuffle_day', {
+        destination: 'Lisbon',
+        day: 3,
+        days: 4,
+        variant: 1,
+      })
+      assert.equal((day.structuredContent as { day: number }).day, 3)
+    } finally {
+      await demo.close()
+    }
+  })
+}

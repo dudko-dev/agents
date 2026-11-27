@@ -811,10 +811,22 @@ No key, no account; it keeps nothing and fetches nothing. Tools: `echo`, `curren
 revisions statelessly, so its questions need `protocol: 'auto'` or `'modern'`: on the 2025
 revisions the two asking tools answer with an error that says so.
 
+It has an [MCP App](#mcp-apps-a-servers-interface-for-a-tool) too, on both revisions: `trip_board`
+plans a trip day by day (`structuredContent`, and the same plan as text) and declares
+`ui://demo/trip-board.html` - one self-contained document whose resource declares empty CSP lists
+(it reaches no origin). The board calls two tools of its server that are for apps only
+(`visibility: ['app']`, so a connection with `apps: true` does not mount them for the model):
+`reshuffle_day` (read-only: other ideas for one day, run without a prompt) and `book_trip` (a
+pretend booking - nothing is booked or kept, the code is a hash of the trip - declared as a write,
+so `agent.approveAppToolCall` asks the user first). It also asks the host to open this page's
+section on MCP Apps (`ui/open-link`) and to put the plan in the message box (`ui/message`), and
+reports its height as days open and close. Everything is computed from the inputs: the same trip,
+the same plan and the same code.
+
 ```ts
 const mcp = await connectMcpHttp(
   { demo: { url: 'https://agent.dudko.dev/mcp/demo', protocol: 'auto' } },
-  { onElicitation: askTheUser, elicitation: { url: true } },
+  { onElicitation: askTheUser, elicitation: { url: true }, apps: true },
 )
 ```
 
@@ -832,7 +844,9 @@ over `postMessage` (JSON-RPC: `ui/initialize`, then the tool's input and result,
 requests - `tools/call` on its server, `ui/open-link`, `ui/message`, size changes).
 
 This package is the data side of a host; drawing the app is a UI's (the React package's
-`<McpAppFrame>` / `<AgentChat mcpApps>`). On a connection made with `apps: true` (`./mcp`):
+`<McpAppFrame>` / `<AgentChat mcpApps>`). To see one without a server of your own, the
+[demo server](#try-it-the-demo-server)'s `trip_board` comes with an app. On a connection made with
+`apps: true` (`./mcp`):
 
 | What | Where |
 | --- | --- |

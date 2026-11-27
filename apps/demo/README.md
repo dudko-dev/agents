@@ -41,9 +41,14 @@ Three tabs, sharing one "Agent settings" panel:
   `Access-Control-Expose-Headers: WWW-Authenticate, mcp-session-id`).
   No server of your own? **Try the demo server** adds the site's own one,
   `<this origin>/mcp/demo` (a Cloudflare Worker, [`apps/worker`](../worker/); same origin, so no
-  CORS): `echo`, `current_time`, `roll_dice` (structured content), and two tools that ask *you*
-  something in the middle of the call — `plan_trip` (a form) and `open_docs` (a link). It is
-  connected with the protocol on "Auto": its questions need the 2026-07-28 revision.
+  CORS): `echo`, `current_time`, `roll_dice` (structured content), two tools that ask *you*
+  something in the middle of the call — `plan_trip` (a form) and `open_docs` (a link) — and
+  `trip_board`, which comes with an **MCP App**: a trip board drawn in the chat, in a sandboxed
+  frame. The board calls its server's two tools for apps only (the model never sees them):
+  "Other ideas" for a day runs at once (`reshuffle_day`, read-only), "Book this trip" waits for
+  your OK in the chat (`book_trip`, a pretend booking that returns a code computed from the trip),
+  and it asks to open the docs and to put the plan in your message box. It is connected with the
+  protocol on "Auto": its questions need the 2026-07-28 revision (the board works on both).
   A server's **MCP Apps** are drawn in the chat, on an origin of their own: the sandbox page of
   `@dudko.dev/agent-web-react/mcp-app-sandbox` at `https://agent-demo-apps.dudko.workers.dev/sandbox/v1`
   (a second Worker, [`apps/app-sandbox`](../app-sandbox/); `src/app-sandbox.ts`). The frame says

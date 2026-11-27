@@ -5,7 +5,8 @@ import test from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { DEMO_MCP_PATH } from '../src/demo-server.ts'
 import { handleRequest, type Env } from '../src/index.ts'
-import { DOCS_PATH } from '../src/tools.ts'
+import { DEMO_TOOL_NAMES, DOCS_PATH } from '../src/tools.ts'
+import { APP_DOCS_PATH } from '../src/trip-board.ts'
 import { modernRequest, read } from './wire.ts'
 
 // The Worker as Cloudflare runs it: which paths reach it (the root wrangler.jsonc), what it does
@@ -109,7 +110,7 @@ const routes = async (fetch: Handler): Promise<void> => {
   const { env, seen } = assets()
   const mcp = await read(await fetch(modernRequest('tools/list'), env))
   assert.equal(mcp.status, 200)
-  assert.equal(mcp.message.result.tools.length, 5)
+  assert.equal(mcp.message.result.tools.length, DEMO_TOOL_NAMES.length)
   // Any other path the Worker sees is the assets' answer: the site's own 404 page.
   for (const path of ['/mcp/other', '/mcp/demo/', '/']) {
     const res = await fetch(new Request(`https://agent.dudko.dev${path}`), env)
@@ -130,12 +131,10 @@ test('the Worker (the bundle wrangler deploys): the same', async () => {
   await routes(mod.default.fetch)
 })
 
-test('open_docs links to a section of the docs that exists', () => {
+test('open_docs and the trip board app link to sections of the docs that exist', () => {
   // The site's pages are generated from the packages' Markdown (apps/site/scripts/sync-docs.mjs):
   // /docs/browser/capabilities/ is packages/agent-web/docs/capabilities.md, and an anchor is its
   // heading, slugged the way Starlight does (lower case, punctuation dropped, spaces to dashes).
-  const [path, anchor] = DOCS_PATH.split('#')
-  assert.equal(path, '/docs/browser/capabilities/')
   const doc = readFileSync(resolve(repo, 'packages/agent-web/docs/capabilities.md'), 'utf8')
   const slugs = [...doc.matchAll(/^#{1,6} (.+)$/gm)].map(([, heading]) =>
     (heading as string)
@@ -143,5 +142,9 @@ test('open_docs links to a section of the docs that exists', () => {
       .replace(/[^\p{L}\p{N}\s-]/gu, '')
       .replace(/\s/g, '-'),
   )
-  assert.ok(slugs.includes(anchor as string), `no heading slugs to #${anchor}`)
+  for (const link of [DOCS_PATH, APP_DOCS_PATH]) {
+    const [path, anchor] = link.split('#')
+    assert.equal(path, '/docs/browser/capabilities/')
+    assert.ok(slugs.includes(anchor as string), `no heading slugs to #${anchor}`)
+  }
 })
