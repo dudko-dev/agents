@@ -58,12 +58,18 @@ export const elicitationConnectOptions = (
   return settings ? { onElicitation: handler, elicitation: settings } : {}
 }
 
-/** How long the core waits for an answer with these settings; `undefined` = no limit of its own. */
+/** The longest wait a timer holds (2^31 - 1 ms); the core takes a longer `timeoutMs` as none. */
+const TIMER_MAX_MS = 2_147_483_647
+
+/**
+ * How long the core waits for an answer with these settings; `undefined` = no limit of its own
+ * (`0`, `Infinity`, more than a timer holds - the core's own rules).
+ */
 export const elicitationTimeoutOf = (settings: McpElicitationOptions): number | undefined => {
   const raw = settings.timeoutMs
   if (raw === undefined || raw === null) return ELICITATION_TIMEOUT_MS
-  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) return undefined
-  return Math.floor(raw)
+  if (typeof raw !== 'number' || !(raw > 0) || raw > TIMER_MAX_MS) return undefined
+  return Math.max(1, Math.floor(raw))
 }
 
 export interface ElicitationQueueOptions {

@@ -3,6 +3,7 @@ import { runContext } from './context.ts'
 import type {
   EventHandler,
   IToolApprovalConfig,
+  IToolApprovalContext,
   IToolApprovalRequest,
   ToolApprovalDecision,
   ToolApprovalMode,
@@ -159,11 +160,43 @@ const normalizeDecision = (
       ? { approved: d.approved === true, reason: d.reason, remember: d.remember }
       : { approved: false, reason: 'invalid approval decision' }
 
-class ApprovalTimeout extends Error {}
+/** How long a question waits for a decision when `toolApproval.timeoutMs` is not set: 5 minutes. */
+export const TOOL_APPROVAL_TIMEOUT_MS = 300_000
 
+// The longest delay a timer holds (2^31 - 1 ms, about 24.8 days). `setTimeout` fires a longer one
+// - Infinity included - after about 1 ms, so a bound past it is taken as no bound at all.
+const MAX_TIMER_MS = 2_147_483_647
+
+/**
+ * `toolApproval.timeoutMs` as the gate uses it: absent = {@link TOOL_APPROVAL_TIMEOUT_MS}; `0`,
+ * `Infinity` or more than a timer holds = no bound (0: the question waits until the run is
+ * stopped). Anything that is not a number of at least 0 is a configuration error.
+ */
+export const resolveApprovalTimeout = (value: unknown): number => {
+  if (value === undefined || value === null) {
+    return TOOL_APPROVAL_TIMEOUT_MS
+  }
+  if (typeof value !== 'number' || Number.isNaN(value) || value < 0) {
+    throw new Error(
+      `toolApproval.timeoutMs must be a number of milliseconds of at least 0 (0 or Infinity: no limit), got: ${typeof value === 'number' ? String(value) : JSON.stringify(value)}`,
+    )
+  }
+  return value === 0 || value > MAX_TIMER_MS ? 0 : Math.max(1, Math.floor(value))
+}
+
+// The bound ran out. Named like `AbortSignal.timeout`'s reason: it is also the reason of the
+// host's signal.
+class ApprovalTimeout extends Error {
+  constructor(timeoutMs: number) {
+    super(`no decision within ${timeoutMs}ms`)
+    this.name = 'TimeoutError'
+  }
+}
+
+// `timeoutMs` is resolved (resolveApprovalTimeout): 0 = no bound, else what a timer can hold.
 const awaitDecision = (
   pending: Promise<ToolApprovalDecision>,
-  timeoutMs: number | undefined,
+  timeoutMs: number,
   signal: AbortSignal | undefined,
 ): Promise<ToolApprovalDecision> =>
   new Promise((resolve, reject) => {
@@ -183,10 +216,10 @@ const awaitDecision = (
       return
     }
     signal?.addEventListener('abort', onAbort, { once: true })
-    if (typeof timeoutMs === 'number' && timeoutMs > 0) {
+    if (timeoutMs > 0) {
       timer = setTimeout(() => {
         done()
-        reject(new ApprovalTimeout())
+        reject(new ApprovalTimeout(timeoutMs))
       }, timeoutMs)
     }
     pending.then(
@@ -221,6 +254,7 @@ export const createApprovalController = (
       `toolApproval.mode must be ${[...MODES].join(' | ')}, got: ${JSON.stringify(mode)}`,
     )
   }
+  const timeoutMs = resolveApprovalTimeout(config?.timeoutMs)
   const remembered = new Set<string>()
 
   const gate = async (name: string, input: unknown, opts: IApprovalGateOptions): Promise<void> => {
@@ -280,18 +314,24 @@ export const createApprovalController = (
       ...(subagent ? { subagent } : {}),
     }
     let raw: ToolApprovalDecision
+    // The host's own signal: aborted when the question ends without its answer (the bound, a
+    // stop, a failed handler), so a prompt left open can be taken down. Never after an answer.
+    const asked = new AbortController()
+    const ctx: IToolApprovalContext = { signal: asked.signal }
     // A person is being asked: the step's time limit (and a subagent's) is about models and
     // tools, and does not run meanwhile. The wait has its own bound, `timeoutMs`.
     const resume = store?.state?.clock?.pause()
     try {
       raw = await awaitDecision(
-        Promise.resolve().then(() => onRequest(request)),
-        config?.timeoutMs,
+        Promise.resolve().then(() => onRequest(request, ctx)),
+        timeoutMs,
         opts.signal,
       )
     } catch (err) {
+      // Before the resolved event: a host that closes its prompt hears of it first.
+      asked.abort(err)
       if (err instanceof ApprovalTimeout) {
-        deny(`no decision within ${config?.timeoutMs}ms`, true)
+        deny(`no decision within ${timeoutMs}ms`, true)
       }
       if (opts.signal?.aborted) {
         emit({

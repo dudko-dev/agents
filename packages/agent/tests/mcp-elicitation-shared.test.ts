@@ -15,6 +15,7 @@ import {
   MCP_ELICITATION_MAX_PER_TOOL_CALL,
   MCP_ELICITATION_MESSAGE_MAX_CHARS,
   MCP_ELICITATION_NAME_MAX_CHARS,
+  MCP_ELICITATION_TIMEOUT_MAX_MS,
   MCP_ELICITATION_TIMEOUT_MS,
   MCP_ELICITATION_TRUNCATED,
   MCP_ELICITATION_URL_MAX_CHARS,
@@ -89,6 +90,7 @@ test('settings: the defaults, and a value that is not a usable number is refused
   assert.equal(loose.subagents, false)
   for (const bad of [
     { timeoutMs: -1 },
+    { timeoutMs: -Infinity },
     { timeoutMs: Number.NaN },
     { timeoutMs: '5' },
     { maxPerToolCall: 0 },
@@ -101,6 +103,23 @@ test('settings: the defaults, and a value that is not a usable number is refused
       JSON.stringify(bad),
     )
   }
+  // A number is shown as it is - NaN is not "null".
+  assert.throws(
+    () => resolveMcpElicitationOptions({ timeoutMs: Number.NaN }),
+    /^Error: elicitation\.timeoutMs must be a number of at least 0 \(0 or Infinity: no limit\) \(got NaN\)$/,
+  )
+})
+
+test('settings: timeoutMs - 0, Infinity and more than a timer holds are no limit; a fraction is 1 ms', () => {
+  const timeoutOf = (timeoutMs: number) => resolveMcpElicitationOptions({ timeoutMs }).timeoutMs
+  assert.equal(MCP_ELICITATION_TIMEOUT_MAX_MS, 2 ** 31 - 1)
+  assert.equal(timeoutOf(0), 0)
+  assert.equal(timeoutOf(Infinity), 0, 'Infinity reaches no timer')
+  assert.equal(timeoutOf(2 ** 31), 0, 'nor does a delay a timer cannot hold')
+  assert.equal(timeoutOf(Number.MAX_VALUE), 0)
+  assert.equal(timeoutOf(MCP_ELICITATION_TIMEOUT_MAX_MS), MCP_ELICITATION_TIMEOUT_MAX_MS)
+  assert.equal(timeoutOf(1500.9), 1500)
+  assert.equal(timeoutOf(0.5), 1, 'a positive fraction is a bound, not "no limit"')
 })
 
 test('capability: the form always, URL mode only when the host asked for it', () => {
@@ -663,6 +682,73 @@ test('ask: no answer in time cancels and fails the call; the host is told the wa
   assert.equal(signal?.aborted, true)
   assert.equal((h.events.at(-1) as { reason?: string }).reason, 'timeout')
 })
+
+// On mocked timers: Node's mock fires a delay past 2^31 - 1 (Infinity included) after 1 ms, as
+// the real setTimeout does, so a bound handed to the timer unresolved shows as a timeout here.
+const flushTurns = async (): Promise<void> => {
+  for (let i = 0; i < 5; i += 1) {
+    await new Promise((resolve) => setImmediate(resolve))
+  }
+}
+
+test('ask: without timeoutMs a question waits 5 minutes, then it is cancelled', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const h = harness(() => new Promise(() => {}))
+  let answer: unknown
+  void answerMcpElicitation(h.deps, h.call, NAME_FORM).then((a) => {
+    answer = a
+  })
+  await flushTurns()
+  t.mock.timers.tick(MCP_ELICITATION_TIMEOUT_MS - 1)
+  await flushTurns()
+  assert.equal(answer, undefined, 'cancelled before the five minutes were up')
+  t.mock.timers.tick(1)
+  await flushTurns()
+  assert.deepEqual(answer, { action: 'cancel' })
+  assert.match(h.call.failure ?? '', /nobody answered within 300000 ms \(elicitation\.timeoutMs\)/)
+  assert.equal((h.events.at(-1) as { reason?: string }).reason, 'timeout')
+})
+
+for (const [label, timeoutMs] of [
+  ['0', 0],
+  ['Infinity', Infinity],
+  ['more than a timer holds (2^31)', 2 ** 31],
+] as const) {
+  test(`ask: timeoutMs ${label} = no limit - the question waits until the run is stopped`, async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    const controller = new AbortController()
+    let hostSignal: AbortSignal | undefined
+    const h = harness(
+      (_request, ctx) => {
+        hostSignal = ctx.signal
+        return new Promise(() => {})
+      },
+      { timeoutMs },
+      { signal: controller.signal },
+    )
+    let outcome: unknown = 'pending'
+    void answerMcpElicitation(h.deps, h.call, NAME_FORM).then(
+      (a) => {
+        outcome = a
+      },
+      (err: unknown) => {
+        outcome = err
+      },
+    )
+    await flushTurns()
+    for (const ms of [0, 1, 5, MCP_ELICITATION_TIMEOUT_MS, MCP_ELICITATION_TIMEOUT_MAX_MS]) {
+      t.mock.timers.tick(ms)
+      await flushTurns()
+      assert.equal(outcome, 'pending', `ended after a tick of ${ms} ms`)
+    }
+    assert.equal(hostSignal?.aborted, false)
+    const stop = new Error('stopped by the user')
+    controller.abort(stop)
+    await flushTurns()
+    assert.equal(outcome, stop, 'the stop is what ended it')
+    assert.equal((h.events.at(-1) as { reason?: string }).reason, 'aborted')
+  })
+}
 
 test('ask: an answer that is not one, or does not fit the form, is not sent', async () => {
   const cases: [string, unknown, RegExp][] = [

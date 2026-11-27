@@ -178,7 +178,11 @@ behind every decision.
   `agentRun.clock`, or `subagentCall.pause` for a worker's host tool) pause it for the wait; it goes
   on with what it had left - never reset, never extended past the wait. The waits' own bounds
   (`toolApproval.timeoutMs`, `elicitation.timeoutMs`) are plain timers, NOT on the clock, and a
-  stop is passed on at once. A subagent tool follows its child's events (`followHumanWaits`); a
+  stop is passed on at once. Both default to 5 minutes; `0`, `Infinity` and more than 2^31 - 1 ms
+  are "no bound", resolved before a timer sees them (`resolveApprovalTimeout` in
+  `tools/approval.ts`, `timeoutOf` in `mcp/elicitation.ts`: `setTimeout` fires those after ~1 ms);
+  negative / NaN throw at creation; each rule has a test on mocked timers. A subagent tool follows
+  its child's events (`followHumanWaits`); a
   host tool asked about by the PARENT's gate pauses the parent's clock and the child's follows
   (`followClock`; a worker child by `tool-wait` messages). A COPY of the server's
   `src/wait-clock.ts`, byte for byte — change both (the server's `tests/wait-clock.test.ts`

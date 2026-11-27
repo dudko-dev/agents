@@ -734,7 +734,9 @@ names the helper. A model that can start helpers must not get a second way to th
 cancelled, the tool call fails with a sentence that says why, and nothing is retried: a tool
 that writes runs once. The step's `chatTimeoutMs` does NOT bound a question - it stops while
 one waits - so `timeoutMs` is the bound; keep it (or a stop the user can reach) on every
-connection. The same goes for tool approval, whose `toolApproval.timeoutMs` has no default.
+connection. `0` or `Infinity` (or more than 2^31 - 1 ms) removes it: only a stop ends such a
+question. The same goes for tool approval: `toolApproval.timeoutMs` is 5 minutes by default, and
+`0` / `Infinity` there too leaves a question waiting until the run is stopped.
 
 **Off is off.** Without the callback no capability is declared and the wire is what it was. A
 server cannot switch the feature on, and neither can the model.

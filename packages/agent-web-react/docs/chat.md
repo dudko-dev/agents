@@ -700,7 +700,17 @@ commands switch the mode live, even mid-run.
 `<ToolApprovalPrompt>` (usable on its own) takes `approvals` (e.g. `useAgent().pendingApprovals`), `onApprove(id, { remember })` and
 `onDeny(id, reason)` (wire them to `useAgent().approve` / `.deny`), `allowRemember` (default
 true; false hides "Always allow") and `showHelper` (default true: a request made by a helper the
-model started says which helper asks - see [the tree](#subagents-and-helpers-the-tree)). `<ContextMeter>` shows tokens against `budgetTokens` and, with
+model started says which helper asks - see [the tree](#subagents-and-helpers-the-tree)).
+
+**A request nobody answers** is denied by the core after `toolApproval.timeoutMs` (default five
+minutes; `0` or `Infinity`: it waits until the run is stopped). Its card turns into a denial (the
+core's own event says why) and the hook drops it: the core hands `onRequest` a `signal` that
+aborts when it stops waiting, and the queue lets the request go then - a late click on its card does
+nothing. The queue is exported for a host that builds the core's agent itself:
+`createApprovalQueue()` (`handler` as `toolApproval.onRequest`, `approve`, `deny`, `settleAll`,
+`pending`).
+
+`<ContextMeter>` shows tokens against `budgetTokens` and, with
 `onCompact` (e.g. `agent.compact`), a "Compact" button — `compacting` disables it while it runs.
 
 ## Questions from MCP servers (elicitation)
@@ -714,7 +724,7 @@ cards are:
 import { useMcpServers } from '@dudko.dev/agent-web-react/mcp'
 
 const mcp = useMcpServers({ elicitation: { url: true } })
-const agent = useAgent({ model, tools: mcp.tools, chatTimeoutMs: 360_000 }, { deps: [mcp.tools] })
+const agent = useAgent({ model, tools: mcp.tools }, { deps: [mcp.tools] })
 
 <AgentChat
   controller={agent}
@@ -755,8 +765,10 @@ What it shows:
   opens it only on the click (`noopener,noreferrer`), then **I have finished there** (the accept),
   **Decline** and **Cancel**. Nothing on the card is a link, and anything but https (or http on a
   loopback host) has no Open action at all.
-- **The time left** - a question waits the core's `elicitation.timeoutMs` (default five minutes),
-  and no longer than its step (`chatTimeoutMs`). When nobody answers, the core cancels it, the tool
+- **The time left** - a question waits the core's `elicitation.timeoutMs` (default five minutes;
+  `0` or `Infinity`: no countdown, it waits until the run is stopped). Its step does not cut it
+  short: the core stops the step's clock (`chatTimeoutMs`) while a person is asked, and the step
+  goes on with the time it had left. When nobody answers, the core cancels it, the tool
   call fails, and the prompt says so: *"A question from the MCP server "crm" was answered
   automatically, and its tool call did not finish: nobody answered in time."* - with a Dismiss
   button. The same line appears for a question the core refused before it could be shown (a form

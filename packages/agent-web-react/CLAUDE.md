@@ -38,6 +38,9 @@ against its production build.
   (its WebLLM engine), `use-mcp` (remote MCP + OAuth round-trip),
   `use-mcp-servers` (several servers), `use-chat-history`, `use-virtual-files`,
   `use-speech-to-text`.
+- `src/approval-queue.ts` — `createApprovalQueue`, the consent queue behind `useAgent`'s
+  `approve` / `deny` (the core's `onRequest`): a request whose `signal` aborts (the core's
+  `timeoutMs`, a stop) leaves it, so no stale resolver is kept. `tests/approval-queue.test.ts`.
 - `src/chat-history.ts` — `ChatHistoryStore` (raw IndexedDB, memory fallback).
 - `src/composer.ts` — the composer's pure helpers (slash commands, attachment
   kinds/refusals, notices); `src/image-resize.ts` — `downscaleImage`.

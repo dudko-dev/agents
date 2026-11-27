@@ -12,10 +12,12 @@ import {
   type RunControl,
   type RunFile,
   type RunResult,
+  type ToolApprovalContext,
   type ToolApprovalDecision,
   type ToolApprovalMode,
   type ToolApprovalRequest,
 } from '@dudko.dev/agent-web'
+import { createApprovalQueue } from '../approval-queue.js'
 import { agentStateReducer, createInitialAgentState, lessonsOf } from '../state.js'
 import type { AgentUiState, ApprovalView, ChatAttachment, ChatMessage } from '../types.js'
 import { errMessage } from '../util.js'
@@ -168,20 +170,20 @@ export const useAgent = (
   const optionsRef = useRef(options)
   optionsRef.current = options
 
-  // Consent requests waiting for approve()/deny(), by request id. An MCP App's are kept apart:
-  // they are not the run's, so a run ending (or stopped) does not answer them.
-  const resolversRef = useRef(new Map<string, (d: ToolApprovalDecision) => void>())
-  const appResolversRef = useRef(new Map<string, (d: ToolApprovalDecision) => void>())
-  const settleAll = useCallback((decision: ToolApprovalDecision) => {
-    for (const resolve of resolversRef.current.values()) resolve(decision)
-    resolversRef.current.clear()
-  }, [])
+  // Consent requests waiting for approve()/deny(), by request id. One the core stops waiting
+  // for (its timeoutMs ran out, the run stopped) leaves its queue by its signal. An MCP App's are
+  // kept in a queue of their own: they are not the run's, so a run ending (or stopped) does not
+  // answer them.
+  const [approvals] = useState(createApprovalQueue)
+  const [appApprovals] = useState(createApprovalQueue)
+  const settleAll = useCallback(
+    (decision: ToolApprovalDecision) => approvals.settleAll(decision),
+    [approvals],
+  )
   const uiOnRequest = useCallback(
-    (req: ToolApprovalRequest) =>
-      new Promise<ToolApprovalDecision>((resolve) => {
-        ;(req.app ? appResolversRef : resolversRef).current.set(req.id, resolve)
-      }),
-    [],
+    (req: ToolApprovalRequest, ctx?: ToolApprovalContext) =>
+      (req.app ? appApprovals : approvals).handler(req, ctx),
+    [approvals, appApprovals],
   )
 
   // The memory session runs go to; a chat-history switch changes it.
@@ -267,12 +269,9 @@ export const useAgent = (
     () => () => {
       abortRef.current?.abort()
       settleAll({ approved: false, reason: 'the view was closed' })
-      for (const resolve of appResolversRef.current.values()) {
-        resolve({ approved: false, reason: 'the view was closed' })
-      }
-      appResolversRef.current.clear()
+      appApprovals.settleAll({ approved: false, reason: 'the view was closed' })
     },
-    [settleAll],
+    [settleAll, appApprovals],
   )
 
   // `run` calls itself (the follow-up of a run), so it is reached through a ref.
@@ -392,25 +391,22 @@ export const useAgent = (
     )
   }, [])
 
-  /** The waiting request with this id - the run's or an app's - taken off its list. */
-  const takeResolver = (id: string) => {
-    for (const map of [resolversRef.current, appResolversRef.current]) {
-      const resolve = map.get(id)
-      if (resolve) {
-        map.delete(id)
-        return resolve
+  // The waiting request with this id - the run's or an app's.
+  const approve = useCallback(
+    (id: string, opts?: ApproveOptions) => {
+      if (!approvals.approve(id, { remember: opts?.remember })) {
+        appApprovals.approve(id, { remember: opts?.remember })
       }
-    }
-    return undefined
-  }
+    },
+    [approvals, appApprovals],
+  )
 
-  const approve = useCallback((id: string, opts?: ApproveOptions) => {
-    takeResolver(id)?.({ approved: true, remember: opts?.remember })
-  }, [])
-
-  const deny = useCallback((id: string, reason?: string) => {
-    takeResolver(id)?.({ approved: false, reason })
-  }, [])
+  const deny = useCallback(
+    (id: string, reason?: string) => {
+      if (!approvals.deny(id, reason)) appApprovals.deny(id, reason)
+    },
+    [approvals, appApprovals],
+  )
 
   const approveAppToolCall = useCallback(
     async (call: AppToolCallRequest, signal?: AbortSignal): Promise<void> => {
@@ -423,8 +419,9 @@ export const useAgent = (
       await agent.approveAppToolCall(
         call,
         (event) => {
-          // Decided (or given up on, by `signal`): nothing waits on the resolver any more.
-          if (event.type === 'tool.approval-resolved') appResolversRef.current.delete(event.id)
+          // Decided (or given up on): nothing waits on the answer any more. The queue drops a
+          // request whose signal aborted; this also covers a core that sends no signal.
+          if (event.type === 'tool.approval-resolved') appApprovals.deny(event.id, 'no longer asked')
           dispatch({
             type: 'event',
             event,

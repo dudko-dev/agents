@@ -352,8 +352,11 @@ const agent = await createAgent({
   toolApproval: {
     mode: 'ask-writes', // 'autopilot' (default) | 'ask-writes' | 'ask-all' | 'read-only'
     rules: { 'github__delete_*': 'deny', 'docs__*': 'allow' }, // exact names or * globs
-    onRequest: async (req) => ({ approved: await confirm(`Run ${req.toolName}?`), remember: false }),
-    timeoutMs: 120_000, // no answer → deny
+    onRequest: async (req, { signal }) => ({
+      approved: await ask(`Run ${req.toolName}?`, { signal }), // close the dialog when signal aborts
+      remember: false,
+    }),
+    timeoutMs: 120_000, // no answer → deny (default 300_000; 0 or Infinity: until the run is stopped)
   },
 })
 agent.setToolApprovalMode('autopilot') // the "autopilot" switch, live — even mid-run
@@ -380,6 +383,25 @@ asked) and `tool.approval-resolved { id, name, approved, reason, automatic }`.
 The gate runs inside each tool's `execute`, so it covers native and prompted
 tool-calling, MCP tools and host tools called by subagents alike.
 
+**How long a question waits.** `timeoutMs` bounds the wait for `onRequest`:
+**5 minutes** (`300000`, exported as `TOOL_APPROVAL_TIMEOUT_MS`) when you do not
+set it. No decision by then is a denial (`automatic: true`, reason
+`no approval decision within 300000 ms`). Set any number of milliseconds
+instead, up to `Infinity`: `0` or `Infinity` means no bound - the question waits
+until the run is stopped - and so does a value above 2^31 - 1 (about 24.8 days,
+the longest delay a timer holds; `setTimeout` would fire it at once). A negative
+number, `NaN` or anything but a number makes `createAgent` throw.
+
+**When the question ends without you.** `onRequest` gets a second argument, `{ signal }`
+(`ToolApprovalContext`, the same shape as an elicitation's `ctx.signal`). It aborts when the agent
+stops waiting for your answer: the bound ran out (`signal.reason` is an Error named
+`TimeoutError`, message `no approval decision within 300000 ms`), the run was stopped (an Error
+named `AbortError`), or your handler failed. It aborts before the `tool.approval-resolved` event of
+that question, so a dialog closed on the signal is gone by the time the denial is reported. Take
+your dialog down then; an answer given later is ignored. It is never aborted once you have
+answered. (The React hook's queue does this for you: `createApprovalQueue` in
+`@dudko.dev/agent-web-react`.)
+
 **Time a person takes does not count.** From `tool.approval-requested` until
 the decision, the step's `chatTimeoutMs` (120 s by default) is stopped, and so
 is every limit the decision holds up: the `timeoutMs` of the subagent the call
@@ -388,7 +410,7 @@ calls through the parent's gate - the child's own step, in a worker too. When
 the decision is in they go on with the time they had left: not a fresh limit,
 and no more than the wait added. The same holds for an
 [MCP elicitation](#mcp-elicitation-a-server-asks-the-user). The wait's own bound
-is `timeoutMs` here; without it a question waits until the run is stopped.
+is `timeoutMs` here (5 minutes unless you set it, above).
 Stopping the run (`signal`, `control.stopSubagent`) still ends a wait at once;
 token and tool-call budgets are not affected. There is no run-level time limit
 in the config; a limit you put on the run's `signal` yourself
@@ -581,7 +603,7 @@ request header**.
 
 | `elicitation` | Default | |
 | --- | --- | --- |
-| `timeoutMs` | `300000` | How long one question waits for the callback (a person is answering). `0` = no limit of its own. |
+| `timeoutMs` | `300000` | How long one question waits for the callback (a person is answering). `0` or `Infinity` = no limit of its own (the question waits until the run is stopped), and so is a value above 2^31 - 1 ms (about 24.8 days, the longest delay a timer holds). A negative number or `NaN` fails the connect. |
 | `maxPerToolCall` | `5` | Questions one tool call may ask. |
 | `maxPerRun` | `20` | Questions one run may be asked, its helpers' calls included. |
 | `url` | `false` | Also accept URL mode: the server sends a link for the user to open. |
