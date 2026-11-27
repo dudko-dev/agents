@@ -532,11 +532,12 @@ Two notes:
   hooks is what puts it in your build.
 - `oauthSupported` is `false` on cores older than `@dudko.dev/agent-web@0.0.9`,
   which introduced `BrowserOAuthProvider`; header auth still works there. The
-  peer floor is `>=0.0.39` — the first core with model tiers, dynamic subagents,
-  media and decision models, whose helpers and constants this package imports
-  (`isReplayedToolOutput`, the media type lists), on top of pipelines, the learning
+  peer floor is `>=0.0.41` — the first core with MCP Apps (`approveAppToolCall`,
+  `sampleForApp`), MCP skills with consent, `file.written`, elicitation and the
+  OAuth `registration` choice this package's chat and hooks use, on top of model
+  tiers, dynamic subagents, media and decision models, pipelines, the learning
   notebook, the virtual file system, attachments, consent, tool search, subagents,
-  steering and context editing this package's chat builds on.
+  steering and context editing.
 
 ## Several MCP servers — `useMcpServers`
 

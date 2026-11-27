@@ -1,3 +1,16 @@
+# 0.0.49 / 2026-11-27
+
+### :tada: Enhancements
+- **Breaking for `config.search`:** the Brave, Tavily and SearXNG adapters are gone from the library. `search` takes your own `engine` function (a few lines for any provider), or `provider: 'google'` - Google Search through Gemini grounding, with its tokens reported under the usage phase `'search'`
+- MCP 2026-07-28 per server: `protocol: 'legacy' | 'auto' | 'modern'` (`'legacy'` keeps the 2025 revisions, the default)
+- MCP elicitation: a server may ask the user something during a tool call - `onElicitation(request, { signal })` (form or URL), with limits per call and run; events `mcp.elicitation-requested` / `mcp.elicitation-answered`. Off by default
+- MCP 2026-07-28: when the `subscriptions/listen` stream ends it is opened again with backoff (10 failures in a row give up), and the tools are re-listed after a re-subscribe
+- MCP skills (the `io.modelcontextprotocol/skills` extension, experimental): `skills: true | { consent }` per server, `mcpSkills` agent-wide. A server's skills join the catalog as `<server>/<skill>`, are read when needed, verified against the server's digests and loaded as third-party knowledge; `load_skill({ server, uri })` loads one the listing left out. The user is asked before a skill's text reaches the model (through `toolApproval.onRequest`; once per skill by default; autopilot does not skip it), and while one is active every tool that runs code is asked
+- MCP OAuth: `registration: 'auto' | 'cimd' | 'dcr'` - a client ID metadata document where the server supports it (default), the document only, or dynamic registration only; `registrationKind()` says which one a stored client is
+- Approval: a question waits 5 minutes by default (`toolApproval.timeoutMs`; `0` or `Infinity` = until the run is stopped); `onRequest` gets `{ signal }`. The CLI closes a question that ended without an answer
+- Time spent waiting for a person (a consent prompt, a server's question) does not count against the step's or a subagent's time limit
+- Sandbox: `timeoutMs` counts from the program's first instruction, not from the engine's start (a busy machine no longer fails short limits)
+
 # 0.0.48 / 2026-11-26
 
 ### :tada: Enhancements
