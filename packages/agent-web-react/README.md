@@ -33,7 +33,7 @@ app with a single hook and (optionally) a set of pre-styled components:
   `forgetSkill`) and the pages it fetched — see
   [docs/chat.md](docs/chat.md#talking-to-the-agent-while-it-works).
 - 🧩 **Building blocks** — `<AgentComposer>`, `<MessageList>`, `<StepList>`,
-  `<ToolApprovalPrompt>`, `<ApprovalModeSwitch>`, `<ChatHistoryList>`, `<FilesPanel>`,
+  `<ToolApprovalPrompt>`, `<ElicitationPrompt>`, `<ApprovalModeSwitch>`, `<ChatHistoryList>`, `<FilesPanel>`,
   `<LearnedSkills>`, `<ContextMeter>`, `<PlanView>`, `<ModelLoadBar>`, `<UsageBadge>`, `<ApiKeyForm>`; hooks `useChatHistory`,
   `useVirtualFiles`, `useSpeechToText`; MCP hooks `useMcp` / `useMcpServers` live in
   [`@dudko.dev/agent-web-react/mcp`](#mcp-hooks-live-in-their-own-subpath).
@@ -436,10 +436,14 @@ await mcp.connect({ url, oauth: true })       // or { url, headers: { Authorizat
 const config = { model, tools: { ...myTools, ...mcp.tools } }
 ```
 
-`useMcp` returns `{ status, tools, catalog, instructions, error, authorizationUrl,
-oauthSupported, completingAuthorization, connect, disconnect, authorize,
-forgetAuthorization, checkOAuthSupport }`. `status` is
-`idle | connecting | connected | needs-authorization | error`.
+`useMcp` returns `{ status, tools, catalog, instructions, protocol, error, authorizationUrl,
+oauthSupported, completingAuthorization, pendingElicitations, answerElicitation, connect,
+disconnect, authorize, forgetAuthorization, checkOAuthSupport }`. `status` is
+`idle | connecting | connected | needs-authorization | error`. `protocol` is the revision
+negotiated with the connected server (`{ server, version, era }`, e.g. `2025-11-25` / `legacy` or
+`2026-07-28` / `modern`; absent until connected, and on a core that does not report it).
+`pendingElicitations` / `answerElicitation` are the server's questions to the user - see
+[MCP elicitation](#mcp-elicitation--a-server-asks-the-user).
 
 `instructions` is what the connected server told the agent in its handshake (MCP `instructions`),
 when it sent any. The core puts that text into the system prompt of an agent that uses the
@@ -460,8 +464,10 @@ Options:
 | `useMcp({ clientName })` | the MCP client name, and the `client_name` of a dynamic registration |
 | `useMcp({ clientMetadataUrl })` | the URL of a **client ID metadata document** (CIMD) your app hosts, for every OAuth server - see below |
 | `useMcp({ onLog })` | connector log lines |
+| `useMcp({ elicitation })` | let a server ask the user something in the middle of a tool call: `true`, or the core's settings `{ url, timeoutMs, maxPerToolCall, maxPerRun, subagents }`. Off by default - see [MCP elicitation](#mcp-elicitation--a-server-asks-the-user) |
 | `connect({ url, name, headers })` | the endpoint, the tool prefix (`"<name>__<tool>"`, default `mcp`), static headers |
 | `connect({ oauth })` | `true`, or `{ redirectUrl, scope, clientName, clientMetadataUrl }` (`McpOAuthOptions`) - each overrides the hook-level value for this server |
+| `connect({ protocol })` | the MCP protocol revisions this connection may use: `'legacy'` (the 2025 revisions), `'auto'` (2026-07-28 when the server offers it, the 2025 ones otherwise) or `'modern'` (2026-07-28 only). Left out, nothing is passed and the core speaks the 2025 revisions, exactly as before. Kept across the OAuth redirect. See [the protocol revision](#the-protocol-revision) |
 
 **`clientMetadataUrl` (CIMD).** Instead of registering itself with every authorization server, an
 app can publish one JSON document that describes it and use that document's URL as its
@@ -514,8 +520,13 @@ mcp.servers  // [{ name, url, status, catalog, instructions, error, … }]
 const config = { model, tools: { ...myTools, ...mcp.tools } } // "<name>__<tool>"
 ```
 
-`useMcpServers` takes the options of `useMcp` (`clientName`, `clientMetadataUrl`, `onLog`) plus
-`persist`, `storageKey`, `autoConnect` and `connectTimeoutMs`. A server added with
+`useMcpServers` takes the options of `useMcp` (`clientName`, `clientMetadataUrl`, `onLog`,
+`elicitation`) plus `persist`, `storageKey`, `autoConnect` and `connectTimeoutMs`, and returns
+`{ servers, tools, catalog, protocols, connectedCount, pendingElicitations, answerElicitation, … }`.
+A server may be added with its own `protocol` (`add({ name, url, protocol: 'auto' })`), which is
+remembered with the list; `servers[i].protocolMode` is what it was added with and
+`servers[i].protocol` (`{ version, era }`) what was negotiated while it is connected - `protocols`
+lists them for every connected server. A server added with
 `auth: 'oauth'` may carry its own `oauth: { redirectUrl, scope, clientName, clientMetadataUrl }`,
 which wins over the hook-level values and is remembered with the list:
 
@@ -529,6 +540,96 @@ are read to the end; tools a server marks read-only skip the "ask before
 changes" prompt. With hundreds of tools the core switches to **tool search**
 (a compact catalogue + `find_tools`) above `toolSearchThreshold` — see the
 core's [capabilities doc](https://github.com/dudko-dev/agents/blob/main/packages/agent-web/docs/capabilities.md).
+
+### The protocol revision
+
+```tsx
+await mcp.add({ name: 'docs', url, protocol: 'auto' })
+mcp.servers[0].protocol // { version: '2026-07-28', era: 'modern' } - or 2025-11-25 / legacy
+```
+
+- `'legacy'` (and no `protocol` at all) is the 2025 handshake: the requests and the CORS request
+  headers are exactly what they were before the option existed.
+- `'auto'` asks the server first (`server/discover`, one extra request at connect) and speaks
+  2026-07-28 to a server that offers it. From a page, that revision sends two more request headers,
+  `Mcp-Method` and `Mcp-Name`: a server whose `Access-Control-Allow-Headers` does not list them
+  blocks the probe in the browser, and the core falls back to the 2025 revisions with a warning
+  (`onLog`) that names the missing headers.
+- `'modern'` is 2026-07-28 only: a server that does not offer it, or whose CORS blocks the headers,
+  fails the connect with the reason.
+
+The revision is decided once, at connect. The core's
+[README](https://github.com/dudko-dev/agents/blob/main/packages/agent-web/README.md) has the
+details (CORS, tool-list changes on 2026-07-28).
+
+## MCP elicitation — a server asks the user
+
+A server may ask the **user** for input in the middle of a tool call: a form to fill in (a name, a
+date, a choice), or - with `url: true` - a page to open (a payment, a sign-in on the server's own
+site). Turn it on in the hook and show the questions:
+
+```tsx
+import { useMcpServers } from '@dudko.dev/agent-web-react/mcp'
+import { AgentChat, useAgent } from '@dudko.dev/agent-web-react'
+
+const mcp = useMcpServers({ elicitation: { url: true } }) // or `true`: forms only
+const agent = useAgent({ model, tools: mcp.tools, chatTimeoutMs: 360_000 }, { deps: [mcp.tools] })
+
+<AgentChat
+  controller={agent}
+  elicitations={mcp.pendingElicitations}
+  onElicitationAnswer={mcp.answerElicitation}
+/>
+// or anywhere: <ElicitationPrompt elicitations={…} onAnswer={…} outcomes={agent.elicitations} />
+```
+
+- **Off by default.** Without `elicitation` the hooks pass nothing to the core: no capability is
+  declared in the handshake, a server cannot ask, and the wire is what it was. `true` turns it on
+  with the core's defaults; an object is the core's settings - `url` (also offer URL mode; default
+  false), `timeoutMs` (how long a question waits; default 300 000), `maxPerToolCall` (5),
+  `maxPerRun` (20), `subagents` (let a helper's call ask too; default false). The option is read
+  when a server connects: changing it takes a reconnect. A core without elicitation ignores it.
+- **`pendingElicitations`** are the questions waiting, oldest first (`PendingElicitation`: the
+  core's `McpElicitationRequest` - `id`, `server`, `tool`, `mode`, `message`, `requestedSchema` or
+  `url`, `subagent?` - plus `expiresAt` when the question has a time limit). **`answerElicitation(id,
+  result)`** answers one: `{ action: 'accept', content }` (a form's values; nothing for a link),
+  `{ action: 'decline' }` or `{ action: 'cancel' }`; it returns false when the question is no longer
+  waiting. A question also leaves the list, answered `cancel`, when the core stops waiting (its time
+  ran out, the run stopped), when its server is disconnected or removed, and when the component
+  that holds the hook unmounts.
+- **Time.** A question waits `timeoutMs`, and no longer than the step it belongs to
+  (`chatTimeoutMs`, default 120 000 in the core): give the agent of an MCP chat a step time that
+  leaves a person room to answer, as above. A question nobody answered is cancelled by the core and
+  its tool call fails; the prompt then says it was answered automatically, and why.
+- **`<ElicitationPrompt>`** (main entry; it imports neither the SDK nor the core's `./mcp`) draws the
+  question where the consent cards are, one at a time with a count: the host's own header (which
+  server asks, during which tool), the server's message under a caption that says it is the
+  server's, then the form - text (plain, email, URL, date, date and time, with length limits),
+  numbers and whole numbers (with bounds), a tick box, a select (plain, titled, `enumNames`), a
+  multi-select - with required marks, titles, descriptions and defaults, and **Submit / Decline /
+  Cancel**. Submit is checked first by the core's own rules (`elicitationFormAnswer`) and a refused
+  field says what is wrong with it, by name. A link shows its host large, the whole address as
+  text, and an **Open in a new tab** button; "I have finished there" (the accept) appears once the
+  user opened it.
+- **On the 2025 revisions** the core sends the calls to a server that may ask one at a time
+  (its question does not say which call it belongs to); on 2026-07-28 a question is part of the
+  call's own answer. Both work the same from here.
+
+A host that calls the core's `connectMcpHttp` itself can use the same queue the hooks use
+(`createElicitationQueue` from `…/mcp`) or pass its own `onElicitation`, and render
+`<ElicitationPrompt>` with what it was given.
+
+> **Security.** The question is the SERVER's text, and the prompt treats it so. Its message, the
+> field titles and descriptions and the option names are shown as plain text (never as markup)
+> inside a box captioned "From the server “*server*”"; the header above it is the
+> app's own. A link is never followed by itself: there is no `<a>`, nothing opens it before the
+> user's click on **Open**, which calls `window.open(url, '_blank', 'noopener,noreferrer')`, and
+> there is no Open at all for anything but https (or http on a loopback host) without credentials -
+> checked again here, although the core already refuses such links. What the user types stays in
+> the prompt's own component state until Submit hands it to `answerElicitation`, which passes it
+> to the core and keeps nothing: it is not in the agent's state (`state.elicitations` holds field
+> NAMES only), its events, the transcript, a saved chat or a log. The core sends it to the server
+> that asked and nowhere else - never to the model.
 
 ## Components
 
@@ -548,6 +649,7 @@ use them standalone. The full guide: [docs/chat.md](docs/chat.md).
 | `<FileChips>` / `<FileChip>` | The files an answer wrote to the workspace (the core's `file.written` / `file.deleted`), as chips: name, kind, size, open, download; an inline preview (text with line numbers, a picture, your own rendering through `renderFileContent`), and an `.html` file in a sandboxed frame with Preview / Source. `<MessageList files showFileChips htmlPreview renderFile renderFileContent>` places them under the answer. |
 | `<SandboxedFrame>` / `<SourceView>` | Untrusted HTML inside chrome the host draws: `<iframe sandbox>` without `allow-same-origin`, by `srcdoc`, no network, fixed height (`html`, `scripts`, `title`, `label`, `actions`, `footer`, `height`) / a file's text with line numbers, never markup. See [the boundary](#the-html-preview-is-a-security-boundary). |
 | `<ToolApprovalPrompt>` | Consent cards (Allow once / Always / Deny); a helper's request says which helper asks (`showHelper`). |
+| `<ElicitationPrompt>` | A question an MCP server puts to the user during a tool call: a form (Submit / Decline / Cancel, checked by the core's rules) or a link opened only by a click, one at a time with a count, the time left, and the questions nobody answered (`elicitations`, `onAnswer`, `outcomes`, `showOutcomes`, `showExpiry`, `showHelper`, `renderElicitation`). See [MCP elicitation](#mcp-elicitation--a-server-asks-the-user). |
 | `<ApprovalModeSwitch>` | Segmented consent-mode switch. |
 | `<ChatHistoryList>` | Saved chats (from `useChatHistory`). |
 | `<FilesPanel>` | A `VirtualFileSystem`, live: preview, download, delete, upload. |
@@ -605,20 +707,20 @@ own steps, usage and duration). Outside `<AgentChat>`, `useAgentContext()` retur
 the enclosing `<AgentProvider>` (it throws outside one; `useOptionalAgentContext()` returns
 `undefined` instead), and `useLabels()` the labels in effect.
 
-**MCP elicitation (state only, no component yet).** When an MCP connection was given the core's
-`onElicitation`, a server may ask the user something in the middle of a tool call; the core's
-`mcp.elicitation-requested` / `mcp.elicitation-answered` events fold into `state.elicitations`
-(absent until the first one): an `ElicitationView` per question with `id`, `server`, `tool`,
-`mode`, `message`, `requestedSchema` or `url`, `stepId`, `subagent?`, and a `status` of
-`pending | accepted | declined | cancelled` (`automatic` / `reason` when nobody decided, `fields`
-- the names an accepted form was answered with). The view never holds an answer, and it is a
-per-run view: it is not copied into the transcript, so a saved conversation never contains a
-server's form. `message`, the schema's titles and `url` are the SERVER's text - render them as
-text, as the server's. The hooks do not pass `onElicitation` to the core yet; a host that calls
-`connectMcpHttp` itself gets the structural types (`McpElicitationRequest`,
-`McpElicitationResult`, `McpElicitationHandler`, `McpElicitationOptions`) from
-`@dudko.dev/agent-web-react/mcp`, and answers a pending view by resolving the promise its own
-`onElicitation` returned for the same `id`.
+**MCP elicitation in the state.** The core's `mcp.elicitation-requested` /
+`mcp.elicitation-answered` events fold into `state.elicitations` (absent until the first one): an
+`ElicitationView` per question with `id`, `server`, `tool`, `mode`, `message`, `requestedSchema` or
+`url`, `stepId`, `subagent?`, and a `status` of `pending | accepted | declined | cancelled`
+(`automatic` / `reason` when nobody decided, `fields` - the names an accepted form was answered
+with). The view never holds an answer, and it is a per-run view: it is not copied into the
+transcript, so a saved conversation never contains a server's form. `message`, the schema's titles
+and `url` are the SERVER's text - render them as text, as the server's. The questions to ANSWER come
+from the hooks (`pendingElicitations`, [above](#mcp-elicitation--a-server-asks-the-user)); the
+state is what `<ElicitationPrompt outcomes>` reads to say which ones were answered automatically.
+The prompt's pure half is exported for a UI of your own: `elicitationFields` (a form's fields and
+the control each is drawn as), `elicitationInitialDraft` (the defaults), `elicitationFormAnswer`
+(the answer, or an issue per field), `elicitationLink` (host, address, whether it may be opened)
+and `formatCountdown`.
 
 ## How it fits together
 

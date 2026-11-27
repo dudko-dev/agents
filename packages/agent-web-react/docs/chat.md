@@ -60,6 +60,7 @@ function Assistant() {
 - [Saved chats (IndexedDB)](#saved-chats-indexeddb)
 - [Workspace (virtual file system)](#workspace-virtual-file-system)
 - [Tool consent](#tool-consent)
+- [Questions from MCP servers (elicitation)](#questions-from-mcp-servers-elicitation)
 - [Customising: show/hide, labels, render props, slots, components, theme](#customising)
 - [Hooks and helpers for your own UI](#hooks-and-helpers-for-your-own-ui)
 - [Label reference](#label-reference)
@@ -100,6 +101,7 @@ full size) and file chips. The header shows the conversation's total.
 | `showSearchResults` | `true` | a `web_search` call's results under its row |
 | `showStatus` | `true` | the status dot in the header |
 | `showContext` | `false` | context meter above the composer (`number` = budget bar) |
+| `showElicitation` | `true` | a question an MCP server puts to the user, beside the consent cards (needs `elicitations` and `onElicitationAnswer`; see [below](#questions-from-mcp-servers-elicitation)) |
 | `activityOpen` | `false` | keep finished answers' activity expanded |
 | `emptyState` | `labels.emptyState` | what the transcript shows before the first message (any node) |
 | `defaultHistoryOpen` | wide panel: yes · narrow: no | whether the saved-chats sidebar starts open |
@@ -566,6 +568,79 @@ true; false hides "Always allow") and `showHelper` (default true: a request made
 model started says which helper asks - see [the tree](#subagents-and-helpers-the-tree)). `<ContextMeter>` shows tokens against `budgetTokens` and, with
 `onCompact` (e.g. `agent.compact`), a "Compact" button — `compacting` disables it while it runs.
 
+## Questions from MCP servers (elicitation)
+
+An MCP server may ask the **user** something in the middle of a tool call - a form, or a page to
+open. The MCP hooks collect the questions when their `elicitation` option is on (off by default:
+then nothing is passed to the core and a server cannot ask); the chat shows them where the consent
+cards are:
+
+```tsx
+import { useMcpServers } from '@dudko.dev/agent-web-react/mcp'
+
+const mcp = useMcpServers({ elicitation: { url: true } })
+const agent = useAgent({ model, tools: mcp.tools, chatTimeoutMs: 360_000 }, { deps: [mcp.tools] })
+
+<AgentChat
+  controller={agent}
+  elicitations={mcp.pendingElicitations}
+  onElicitationAnswer={mcp.answerElicitation}
+/>
+```
+
+| Prop of `<AgentChat>` | |
+| --- | --- |
+| `elicitations` | the questions waiting (`useMcp().pendingElicitations` / `useMcpServers().pendingElicitations`) |
+| `onElicitationAnswer` | `(id, result)` - the hook's `answerElicitation` |
+| `showElicitation` | default `true`; `false` hides the prompt |
+| `renderElicitation` | `(question, fallback, answer) => node` - draw a question yourself; `answer(result)` decides it |
+| `components.ElicitationPrompt` | swap the whole prompt for your own (same props) |
+
+`<ElicitationPrompt>` works on its own too: `elicitations`, `onAnswer(id, result)`, `outcomes` (the
+run's `useAgent().elicitations`, for the questions nobody answered), `showOutcomes` (default true),
+`showExpiry` (default true: "Cancelled automatically in 4:05"), `showHelper` (default true: a
+question from a helper's call says which helper), `renderElicitation`, `labels`, `className`.
+
+What it shows:
+
+- **The host's header** - which server asks, during which tool (its name as the model called it),
+  and "1 of 3" when several are waiting. One question is shown at a time, oldest first.
+- **The server's words** under a caption that says whose they are ("From the server
+  “*server*”"), as plain text: markup in a message is shown as characters. The field titles,
+  descriptions and option names are the server's text too, and sit in the same box.
+- **A form** with exactly the fields the core lets through: text (plain, email, URL, date, date and
+  time; length limits), numbers and whole numbers (bounds), a tick box, a select (plain options,
+  titled `oneOf`, the older `enumNames`), a multi-select (`enum` or titled `anyOf` items, with a
+  minimum and maximum). Required fields are marked, defaults are filled in. **Submit** checks the
+  form by the core's rules first; a field that breaks one gets a message that names it (*"Seats must
+  be 8 or less."*), the first one is focused, and nothing is sent until the form is fixed.
+  **Decline** is a no, **Cancel** dismisses the question; both send nothing of what was typed. A
+  date and time goes to the server in RFC 3339 with its offset.
+- **A link**: the host it leads to, large; the whole address as text; **Open in a new tab**, which
+  opens it only on the click (`noopener,noreferrer`), then **I have finished there** (the accept),
+  **Decline** and **Cancel**. Nothing on the card is a link, and anything but https (or http on a
+  loopback host) has no Open action at all.
+- **The time left** - a question waits the core's `elicitation.timeoutMs` (default five minutes),
+  and no longer than its step (`chatTimeoutMs`). When nobody answers, the core cancels it, the tool
+  call fails, and the prompt says so: *"A question from the MCP server "crm" was answered
+  automatically, and its tool call did not finish: nobody answered in time."* - with a Dismiss
+  button. The same line appears for a question the core refused before it could be shown (a form
+  it cannot draw, a link that is not https, a helper not allowed to ask, a cap) and for one still
+  waiting when the run was stopped.
+
+What the user types stays in the prompt's own state and goes to `onAnswer` once: it is not in
+`AgentUiState` (`state.elicitations` keeps field names only), the events, the transcript or a
+saved chat. The hook passes it to the core, which sends it to the server that asked - never to the
+model.
+
+The pure half is exported for a UI of your own: `elicitationFields(schema)` (each field with its
+`control`: `text | email | url | date | datetime | number | checkbox | select | multiselect`, its
+label, description, options), `elicitationInitialDraft(schema)`, `elicitationFormAnswer(schema,
+draft)` (`{ ok: true, content }` or `{ ok: false, issues }`, an `ElicitationIssue` per field:
+`kind` and `limit`, never the value), `elicitationLink(url)` (`host`, `href`, `openable`) and
+`formatCountdown(ms)`. The queue behind the hooks is `createElicitationQueue` in
+`@dudko.dev/agent-web-react/mcp`, for a host that calls the core's `connectMcpHttp` itself.
+
 ## Customising
 
 **Show / hide** — the `show*` props above, `composer={false}`, `history`,
@@ -596,6 +671,7 @@ rendering as `fallback`:
   renderAttachment={(a) => <MyThumb attachment={a} />}
   renderMessage={(m, fallback) => <Animated key={m.id}>{fallback}</Animated>}
   renderApproval={(req, fallback) => fallback}
+  renderElicitation={(question, fallback, answer) => fallback}
   renderSubagent={(node, fallback) => fallback}
   renderMedia={(media, message, fallback) => fallback}
   renderFile={(file, message, fallback) => fallback}
@@ -607,7 +683,7 @@ rendering as `fallback`:
 afterMessages, footerStart, sidebar }}` (`header: false` hides it).
 
 **Components** — swap whole parts with your own (same props):
-`components={{ Composer, MessageList, HistoryList, FilesPanel, ApprovalPrompt }}`.
+`components={{ Composer, MessageList, HistoryList, FilesPanel, ApprovalPrompt, ElicitationPrompt }}`.
 
 **Theme** — `theme="auto" | "light" | "dark"`, the `--awr-*` custom properties
 (colours, radius, fonts, `--awr-sidebar-width`, `--awr-files-width`),
@@ -624,7 +700,8 @@ tokens inside an element with class `awr-theme`.
 | `lessonsOf` | the agent's own skills (`agent.listLearnedSkills()`) as `LessonView[]` - what the hook seeds the notebook with |
 | `useVirtualFiles` | a live listing of a `VirtualFileSystem` + upload / remove / read |
 | `useSpeechToText` | Web Speech API: `{ supported, listening, interim, start, stop, toggle }` |
-| `useMcp` / `useMcpServers` | one or several MCP servers, merged tools — import from `@dudko.dev/agent-web-react/mcp`. `instructions` (on `useMcp`, and on each of `useMcpServers().servers`) is what the server told the agent in its handshake - third-party text that goes into the agent's prompt: show it to the user as the server's words. Options: `clientName`, `clientMetadataUrl` (a client ID metadata document, CIMD, used as the OAuth `client_id` where the authorization server supports it; per server through `oauth.clientMetadataUrl`), `onLog` — see the README |
+| `useMcp` / `useMcpServers` | one or several MCP servers, merged tools — import from `@dudko.dev/agent-web-react/mcp`. `instructions` (on `useMcp`, and on each of `useMcpServers().servers`) is what the server told the agent in its handshake - third-party text that goes into the agent's prompt: show it to the user as the server's words. `protocol` (`useMcp`) / `servers[i].protocol` and `protocols` (`useMcpServers`) are the negotiated MCP revisions; a server is connected with `protocol: 'legacy' \| 'auto' \| 'modern'` (`connect` / `add`). `pendingElicitations` / `answerElicitation` are the servers' [questions to the user](#questions-from-mcp-servers-elicitation). Options: `clientName`, `clientMetadataUrl` (a client ID metadata document, CIMD, used as the OAuth `client_id` where the authorization server supports it; per server through `oauth.clientMetadataUrl`), `onLog`, `elicitation` (`true` or the core's settings; off by default) — see the README |
+| `elicitationFields`, `elicitationInitialDraft`, `elicitationFormAnswer`, `elicitationLink`, `formatCountdown` | the elicitation prompt's pure logic ([above](#questions-from-mcp-servers-elicitation)) |
 | `mcpOAuthProviderOptions` | the options the MCP hooks hand the core's OAuth provider for one server (pure; same subpath) |
 | `agentStateReducer` | the pure event → UI reducer |
 | `subagentTree` | `agent.subagents` (flat) as nested `SubagentNode[]` |
@@ -681,5 +758,19 @@ component or `<AgentLabelsProvider>`); whatever you leave out falls back to `def
   `htmlShorter`, `htmlFrameName` *(fn: path)*.
 - **Consent:** `approvalLead`, `approve`, `alwaysAllow`, `deny`, `declinedReason`, `readOnlyTool`,
   `consentWaiting`, `consentAllowed`, `consentDenied` *(fn: reason?)*.
+- **Questions from MCP servers:** `elicitationTitle` (the prompt's accessible name),
+  `elicitationLead` *(fn: server)*, `elicitationLeadHelper` *(fn: server, role?)*, `elicitationDuring`,
+  `elicitationCount` *(fn: index, total)*, `elicitationFrom` *(fn: server; the caption over the
+  server's words)*, `elicitationRequired`, `elicitationChoose` (a select's empty choice),
+  `elicitationSubmit`, `elicitationDecline`, `elicitationCancel`, `elicitationErrors` *(map by
+  `required` / `tooShort` / `tooLong` / `email` / `uri` / `date` / `dateTime` / `notNumber` /
+  `notInteger` / `belowMinimum` / `aboveMaximum` / `notAnOption` / `tooFew` / `tooMany`: fn: field,
+  limit?)*, `elicitationFix` *(fn: n)*, `elicitationUrlLead` *(fn: server)*, `elicitationUrlFull`,
+  `elicitationOpen`, `elicitationOpened`, `elicitationUrlDone`, `elicitationUrlRefused`,
+  `elicitationExpiresIn` *(fn: time)*, `elicitationExpires`, `elicitationAutomatic` *(fn: server,
+  reason)*, `elicitationReasons` *(map by the core's reason: `timeout` / `step-timeout` / `aborted` /
+  `stopped` / `cap-per-call` / `cap-per-run` / `unsupported-schema` / `unsupported-mode` /
+  `insecure-url` / `invalid-request` / `subagent` / `handler-error` / `invalid-answer` /
+  `after-failure` / `no-tool-call`)*, `elicitationDismiss`.
 
 `tests/chat.test.ts` fails if a key is added to `AgentLabels` and not listed here.

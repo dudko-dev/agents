@@ -66,7 +66,33 @@ export type { AgentProviderProps } from './context.js'
 export { agentStateReducer, createInitialAgentState, lessonsOf, subagentTree } from './state.js'
 export type { AgentAction } from './state.js'
 // The form inside an `ElicitationView` (types only: the MCP hooks are the `./mcp` entry).
-export type { McpElicitationFieldSchema, McpElicitationSchema } from './mcp-types.js'
+export type {
+  McpElicitationFieldSchema,
+  McpElicitationRequest,
+  McpElicitationResult,
+  McpElicitationSchema,
+} from './mcp-types.js'
+// The prompt's pure half: a form's fields, the answer and its checks, a link, the countdown.
+export {
+  elicitationFields,
+  elicitationFormAnswer,
+  elicitationInitialDraft,
+  elicitationLink,
+  formatCountdown,
+} from './elicitation.js'
+export type {
+  ElicitationControl,
+  ElicitationDraft,
+  ElicitationDraftValue,
+  ElicitationField,
+  ElicitationFormOutcome,
+  ElicitationIssue,
+  ElicitationIssueKind,
+  ElicitationLink,
+  ElicitationOption,
+  ElicitationOutcomeReason,
+  PendingElicitation,
+} from './elicitation.js'
 export type {
   AgentUiState,
   AgentStatus,
@@ -160,6 +186,8 @@ export { webSearchOf } from './components/format.js'
 export type { WebSearchResultView, WebSearchView } from './components/format.js'
 export { ToolApprovalPrompt } from './components/ToolApprovalPrompt.js'
 export type { ToolApprovalPromptProps } from './components/ToolApprovalPrompt.js'
+export { ElicitationPrompt } from './components/ElicitationPrompt.js'
+export type { ElicitationPromptProps } from './components/ElicitationPrompt.js'
 export { ApprovalModeSwitch } from './components/ApprovalModeSwitch.js'
 export type { ApprovalModeSwitchProps } from './components/ApprovalModeSwitch.js'
 export { ContextMeter } from './components/ContextMeter.js'

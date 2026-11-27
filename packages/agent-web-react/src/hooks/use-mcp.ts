@@ -1,12 +1,25 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { AgentToolSet } from '@dudko.dev/agent-web'
+import {
+  createElicitationQueue,
+  elicitationConnectOptions,
+  elicitationSettings,
+  elicitationTimeoutOf,
+  type ElicitationQueue,
+  type PendingElicitation,
+} from '../elicitation.js'
 import type {
   BrowserOAuthProvider,
   BrowserOAuthProviderOptions,
   ConnectedMcp,
   McpCatalogEntry,
+  McpElicitationHandler,
+  McpElicitationOptions,
+  McpElicitationResult,
   McpModule,
   McpOAuthCallback,
+  McpProtocolMode,
+  McpServerProtocol,
   McpServerResult,
 } from '../mcp-types.js'
 
@@ -45,6 +58,15 @@ export interface McpConnectOptions {
    * that ships the OAuth provider; check `oauthSupported` before offering it.
    */
   oauth?: boolean | McpOAuthOptions
+  /**
+   * The MCP protocol revisions this connection may use: `'legacy'` the 2025 revisions,
+   * `'auto'` 2026-07-28 when the server offers it and the 2025 ones otherwise (one probe
+   * request; from a page the server's CORS must allow `Mcp-Method` and `Mcp-Name`, or the
+   * probe is blocked and the connection falls back with a warning), `'modern'` 2026-07-28 only.
+   * Left out, nothing is passed and the core decides (`'legacy'`). What was negotiated is in
+   * the hook's `protocol`.
+   */
+  protocol?: McpProtocolMode
 }
 
 export interface UseMcpOptions {
@@ -58,9 +80,36 @@ export interface UseMcpOptions {
   clientMetadataUrl?: string
   /** Called with connector log lines — handy while debugging a server. */
   onLog?: (level: string, message: string) => void
+  /**
+   * MCP elicitation: let a server ask the USER for input in the middle of a tool call - a
+   * form, or (with `url: true`) a link to open. Off by default, and then nothing is passed to
+   * the core: no capability is declared and the wire is what it was. `true` turns it on with
+   * the core's defaults; an object is the core's `elicitation` settings (`url`, `timeoutMs`,
+   * `maxPerToolCall`, `maxPerRun`, `subagents`). Questions land in `pendingElicitations`; show
+   * them (`<ElicitationPrompt>`, or `<AgentChat elicitations>`) and answer with
+   * `answerElicitation`. Read when a server connects: changing it takes a reconnect.
+   */
+  elicitation?: boolean | McpElicitationOptions
 }
 
-export interface UseMcpReturn {
+/** What both MCP hooks return for elicitation. */
+export interface McpElicitationControls {
+  /**
+   * Questions servers are waiting on, oldest first (empty unless `elicitation` is on). Every
+   * string in a request is the SERVER's text. A question leaves the list when it is answered,
+   * when the core stops waiting (its time ran out, the run stopped), when its server is
+   * disconnected and when the component unmounts - the last three answer `cancel`.
+   */
+  pendingElicitations: PendingElicitation[]
+  /**
+   * Answer a pending question: `{ action: 'accept', content }` (a form's values; no content
+   * for a link), `{ action: 'decline' }` or `{ action: 'cancel' }`. The answer is handed to
+   * the core and kept nowhere. False when no such question is waiting any more.
+   */
+  answerElicitation: (id: string, result: McpElicitationResult) => boolean
+}
+
+export interface UseMcpReturn extends McpElicitationControls {
   status: McpStatus
   /** Merge into `BrowserAgentConfig.tools` once `status === 'connected'`. */
   tools?: AgentToolSet
@@ -71,6 +120,11 @@ export interface UseMcpReturn {
    * user as the server's words, never as your own.
    */
   instructions?: string
+  /**
+   * The protocol revision negotiated with the connected server (`version`, `era`); absent
+   * until it is connected, and on a core that does not report it.
+   */
+  protocol?: McpServerProtocol
   error?: string
   /** Where to send the user when `status === 'needs-authorization'`. */
   authorizationUrl?: string
@@ -105,6 +159,68 @@ export const mcpInstructionsOf = (
   return typeof text === 'string' && text.trim() ? text : undefined
 }
 
+/** What was negotiated with the server `name`, or undefined (not connected, or an older core). */
+export const mcpProtocolOf = (
+  connection: Pick<ConnectedMcp, 'protocols'>,
+  name: string,
+): McpServerProtocol | undefined => {
+  const list = Array.isArray(connection.protocols) ? connection.protocols : []
+  const found = list.find((p) => p?.server === name)
+  return found && typeof found.version === 'string'
+    ? { server: name, version: found.version, era: found.era }
+    : undefined
+}
+
+/**
+ * The queue of questions behind both MCP hooks (`pendingElicitations`, `answerElicitation`),
+ * and the handler they give the core when `elicitation` is on. Whatever is still waiting is
+ * cancelled on unmount; a question that arrives after it is cancelled at once.
+ */
+export const useElicitationQueue = (optionsRef: {
+  current: Pick<UseMcpOptions, 'elicitation'>
+}): McpElicitationControls & {
+  handler: McpElicitationHandler
+  /** Cancel the waiting questions: all, or one server's. */
+  cancel: (server?: string) => void
+} => {
+  const [pendingElicitations, setPending] = useState<PendingElicitation[]>([])
+  const mountedRef = useRef(true)
+  const queueRef = useRef<ElicitationQueue | undefined>(undefined)
+  queueRef.current ??= createElicitationQueue({
+    timeoutMs: () => {
+      const settings = elicitationSettings(optionsRef.current.elicitation)
+      return settings ? elicitationTimeoutOf(settings) : undefined
+    },
+    onChange: (pending) => {
+      if (mountedRef.current) setPending(pending)
+    },
+  })
+  const queue = queueRef.current
+  const handler = useCallback<McpElicitationHandler>(
+    (request, ctx) =>
+      mountedRef.current ? queue.handler(request, ctx) : { action: 'cancel' as const },
+    [queue],
+  )
+  const answerElicitation = useCallback(
+    (id: string, result: McpElicitationResult) => queue.answer(id, result),
+    [queue],
+  )
+  const cancel = useCallback(
+    (server?: string) =>
+      queue.cancel(server === undefined ? undefined : (request) => request.server === server),
+    [queue],
+  )
+  useEffect(() => {
+    // Set again on every mount: StrictMode unmounts and remounts once in development.
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      queue.cancel()
+    }
+  }, [queue])
+  return { pendingElicitations, answerElicitation, handler, cancel }
+}
+
 export const OAUTH_UNSUPPORTED =
   'The installed @dudko.dev/agent-web has no MCP OAuth support. Upgrade the core to a version exporting BrowserOAuthProvider, or use a static Authorization header.'
 
@@ -118,6 +234,8 @@ interface OAuthRecord {
   scope?: string
   clientName?: string
   clientMetadataUrl?: string
+  /** The protocol revisions the connection was asked for, kept across the redirect. */
+  protocol?: McpProtocolMode
   /** When the redirect was started, so a stale record can't claim a callback. */
   startedAt?: number
 }
@@ -366,6 +484,7 @@ export const useMcp = (options: UseMcpOptions = {}): UseMcpReturn => {
   const [tools, setTools] = useState<AgentToolSet | undefined>(undefined)
   const [catalog, setCatalog] = useState<McpCatalogEntry[]>([])
   const [instructions, setInstructions] = useState<string | undefined>(undefined)
+  const [protocol, setProtocol] = useState<McpServerProtocol | undefined>(undefined)
   const [error, setError] = useState<string | undefined>(undefined)
   const [authorizationUrl, setAuthorizationUrl] = useState<string | undefined>(undefined)
   const [oauthSupported, setOauthSupported] = useState<boolean | undefined>(undefined)
@@ -383,12 +502,16 @@ export const useMcp = (options: UseMcpOptions = {}): UseMcpReturn => {
   // dependency of effects in host components.
   const optionsRef = useRef(options)
   optionsRef.current = options
+  const elicitation = useElicitationQueue(optionsRef)
+  const cancelElicitations = elicitation.cancel
 
   const closeConnection = useCallback(async () => {
     const open = connectionRef.current
     connectionRef.current = undefined
+    // Nobody is left to take the answers of a connection that is being closed.
+    cancelElicitations()
     if (open) await open.close().catch(() => {})
-  }, [])
+  }, [cancelElicitations])
 
   const checkOAuthSupport = useCallback(async () => {
     try {
@@ -414,6 +537,7 @@ export const useMcp = (options: UseMcpOptions = {}): UseMcpReturn => {
       setTools(undefined)
       setCatalog([])
       setInstructions(undefined)
+      setProtocol(undefined)
 
       try {
         const mod = await loadMcp()
@@ -435,6 +559,7 @@ export const useMcp = (options: UseMcpOptions = {}): UseMcpReturn => {
             scope: providerOptions.scope,
             clientName: providerOptions.clientName,
             clientMetadataUrl: providerOptions.clientMetadataUrl,
+            ...(opts.protocol ? { protocol: opts.protocol } : {}),
             startedAt: Date.now(),
           }
           // Throws on a clientMetadataUrl the core refuses (not https, or a bare
@@ -455,9 +580,16 @@ export const useMcp = (options: UseMcpOptions = {}): UseMcpReturn => {
               url: opts.url,
               headers: opts.oauth ? undefined : opts.headers,
               authProvider,
+              // Only when asked for: without it the connection is built as it always was.
+              ...(opts.protocol ? { protocol: opts.protocol } : {}),
             },
           },
-          { clientName: optionsRef.current.clientName, onLog: optionsRef.current.onLog },
+          {
+            clientName: optionsRef.current.clientName,
+            onLog: optionsRef.current.onLog,
+            // Off: neither key is passed, so the core declares no capability.
+            ...elicitationConnectOptions(optionsRef.current.elicitation, elicitation.handler),
+          },
         )
 
         if (!current()) {
@@ -492,6 +624,7 @@ export const useMcp = (options: UseMcpOptions = {}): UseMcpReturn => {
         )
         setCatalog(connection.catalog)
         setInstructions(mcpInstructionsOf(connection, name))
+        setProtocol(mcpProtocolOf(connection, name))
         setStatus('connected')
       } catch (err) {
         if (!current()) return
@@ -499,7 +632,7 @@ export const useMcp = (options: UseMcpOptions = {}): UseMcpReturn => {
         setStatus('error')
       }
     },
-    [closeConnection],
+    [closeConnection, elicitation.handler],
   )
 
   const disconnect = useCallback(async () => {
@@ -508,6 +641,7 @@ export const useMcp = (options: UseMcpOptions = {}): UseMcpReturn => {
     setTools(undefined)
     setCatalog([])
     setInstructions(undefined)
+    setProtocol(undefined)
     setAuthorizationUrl(undefined)
     setError(undefined)
     setStatus('idle')
@@ -606,6 +740,7 @@ export const useMcp = (options: UseMcpOptions = {}): UseMcpReturn => {
             clientName: pending.clientName,
             clientMetadataUrl: pending.clientMetadataUrl,
           },
+          ...(pending.protocol ? { protocol: pending.protocol } : {}),
         })
       } catch (err) {
         writeRecord(PENDING_KEY, undefined)
@@ -631,10 +766,13 @@ export const useMcp = (options: UseMcpOptions = {}): UseMcpReturn => {
     tools,
     catalog,
     instructions,
+    protocol,
     error,
     authorizationUrl,
     oauthSupported,
     completingAuthorization,
+    pendingElicitations: elicitation.pendingElicitations,
+    answerElicitation: elicitation.answerElicitation,
     connect,
     disconnect,
     authorize,
