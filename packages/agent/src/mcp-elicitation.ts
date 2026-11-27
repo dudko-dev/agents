@@ -738,6 +738,11 @@ export interface McpElicitationCall {
   failure?: string
   /** Called around the wait for the host (true: waiting), so a call's own clock can stop. */
   onWait?: (waiting: boolean) => void
+  /**
+   * Stops the time limits of the run the call belongs to (its step's) for the length of the
+   * wait for the host; returns what starts them again. The wait has its own bound, `timeoutMs`.
+   */
+  pause?: () => () => void
 }
 
 export interface McpElicitationDeps {
@@ -806,8 +811,10 @@ type WireAnswer = { action: 'accept' | 'decline' | 'cancel'; content?: McpElicit
  * returned. In every other case the answer is made here (`decline` for a request that cannot be
  * shown, `cancel` otherwise), `call.failure` is set, and the caller fails the tool call with it.
  *
- * Throws only when the call's own signal aborted (the run was stopped, or its step ran out of
- * time): the reason is rethrown, as for any aborted tool call.
+ * Throws only when the call's own signal aborted (the run was stopped, or its time was already
+ * spent when the question came): the reason is rethrown, as for any aborted tool call. While
+ * the host is asked, the limits of the run are stopped (`call.pause`): the wait is bounded by
+ * `timeoutMs` and by a stop of the run, not by the step it belongs to.
  */
 export const answerMcpElicitation = async (
   deps: McpElicitationDeps,
@@ -908,6 +915,8 @@ export const answerMcpElicitation = async (
     | { kind: 'timeout' }
     | { kind: 'aborted' }
   call.onWait?.(true)
+  // A person is being asked: the step's limit is about models and tools, and does not run.
+  const resume = call.pause?.()
   const outcome = await new Promise<Outcome>((resolve) => {
     if (options.timeoutMs > 0) {
       timer = setTimeout(() => resolve({ kind: 'timeout' }), options.timeoutMs)
@@ -921,6 +930,7 @@ export const answerMcpElicitation = async (
         (error: unknown) => resolve({ kind: 'error', error }),
       )
   })
+  resume?.()
   call.onWait?.(false)
   if (timer) {
     clearTimeout(timer)
@@ -934,9 +944,11 @@ export const answerMcpElicitation = async (
     const reason: McpElicitationReason = isTimeoutAbort(call.signal) ? 'step-timeout' : 'aborted'
     call.failure ??= mcpElicitationFailure(call.tool, reason, options)
     if (reason === 'step-timeout') {
+      // Not the step's own limit, which does not run during the wait (`call.pause`): a time
+      // limit somebody else put on the call's signal.
       log(
         'warn',
-        `${where}: the step's time limit ended while the question was waiting for an answer; a question waits no longer than the step it belongs to`,
+        `${where}: the step's time limit ended while the question was waiting for an answer (a limit that is not stopped for a question: one the host put on the run's signal)`,
       )
     }
     answered('cancel', true, reason)
@@ -1039,6 +1051,8 @@ export interface McpElicitationCallInfo {
   subagent?: { id: string; depth: number }
   /** The run's counter; absent outside a run (the call then counts alone). */
   run?: { count: number }
+  /** Stops the run's time limits while the host is asked; returns what starts them again. */
+  pause?: () => () => void
 }
 
 export interface McpElicitationSession {
@@ -1118,6 +1132,7 @@ export const createMcpElicitationSession = (
     ...(info.emit ? { emit: info.emit } : {}),
     ...(info.runId ? { runId: info.runId } : {}),
     ...(info.subagent ? { subagent: info.subagent } : {}),
+    ...(info.pause ? { pause: info.pause } : {}),
     run: info.run ?? { count: 0 },
     asked: 0,
   })

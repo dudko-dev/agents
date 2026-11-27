@@ -8,12 +8,23 @@ import { randomUUID } from 'node:crypto'
 import { isMainThread, parentPort, type MessagePort } from 'node:worker_threads'
 import { createAgent, type IAgent } from './agent.ts'
 import { markReadOnly } from './approval.ts'
+import { runContext } from './context.ts'
 import { toCloneable, type ParentToWorkerMessage, type WorkerToParentMessage } from './subagent.ts'
 import { errorMessage } from './utils.ts'
 
 export const serveSubagentWorker = (port: MessagePort): void => {
   const ac = new AbortController()
   const pending = new Map<string, (r: { ok: boolean; output: unknown }) => void>()
+  // What stops the clock of the run each proxied call in flight belongs to, and what starts the
+  // clocks again that a 'tool-wait' message stopped.
+  const pauses = new Map<string, () => () => void>()
+  let resumes: (() => void)[] = []
+  const setWaiting = (waiting: boolean): void => {
+    for (const resume of resumes) {
+      resume()
+    }
+    resumes = waiting ? [...pauses.values()].map((pause) => pause()) : []
+  }
   let started = false
   const post = (msg: WorkerToParentMessage): void => {
     try {
@@ -38,6 +49,7 @@ export const serveSubagentWorker = (port: MessagePort): void => {
               const signal = options?.abortSignal
               const onAbort = (): void => {
                 pending.delete(callId)
+                pauses.delete(callId)
                 reject(signal?.reason ?? new DOMException('Aborted', 'AbortError'))
               }
               if (signal?.aborted) {
@@ -45,8 +57,13 @@ export const serveSubagentWorker = (port: MessagePort): void => {
                 return
               }
               signal?.addEventListener('abort', onAbort, { once: true })
+              const clock = runContext.getStore()?.state?.clock
+              if (clock) {
+                pauses.set(callId, clock.pause)
+              }
               pending.set(callId, (r) => {
                 pending.delete(callId)
+                pauses.delete(callId)
                 signal?.removeEventListener('abort', onAbort)
                 if (r.ok) {
                   resolve(r.output)
@@ -90,6 +107,9 @@ export const serveSubagentWorker = (port: MessagePort): void => {
         break
       case 'tool-result':
         pending.get(msg.callId)?.({ ok: msg.ok, output: msg.output })
+        break
+      case 'tool-wait':
+        setWaiting(msg.waiting)
         break
     }
   })
