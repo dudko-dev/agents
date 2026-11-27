@@ -604,6 +604,7 @@ export const App = () => {
               mockCatalog={mockCatalog}
               onMockCatalog={setMockCatalog}
               toolCount={Object.keys(mcpTools).length}
+              elicitation
               searchMode={
                 (mcpAgent.agent?.toolStrategy ??
                   (Object.keys(mcpTools).length > 40 ? 'search' : 'all')) === 'search'

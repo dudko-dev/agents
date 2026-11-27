@@ -251,6 +251,7 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
     // Nobody is left to take the answers of a connection that is being closed.
     cancelElicitations(name)
     if (open) await open.close().catch(() => {})
+    // `cancelElicitations` is stable (the queue lives as long as the hook).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 

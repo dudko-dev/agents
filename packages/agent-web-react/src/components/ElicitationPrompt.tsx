@@ -10,6 +10,7 @@ import {
   type ElicitationDraftValue,
   type ElicitationField,
   type ElicitationIssue,
+  type ElicitationOutcomeReason,
   type PendingElicitation,
 } from '../elicitation.js'
 import { useLabels, type AgentLabels, type AgentLabelsOverride } from '../labels.js'
@@ -53,6 +54,15 @@ export interface ElicitationPromptProps {
   ) => ReactNode
   labels?: AgentLabelsOverride
   className?: string
+}
+
+// Why a question was answered automatically, in the labels' words (the core's code otherwise).
+const reasonText = (outcome: ElicitationView, L: AgentLabels): string => {
+  const reason = outcome.reason
+  if (reason && Object.hasOwn(L.elicitationReasons, reason)) {
+    return L.elicitationReasons[reason as ElicitationOutcomeReason]
+  }
+  return reason || outcome.status
 }
 
 /** Ticks once a second while `active`, so a countdown redraws. */
@@ -442,9 +452,10 @@ export const ElicitationPrompt = ({
             <span className="awr-elicit__count">{L.elicitationCount(1, elicitations.length)}</span>
           )}
         </div>
+        {/* Before the form, not under it: a long form is read from the top. */}
+        {showExpiry && <Expiry key={`x-${current.id}`} expiresAt={current.expiresAt} L={L} />}
         {/* Keyed by the question: the next one starts from an empty form. */}
         <Body key={current.id} elicitation={current} answer={answer} L={L} />
-        {showExpiry && <Expiry key={`x-${current.id}`} expiresAt={current.expiresAt} L={L} />}
       </section>
     )
     card = renderElicitation ? renderElicitation(current, builtIn, answer) : builtIn
@@ -456,12 +467,7 @@ export const ElicitationPrompt = ({
         <div key={o.id} className="awr-elicit-outcome" role="status" data-reason={o.reason}>
           <AlertIcon size={14} className="awr-elicit-outcome__icon" />
           <span className="awr-elicit-outcome__text">
-            {L.elicitationAutomatic(
-              o.server,
-              (o.reason && Object.hasOwn(L.elicitationReasons, o.reason)
-                ? L.elicitationReasons[o.reason]
-                : o.reason) || o.status,
-            )}
+            {L.elicitationAutomatic(o.server, reasonText(o, L))}
           </span>
           <button
             type="button"

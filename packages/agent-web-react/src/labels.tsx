@@ -8,7 +8,7 @@ import type {
   ToolApprovalMode,
 } from '@dudko.dev/agent-web'
 import { defaultNoticeTexts, type NoticeTexts } from './composer.js'
-import type { ElicitationIssueKind } from './elicitation.js'
+import type { ElicitationIssueKind, ElicitationOutcomeReason } from './elicitation.js'
 import type { AgentStatus } from './types.js'
 
 /**
@@ -254,8 +254,8 @@ export interface AgentLabels {
   elicitationExpires: string
   /** A question nobody answered: the server, and why (one of `elicitationReasons`). */
   elicitationAutomatic: (server: string, reason: string) => string
-  /** Why a question was answered without anybody deciding, by the core's reason. */
-  elicitationReasons: Record<string, string>
+  /** Why a question was answered without anybody deciding, by the core's reason (+ `stopped`). */
+  elicitationReasons: Record<ElicitationOutcomeReason, string>
   elicitationDismiss: string
 }
 

@@ -90,6 +90,7 @@ export type {
   ElicitationIssueKind,
   ElicitationLink,
   ElicitationOption,
+  ElicitationOutcomeReason,
   PendingElicitation,
 } from './elicitation.js'
 export type {

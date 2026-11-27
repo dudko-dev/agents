@@ -81,6 +81,9 @@ test('form: a filled-in form reaches the server and the tool call completes; wha
   // them on the page.
   server.elicitationFaults.quietResult = true
   const calls = await mockGemini(page, callTool('elicit_form'))
+  // Everything the page logs, the core's connector lines included.
+  const logged: string[] = []
+  page.on('console', (message) => logged.push(message.text()))
   await openWithServer(page)
 
   // "Auto" is the demo's default, and this server offers the 2026-07-28 revision.
@@ -141,22 +144,60 @@ test('form: a filled-in form reaches the server and the tool call completes; wha
   expect(server.calls.map((c) => c.name)).toEqual(['elicit_form'])
 
   // The typed values: not in the document (text, markup, attributes, form controls), not in the
-  // transcript with its activity opened, not in what the model was sent, not in web storage.
+  // transcript with its activity opened, not in what the model was sent, not in web storage, not
+  // in IndexedDB (the saved chats live there), not in the console.
   await page.locator('.awr-activity__summary').last().click()
-  const surface = await page.evaluate(() => {
+  // The saved chat is written once the run has settled.
+  await page.waitForTimeout(500)
+  const surface = await page.evaluate(async () => {
     const fields = [...document.querySelectorAll('input, textarea, select')].map(
       (el) => (el as HTMLInputElement).value,
     )
-    return [
-      document.documentElement.outerHTML,
-      document.body.innerText,
-      fields.join('\n'),
-      JSON.stringify({ ...localStorage }),
-      JSON.stringify({ ...sessionStorage }),
-    ].join('\n')
+    // Every record of every IndexedDB database of the origin, as text.
+    const dumps: string[] = []
+    for (const info of await indexedDB.databases()) {
+      if (!info.name) continue
+      const db = await new Promise<IDBDatabase>((resolve, reject) => {
+        const req = indexedDB.open(info.name as string)
+        req.onsuccess = () => resolve(req.result)
+        req.onerror = () => reject(req.error)
+      })
+      for (const store of [...db.objectStoreNames]) {
+        const rows = await new Promise<unknown[]>((resolve, reject) => {
+          const req = db.transaction(store, 'readonly').objectStore(store).getAll()
+          req.onsuccess = () => resolve(req.result)
+          req.onerror = () => reject(req.error)
+        })
+        dumps.push(
+          JSON.stringify(rows, (_key, value: unknown) =>
+            value instanceof ArrayBuffer || ArrayBuffer.isView(value)
+              ? new TextDecoder().decode(value as ArrayBuffer)
+              : value,
+          ),
+        )
+      }
+      db.close()
+    }
+    return {
+      page: [
+        document.documentElement.outerHTML,
+        document.body.innerText,
+        fields.join('\n'),
+        JSON.stringify({ ...localStorage }),
+        JSON.stringify({ ...sessionStorage }),
+      ].join('\n'),
+      stored: dumps.join('\n'),
+    }
   })
+  // The dump is not empty: the chat this run was saved in is there.
+  expect(surface.stored).toContain('Fill in my profile')
   for (const typed of [SECRET, 'zq7731@example.test', '2001-02-03']) {
-    expect(surface.includes(typed), `"${typed}" is still on the page`).toBe(false)
+    expect(surface.page.includes(typed), `"${typed}" is still on the page`).toBe(false)
+    expect(surface.stored.includes(typed), `"${typed}" was stored in IndexedDB`).toBe(false)
+    expect(
+      logged.some((line) => line.includes(typed)),
+      `"${typed}" was logged`,
+    ).toBe(false)
     expect(
       calls.some((c) => `${c.user}\n${JSON.stringify(c.functionResponses)}`.includes(typed)),
       `"${typed}" was sent to the model`,

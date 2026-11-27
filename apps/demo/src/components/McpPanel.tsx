@@ -16,6 +16,8 @@ export interface McpPanelProps {
   /** Tools the agent can see in total, and whether tool search is active. */
   toolCount: number
   searchMode: boolean
+  /** The page shows the servers' questions to the user (MCP elicitation): say so in the notes. */
+  elicitation?: boolean
 }
 
 const STATUS_TEXT: Record<string, string> = {
@@ -55,6 +57,7 @@ export const McpPanel = ({
   onMockCatalog,
   toolCount,
   searchMode,
+  elicitation,
 }: McpPanelProps) => {
   const [url, setUrl] = useState('')
   const [name, setName] = useState('')
@@ -325,9 +328,9 @@ export const McpPanel = ({
         browser talks to each server directly, so it must send CORS headers for this origin —
         including <code>Access-Control-Expose-Headers: WWW-Authenticate, mcp-session-id</code> (and,
         for the 2026-07-28 revision, <code>Mcp-Method</code> and <code>Mcp-Name</code> among the
-        allowed request headers; without them “Auto” falls back to the 2025 revisions). In the chat,
-        a server may ask you something in the middle of a tool call — a form, or a page to open: the
-        question is shown as the server’s own text, and your answer goes to that server only.
+        allowed request headers; without them “Auto” falls back to the 2025 revisions).
+        {elicitation &&
+          ' In the chat, a server may ask you something in the middle of a tool call — a form, or a page to open: the question is shown as the server’s own text, and your answer goes to that server only.'}
       </p>
     </div>
   )

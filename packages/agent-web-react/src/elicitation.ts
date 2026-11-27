@@ -500,6 +500,30 @@ export const elicitationLink = (raw: unknown): ElicitationLink => {
   }
 }
 
+// ── an answer nobody gave ────────────────────────────────────────────────
+
+/**
+ * Why a question was answered without anybody deciding: the core's reasons
+ * (`mcp.elicitation-answered` with `automatic: true`), and `stopped`, which the reducer sets on
+ * whatever was still waiting when the run stopped.
+ */
+export type ElicitationOutcomeReason =
+  | 'timeout'
+  | 'step-timeout'
+  | 'aborted'
+  | 'stopped'
+  | 'cap-per-call'
+  | 'cap-per-run'
+  | 'unsupported-schema'
+  | 'unsupported-mode'
+  | 'insecure-url'
+  | 'invalid-request'
+  | 'subagent'
+  | 'handler-error'
+  | 'invalid-answer'
+  | 'after-failure'
+  | 'no-tool-call'
+
 /** "4:05" - what is left of a question's time. */
 export const formatCountdown = (ms: number): string => {
   const total = Math.max(0, Math.ceil(ms / 1000))

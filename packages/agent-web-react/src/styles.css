@@ -2011,8 +2011,10 @@
   justify-content: center;
   gap: 6px;
 }
+/* Under the header's text (past the icon), before the form. */
 .awr-elicit__expiry {
-  margin: 0;
+  margin: -4px 0 0;
+  padding-left: 24px;
   font-size: 12px;
   color: var(--awr-muted);
   font-variant-numeric: tabular-nums;

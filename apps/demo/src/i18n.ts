@@ -291,7 +291,7 @@ export const ES_LABELS: AgentLabels = {
   elicitationExpiresIn: (time) => `Se cancela automáticamente en ${time}`,
   elicitationExpires: 'Se cancela automáticamente si queda sin respuesta',
   elicitationAutomatic: (server, reason) =>
-    `Una pregunta del servidor MCP «${server}» se respondió automáticamente y su llamada no terminó: ${reason}.`,
+    `Una pregunta del servidor MCP «${server}» se respondió automáticamente y su llamada a la herramienta no terminó: ${reason}.`,
   elicitationReasons: {
     timeout: 'nadie respondió a tiempo',
     'step-timeout': 'el paso agotó su tiempo mientras la pregunta esperaba',
@@ -578,7 +578,7 @@ export const DE_LABELS: AgentLabels = {
   elicitationExpiresIn: (time) => `Wird in ${time} automatisch abgebrochen`,
   elicitationExpires: 'Wird automatisch abgebrochen, wenn sie unbeantwortet bleibt',
   elicitationAutomatic: (server, reason) =>
-    `Eine Frage des MCP-Servers „${server}“ wurde automatisch beantwortet, und sein Aufruf wurde nicht abgeschlossen: ${reason}.`,
+    `Eine Frage des MCP-Servers „${server}“ wurde automatisch beantwortet, und ihr Tool-Aufruf wurde nicht abgeschlossen: ${reason}.`,
   elicitationReasons: {
     timeout: 'niemand hat rechtzeitig geantwortet',
     'step-timeout': 'die Zeit des Schritts lief ab, während die Frage wartete',
