@@ -9,6 +9,7 @@ import {
   followHumanWaits,
   humanWaitOf,
 } from '../src/wait-clock.ts'
+import { useVirtualTime } from './helpers/virtual-time.ts'
 
 // The clock the step and subagent time limits run on: stopped while a person is asked, going on
 // with what it had left. Pure, so it is tested here on mocked timers (setTimeout and Date move
@@ -25,6 +26,12 @@ test('wait-clock: the browser package carries the same file, byte for byte', () 
     readFileSync(here('../src/wait-clock.ts'), 'utf8'),
     readFileSync(sibling, 'utf8'),
     'wait-clock.ts and agent-web/src/wait-clock.ts must stay identical',
+  )
+  // And the tests' side of its test seam: the virtual time both packages' loop tests run on.
+  assert.equal(
+    readFileSync(here('./helpers/virtual-time.ts'), 'utf8'),
+    readFileSync(here('../../agent-web/tests/helpers/virtual-time.ts'), 'utf8'),
+    'tests/helpers/virtual-time.ts and agent-web/tests/helpers/virtual-time.ts must stay identical',
   )
 })
 
@@ -147,6 +154,44 @@ test('watch: told when the clock stops and when it runs again, once per change',
   unwatch()
   clock.pause()()
   assert.deepEqual(seen, [true, false])
+})
+
+// ── the test seam ───────────────────────────────────────────────────────────
+
+test("a test's own time: the clocks made meanwhile run on it, not on the real timers", (t) => {
+  // What `human-wait.test.ts` (here and in the browser package) drives the whole loop with.
+  const real = fakeTime(t)
+  const vt = useVirtualTime(t)
+  const clock = createWaitClock()
+  let fired = 0
+  const timer = clock.timer(100, () => (fired += 1))
+  real(1000)
+  assert.equal(fired, 0, 'a deadline ran on the real timers')
+  vt.tick(70)
+  const resume = clock.pause()
+  vt.tick(10_000)
+  assert.equal(timer.left(), 30)
+  resume()
+  vt.tick(29)
+  assert.equal(fired, 0)
+  vt.tick(1)
+  assert.equal(fired, 1)
+  assert.equal(vt.running, 0)
+})
+
+test('anything else under the test key is ignored: the clocks keep real time', (t) => {
+  const tick = fakeTime(t)
+  const key = Symbol.for('@dudko.dev/agent:wait-clock-test-time')
+  const global = globalThis as unknown as Record<symbol, unknown>
+  global[key] = { now: () => 0, set: 'not a function' }
+  t.after(() => {
+    delete global[key]
+  })
+  const clock = createWaitClock()
+  let fired = 0
+  clock.timer(100, () => (fired += 1))
+  tick(100)
+  assert.equal(fired, 1)
 })
 
 // ── deadlineSignal ──────────────────────────────────────────────────────────

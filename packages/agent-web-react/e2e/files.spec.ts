@@ -197,23 +197,47 @@ test('guard sandbox: top navigation, window.open and popups do nothing', async (
 })
 
 // Ways a frame can navigate ITSELF. Neither the sandbox nor the document's own policy stops
-// these: the shell's `frame-src 'none'` does.
-const selfNavigations = (): { path: string; html: string; click?: string }[] => [
+// these: the shell's `frame-src 'none'` does. A page that navigates on a timer may already have
+// tried - and lost its document to the browser's error page - by the time the test looks at it,
+// so it tells the host page that it ran (`top.postMessage`), which outlives its document.
+interface ISelfNavigation {
+  path: string
+  html: string
+  /** Clicked to start the navigation. */
+  click?: string
+  /** It navigates by itself soon after it loads, with scripts on (and says so to the host). */
+  timed?: boolean
+  /** Its script writes `#m` (it says "before" until then). */
+  writes?: boolean
+  /** A form: the sandbox has no `allow-forms`, so the navigation is not even tried. */
+  form?: boolean
+}
+
+const told = (name: string): string => `<script>top.postMessage('ran:${name}', '*')</script>`
+
+const selfNavigations = (): ISelfNavigation[] => [
   {
     path: '/nav-location.html',
-    html: `<!doctype html><p id="m">before</p><script>document.getElementById('m').textContent = 'ran'; setTimeout(() => { location.href = '${sinkUrl}/hit?location' }, 300)</script>`,
+    html: `<!doctype html><p id="m">before</p><script>document.getElementById('m').textContent = 'ran'; setTimeout(() => { location.href = '${sinkUrl}/hit?location' }, 300)</script>${told('nav-location.html')}`,
+    timed: true,
+    writes: true,
   },
   {
     path: '/nav-replace.html',
-    html: `<!doctype html><p id="m">before</p><script>document.getElementById('m').textContent = 'ran'; setTimeout(() => location.replace('${sinkUrl}/hit?replace'), 300)</script>`,
+    html: `<!doctype html><p id="m">before</p><script>document.getElementById('m').textContent = 'ran'; setTimeout(() => location.replace('${sinkUrl}/hit?replace'), 300)</script>${told('nav-replace.html')}`,
+    timed: true,
+    writes: true,
   },
   {
     path: '/nav-open-self.html',
-    html: `<!doctype html><p id="m">before</p><script>document.getElementById('m').textContent = 'ran'; setTimeout(() => window.open('${sinkUrl}/hit?open-self', '_self'), 300)</script>`,
+    html: `<!doctype html><p id="m">before</p><script>document.getElementById('m').textContent = 'ran'; setTimeout(() => window.open('${sinkUrl}/hit?open-self', '_self'), 300)</script>${told('nav-open-self.html')}`,
+    timed: true,
+    writes: true,
   },
   {
     path: '/nav-refresh.html',
-    html: `<!doctype html><meta http-equiv="refresh" content="1;url=${sinkUrl}/hit?refresh"><p id="m">ran</p>`,
+    html: `<!doctype html><meta http-equiv="refresh" content="1;url=${sinkUrl}/hit?refresh"><p id="m">ran</p>${told('nav-refresh.html')}`,
+    timed: true,
   },
   {
     path: '/nav-link.html',
@@ -224,13 +248,34 @@ const selfNavigations = (): { path: string; html: string; click?: string }[] => 
     path: '/nav-form.html',
     html: `<!doctype html><p id="m">ran</p><form action="${sinkUrl}/hit"><input name="form" value="1"><button id="go">send</button></form>`,
     click: '#go',
+    form: true,
   },
   {
     path: '/nav-formaction.html',
     html: `<!doctype html><p id="m">ran</p><form><button id="go" formaction="${sinkUrl}/hit?formaction">send</button></form>`,
     click: '#go',
+    form: true,
   },
 ]
+
+/** Keep what the previewed pages post to the host page (`top.postMessage`). */
+const listenToPages = (page: Page): Promise<void> =>
+  page.evaluate(() => {
+    const w = window as unknown as { told: string[] }
+    w.told = []
+    addEventListener('message', (e) => {
+      if (typeof e.data === 'string') w.told.push(e.data)
+    })
+  })
+const toldHost = (page: Page): Promise<string[]> =>
+  page.evaluate(() => (window as unknown as { told: string[] }).told)
+
+/** The URL of the frame the previewed document is in: the inner of the two. */
+const documentFrameUrl = (page: Page): string | undefined =>
+  page
+    .frames()
+    .find((f) => f.parentFrame()?.parentFrame() === page.mainFrame())
+    ?.url()
 
 for (const scripts of [true, false]) {
   test(`guard navigation: a previewed page cannot navigate its own frame to the network (scripts ${scripts ? 'on' : 'off'})`, async ({
@@ -238,17 +283,32 @@ for (const scripts of [true, false]) {
   }) => {
     const docs = selfNavigations()
     await openFixture(page, docs, scripts)
+    await listenToPages(page)
     for (const d of docs) {
       const name = d.path.slice(1)
       const doc = await preview(page, name)
-      // With scripts off the script variants never run: the page stays as written.
-      const scripted = d.html.includes('<script>')
-      await expect(doc.locator('#m')).toHaveText(scripted && !scripts ? 'before' : 'ran')
+      if (d.timed && scripts) {
+        // It ran - wherever its document is by now.
+        await expect
+          .poll(() => toldHost(page), { message: `${name} never ran` })
+          .toContain(`ran:${name}`)
+      } else {
+        // With scripts off the script variants never run: the page stays as written.
+        await expect(doc.locator('#m')).toHaveText(d.writes && !scripts ? 'before' : 'ran')
+      }
       if (d.click) await doc.locator(d.click).click()
-      // Long enough for the delayed ones (300 ms, and the refresh's second) to have tried.
-      await page.waitForTimeout(d.click ? 400 : 1500)
-      // The sink's page is not in the frame. (A refused navigation leaves the browser's own
-      // error page there - the document is gone, and nothing was requested.)
+      if ((d.timed && scripts) || (d.click && !d.form)) {
+        // It tried: the frame left the document. Refused, it holds the browser's own error page -
+        // the document is gone, and nothing was requested (the checks below).
+        await expect
+          .poll(() => documentFrameUrl(page) ?? 'about:srcdoc', { message: `${name} never tried` })
+          .not.toBe('about:srcdoc')
+      } else {
+        // Nothing to wait for (a form, or a script that does not run): long enough for the delayed
+        // ones (300 ms, and the refresh's second) to have tried, were they going to.
+        await page.waitForTimeout(d.click ? 400 : 1500)
+      }
+      // The sink's page is not in the frame.
       await expect(doc.locator('#sink')).toHaveCount(0)
       await page.getByRole('button', { name: `Close preview of ${name}` }).click()
     }

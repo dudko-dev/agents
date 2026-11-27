@@ -184,6 +184,13 @@ behind every decision.
   `src/wait-clock.ts`, byte for byte — change both (the server's `tests/wait-clock.test.ts`
   compares them and tests the clock on mocked timers; `tests/human-wait.test.ts` here drives the
   whole loop). Every guard has a test and a mutation check. Without a wait nothing changes.
+  The loop's tests run the limits on VIRTUAL time: `tests/helpers/virtual-time.ts` (the same file
+  in both packages) puts a time source under the test seam `TEST_TIME` (a `Symbol.for` key on
+  `globalThis`, read when a clock is made; not exported, not an API) and a person's wait is a
+  `tick` while the question is open. Never go back to real sleeps against short real limits: the
+  model's, the sockets' and a worker's real latency counted against them and the suite failed
+  under load. `chatTimeoutMs` there is large (it is also the planner's REAL bound); one test
+  keeps real timers, with relative bounds only.
 - `src/{thinking,limits,caching,skills,images}.ts` — see docs/capabilities.md.
 - `src/logger.ts` — `logLevel` / `logger` (leveled, console-like sink; default `warn`).
 - Compaction (`memory/compress.ts`, `context-window.ts`) is judged on prompt + transcript + step log together

@@ -236,7 +236,14 @@
     of the browser sibling's `src/wait-clock.ts`, byte for byte: change both
     (`tests/wait-clock.test.ts` compares them and tests the clock on mocked timers;
     `tests/human-wait.test.ts` drives the whole loop). Every guard has a test and a mutation check.
-    Without a wait nothing changes: the golden fixtures pass untouched.
+    Without a wait nothing changes: the golden fixtures pass untouched. The loop's tests run the
+    limits on VIRTUAL time: `tests/helpers/virtual-time.ts` (the same file in both packages) puts
+    a time source under the test seam `TEST_TIME` (a `Symbol.for` key on `globalThis`, read when
+    a clock is made; not exported, not an API) and a person's wait is a `tick` while the question
+    is open. Never go back to real sleeps against short real limits: the model's and the sockets'
+    real latency counted against them and the suite failed under load. `llmTimeoutMs` there is
+    large (it is also the planner's REAL bound). A worker THREAD does not share the seam: that
+    test, and one more, stay on real timers with relative bounds only.
   - `internal.ts` (`IRunState`: the per-run mutable state shared by the runner, the stages and the tool
     wrappers) + `context.ts` (`runContext`, the AsyncLocalStorage that carries run id, emit and state
     into tools). Neither is public API.

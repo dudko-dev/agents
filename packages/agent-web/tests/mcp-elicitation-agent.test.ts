@@ -21,6 +21,7 @@ import {
   type McpElicitationRequest,
 } from '../dist/mcp.js'
 import { scriptedModel, stageOf, type CallInfo, type Reply } from './helpers/scripted-model.ts'
+import { useVirtualTime } from './helpers/virtual-time.ts'
 
 // MCP elicitation inside a whole agent: a scripted model, the real MCP test
 // server over real sockets (both revisions), nothing stubbed in between. What is
@@ -531,25 +532,30 @@ for (const era of ['legacy', 'modern'] as Era[]) {
 
   // ── time ──────────────────────────────────────────────────────────────────
 
-  test(`${era}: the step's limit does not end a question - the question's own bound does, and says so`, async () => {
+  test(`${era}: the step's limit does not end a question - the question's own bound does, and says so`, async (t) => {
+    // The step's limit runs on virtual time (helpers/virtual-time.ts), the question's own bound
+    // on real time: while the question waits, three times the step's limit passes, and the step's
+    // limit stops meanwhile (wait-clock.ts) - it is the question's bound that ends the wait.
+    const vt = useVirtualTime(t)
+    let stopped: boolean | undefined
     let hostSignal: AbortSignal | undefined
     await withAgent(
       era,
       {
         root: [{ name: 'wx__elicit_form', args: {} }],
-        onElicitation: (_request, ctx) => {
+        onElicitation: async (_request, ctx) => {
           hostSignal = ctx.signal
+          stopped = await vt.stopped()
+          vt.tick(3 * 10_000)
           return new Promise(() => {})
         },
-        // The step may take 400 ms of its own time; the question waits 1200 ms, and the step's
-        // limit stops meanwhile (wait-clock.ts).
-        elicitation: { timeoutMs: 1200 },
-        config: () => ({ chatTimeoutMs: 400 }),
+        elicitation: { timeoutMs: 300 },
+        // Also the planner's and synthesizer's bound, in real time: ample on any machine.
+        config: () => ({ chatTimeoutMs: 10_000 }),
       },
       async (rig) => {
-        const startedAt = Date.now()
         const result = await go(rig)
-        assert.ok(Date.now() - startedAt >= 1200, 'the step ended the question')
+        assert.equal(stopped, true, "the step's limit ran on while the question waited")
         assert.equal(hostSignal?.aborted, true, 'the host was not told the wait is over')
         const [answered] = of(rig.events, 'mcp.elicitation-answered')
         assert.deepEqual(
@@ -561,7 +567,7 @@ for (const era of ['legacy', 'modern'] as Era[]) {
         assert.deepEqual([call.name, call.ok], ['wx__elicit_form', false])
         assert.match(
           errorOf(call.output),
-          /nobody answered within 1200 ms \(elicitation\.timeoutMs\)/,
+          /nobody answered within 300 ms \(elicitation\.timeoutMs\)/,
         )
         assert.equal(result.final, 'All done.')
         assert.deepEqual(rig.server.calls, [{ name: 'elicit_form', args: {} }])
