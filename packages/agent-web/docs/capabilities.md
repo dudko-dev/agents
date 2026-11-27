@@ -531,11 +531,127 @@ Both errors come in one exchange, not after a timeout. `ConnectedMcp.protocols` 
 - **Sessions and reconnection** do not exist in that revision: no `mcp-session-id`, no GET
   stream, no `Last-Event-ID`; `reconnection` on the config applies to 2025 connections only.
 - **`input_required`.** The SDK is told not to answer it (`inputRequired.autoFulfill: false`), so
-  nothing is retried; the call fails with `MCP tool "x" did not finish: the server asked for more
-  input …`. The client declares no elicitation capability, and a server that checks refuses such
-  a tool with `-32021` before it runs. Elicitation is not implemented yet.
+  nothing is retried by it. Without `onElicitation` the call fails with `MCP tool "x" did not
+  finish: the server asked for more input …`: the client declares no elicitation capability, and
+  a server that checks refuses such a tool with `-32021` before it runs. With `onElicitation` the
+  connector answers it itself - see [MCP elicitation](#mcp-elicitation-a-server-asks-the-user).
 - **OAuth** works as on 2025: the probe is the first request to be answered 401, and the token
   is refreshed on a 401 in the middle of a session.
+
+## MCP elicitation: a server asks the user
+
+A tool of an MCP server may need something only the user has and ask for it in the middle of
+the call. That is *elicitation*: the server asks, the **host** answers through a callback, and
+the call goes on. The option is on the MCP connection (`@dudko.dev/agent-web/mcp`), because the
+capability is declared in the handshake:
+
+```ts
+const mcp = await connectMcpHttp(servers, {
+  onElicitation: async (request, { signal }) => {
+    const values = await showForm(request, signal) // your UI; undefined when dismissed
+    return values ? { action: 'accept', content: values } : { action: 'cancel' }
+  },
+  elicitation: { timeoutMs: 300_000, maxPerToolCall: 5, maxPerRun: 20, url: false, subagents: false },
+})
+const agent = await createAgent({ model, tools: mcp.tools })
+```
+
+**Off by default; off = the same wire.** Without `onElicitation` no capability is declared, so a
+server cannot ask (a 2026-07-28 server refuses such a tool with `-32021`; one that answers
+`input_required` anyway gets the error it always got), and every request - method, headers,
+body - is what it was: `tests/mcp-elicitation.test.ts` compares the session with the fixture
+recorded before the option existed. `elicitation` without a callback changes nothing. Turning it
+on adds a capability to `initialize` (2025) or to each request's `_meta` (2026-07-28) and **no
+request header**.
+
+| `elicitation` | Default | |
+| --- | --- | --- |
+| `timeoutMs` | `300000` | How long one question waits for the callback (a person is answering). `0` = no limit of its own. |
+| `maxPerToolCall` | `5` | Questions one tool call may ask. |
+| `maxPerRun` | `20` | Questions one run may be asked, its helpers' calls included. |
+| `url` | `false` | Also accept URL mode: the server sends a link for the user to open. |
+| `subagents` | `false` | Let a tool call made by a helper (a subagent) ask too. |
+
+**The callback** gets a `McpElicitationRequest` - `id`, `server` (its key in the servers you
+connected), `tool` (the tool's name as the model called it), `mode`, `message`, and
+`requestedSchema` (form mode) or `url` (+ `elicitationId` on the 2025 revisions); `runId`; and
+`subagent: { id, depth }` when a helper's call asks - and `ctx.signal`, which aborts when the
+answer is no longer wanted (the run stopped, the time ran out), so a dialog left open can be
+taken down. It returns `{ action: 'accept', content }`, `{ action: 'decline' }` or
+`{ action: 'cancel' }`. An answer the user gave - accept, decline, cancel - goes to the server,
+and the tool call ends with what the server then answers.
+
+**What the form may be.** The specification allows a flat object of: strings (`minLength`,
+`maxLength`, `format: 'email' | 'uri' | 'date' | 'date-time'`), numbers and integers (`minimum`,
+`maximum`), booleans, single-selects (`enum`, optionally `enumNames`; or `oneOf: [{ const,
+title }]`) and multi-selects (`type: 'array'` with `items.enum` or `items.anyOf`, `minItems`,
+`maxItems`); `title`, `description`, `default`, and `required` at the top. That is all a host
+ever receives: keywords outside it are dropped, texts are cleaned and capped, and a form that
+is not flat (a nested object, a list of objects, a type union), has an unknown format, more than
+50 fields or 100 options, or a name that could not be sent back verbatim is **declined without
+the callback being called**. `normalizeMcpElicitationSchema` and `validateMcpElicitationContent`
+are exported from `./mcp` for a UI that wants to check a form before submitting it.
+
+**Guards** (each has a test and a mutation check; the rationale is in
+[security.md](security.md#mcp-elicitation-a-server-asks-the-user-in-the-middle-of-a-tool-call)):
+
+- The server's text is cleaned (control, zero-width and bidi-override characters removed) and
+  capped (2000 characters for the message, 200 for a title, 500 for a description) and never
+  put into a prompt.
+- The answer is checked against the form before it is sent: every value of its field's type and
+  within its limits, every required field there, no field the form did not ask for. One that
+  does not fit is not sent.
+- The answer goes to the server that asked and nowhere else: not the model's context, not an
+  event (`mcp.elicitation-answered` has the field *names*), not a log line, not a run
+  checkpoint. A callback that throws is reported by the kind of error only.
+- URL mode: `https:` only (`http:` on a loopback host), no credentials in the link; the link is
+  handed to the callback and never fetched or opened by this package - no `window.open`.
+- Nobody decided - the callback threw, nobody answered within `timeoutMs`, the answer did not
+  fit, a cap was reached, the form could not be shown - means the question is answered `cancel`
+  (or `decline`) automatically and the **tool call fails** with one sentence that says why.
+  Nothing is retried.
+- Caps: `maxPerToolCall`, `maxPerRun`, and 10 `input_required` rounds per call on 2026-07-28.
+- Subagents: see below.
+
+**Time.** A question waits `elicitation.timeoutMs` at most - and no longer than the step that
+made the tool call. `chatTimeoutMs` (default 120 000) bounds a step; when it ends, the pending
+question is cancelled with `reason: 'step-timeout'` and a `warn` line says so. **Raise
+`chatTimeoutMs` on an agent whose servers may ask** (to at least `elicitation.timeoutMs`), or
+lower `elicitation.timeoutMs` to fit. The MCP SDK's own request timeout (60 s) is handled for
+you: on the 2025 revisions, where the tool call is one request that stays open while the user
+answers, the connector keeps that minute itself and stops it while a question waits. Stopping
+the run cancels a pending question (`reason: 'aborted'`).
+
+**Both protocol revisions.** On the 2025 revisions the server sends an `elicitation/create`
+request while the call is open. The request does not say which call it belongs to, so with
+`onElicitation` the calls to that server run **one at a time** (other servers are not affected).
+On 2026-07-28 the call itself answers `input_required`; the connector asks the callback and
+sends the same call again with the answers and the server's `requestState`, byte for byte: the
+server's way of continuing **one** call. Only elicitation is answered - a server that asks for
+sampling or roots that way fails the call. A result that breaks its `outputSchema` is still
+passed on with a note.
+
+**Subagents.** A question reaches the user only from a call of the run the host started:
+
+| Who calls the tool | Default | With `elicitation: { subagents: true }` |
+| --- | --- | --- |
+| The run itself | asks | asks |
+| A helper the model started (`subagents.dynamic`) | cancelled, callback not called | asks; the request has `subagent: { id, depth }` |
+| A subagent tool's child that was given the tools (`config.tools`, or host `tools` - in-process or behind a worker) | cancelled, callback not called | asks; the request has `subagent` |
+| A worker subagent that connects on its own inside the worker | its own connection, its own `onElicitation` | - |
+
+**Events** (inside a run; outside one the callback is still called, and nothing is emitted):
+`mcp.elicitation-requested` when the callback is called, `mcp.elicitation-answered` when the
+question is settled - see the [event reference](#event-reference). `automatic: true` means nobody
+decided; `reason` is one of `unsupported-schema`, `unsupported-mode`, `insecure-url`,
+`invalid-request`, `subagent`, `cap-per-call`, `cap-per-run`, `handler-error`, `timeout`,
+`invalid-answer`, `aborted`, `step-timeout`, `after-failure`. A question refused before it could
+be shown has an answered event and no requested one.
+
+**Not done.** The `-32042` "URL elicitation required" error of 2025-11-25 is passed on as the
+tool error it is; `notifications/elicitation/complete` is not surfaced; a resumed run starts its
+`maxPerRun` count again. The React package has the view state (`state.elicitations`) but no
+component yet.
 
 ## MCP servers behind OAuth
 
@@ -1870,6 +1986,8 @@ Subscribe with `onEvent` (per run) or the handler you pass to `createAgent`; ren
 | `tools.discovered` | `step?, query, names` — `find_tools` activated more tools |
 | `tool.approval-requested` | `id, name, input, readOnly, step?, subagent?` (`subagent: { id, depth }` when a helper the model started is asking) |
 | `tool.approval-resolved` | `id, name, approved, reason?, automatic` |
+| `mcp.elicitation-requested` | `id, server, tool, mode: 'form' \| 'url', message, requestedSchema?, url?, step?, subagent?` — an MCP server asked the user for input during a tool call and the connection's `onElicitation` is being called. The server's text, cleaned and capped ([elicitation](#mcp-elicitation-a-server-asks-the-user)) |
+| `mcp.elicitation-answered` | `id, server, tool, action: 'accept' \| 'decline' \| 'cancel', automatic, reason?, fields?` — the question was settled. `fields`: the NAMES of the fields an accepted form was answered with, never a value. `automatic`: nobody decided, the tool call fails, `reason` says why |
 | `egress.request` | `url` (origin + path), `allowed`, `status?`, `reason?` — a `web_fetch` request (or `web_search`'s call to its [search API](#search-finding-the-page-to-fetch)), allowed or refused ([egress](#egress-what-the-model-may-fetch)) |
 | `media.generated` | `kind: 'image' \| 'speech'`, `path`, `mediaType`, `bytes`, `model`, `step?` — a media tool wrote a file to the virtual file system; read it with `vfs.readDataUrl(path)` ([media](#media-images-speech-and-transcription)) |
 | `media.transcribed` | `source: 'attachment' \| 'tool'`, `name`, `text`, `language?`, `durationInSeconds?`, `model` — an audio file became text |

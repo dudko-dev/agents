@@ -51,6 +51,8 @@ Optional env vars (see env.example for the full list):
                               (default: a share of the context window; 0 = no cap)
   AGENT_TOOL_APPROVAL         autopilot | ask-writes | ask-all | read-only
   AGENT_TOOL_RULES            JSON: { "<tool or glob*>": "allow" | "ask" | "deny" } - beats the mode
+  AGENT_MCP_ELICITATION       form lets an MCP server ask YOU something during a tool call (a form at the
+                              prompt); all also accepts a link to open yourself; off (default): servers cannot ask
   AGENT_SKILLS_DIR            folder of <skill>/SKILL.md skills
   AGENT_LEARNING              on lets the agent write down lessons as skills (for this session)
   AGENT_LEARNING_DIR          keep them as <dir>/<name>/SKILL.md across sessions (needs AGENT_LEARNING=on)
@@ -93,6 +95,11 @@ Commands inside the REPL:
 
 When the approval mode asks, answer y (allow once), n (deny) or a (always
 allow this tool for the session).
+
+With AGENT_MCP_ELICITATION, a question from an MCP server is shown as a quotation
+("| ..."): answer y to fill in its fields one by one (Enter takes a default or
+skips an optional field, /cancel dismisses), n to decline, anything else to
+cancel. What you type goes to that server only - not to the model.
 `
 
 const FLAG_TO_ENV: Record<string, string> = {

@@ -15,6 +15,16 @@ import {
 } from '@modelcontextprotocol/client'
 import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/client/validators/cf-worker'
 import { dynamicTool, jsonSchema, type ToolSet } from 'ai'
+import {
+  createMcpElicitationSession,
+  resolveMcpElicitationOptions,
+  type McpElicitationCallInfo,
+  type McpElicitationDeps,
+  type McpElicitationEvent,
+  type McpElicitationHandler,
+  type McpElicitationOptions,
+  type McpElicitationSession,
+} from './elicitation.js'
 import { assertSecureOAuthUrl } from './oauth.js'
 import {
   cleanMcpInstructions,
@@ -83,7 +93,8 @@ export interface McpHttpServerConfig {
    *
    * On 2026-07-28 there is no session; a tool-list change arrives over a
    * `subscriptions/listen` stream this connector opens (it is not opened again
-   * when it drops), and an `input_required` result (elicitation) fails the call.
+   * when it drops), and an `input_required` result fails the call unless the
+   * connection was given `onElicitation` (see `ConnectMcpOptions`).
    */
   protocol?: McpProtocolMode
 }
@@ -157,6 +168,62 @@ export interface ConnectMcpOptions {
    * mount — one hanging server no longer holds every other one hostage.
    */
   connectTimeoutMs?: number
+  /**
+   * MCP elicitation: a server may ask the user for input in the middle of a tool
+   * call (a form, or - with `elicitation.url` - a link to open), and this
+   * callback answers: accept with the form's values, decline, or cancel. The
+   * HOST decides, never the model: the question is not shown to the model, and
+   * the answer goes only to the server that asked - not into the model's
+   * context, an event, a log or a run checkpoint.
+   *
+   * Without the callback the capability is not declared, a server cannot ask,
+   * and nothing is sent that was not sent before. The server's message and form
+   * are third-party text: cleaned, capped and restricted to a flat form before
+   * the callback sees them; the answer is checked against the form before it is
+   * sent. A link (URL mode) is only handed to the callback: this package never
+   * fetches or opens it. A callback that throws or does not answer in time
+   * cancels the question and fails the tool call; nothing is retried.
+   *
+   * Inside an agent run the two events `mcp.elicitation-requested` /
+   * `mcp.elicitation-answered` are emitted (the answered one never carries a
+   * value). On the 2025 revisions the calls to a server with this option run
+   * one at a time: its question does not say which call it belongs to.
+   */
+  onElicitation?: McpElicitationHandler
+  /**
+   * Its settings: `timeoutMs` (default 300 000: a human is answering - but a
+   * question still ends with the step it belongs to, see `chatTimeoutMs`),
+   * `maxPerToolCall` (5), `maxPerRun` (20), `url` (also accept URL mode; default
+   * false), `subagents` (let a call made by a helper - a subagent - ask too;
+   * default false: its question is cancelled without the callback being called).
+   */
+  elicitation?: McpElicitationOptions
+}
+
+/**
+ * The longest delay a timer takes (2^31 - 1 ms): the SDK's own request timeout
+ * is set to it for a 2025 tool call that may ask the user something, whose time
+ * is kept by the elicitation session instead (it does not count the time a
+ * question waits).
+ */
+const MAX_TIMER_MS = 2_147_483_647
+
+/**
+ * What an MCP tool reads of the call that reached it, structurally (this entry
+ * does not import the core): the run context the agent passes as
+ * `options.agentRun`, and the mark a subagent tool puts on a host tool's call.
+ */
+interface ToolCallOptions {
+  abortSignal?: AbortSignal
+  agentRun?: {
+    emit?: (event: never) => void
+    step?: unknown
+    signal?: AbortSignal
+    runId?: string
+    subagent?: { id: string; depth: number }
+    elicitations?: { count: number }
+  }
+  subagentCall?: { id: string; depth: number; elicitations?: { count: number } }
 }
 
 /** Hard stop for a server whose pagination never ends (the Node sibling's cap and name). */
@@ -585,17 +652,27 @@ const openConnection = async (
   opts: ConnectMcpOptions,
   log: NonNullable<ConnectMcpOptions['onLog']>,
   isClosing: () => boolean,
+  elicitation: McpElicitationSession | undefined,
 ): Promise<ServerConnect> => {
   let client: Client | undefined
   let timedOut = false
   const timeoutMs = cfg.connectTimeoutMs ?? opts.connectTimeoutMs ?? 30_000
   // What the version probe (`protocol: 'auto' | 'modern'`) ran into.
   const probe: ProbeState = { blocked: false }
-  const attempt = connectAndList(name, cfg, opts, log, probe, isClosing, (c) => {
-    client = c
-    // Created after the deadline already passed: nobody will ever use it.
-    if (timedOut) void c.close().catch(() => {})
-  })
+  const attempt = connectAndList(
+    name,
+    cfg,
+    opts,
+    log,
+    probe,
+    isClosing,
+    (c) => {
+      client = c
+      // Created after the deadline already passed: nobody will ever use it.
+      if (timedOut) void c.close().catch(() => {})
+    },
+    elicitation,
+  )
   // A handshake that completes after the deadline must not leave a live session behind.
   attempt.then(
     (r) => {
@@ -704,6 +781,7 @@ const connectAndList = async (
   probe: ProbeState,
   isClosing: () => boolean,
   onClient: (client: Client) => void,
+  elicitation: McpElicitationSession | undefined,
 ): Promise<ServerConnect> => {
   // Read first: a `protocol` that is none of the three names is a
   // configuration error, said before anything is sent.
@@ -767,16 +845,27 @@ const connectAndList = async (
   // built with exactly the options it always had.
   const negotiation = mcpVersionNegotiation(mode)
   const clientOptions: ClientOptions | undefined =
-    enterprise || negotiation
+    enterprise || negotiation || elicitation
       ? {
-          // An extension is opt-in: it is declared only by the client that uses it.
-          ...(enterprise ? { capabilities: { extensions: { [enterprise.extension]: {} } } } : {}),
+          // An extension is opt-in: it is declared only by the client that uses
+          // it. So is elicitation: without `onElicitation` no capability is
+          // declared, and a server cannot ask.
+          ...(enterprise || elicitation
+            ? {
+                capabilities: {
+                  ...(enterprise ? { extensions: { [enterprise.extension]: {} } } : {}),
+                  ...(elicitation ? { elicitation: elicitation.capability } : {}),
+                },
+              }
+            : {}),
           ...(negotiation
             ? {
                 versionNegotiation: negotiation,
                 // 2026-07-28: an `input_required` result is NOT answered and the
                 // call is NOT sent again by the SDK (its default would try
-                // both); it fails the tool call, see `execute`.
+                // both). Without `onElicitation` it fails the tool call; with
+                // it, `execute` answers it through the session, which keeps
+                // the caps the SDK's own loop does not have.
                 inputRequired: { autoFulfill: false },
               }
             : {}),
@@ -786,6 +875,14 @@ const connectAndList = async (
     { name: opts.clientName ?? 'agent-web', version: opts.clientVersion ?? '0.0.0' },
     clientOptions,
   )
+  if (elicitation) {
+    // 2025 revisions: the server's question is a request of its own. (On
+    // 2026-07-28 the SDK drops inbound requests; the question is then the tool
+    // call's `input_required` result.)
+    client.setRequestHandler('elicitation/create', (request) =>
+      elicitation.onRequest(request.params),
+    )
+  }
   onClient(client)
   await client.connect(transport)
   probing = false
@@ -846,6 +943,23 @@ export const connectMcpHttp = async (
   opts: ConnectMcpOptions = {},
 ): Promise<ConnectedMcp> => {
   const log = opts.onLog ?? (() => {})
+  // Read first: a setting that is not a usable number is a configuration error.
+  const elicitationOptions = resolveMcpElicitationOptions(opts.elicitation)
+  const elicitationDeps: McpElicitationDeps | undefined = opts.onElicitation
+    ? { handler: opts.onElicitation, options: elicitationOptions, log }
+    : undefined
+  // One per server, made before its client: the capability it declares is part
+  // of the handshake.
+  const elicitationSessions = new Map<string, McpElicitationSession>()
+  const elicitationSessionOf = (name: string): McpElicitationSession | undefined => {
+    if (!elicitationDeps) return undefined
+    let session = elicitationSessions.get(name)
+    if (!session) {
+      session = createMcpElicitationSession(name, elicitationDeps)
+      elicitationSessions.set(name, session)
+    }
+    return session
+  }
   const clients = new Map<string, Client>()
   const tools: ToolSet = {}
   const catalog: McpCatalogEntry[] = []
@@ -936,14 +1050,76 @@ export const connectMcpHttp = async (
           // request that fails (transport, protocol, abort) throws here: there
           // is no result, and the throw is recorded as a failed call.
           let res: CallToolResult
+          const elicitation = elicitationSessionOf(name)
           try {
-            res = await client.request(
-              {
-                method: 'tools/call',
-                params: { name: t.name, arguments: (args ?? {}) as Record<string, unknown> },
-              },
-              options?.abortSignal ? { signal: options.abortSignal } : undefined,
-            )
+            if (elicitation) {
+              // The server may ask the user something during this call
+              // (`onElicitation`). The session answers - on the 2025 revisions
+              // a request of the server's own, on 2026-07-28 an
+              // `input_required` result followed by the same call sent again
+              // with the answers and the server's state - and keeps the caps;
+              // see elicitation.ts.
+              const call = options as ToolCallOptions | undefined
+              const run = call?.agentRun
+              const signal = call?.abortSignal ?? run?.signal
+              const emit = run?.emit as ((event: unknown) => void) | undefined
+              const step = run?.step
+              // A call made by a helper says so: the agent marks its own
+              // helpers' calls, a subagent tool the calls of its host tools.
+              const helper = run?.subagent ?? call?.subagentCall
+              // One count per run the host started: a subagent tool's child counts on the
+              // run that delegated to it.
+              const counter = call?.subagentCall?.elicitations ?? run?.elicitations
+              const era = client.getProtocolEra() ?? 'legacy'
+              const info: McpElicitationCallInfo = {
+                tool: key,
+                toolName: t.name,
+                ...(signal ? { signal } : {}),
+                ...(emit
+                  ? {
+                      emit: (event: McpElicitationEvent) =>
+                        emit(
+                          event.type === 'mcp.elicitation-requested' && step
+                            ? { ...event, step }
+                            : event,
+                        ),
+                    }
+                  : {}),
+                ...(run?.runId ? { runId: run.runId } : {}),
+                ...(helper ? { subagent: { id: helper.id, depth: helper.depth } } : {}),
+                ...(counter ? { run: counter } : {}),
+              }
+              res = await elicitation.call(
+                era,
+                info,
+                (leg) =>
+                  client.request(
+                    {
+                      method: 'tools/call',
+                      params: {
+                        name: t.name,
+                        arguments: (args ?? {}) as Record<string, unknown>,
+                        ...leg.retry,
+                      },
+                    },
+                    {
+                      ...(leg.signal ? { signal: leg.signal } : {}),
+                      ...(leg.ownTimeout ? { timeout: MAX_TIMER_MS } : {}),
+                      // Hand an `input_required` result back instead of failing
+                      // on it: the session answers it.
+                      ...(era === 'modern' ? { allowInputRequired: true } : {}),
+                    },
+                  ) as Promise<CallToolResult>,
+              )
+            } else {
+              res = await client.request(
+                {
+                  method: 'tools/call',
+                  params: { name: t.name, arguments: (args ?? {}) as Record<string, unknown> },
+                },
+                options?.abortSignal ? { signal: options.abortSignal } : undefined,
+              )
+            }
           } catch (err) {
             // 2026-07-28: the server answered `input_required` (it wants the
             // user asked something, or the call sent again with a state). Not
@@ -1000,7 +1176,7 @@ export const connectMcpHttp = async (
 
   const connects = await Promise.all(
     Object.entries(servers).map(([name, cfg]) =>
-      openConnection(name, cfg, opts, log, () => closing),
+      openConnection(name, cfg, opts, log, () => closing, elicitationSessionOf(name)),
     ),
   )
 

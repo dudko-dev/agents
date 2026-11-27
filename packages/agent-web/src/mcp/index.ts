@@ -13,6 +13,24 @@ export {
   renderMcpInstructions,
 } from './shared.js'
 export type { McpProtocolMode, McpServerInstructions, McpServerProtocol } from './shared.js'
+export {
+  MCP_ELICITATION_MAX_PER_RUN,
+  MCP_ELICITATION_MAX_PER_TOOL_CALL,
+  MCP_ELICITATION_TIMEOUT_MS,
+  normalizeMcpElicitationSchema,
+  validateMcpElicitationContent,
+} from './elicitation.js'
+export type {
+  McpElicitationContent,
+  McpElicitationContext,
+  McpElicitationFieldSchema,
+  McpElicitationHandler,
+  McpElicitationOptions,
+  McpElicitationReason,
+  McpElicitationRequest,
+  McpElicitationResult,
+  McpElicitationSchema,
+} from './elicitation.js'
 export type {
   McpHttpServerConfig,
   McpCatalogEntry,

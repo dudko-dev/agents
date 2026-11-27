@@ -10,6 +10,7 @@ import type {
   ReplanMode,
   TierReason,
 } from '@dudko.dev/agent-web'
+import type { McpElicitationSchema } from './mcp-types.js'
 
 /** Why a run stopped early (a `budget.exceeded` event). */
 export interface BudgetView {
@@ -209,6 +210,38 @@ export interface ApprovalView {
   automatic?: boolean
 }
 
+/**
+ * A question an MCP server put to the user in the middle of a tool call (MCP elicitation; the
+ * core's `mcp.elicitation-*` events). `message`, `requestedSchema` and `url` are the SERVER's
+ * text - show them as such, never as the application's own. The view never holds what the user
+ * answered: `fields` are the names of the fields an accepted form was answered with.
+ */
+export interface ElicitationView {
+  /** The question's id: the same as `McpElicitationRequest.id` handed to `onElicitation`. */
+  id: string
+  server: string
+  /** The tool call during which the server asked. */
+  tool: string
+  /** Absent only for a question that was refused before it could be shown. */
+  mode?: 'form' | 'url'
+  message: string
+  /** Form mode: the fields to fill in. */
+  requestedSchema?: McpElicitationSchema
+  /** URL mode: the link the server wants opened. Nothing opens it for the user. */
+  url?: string
+  /** The step the tool call belongs to, when known. */
+  stepId?: string
+  /** Set when a helper (a subagent) is the one whose call asks. */
+  subagent?: { id: string; depth: number; name?: string; role?: string }
+  status: 'pending' | 'accepted' | 'declined' | 'cancelled'
+  /** Answered without anybody deciding (a guard, a cap, a timeout, a stopped run). */
+  automatic?: boolean
+  /** Why it was answered automatically (the core's reason, or `stopped`). */
+  reason?: string
+  /** The names of the fields an accepted form was answered with. */
+  fields?: string[]
+}
+
 /** A message sent to the agent while it works, still waiting for a boundary to be shown to the model. */
 export interface QueuedMessageView {
   id: string
@@ -381,6 +414,12 @@ export interface AgentUiState {
    * every depth, in the order they started. A tree: see `SubagentView.parentId` / `subagentTree`.
    */
   subagents: SubagentView[]
+  /**
+   * Questions MCP servers put to the user in this run (MCP elicitation), in the order they
+   * arrived; absent until the first one. Per-run view only: they are not copied into the
+   * transcript, so a saved conversation never holds a server's form.
+   */
+  elicitations?: ElicitationView[]
   /** Messages sent while the run goes that have not yet been shown to the model. */
   queued: QueuedMessageView[]
   /** What the user said during this run and when it reached the agent. */

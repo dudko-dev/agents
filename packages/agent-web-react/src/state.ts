@@ -7,6 +7,7 @@ import {
 import type {
   AgentUiState,
   ApprovalView,
+  ElicitationView,
   ChatAttachment,
   ChatMessage,
   DecisionView,
@@ -177,6 +178,71 @@ const patchApproval = (
   id: string,
   fn: (a: ApprovalView) => ApprovalView,
 ): ApprovalView[] => approvals.map((a) => (a.id === id ? fn(a) : a))
+
+const STATUS_OF_ACTION = {
+  accept: 'accepted',
+  decline: 'declined',
+  cancel: 'cancelled',
+} as const
+
+/** A server's question (MCP elicitation) joins the run's view, once. */
+const addElicitation = (
+  state: AgentUiState,
+  event: Extract<AgentEvent, { type: 'mcp.elicitation-requested' }>,
+  extra: Pick<ElicitationView, 'stepId' | 'subagent'>,
+): AgentUiState =>
+  state.elicitations?.some((e) => e.id === event.id)
+    ? state
+    : {
+        ...state,
+        elicitations: [
+          ...(state.elicitations ?? []),
+          {
+            id: event.id,
+            server: event.server,
+            tool: event.tool,
+            mode: event.mode,
+            message: event.message,
+            ...(event.requestedSchema ? { requestedSchema: event.requestedSchema } : {}),
+            ...(event.url ? { url: event.url } : {}),
+            ...(extra.stepId ? { stepId: extra.stepId } : {}),
+            ...(extra.subagent ? { subagent: extra.subagent } : {}),
+            status: 'pending',
+          },
+        ],
+      }
+
+/** The question was answered; one that was refused before it could be shown is recorded too. */
+const answerElicitation = (
+  state: AgentUiState,
+  event: Extract<AgentEvent, { type: 'mcp.elicitation-answered' }>,
+  stepId: string | undefined,
+): AgentUiState => {
+  const answered = (e: ElicitationView): ElicitationView => ({
+    ...e,
+    status: STATUS_OF_ACTION[event.action],
+    automatic: event.automatic,
+    ...(event.reason ? { reason: event.reason } : {}),
+    ...(event.fields ? { fields: event.fields } : {}),
+  })
+  const list = state.elicitations ?? []
+  return {
+    ...state,
+    elicitations: list.some((e) => e.id === event.id)
+      ? list.map((e) => (e.id === event.id ? answered(e) : e))
+      : [
+          ...list,
+          answered({
+            id: event.id,
+            server: event.server,
+            tool: event.tool,
+            message: '',
+            ...(stepId ? { stepId } : {}),
+            status: 'pending',
+          }),
+        ],
+  }
+}
 
 const patchSubagent = (
   subagents: SubagentView[],
@@ -410,6 +476,34 @@ const applySubagent = (
                 })),
               }
             : known
+
+        // A server asks the user during a subagent's tool call (the connection lets helpers
+        // ask): the question is the user's to answer, like the run's own.
+        case 'mcp.elicitation-requested': {
+          const node = inner.subagent
+            ? known.subagents.find((s) => s.id === inner.subagent!.id)
+            : undefined
+          return addElicitation(known, inner, {
+            // The subagent's own step ids mean nothing here: the step that delegated it does.
+            stepId: (node ?? known.subagents.find((s) => s.id === event.id))?.stepId,
+            ...(inner.subagent
+              ? {
+                  subagent: {
+                    id: inner.subagent.id,
+                    depth: inner.subagent.depth,
+                    ...(node ? { name: node.name } : {}),
+                    ...(node?.role ? { role: node.role } : {}),
+                  },
+                }
+              : {}),
+          })
+        }
+        case 'mcp.elicitation-answered':
+          return answerElicitation(
+            known,
+            inner,
+            known.subagents.find((s) => s.id === event.id)?.stepId,
+          )
 
         // What a subagent generated is in the same workspace: it shows in the turn (its step
         // ids are its own, so it is tied to no step here).
@@ -853,6 +947,15 @@ const applyEvent = (state: AgentUiState, event: AgentEvent, ctx: EventContext): 
         totalUsage: addUsage(state.totalUsage, event.usage),
       }
 
+    case 'mcp.elicitation-requested':
+      return addElicitation(state, event, {
+        stepId: event.step?.id,
+        ...(event.subagent ? { subagent: event.subagent } : {}),
+      })
+
+    case 'mcp.elicitation-answered':
+      return answerElicitation(state, event, runningStepId(state.steps))
+
     case 'tool.approval-requested':
       return {
         ...state,
@@ -973,6 +1076,15 @@ const applyEvent = (state: AgentUiState, event: AgentEvent, ctx: EventContext): 
         approvals: state.approvals.map((a) =>
           a.status === 'pending' ? { ...a, status: 'denied' as const, reason: 'stopped' } : a,
         ),
+        ...(state.elicitations
+          ? {
+              elicitations: state.elicitations.map((e) =>
+                e.status === 'pending'
+                  ? { ...e, status: 'cancelled' as const, automatic: true, reason: 'stopped' }
+                  : e,
+              ),
+            }
+          : {}),
         messages: finalizeAssistant(
           state.messages,
           state.finalText || 'Stopped.',

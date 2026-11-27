@@ -7,6 +7,12 @@ import type { IEgressPolicy } from './safe-fetch.ts'
 import type { ISearchConfig } from './web-search.ts'
 import type { ISandboxConfig } from './sandbox-engine.ts'
 import type { IMediaConfig, IRunFile } from './media.ts'
+import type {
+  McpElicitationHandler,
+  McpElicitationOptions,
+  McpElicitationReason,
+  McpElicitationSchema,
+} from './mcp-elicitation.ts'
 import type { McpProtocolMode } from './mcp-shared.ts'
 import type { ISubagentsConfig } from './subagent-dynamic-shared.ts'
 
@@ -494,6 +500,22 @@ export interface IAgentConfig {
   // Default connect + tools/list timeout for every MCP server (each server
   // can override it). Default 30_000; 0 disables.
   mcpConnectTimeoutMs?: number
+  // MCP elicitation: a server may ask the user for input in the middle of a tool call (a form,
+  // or - with `elicitation.url` - a link to open), and this callback answers: accept with the
+  // form's values, decline, or cancel. The HOST decides, never the model: the question is not
+  // shown to the model and the answer goes only to the server that asked - not into the model's
+  // context, an event, a log, a trace or a run snapshot. Without the callback the capability is
+  // not declared, a server cannot ask, and nothing is sent that was not sent before. The
+  // server's message and form are third-party text: cleaned, capped and restricted to a flat
+  // form before the callback sees them; the answer is checked against the form before it is
+  // sent. A callback that throws or does not answer in time cancels the question and fails the
+  // tool call; nothing is retried. See the README, "MCP elicitation".
+  onElicitation?: McpElicitationHandler
+  // Its settings: `timeoutMs` (default 300_000: a human is answering; the question still ends
+  // with its step - `llmTimeoutMs`), `maxPerToolCall` (5), `maxPerRun` (20), `url` (also accept
+  // URL mode; default false), `subagents` (let a call made by a spawn_subagent helper ask too;
+  // default false: a helper's question is cancelled without the callback being called).
+  elicitation?: McpElicitationOptions
   // Show the model the `instructions` a connected MCP server returned in its
   // initialize result (planner and executor system prompts, under a preamble
   // that marks them as third-party text; capped per server and in total).
@@ -733,6 +755,37 @@ type AgentEventBody =
       approved: boolean
       reason?: string
       automatic: boolean
+    }
+  // An MCP server asked the user for input during a tool call (`onElicitation` is being called).
+  // `message`, `requestedSchema` and `url` are the SERVER's text: cleaned and capped, for a UI
+  // to show - never instructions.
+  | {
+      type: 'mcp.elicitation-requested'
+      id: string
+      server: string
+      // The tool call that asks: the tool's name as the model called it.
+      tool: string
+      mode: 'form' | 'url'
+      message: string
+      requestedSchema?: McpElicitationSchema
+      url?: string
+      step?: IPlanStep
+      // Set when a helper the model started is the one whose call asks.
+      subagent?: { id: string; depth: number }
+    }
+  // The question was answered. Never carries a value the user entered: `fields` are the NAMES
+  // of the fields an accepted form was answered with. automatic: true when nobody decided (a
+  // guard, a cap, a timeout, a failed handler, a stopped run) - `reason` says which, the tool
+  // call fails, and no 'mcp.elicitation-requested' may have preceded it.
+  | {
+      type: 'mcp.elicitation-answered'
+      id: string
+      server: string
+      tool: string
+      action: 'accept' | 'decline' | 'cancel'
+      automatic: boolean
+      reason?: McpElicitationReason
+      fields?: string[]
     }
   // `profile` is set when the parent chose one of the subagent's named profiles for this call.
   // The tree: `parentId` is the id of the subagent that made the call, or the `runId` of the run

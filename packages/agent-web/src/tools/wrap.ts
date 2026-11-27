@@ -43,6 +43,17 @@ export interface ToolRunContext {
   fetched?: string[]
   /** Internal - what the built-in `spawn_subagent` tool reads of the run (`subagents.dynamic`). */
   spawn?: SpawnRun
+  /**
+   * Set on the run of a helper the model started (`subagents.dynamic`): the call is the
+   * helper's, not the run's the host started. An MCP tool reads it to decide whether the call
+   * may ask the user something (`onElicitation`, `elicitation.subagents`).
+   */
+  subagent?: { id: string; depth: number }
+  /**
+   * The questions MCP servers asked the user in this run (`onElicitation`): one object per run,
+   * shared with the helpers it starts (`elicitation.maxPerRun`).
+   */
+  elicitations?: { count: number }
 }
 
 /** Read the run context the agent passes to a tool's execute (undefined outside a run). */
@@ -119,6 +130,8 @@ export interface WrapToolsOptions {
   spawn?: SpawnRun
   /** Set on a helper's own run: every consent request it makes carries it. */
   subagent?: { id: string; depth: number }
+  /** The run's count of questions asked of the user, handed to tools through their run context. */
+  elicitations?: { count: number }
 }
 
 const isAsyncIterable = (v: unknown): v is AsyncIterable<unknown> =>
@@ -207,6 +220,8 @@ export const wrapToolsForRun = (tools: ToolSet, o: WrapToolsOptions): ToolSet =>
             ...(o.runId ? { runId: o.runId } : {}),
             ...(o.fetched ? { fetched: o.fetched } : {}),
             ...(o.spawn ? { spawn: o.spawn } : {}),
+            ...(o.subagent ? { subagent: o.subagent } : {}),
+            ...(o.elicitations ? { elicitations: o.elicitations } : {}),
           }
           return execute.call(t, input, { ...(options as object), agentRun })
         }

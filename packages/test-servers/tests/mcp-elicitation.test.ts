@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   ELICIT_FORM_SCHEMA,
+  ELICIT_HUGE_FIELDS,
   startLocalMcpServer,
   validFormContent,
   type ILocalMcpServer,
@@ -486,6 +487,56 @@ test('fault neverSatisfied: every round is answered with the question again', as
       }),
     )
     assert.deepEqual(Object.keys(moved.inputRequests ?? {}), ['color'], 'switched off: it moves on')
+  } finally {
+    await mcp.close()
+  }
+})
+
+test('faults formSchema and quietResult: a form no client should show, and results without the answers', async () => {
+  const mcp = await start()
+  try {
+    mcp.elicitationFaults.formSchema = 'nested'
+    const nested = askedOf(await call(mcp, 'elicit_form', FORM))
+    assert.equal(
+      nested.inputRequests?.profile.params.requestedSchema.properties.address.type,
+      'object',
+    )
+    mcp.elicitationFaults.formSchema = 'huge'
+    const huge = askedOf(await call(mcp, 'elicit_form', FORM))
+    assert.equal(
+      Object.keys(huge.inputRequests?.profile.params.requestedSchema.properties).length,
+      ELICIT_HUGE_FIELDS,
+    )
+    // A decline is answered as ever.
+    assert.deepEqual(
+      finalOf(
+        await call(mcp, 'elicit_form', FORM, {
+          inputResponses: { profile: { action: 'decline' } },
+        }),
+      ),
+      { tool: 'elicit_form', action: 'decline' },
+    )
+    delete mcp.elicitationFaults.formSchema
+
+    mcp.elicitationFaults.quietResult = true
+    assert.deepEqual(
+      finalOf(
+        await call(mcp, 'elicit_form', FORM, {
+          inputResponses: { profile: { action: 'accept', content: PROFILE } },
+        }),
+      ),
+      { tool: 'elicit_form', action: 'accept' },
+      'the answer is not repeated in the result',
+    )
+    delete mcp.elicitationFaults.quietResult
+    assert.deepEqual(
+      finalOf(
+        await call(mcp, 'elicit_form', FORM, {
+          inputResponses: { profile: { action: 'accept', content: PROFILE } },
+        }),
+      ).content,
+      PROFILE,
+    )
   } finally {
     await mcp.close()
   }

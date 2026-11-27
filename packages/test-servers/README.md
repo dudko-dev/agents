@@ -201,6 +201,9 @@ in every `protocol` mode; only `server/discover` is touched:
 | `neverSatisfied` | ask their first question again on every round, whatever was answered (legacy: the call fails after 8 rounds) |
 | `undeclaredMode` | ask in the mode the client did not declare: URL mode from a client that declared the form only or nothing, a form from one that declared URL mode only (the answer is reported back as `{ tool, undeclared, action }`). A client that declared both gets the normal tool. |
 | `tamperState` | hand out a `requestState` whose signature is broken: echoed exactly, it is still refused |
+| `formSchema: 'nested'` | ask every form with a field that is itself an object: outside the flat subset a form may be, so a client must refuse it |
+| `formSchema: 'huge'` | ask every form with `ELICIT_HUGE_FIELDS` (51) string fields: each one allowed, the form as a whole more than a client should show |
+| `quietResult` | leave the user's answers out of the tool results (`{ tool, action }` only): for tests that look for an answer where it must not be |
 
 **Options that change what a server accepts:**
 

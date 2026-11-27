@@ -16,6 +16,7 @@ import type {
 } from '../index.ts'
 import { DirSkillStore } from '../learning.ts'
 import { mcpProtocolMode } from '../mcp-shared.ts'
+import { parseElicitationMode } from './elicit.ts'
 import type { ISandboxConfig } from '../sandbox.ts'
 import type { ISubagentsConfig } from '../subagent-dynamic-shared.ts'
 import type { ISearchConfig } from '../web-search.ts'
@@ -102,6 +103,11 @@ export const loadConfig = (): IAgentConfig => {
     maxToolCalls: parseOptionalInt(process.env.AGENT_MAX_TOOL_CALLS),
     thinking: parseThinking(process.env.AGENT_THINKING),
     toolApproval: parseApproval(process.env.AGENT_TOOL_APPROVAL, process.env.AGENT_TOOL_RULES),
+    // AGENT_MCP_ELICITATION=all also accepts URL mode. The callback itself is the REPL's
+    // (run.ts): without it nothing is declared, whatever this says.
+    ...(parseElicitationMode(process.env.AGENT_MCP_ELICITATION) === 'all'
+      ? { elicitation: { url: true } }
+      : {}),
     compaction: parseCompaction(),
     egress: parseEgress(),
     search: parseSearch(),

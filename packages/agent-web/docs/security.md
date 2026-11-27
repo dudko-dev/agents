@@ -634,8 +634,60 @@ sends none of them.
   four `POST`s of a JSON-RPC `ping` to the MCP endpoint, one per header, with no credentials of
   yours beyond what your `fetch` adds. A server sees them as unauthenticated pings.
 - **No call is repeated.** The revision is chosen at connect; a tool call that fails is not sent
-  again in the other revision, and an `input_required` answer is not retried - a tool that
-  writes runs once.
+  again in the other revision, and an `input_required` answer is not retried (with
+  `onElicitation` the same call is CONTINUED with the user's answers and the server's state, see
+  below; never after an answer nobody decided) - a tool that writes runs once.
+
+## MCP elicitation: a server asks the user in the middle of a tool call
+
+With `onElicitation` on a connection (`connectMcpHttp`), a server may put a question to the
+person in front of the page while one of its tools runs. That is a consent boundary in both
+directions: third-party text reaches your UI, and what the user types leaves the page.
+
+**What comes in is the server's text.**
+
+- The message, the field titles and descriptions and the option titles are cleaned of control,
+  zero-width and bidi-override characters and capped before your callback or an event sees them.
+  They are never put into a prompt. **Render them as text** (never as HTML), under the server's
+  name, visibly apart from your application's own words: a form that says "your session
+  expired, enter your password" is still a form from a tool.
+- The form is restricted to what the specification allows - a flat object of strings, numbers,
+  booleans and selects. A nested or oversized form is declined before anybody is asked.
+- **Do not let the model fill it in.** The question is not shown to the model, and the answer
+  must come from the user. A host that pipes `request` into a prompt, or answers from the
+  conversation, has removed the boundary.
+
+**What goes out is the user's answer, to that server only.**
+
+- It is checked against the form first (types, limits, required fields) and a field the form
+  did not ask for is refused: the server gets what it asked for and nothing else.
+- It is not written to the model's context, an event, a log line or a run checkpoint, and the
+  error a failed call reports names the field and the rule, never the value. A server may
+  repeat an answer in its tool result: that is the server's output, and the model then reads
+  it. Do not ask users for secrets through a server you would not show them to.
+- Keep it out of your own logs and state too. `mcp.elicitation-answered` carries field names
+  for that reason; the React package's view state holds no answer.
+
+**A link is only a link.** In URL mode (opt-in: `elicitation: { url: true }`) the callback gets
+`request.url`. This package never fetches it and never calls `window.open`. Only `https:` links
+(or `http:` on a loopback host) get that far, and none with credentials in them. Opening it is
+your decision and the user's: show the host name, open from a user gesture, in a new tab with
+`noopener`. `accept` means "the user agreed to open it" and carries no content. A link is the
+obvious phishing vector of a tool; leave URL mode off for servers you do not trust.
+
+**Who may ask.** Only a call of the run the host started. A helper the model started, and a
+subagent tool's child that was handed the same tools, are refused without the callback being
+called unless the connection says `elicitation: { subagents: true }` - and then the request
+names the helper. A model that can start helpers must not get a second way to the user.
+
+**It cannot go on for ever.** One question waits `timeoutMs` (5 minutes); a tool call may ask
+`maxPerToolCall` (5) and a run `maxPerRun` (20); a 2026-07-28 call ends after 10
+`input_required` rounds. Past any of them - and when the callback throws - the question is
+cancelled, the tool call fails with a sentence that says why, and nothing is retried: a tool
+that writes runs once.
+
+**Off is off.** Without the callback no capability is declared and the wire is what it was. A
+server cannot switch the feature on, and neither can the model.
 
 ## Pipelines: a definition is data
 
