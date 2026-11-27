@@ -121,6 +121,15 @@ export const mcpAppsRouter = (
       return apps ? apps.readUiResource(server, uri, options) : Promise.reject(notConnected(server))
     },
     appTool: (server, name) => appsOf(server)?.appTool(server, name),
+    readResource: (server, uri, options) => {
+      const apps = appsOf(server)
+      if (!apps) return Promise.reject(notConnected(server))
+      // An older core has no such read: a linked file is refused, never fetched instead.
+      if (!apps.readResource) {
+        return Promise.reject(new Error('this version of the core cannot read a linked file'))
+      }
+      return apps.readResource(server, uri, options)
+    },
     callAppTool: (server, name, args, options) => {
       const apps = appsOf(server)
       return apps

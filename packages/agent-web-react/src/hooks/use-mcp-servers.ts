@@ -61,6 +61,13 @@ export interface McpServerSpec {
    * server. Left out, nothing is passed (off).
    */
   skills?: boolean
+  /**
+   * MCP Apps for this server: `false` keeps its apps off while other servers' are shown (nothing
+   * is declared to it, no app of it is read, its app-only tools are hidden from everyone and its
+   * other tools are the model's, as plain tools); `true` shows them even when the hook's `apps`
+   * is off. Remembered with the server. Left out, the hook's `apps` decides.
+   */
+  apps?: boolean
 }
 
 /** A server's live state. */
@@ -72,6 +79,8 @@ export interface McpServerView {
   protocolMode?: McpProtocolMode
   /** It was added with `skills: true`: its skills (if it serves any) are in the agent's catalog. */
   skills?: boolean
+  /** It was added with `apps` set (`false`: its apps are off; absent: the hook's `apps`). */
+  apps?: boolean
   /** What was negotiated (`version`, `era`), while it is connected and the core reports it. */
   protocol?: Omit<McpServerProtocol, 'server'>
   status: McpStatus
@@ -139,6 +148,7 @@ interface StoredServer {
   oauth?: McpServerSpec['oauth']
   protocol?: McpProtocolMode
   skills?: boolean
+  apps?: boolean
 }
 
 interface PendingRecord {
@@ -173,6 +183,7 @@ const view = (s: StoredServer, patch: Partial<McpServerView> = {}): McpServerVie
   auth: s.auth,
   ...(isProtocolMode(s.protocol) ? { protocolMode: s.protocol } : {}),
   ...(s.skills === true ? { skills: true } : {}),
+  ...(typeof s.apps === 'boolean' ? { apps: s.apps } : {}),
   status: 'idle',
   catalog: [],
   ...patch,
@@ -228,6 +239,7 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
         ...(oauth && typeof oauth === 'object' ? { oauth } : {}),
         ...(s.protocolMode ? { protocol: s.protocolMode } : {}),
         ...(s.skills ? { skills: true } : {}),
+        ...(typeof s.apps === 'boolean' ? { apps: s.apps } : {}),
       })
     }
   }
@@ -322,6 +334,8 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
               // Only when asked for: without it the connection is built as it always was.
               ...(spec.protocol ? { protocol: spec.protocol } : {}),
               ...(spec.skills === true ? { skills: true } : {}),
+              // Only when given: without it the hook's `apps` decides, as before.
+              ...(typeof spec.apps === 'boolean' ? { apps: spec.apps } : {}),
             },
           },
           {
@@ -393,6 +407,7 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
         ...(input.oauth ? { oauth: input.oauth } : {}),
         ...(isProtocolMode(input.protocol) ? { protocol: input.protocol } : {}),
         ...(input.skills === true ? { skills: true } : {}),
+        ...(typeof input.apps === 'boolean' ? { apps: input.apps } : {}),
       }
       specsRef.current.set(name, spec)
       live(name).token = input.auth === 'bearer' ? input.token : undefined
@@ -576,10 +591,20 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
     [servers],
   )
 
-  const appsOn = options.apps === true
+  // Apps of every server whose own setting, or the hook's, turns them on. A server with
+  // `apps: false` is never routed to - not even by a core too old to know the setting.
+  const appsOn = options.apps === true || servers.some((s) => s.apps === true)
+  const hookApps = options.apps === true
   const apps = useMemo(
-    () => (appsOn ? mcpAppsRouter((server) => liveRef.current.get(server)?.connection) : undefined),
-    [appsOn],
+    () =>
+      appsOn
+        ? mcpAppsRouter((server) => {
+            const spec = specsRef.current.get(server)
+            if (!spec || (spec.apps ?? hookApps) !== true) return undefined
+            return liveRef.current.get(server)?.connection
+          })
+        : undefined,
+    [appsOn, hookApps],
   )
 
   const protocols = useMemo<McpServerProtocol[]>(

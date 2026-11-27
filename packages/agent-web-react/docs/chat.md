@@ -481,7 +481,22 @@ What the user sees:
     without credentials get that far;
   - a **message** - "The app “travel” wants to put a message in your message box", the text
     quoted. **Put in the message box** adds it to the message field as a draft: nothing is sent
-    until the user sends it, and they can change it first. **Discard** is an error for the app.
+    until the user sends it, and they can change it first. **Discard** is an error for the app;
+  - a **file** (with `appDownloads`) - "The app “demo” wants to save a file to your device", the
+    file's sanitized name highlighted, its type and size, and where the bytes came from (made in
+    the app's frame, or read from its server). **Save file** saves it - this page does, through a
+    `blob:` URL of its own and an `<a download>` it clicks once; **Cancel** saves nothing and the
+    app is told (`isError`). Programs, scripts and web pages are refused before anyone is asked
+    ([below](#what-an-app-may-ask-for-besides-a-tool-call));
+  - a **request to the agent's model** (with `appSampling`) - "The app “demo” asks the agent’s
+    model for an answer": the app's instructions and messages as plain text - exactly what the model
+    would get, nothing of the chat - and "Up to 120 tokens." **Allow once**, **Always for this
+    app** (its next requests are not asked about until the page is reloaded) or **Deny** (the app
+    is told `-1`, MCP's "user rejected"). The answer goes to the app only: it is never in the
+    transcript, the memory or the model's context; its tokens count in the header's total.
+
+  While an app shown full screen waits for the user, it goes back inline: a prompt is never under
+  an app.
 
   One question per app at a time; an app cannot pile prompts up. The consent area keeps one
   order: tool calls (the agent's and the apps'), then what apps ask besides (links, messages),
@@ -506,16 +521,33 @@ approval.app // { server, tool, resourceUri } - an app asks, not the agent
 | `appsCollapsed` | `false` | start every app folded to one line |
 | `appSandbox` | - | `{ url, timeoutMs? }`: run apps on an origin of their own, behind your sandbox page on another origin ([below](#an-app-on-an-origin-of-its-own)). Without it, an opaque frame |
 | `appPanel` | `'auto'` | where "Open in panel" goes: `'auto'` (beside a wide chat, a sheet on a narrow one), `'sheet'`, an element of your page, or `false` (no panel) |
+| `appFullscreen` | `false` | offer `fullscreen` besides `inline` (`hostContext.availableDisplayModes`): an app that declared it may ask for it right after a click or a key inside its frame ([below](#full-screen)) |
+| `appDownloads` | `false` | `ui/download-file` (`hostCapabilities.downloadFile`): a file the app hands the user, saved on **Save file** |
+| `appSampling` | `false` | `sampling/createMessage` (`hostCapabilities.sampling`, never `sampling.tools`): the agent's model answers the app after the user allowed it (needs `useAgent().sampleForApp`) |
 | `onAppPanel` | - | told when an app goes into the panel (`app`) or leaves it (`undefined`) |
 | `renderApp(app, message, fallback)` | - | draw an app yourself |
-| `renderAppRequest(request, fallback)` | - | draw a link / message request yourself |
+| `renderAppRequest(request, fallback)` | - | draw a link / message / file / sampling request yourself |
 
 The parts on their own: `<McpAppFrame app host variant? theme? defaultCollapsed? onOpenPanel?
-onClosePanel? showCalls?>`, `<McpAppLine app note action onAction>`, `<AppRequestPrompt requests
-onAnswer renderRequest?>`, `useMcpAppHost({ connection, approve, approvals, sandbox? })` (what `<AgentChat>`
-uses: `read`, `callTool`, `openLink`, `message`, `requests`, `answer`, `draft`, `isWaiting`, `sandbox`),
-and `<AgentComposer draft={{ id, text }}>` (an accepted message, appended once per `id`, never
-sent). `<MessageList renderApp showApps>` draws `message.apps`.
+onClosePanel? showCalls? allowFullscreen?>`, `<McpAppLine app note action onAction>`,
+`<AppRequestPrompt requests onAnswer(id, accept, { always? }) renderRequest?>`,
+`useMcpAppHost({ connection, approve, approvals, sandbox?, downloads?, sampling?, sample? })` (what
+`<AgentChat>` uses: `read`, `callTool`, `openLink`, `message`, `downloadFile` and `sample` (each
+present only when on - absent, the app is not offered it), `requests`, `answer`, `draft`,
+`isWaiting`, `sandbox`; `sample` is `useAgent().sampleForApp`), and `<AgentComposer draft={{ id,
+text }}>` (an accepted message, appended once per `id`, never sent). `<MessageList renderApp
+showApps>` draws `message.apps`. A request is an `AppRequestView` - `kind: 'link' | 'message' |
+'download' | 'sampling'`, with `link`, `text`, `download` (`AppDownloadView`: `{ name, mimeType?,
+size, source }` - the bytes stay with the host) or `sampling` (the core's `AppSamplingView`: `{
+server, resourceUri, messages: [{ role, text, images }], systemPrompt?, maxTokens,
+requestedMaxTokens, temperature? }`).
+
+**Apps of one server off.** `useMcpServers().add({ name, url, apps: false })` keeps that server's
+apps off while the others' are shown (remembered with the server list, like `skills`;
+`servers[i].apps`): nothing is declared to it, none of its apps is read or drawn, a tool it marks
+for its app only is mounted for nobody, and its other tools are the model's, as plain tools.
+`apps: true` turns them on for that server even when the hook's `apps` is off. The demo's add form
+has "Show this server's apps" for it (the panel's switch is the default).
 
 ### An app is a security boundary
 
@@ -542,11 +574,13 @@ a hostile app, `e2e/apps.spec.ts`):
   only messages whose `event.source` is the frame it drew: an app writing to `window.top` directly
   is ignored.
 - **An allow-list on the bridge.** `ui/initialize`, `ping`, `tools/call`, `ui/open-link`,
-  `ui/message`, `ui/request-display-mode` (it stays inline); size-changed and initialized
-  notifications. Everything else is "method not found" - no resource reads, no model context, no
-  downloads, no sampling. Nothing but `ping` before `ui/initialize`; the tool's input and result are
-  sent once, after the app says it is initialized. Parameters are checked before the host sees
-  them; at most `MCP_APP_MAX_IN_FLIGHT` (3) requests of an app wait at once.
+  `ui/message`, `ui/request-display-mode` (inline unless the host offers full screen - see below);
+  size-changed and initialized notifications; and, only when the host turned them on,
+  `ui/download-file` and `sampling/createMessage` (`MCP_APP_OPTIONAL_REQUESTS`). Everything else is
+  "method not found" - no resource reads for the app, no model context. Nothing but `ping` before
+  `ui/initialize`; the tool's input and result are sent once, after the app says it is
+  initialized. Parameters are checked before the host sees them; at most `MCP_APP_MAX_IN_FLIGHT`
+  (3) requests of an app wait at once. `hostCapabilities` says only what is on.
 - **Consent for everything that acts** - tool calls through the agent's gate, links on the user's
   click, messages as a draft - labelled as the app's. A tool of another server, or one whose
   `visibility` leaves out `'app'`, is refused before anyone is asked.
@@ -566,9 +600,89 @@ What it does **not** do, in this version:
 - **WebRTC** is not governed by `connect-src` in Chromium: an app could reach a STUN server it
   names - with what it has (the tool's input and result, what the user typed into it), never
   anything of your page. Its CPU and memory are not limited.
-- `ui/update-model-context`, `resources/read` for the app, `ui/download-file`, sampling,
-  fullscreen / picture-in-picture, the host's style variables. A teardown is announced to the app
-  but not waited for.
+- `ui/update-model-context`, `resources/read` for the app, picture-in-picture, tools in sampling
+  (`sampling.tools`), the host's style variables. A teardown is announced to the app but not
+  waited for.
+
+### What an app may ask for besides a tool call
+
+Three requests of the extension need the host to turn them on; each is off by default, each is a
+consent boundary with a test for every guard (`tests/apps-features.test.ts`, and in a real browser
+`e2e/demo-server-app.spec.ts` / `e2e/apps.spec.ts`).
+
+#### Full screen
+
+`appFullscreen` offers `['inline', 'fullscreen']` in `hostContext.availableDisplayModes`
+(`specification/2026-01-26/apps.mdx`, "Display Modes"). An app's `ui/request-display-mode` for
+`fullscreen` is granted only when **all** of these hold, else it is answered with the mode it is
+in (the specification: "Host MUST return the resulting mode (whether updated or not)"):
+
+- the app declared it in `appCapabilities.availableDisplayModes` at `ui/initialize` (an app that
+  declared nothing stays inline - the specification lets a host decline it);
+- **the user just acted inside its frame**: the frame's element has the focus (a click or a key in
+  a frame focuses it) and the page has transient user activation (`navigator.userActivation`; an
+  activation inside a frame reaches the pages above it for a few seconds). The specification asks
+  for no gesture; a browser asks the same of its own Fullscreen API, and an app taking over the
+  chat unasked is an app that can dress up as the chat. `appGestureOf`;
+- the app does not wait for the user (a prompt must never be under it).
+
+Then the app fills the chat panel (the whole viewport on a window up to 640 px wide - a phone) in
+the host's chrome: "App from server “demo” · sandboxed · full screen", and **Exit full screen**
+(Esc). The focus moves to that button and stays inside the dialog (`role="dialog"`, `aria-modal`); its place
+in the transcript is kept. Esc works while the focus is on the host's chrome - inside the app's
+frame the keys are the app's, which the browser gives your page no way to see - so the button is
+always there; the demo's board takes Esc back itself. `inline` is always granted (the way back
+needs no gesture). Each change reaches the app as `ui/notifications/host-context-changed` -
+`displayMode`, and `containerDimensions` (fixed `width` / `height` full screen, `maxHeight` 800
+inline); a reload starts it inline again. **Picture-in-picture is not offered**: a frame that floats
+over the chat while the user does something else is the easiest place for an app to pass for the
+host's own interface - a fake prompt, a fake composer - and it would have to stay clear of the
+prompts it may cause. An app asking for `pip` is answered with its current mode.
+
+#### A file to save
+
+`appDownloads` adds `downloadFile` to `hostCapabilities` (the draft revision's `ui/download-file`):
+the app hands the host ONE file per request - an `EmbeddedResource` (`text` or base64 `blob`) or a
+`ResourceLink` - and the user is asked. The guards (`appDownloadOf`, `appFileNameOf`,
+`appDownloadRefusal`, `resolveAppDownload`, `saveAppFile`):
+
+- **The name** is the last segment of `resource.uri` (a link: of its URI, else its `name`),
+  percent-decoding undone and split again, without what cannot be seen (bidirectional overrides,
+  zero-width), with `<>:"/\|?*` and control characters replaced, no leading dots (a hidden file),
+  no trailing dots or spaces, not a Windows device name (`CON` → `_CON`), at most 100 characters
+  with the extension kept; `download` when nothing is left. That is what the prompt shows and what
+  the file is saved as.
+- **Refused before anyone is asked:** programs, scripts, installers, shortcuts and disk images
+  (`.exe .bat .cmd .msi .ps1 .vbs .js .jar .sh .app .dmg .deb .apk .lnk .reg .py …`,
+  `MCP_APP_REFUSED_DOWNLOAD_EXTENSIONS`) and documents a browser runs scripts in when opened (HTML,
+  SVG, XML) - by the name's extension AND by the declared type (`text/html`, `image/svg+xml`, any
+  `…+xml`, `MCP_APP_REFUSED_DOWNLOAD_TYPES`). An SVG export is refused for that reason: offer PNG.
+- **At most 20 MB** (`MCP_APP_MAX_DOWNLOAD_BYTES`), checked on the text and on the base64 before it
+  is decoded.
+- **A linked file is read through the connection**: `resources/read` on the app's OWN server (the
+  core's `apps.readResource`), never a fetch of its URI - an `https://` link to elsewhere is asked
+  of that server, which does not have it, and nothing leaves the page. The type the SERVER gives
+  it is judged again. Read before the prompt, so the prompt shows the real size.
+- **Saved by your page, on the click:** a `Blob` of type `application/octet-stream` (never
+  rendered or sniffed as a page), a `blob:` URL of your page, an `<a download>` it makes and clicks
+  once, the URL revoked a minute later - no navigation, no `data:` or `javascript:` URL. The app's
+  frame has no download token and never gets one.
+- Denied, or not saved: `{ isError: true }` (the SDK's `McpUiDownloadFileResult`); refused by the
+  rules: a JSON-RPC error (`-32602`, "Policy violation: …").
+
+#### An answer of the agent's model
+
+`appSampling` adds `sampling: {}` (never `sampling.tools`) to `hostCapabilities`, and the app's
+`sampling/createMessage` (MCP's `CreateMessageRequest`) is answered by the agent - the core's
+`Agent.sampleForApp` (`useAgent().sampleForApp`), which holds the rules (docs of the core:
+`docs/capabilities.md`, "An app asks the model"): text messages (images only for a model known to
+read them), no tools, at most 16 000 characters, `maxTokens` lowered to 1024, 5 requests a minute
+and 30 in all per app; checked and counted BEFORE the user is asked, so an app cannot stack
+prompts. The prompt shows exactly what the model gets. **Always for this app** is kept by the page
+(`useMcpAppHost`) until it is reloaded - under every approval mode, autopilot included, an app's
+sampling asks unless the user chose it. The model's answer is returned to the app and is in no
+message, no event and no memory; the tokens arrive as a `usage` event of phase `'app'`, which the
+reducer adds to `totalUsage` only - never to a run's `usage` or an answer's.
 
 ### An app on an origin of its own
 
@@ -692,7 +806,10 @@ Labels: `appFrom`, `appSandboxed`, `appSandboxedOrigin`, `appSandboxOrigin`, `ap
 `appServedBy`, `appInPanel`, `appBringBack`, `appClosePanel`, `appPanelNote`, `appFrameName`,
 `appRan`, `appRefused`, `approvalLeadApp`, `approvalFromApp`, `appLinkLead`, `appLinkNote`,
 `appLinkOpen`, `appCancel`, `appMessageLead`, `appMessageNote`, `appMessageAccept`,
-`appMessageDiscard`.
+`appMessageDiscard`, `appFullscreenBadge`, `appFullscreenExit`, `appFullscreenKey`,
+`appDownloadLead`, `appDownloadType`, `appDownloadSize`, `appDownloadSource`, `appDownloadNote`,
+`appDownloadSave`, `appSamplingLead`, `appSamplingSystem`, `appSamplingRole`, `appSamplingImages`,
+`appSamplingTokens`, `appSamplingNote`, `appSamplingAllow`, `appSamplingAlways`, `appSamplingDeny`.
 
 ## The decision model's note
 
@@ -969,10 +1086,10 @@ tokens inside an element with class `awr-theme`.
 | `lessonsOf` | the agent's own skills (`agent.listLearnedSkills()`) as `LessonView[]` - what the hook seeds the notebook with |
 | `useVirtualFiles` | a live listing of a `VirtualFileSystem` + upload / remove / read |
 | `useSpeechToText` | Web Speech API: `{ supported, listening, interim, start, stop, toggle }` |
-| `useMcp` / `useMcpServers` | one or several MCP servers, merged tools — import from `@dudko.dev/agent-web-react/mcp`. With `apps: true` they declare MCP Apps and return `apps` for `<AgentChat mcpApps>`. `instructions` (on `useMcp`, and on each of `useMcpServers().servers`) is what the server told the agent in its handshake - third-party text that goes into the agent's prompt: show it to the user as the server's words. `protocol` (`useMcp`) / `servers[i].protocol` and `protocols` (`useMcpServers`) are the negotiated MCP revisions; a server is connected with `protocol: 'legacy' \| 'auto' \| 'modern'` (`connect` / `add`) and, experimentally, `skills: true` (its MCP skills join the agent's catalog as `<server>/<skill>`, so the run's skills - `message.skills` - name the server; `servers[i].skills`). `pendingElicitations` / `answerElicitation` are the servers' [questions to the user](#questions-from-mcp-servers-elicitation). Options: `clientName`, `clientMetadataUrl` (a client ID metadata document, CIMD, used as the OAuth `client_id` where the authorization server supports it; per server through `oauth.clientMetadataUrl`), `onLog`, `elicitation` (`true` or the core's settings; off by default), `apps` (off by default) — see the README |
+| `useMcp` / `useMcpServers` | one or several MCP servers, merged tools — import from `@dudko.dev/agent-web-react/mcp`. With `apps: true` they declare MCP Apps and return `apps` for `<AgentChat mcpApps>`. `instructions` (on `useMcp`, and on each of `useMcpServers().servers`) is what the server told the agent in its handshake - third-party text that goes into the agent's prompt: show it to the user as the server's words. `protocol` (`useMcp`) / `servers[i].protocol` and `protocols` (`useMcpServers`) are the negotiated MCP revisions; a server is connected with `protocol: 'legacy' \| 'auto' \| 'modern'` (`connect` / `add`) and, experimentally, `skills: true` (its MCP skills join the agent's catalog as `<server>/<skill>`, so the run's skills - `message.skills` - name the server; `servers[i].skills`) and `apps: false` (that server's apps off, the hook's `apps` the default; `servers[i].apps`). `pendingElicitations` / `answerElicitation` are the servers' [questions to the user](#questions-from-mcp-servers-elicitation). Options: `clientName`, `clientMetadataUrl` (a client ID metadata document, CIMD, used as the OAuth `client_id` where the authorization server supports it; per server through `oauth.clientMetadataUrl`), `onLog`, `elicitation` (`true` or the core's settings; off by default), `apps` (off by default) — see the README |
 | `elicitationFields`, `elicitationInitialDraft`, `elicitationFormAnswer`, `elicitationLink`, `formatCountdown` | the elicitation prompt's pure logic ([above](#questions-from-mcp-servers-elicitation)) |
 | `mcpOAuthProviderOptions` | the options the MCP hooks hand the core's OAuth provider for one server (pure; same subpath) |
-| `useMcpAppHost` | MCP Apps: reads an app from its server, puts its tool calls through the agent's gate, holds its link / message requests ([above](#mcp-apps-a-servers-interface-in-the-chat)); `sandbox: { url, timeoutMs? }` runs apps on an origin of their own ([above](#an-app-on-an-origin-of-its-own)). `mcpAppsRouter` (`./mcp`) is the stable `apps` the MCP hooks return |
+| `useMcpAppHost` | MCP Apps: reads an app from its server, puts its tool calls through the agent's gate, holds its link / message / file / sampling requests ([above](#mcp-apps-a-servers-interface-in-the-chat)); `sandbox: { url, timeoutMs? }` runs apps on an origin of their own ([above](#an-app-on-an-origin-of-its-own)); `downloads`, `sampling` + `sample` turn on what an app may ask for besides ([above](#what-an-app-may-ask-for-besides-a-tool-call)). `mcpAppsRouter` (`./mcp`) is the stable `apps` the MCP hooks return |
 | `McpAppBridge`, `buildMcpAppDocument`, `mcpAppCsp`, `appLinkOf`, `appMessageTextOf`, `clampAppHeight` | the frame's security core, pure: the bridge without a DOM, the shell, the policy, the link and message checks |
 | `agentStateReducer` | the pure event → UI reducer |
 | `subagentTree` | `agent.subagents` (flat) as nested `SubagentNode[]` |
@@ -1050,6 +1167,11 @@ component or `<AgentLabelsProvider>`); whatever you leave out falls back to `def
   *(fn: server)*, `appRan` *(fn: names)*, `appRefused`, `approvalLeadApp` *(fn: server)*,
   `approvalFromApp` *(fn: server, readOnly)*, `appLinkLead` *(fn: server)*, `appLinkNote`,
   `appLinkOpen`, `appCancel`, `appMessageLead` *(fn: server)*, `appMessageNote`,
-  `appMessageAccept`, `appMessageDiscard`.
+  `appMessageAccept`, `appMessageDiscard`, `appFullscreenBadge`, `appFullscreenExit`,
+  `appFullscreenKey`, `appDownloadLead` *(fn: server)*, `appDownloadType` *(fn: mimeType)*,
+  `appDownloadSize` *(fn: bytes)*, `appDownloadSource` *(fn: source, server)*, `appDownloadNote`,
+  `appDownloadSave`, `appSamplingLead` *(fn: server)*, `appSamplingSystem`, `appSamplingRole`
+  *(fn: role)*, `appSamplingImages` *(fn: n)*, `appSamplingTokens` *(fn: tokens, asked)*,
+  `appSamplingNote`, `appSamplingAllow`, `appSamplingAlways`, `appSamplingDeny`.
 
 `tests/chat.test.ts` fails if a key is added to `AgentLabels` and not listed here.

@@ -372,6 +372,30 @@ export interface AgentLabels {
   appMessageNote: string
   appMessageAccept: string
   appMessageDiscard: string
+  /** The app shown full screen (`<McpAppFrame allowFullscreen>`): the badge, the way back. */
+  appFullscreenBadge: string
+  appFullscreenExit: string
+  /** The key that exits too, shown on the button. */
+  appFullscreenKey: string
+  /** A file the app asks to save (`<AppRequestPrompt>`). */
+  appDownloadLead: (server: string) => string
+  /** Name · type · size. */
+  appDownloadType: (mimeType: string | undefined) => string
+  appDownloadSize: (bytes: number) => string
+  /** Where the bytes came from: the request itself, or read from the app's server. */
+  appDownloadSource: (source: 'embedded' | 'link', server: string) => string
+  appDownloadNote: string
+  appDownloadSave: string
+  /** The app asks the agent's model for an answer (`sampling/createMessage`). */
+  appSamplingLead: (server: string) => string
+  appSamplingSystem: string
+  appSamplingRole: (role: 'user' | 'assistant') => string
+  appSamplingImages: (count: number) => string
+  appSamplingTokens: (tokens: number, asked: number) => string
+  appSamplingNote: string
+  appSamplingAllow: string
+  appSamplingAlways: string
+  appSamplingDeny: string
 }
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`
@@ -729,6 +753,32 @@ export const defaultLabels: AgentLabels = {
     'Nothing is sent until you send it yourself, and you can change it first. It is the app’s text, not yours.',
   appMessageAccept: 'Put in the message box',
   appMessageDiscard: 'Discard',
+  appFullscreenBadge: 'full screen',
+  appFullscreenExit: 'Exit full screen',
+  appFullscreenKey: 'Esc',
+  appDownloadLead: (server) => `The app “${server}” wants to save a file to your device`,
+  appDownloadType: (mimeType) => mimeType ?? 'type not given',
+  appDownloadSize: kb,
+  appDownloadSource: (source, server) =>
+    source === 'link'
+      ? `Read from the server “${server}” for the app.`
+      : 'Made by the app inside its frame.',
+  appDownloadNote:
+    'This page saves it, not the app. Programs, scripts and web pages are never saved; check the name before you save.',
+  appDownloadSave: 'Save file',
+  appSamplingLead: (server) => `The app “${server}” asks the agent’s model for an answer`,
+  appSamplingSystem: 'Its instructions',
+  appSamplingRole: (role) => (role === 'user' ? 'Asks' : 'Earlier answer'),
+  appSamplingImages: (count) => plural(count, 'image', 'images'),
+  appSamplingTokens: (tokens, asked) =>
+    tokens < asked
+      ? `Up to ${tokens} tokens (the app asked for ${asked}).`
+      : `Up to ${tokens} tokens.`,
+  appSamplingNote:
+    'Only this text is sent - not your chat. The answer goes to the app only, and its tokens count in your total.',
+  appSamplingAllow: 'Allow once',
+  appSamplingAlways: 'Always for this app',
+  appSamplingDeny: 'Deny',
 }
 
 /** Overrides: any label, with the nested groups merged key by key. */

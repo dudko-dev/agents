@@ -90,6 +90,12 @@ export interface McpHttpServerConfig {
    * given `skills: true`.
    */
   skills?: boolean
+  /**
+   * MCP Apps for this server alone, over the connection's `apps` (cores with per-server apps;
+   * an older one ignores it). `false`: its apps are not shown - nothing declared, no app read,
+   * its app-only tools not mounted. The hooks set it only for a server that was given `apps`.
+   */
+  apps?: boolean
 }
 
 /**

@@ -16,7 +16,10 @@ import {
   APP_ONLY_TOOLS,
   bookingCode,
   TRIP_BOARD_URI,
+  TRIP_DEFAULT_LEAD_DAYS,
+  TRIP_DEFAULT_WEEKDAY,
   TRIP_MAX_NIGHTS,
+  defaultTripStart,
   tripDay,
   tripPlan,
 } from '../src/trip-board.ts'
@@ -490,18 +493,59 @@ for (const era of ['modern', 'legacy'] as const) {
   })
 }
 
-test('trip_board: defaults, no dates without a first day, inputs bounded by the schema', async () => {
+test('trip_board: the default first day - the first Friday at least 14 days after the request day (UTC)', () => {
+  const at = (iso: string) => defaultTripStart(new Date(iso))
+  // Friday 27 Nov 2026: 14 days on is Friday 11 Dec.
+  assert.equal(at('2026-11-27T10:00:00Z'), '2026-12-11')
+  // Saturday 28 Nov: 12 Dec is a Saturday, so Friday 18 Dec.
+  assert.equal(at('2026-11-28T00:00:00Z'), '2026-12-18')
+  // Thursday 26 Nov, late in the UTC day: 10 Dec is a Thursday, so Friday 11 Dec.
+  assert.equal(at('2026-11-26T23:59:59Z'), '2026-12-11')
+  // The day in UTC decides, whatever the time: the same request day, the same date.
+  assert.equal(at('2026-11-26T00:00:00Z'), at('2026-11-26T23:59:59.999Z'))
+  // Across a month and a year end.
+  assert.equal(at('2026-12-20T12:00:00Z'), '2027-01-08')
+  for (let d = 0; d < 14; d += 1) {
+    const day = new Date(Date.UTC(2027, 1, 20 + d))
+    const start = new Date(`${defaultTripStart(day)}T00:00:00Z`)
+    const lead = (start.getTime() - day.getTime()) / 86_400_000
+    assert.equal(start.getUTCDay(), TRIP_DEFAULT_WEEKDAY)
+    assert.ok(lead >= TRIP_DEFAULT_LEAD_DAYS && lead < TRIP_DEFAULT_LEAD_DAYS + 7, String(lead))
+  }
+})
+
+test('trip_board: defaults (dates from the request day when none is given), inputs bounded by the schema', async (t) => {
+  // The server's clock, for this test only: a request on Friday 27 Nov 2026.
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-27T09:30:00Z') })
   await withServer(async (server) => {
     const plain = await modern(server, 'tools/call', call('trip_board', { destination: ' Kyoto ' }))
     const plan = plain.message.result.structuredContent
     assert.deepEqual(plan.trip, {
       destination: 'Kyoto',
+      start: '2026-12-11',
+      end: '2026-12-14',
       nights: 3,
       travellers: 2,
       budget: 'comfortable',
     })
     assert.equal(plan.days.length, 4)
-    assert.ok(plan.days.every((d: { date?: string }) => d.date === undefined))
+    assert.deepEqual(
+      plan.days.map((d: { date?: string }) => d.date),
+      ['2026-12-11', '2026-12-12', '2026-12-13', '2026-12-14'],
+    )
+    // The model is told the date was picked for it, and how to change it.
+    assert.match(
+      textOf(plain),
+      /No first day was given, so the trip starts on 2026-12-11: the first Friday at least 14 days from today \(UTC\)/,
+    )
+    // Given, it is used as it is, and nothing is said about it.
+    const given = await modern(
+      server,
+      'tools/call',
+      call('trip_board', { destination: 'Kyoto', start: '2027-03-01' }),
+    )
+    assert.equal(given.message.result.structuredContent.trip.start, '2027-03-01')
+    assert.doesNotMatch(textOf(given), /No first day/)
     assert.match(plan.days[0].items[0].title, /Arrive in Kyoto/)
     // A place is not case: the same plan.
     const lower = await modern(server, 'tools/call', call('trip_board', { destination: 'kyoto' }))
@@ -578,7 +622,23 @@ test('trip_board: the app script compiles, and speaks the extension as the speci
   assert.ok(initialize > 0 && initialized > initialize)
   assert.match(code, /protocolVersion: '2026-01-26'/)
   assert.match(code, /appInfo: \{ name: 'trip-board', version: '1\.0\.0' \}/)
-  assert.match(code, /appCapabilities: \{ availableDisplayModes: \['inline'\] \}/)
+  // It declares full screen, and asks for it (and the way back) only through the extension.
+  assert.match(code, /appCapabilities: \{ availableDisplayModes: \['inline', 'fullscreen'\] \}/)
+  assert.match(code, /request\('ui\/request-display-mode', \{ mode: mode \}\)/)
+  // A file to save and an answer of the host's model only where the host offers them: the
+  // buttons stay hidden otherwise. Its sampling request asks for no tools, and little.
+  assert.match(code, /\$\('download'\)\.hidden = !caps\.downloadFile/)
+  assert.match(code, /hidden: !caps\.sampling/)
+  assert.match(code, /b\.hidden = !caps\.sampling/)
+  const sampling = code.slice(code.indexOf("request('sampling/createMessage'"))
+  assert.match(sampling, /maxTokens: 120,/)
+  assert.doesNotMatch(sampling.slice(0, 600), /tools|toolChoice/)
+  assert.match(
+    code,
+    /request\('ui\/download-file', \{ contents: \[\{ type: 'resource', resource: \{ uri: 'file:\/\/\/' \+ name, mimeType: 'text\/plain'/,
+  )
+  // The model's answer is text in the page, never markup.
+  assert.match(code, /\$\('idea-text'\)\.textContent = text/)
   // Text from the server is never markup: innerHTML takes the constant icons only.
   assert.deepEqual(
     [...code.matchAll(/innerHTML = (\w+)/g)].map(([, value]) => value),

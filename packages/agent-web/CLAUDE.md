@@ -274,8 +274,24 @@ behind every decision.
 waiting for it. OFF
   without `apps`: no capability, no `_meta` read, every tool mounted - `tests/mcp-apps.test.ts`
   compares the wire with the fixture. Security boundary: every guard has a test there and needs a
-  mutation check. The Node sibling has none of it (it renders nothing): keep the names for when
+  mutation check. Per server: `McpHttpServerConfig.apps` wins over the connection's
+  (`mcpAppsModeOf`: `'on'`, `'declined'` for `false` - nothing declared, `_meta.ui` read for
+  `visibility` only, an app-only tool mounted for nobody, no event, every `apps.*` refuses it -
+  and `'off'`, the recorded wire). `apps.readResource` (`mcpAppDownloadOf`): a file an app links
+  to, `resources/read` on that server only, never a fetch, capped, not cached; the UI judges the
+  type. The Node sibling has none of it (it renders nothing): keep the names for when
   it does. Docs: README (MCP Apps), `docs/capabilities.md`, `docs/security.md`, `docs/design.md`.
+- `src/app-sampling.ts` (pure, no imports; `config.appSampling`) - an MCP App's
+  `sampling/createMessage`: `appSamplingRequestOf` (what is accepted: text, images only for a
+  model known to read them, no tools, the caps; text cleaned so the user sees what the model
+  reads), `createAppSamplingLimiter` (per app, per minute and in all), `AppSamplingError` (its
+  `rpcCode` is what the app is told; `-1` = the user said no). `Agent.sampleForApp`
+  (`agent/runner.ts`) is the seam: check, count, `approve` (bounded by `toolApproval.timeoutMs`),
+  then the synthesizer's model with nothing of the agent's context, the tokens charged under
+  phase `'app'` (the one event), the answer returned only - no memory, no event, no run. A
+  consent boundary: every guard has a test in `tests/app-sampling.test.ts` and a mutation check.
+  Docs: README (MCP Apps, config), `docs/capabilities.md` ("An app asks the model"),
+  `docs/security.md`, `docs/design.md`.
 - The MCP client is the official 2.x SDK, `@modelcontextprotocol/client` (the optional peer of
   `./mcp`; `@modelcontextprotocol/sdk` 1.x is gone from this package - the test servers and the
   React package's e2e servers keep it, as real 1.x SERVERS). The JSON Schema validator is imported

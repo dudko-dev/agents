@@ -226,6 +226,25 @@ export interface AgentChatProps {
    * not answer in `timeoutMs`.
    */
   appSandbox?: McpAppSandboxOptions
+  /**
+   * Let an app be shown full screen (`ui/request-display-mode`): over the chat panel, or the
+   * viewport on a phone, in the host's chrome with Exit full screen and Esc. Granted only to
+   * an app that declared it, right after a click or a key inside its frame. Default false.
+   */
+  appFullscreen?: boolean
+  /**
+   * Let an app hand the user a file to save (`ui/download-file`): a prompt with its name, type
+   * and size, saved by this page on "Save file". Programs, scripts and web pages are refused; a
+   * linked file is read from the app's own server only. Default false.
+   */
+  appDownloads?: boolean
+  /**
+   * Let an app ask the agent's model for an answer (`sampling/createMessage`, no tools): a
+   * prompt with exactly what the model would get; "Allow once", "Always for this app" (until a
+   * reload) or "Deny". The answer goes to the app only; its tokens count in the total. Default
+   * false. Needs a controller with `sampleForApp` (`useAgent`).
+   */
+  appSampling?: boolean
   /** Start every app folded to one line (default false). */
   appsCollapsed?: boolean
   /**
@@ -340,6 +359,9 @@ const AgentChatInner = ({
   style,
   mcpApps,
   appSandbox,
+  appFullscreen = false,
+  appDownloads = false,
+  appSampling = false,
   showApps = true,
   appsCollapsed = false,
   appPanel = 'auto',
@@ -419,6 +441,9 @@ const AgentChatInner = ({
     approve: agent.approveAppToolCall,
     approvals: agent.pendingApprovals,
     sandbox: appSandbox,
+    downloads: appDownloads,
+    sampling: appSampling,
+    ...(agent.sampleForApp ? { sample: agent.sampleForApp } : {}),
   })
   const prefersDark = usePrefersDark()
   const appTheme: 'light' | 'dark' = theme === 'auto' ? (prefersDark ? 'dark' : 'light') : theme
@@ -454,6 +479,7 @@ const AgentChatInner = ({
           theme={appTheme}
           defaultCollapsed={appsCollapsed}
           onOpenPanel={panelAllowed ? () => setPanelApp(app) : undefined}
+          allowFullscreen={appFullscreen}
         />
       )
     return renderApp ? renderApp(app, message, built) : built
@@ -467,6 +493,7 @@ const AgentChatInner = ({
         theme={appTheme}
         variant="panel"
         onClosePanel={() => setPanelApp(undefined)}
+        allowFullscreen={appFullscreen}
       />
     ) : null
 

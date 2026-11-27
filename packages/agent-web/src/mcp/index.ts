@@ -43,6 +43,7 @@ export type {
 export {
   MCP_APP_DEFAULT_VISIBILITY,
   MCP_APP_MAX_DOMAINS,
+  MCP_APP_MAX_DOWNLOAD_BYTES,
   MCP_APP_MAX_HTML_CHARS,
   MCP_APP_MAX_RESULT_CHARS,
   MCP_APP_MIME_TYPE,
@@ -51,19 +52,23 @@ export {
   isMcpAppMimeType,
   isMcpAppUri,
   mcpAppCspOf,
+  mcpAppDownloadOf,
   mcpAppOrigin,
   mcpAppPermissionsOf,
   mcpAppResourceOf,
   mcpAppToolMeta,
   mcpAppToolResultOf,
+  mcpAppsModeOf,
 } from './apps.js'
 export type {
   McpAppCsp,
+  McpAppDownloadResource,
   McpAppPermissions,
   McpAppResource,
   McpAppToolMeta,
   McpAppToolResult,
   McpAppVisibility,
+  McpAppsMode,
 } from './apps.js'
 export {
   BrowserOAuthProvider,

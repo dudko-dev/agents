@@ -401,6 +401,30 @@ export const ES_LABELS: AgentLabels = {
     'No se envía nada hasta que lo envíe usted, y puede cambiarlo antes. Es el texto de la app, no el suyo.',
   appMessageAccept: 'Poner en el cuadro de texto',
   appMessageDiscard: 'Descartar',
+  appFullscreenBadge: 'pantalla completa',
+  appFullscreenExit: 'Salir de pantalla completa',
+  appFullscreenKey: 'Esc',
+  appDownloadLead: (server) => `La app «${server}» quiere guardar un archivo en su dispositivo`,
+  appDownloadType: (mimeType) => mimeType ?? 'tipo no indicado',
+  appDownloadSize: bytes,
+  appDownloadSource: (source, server) =>
+    source === 'link'
+      ? `Leído del servidor «${server}» para la app.`
+      : 'Creado por la app dentro de su marco.',
+  appDownloadNote:
+    'Lo guarda esta página, no la app. Nunca se guardan programas, scripts ni páginas web; compruebe el nombre antes de guardar.',
+  appDownloadSave: 'Guardar archivo',
+  appSamplingLead: (server) => `La app «${server}» pide una respuesta al modelo del agente`,
+  appSamplingSystem: 'Sus instrucciones',
+  appSamplingRole: (role) => (role === 'user' ? 'Pregunta' : 'Respuesta anterior'),
+  appSamplingImages: (n) => count(n, 'imagen', 'imágenes'),
+  appSamplingTokens: (tokens, asked) =>
+    tokens < asked ? `Hasta ${tokens} tokens (la app pidió ${asked}).` : `Hasta ${tokens} tokens.`,
+  appSamplingNote:
+    'Solo se envía este texto, no su chat. La respuesta va solo a la app, y sus tokens cuentan en su total.',
+  appSamplingAllow: 'Permitir una vez',
+  appSamplingAlways: 'Siempre para esta app',
+  appSamplingDeny: 'Denegar',
 }
 
 /** The same, in German (formal "Sie" where the visitor is addressed). */
@@ -780,6 +804,32 @@ export const DE_LABELS: AgentLabels = {
     'Nichts wird gesendet, bis Sie es selbst senden, und Sie können es vorher ändern. Es ist der Text der App, nicht Ihrer.',
   appMessageAccept: 'Ins Eingabefeld setzen',
   appMessageDiscard: 'Verwerfen',
+  appFullscreenBadge: 'Vollbild',
+  appFullscreenExit: 'Vollbild beenden',
+  appFullscreenKey: 'Esc',
+  appDownloadLead: (server) => `Die App „${server}“ möchte eine Datei auf Ihrem Gerät speichern`,
+  appDownloadType: (mimeType) => mimeType ?? 'Typ nicht angegeben',
+  appDownloadSize: bytes,
+  appDownloadSource: (source, server) =>
+    source === 'link'
+      ? `Für die App vom Server „${server}“ gelesen.`
+      : 'Von der App in ihrem Rahmen erstellt.',
+  appDownloadNote:
+    'Diese Seite speichert sie, nicht die App. Programme, Skripte und Webseiten werden nie gespeichert; prüfen Sie den Namen, bevor Sie speichern.',
+  appDownloadSave: 'Datei speichern',
+  appSamplingLead: (server) => `Die App „${server}“ bittet das Modell des Agenten um eine Antwort`,
+  appSamplingSystem: 'Ihre Anweisungen',
+  appSamplingRole: (role) => (role === 'user' ? 'Fragt' : 'Frühere Antwort'),
+  appSamplingImages: (n) => count(n, 'Bild', 'Bilder'),
+  appSamplingTokens: (tokens, asked) =>
+    tokens < asked
+      ? `Bis zu ${tokens} Tokens (die App bat um ${asked}).`
+      : `Bis zu ${tokens} Tokens.`,
+  appSamplingNote:
+    'Nur dieser Text wird gesendet, nicht Ihr Chat. Die Antwort geht nur an die App, und ihre Tokens zählen in Ihrer Summe.',
+  appSamplingAllow: 'Einmal erlauben',
+  appSamplingAlways: 'Immer für diese App',
+  appSamplingDeny: 'Ablehnen',
 }
 
 /** The label set of a chat language; English is the library's own defaults. */

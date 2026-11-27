@@ -155,6 +155,25 @@ against its production build.
   server's hostile "travel" app, counted endpoints for a declared and an undeclared origin), and a
   change needs a mutation check. Never add `allow-same-origin`, an `allow` attribute, or a method
   to the allow-list without its consent and a test.
+- MCP Apps, what an app may ask for besides a tool call (each off by default; `<AgentChat
+appFullscreen appDownloads appSampling>`, `useMcpAppHost({ downloads, sampling, sample })`,
+  `<McpAppFrame allowFullscreen>`): the bridge offers `ui/download-file` / `sampling/createMessage`
+  only with a handler (`MCP_APP_OPTIONAL_REQUESTS`; `hostCapabilities` says only what is on, never
+  `sampling.tools`), and `ui/request-display-mode` grants `fullscreen` only to an app that declared
+  it (`appDisplayModeAllowed`), right after the user acted in its frame (`appGestureOf`: the
+  frame's element focused + `navigator.userActivation`), never while it waits for the user (it goes
+  back inline then); no `pip`. Full screen is CSS on the same element (`awr-frame--fullscreen`,
+  fixed over `.awr-chat` or the viewport; the iframe is never re-parented - that would reload it),
+  a holder keeps its place, focus guards, Esc, Exit. Downloads: `appDownloadOf` (one file),
+  `appFileNameOf`, `appDownloadRefusal` (programs, scripts, HTML / SVG / XML by name and type),
+  `resolveAppDownload` (a link read through `connection.readResource`, its type judged again),
+  `saveAppFile` (octet-stream blob, `<a download>` on the click). Sampling: the core's
+  `Agent.sampleForApp` through `useAgent().sampleForApp`; the prompt, and "Always for this app"
+  (until a reload), are `useMcpAppHost`'s; `appSamplingErrorOf` maps the core's codes; the
+  reducer adds a `usage` of phase `'app'` to `totalUsage` only. Per server: `useMcpServers`
+  `add({ apps })` (remembered; `servers[i].apps`), and the router refuses a server whose apps are
+  off. Tests: `tests/apps-features.test.ts` (every guard) and `e2e/demo-server-app.spec.ts` /
+  `e2e/apps.spec.ts`. Labels `appFullscreen*`, `appDownload*`, `appSampling*`.
 - MCP Apps on an origin of their own (opt-in: `appSandbox` / `useMcpAppHost({ sandbox })`, the
   specification's sandbox proxy) - three files, two sides:
   - `src/mcp-app-policy.ts` - shared, pure, NO imports (a Worker bundles it): `mcpAppPolicy` (the

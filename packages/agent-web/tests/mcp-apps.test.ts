@@ -28,8 +28,11 @@ import {
   MCP_APP_MAX_DOMAINS,
   MCP_APP_MAX_HTML_CHARS,
   MCP_APP_MAX_RESULT_CHARS,
+  MCP_APP_MAX_DOWNLOAD_BYTES,
   McpAppResourceError,
   mcpAppCspOf,
+  mcpAppDownloadOf,
+  mcpAppsModeOf,
   mcpAppOrigin,
   mcpAppPermissionsOf,
   mcpAppResourceOf,
@@ -540,6 +543,171 @@ for (const era of ERAS) {
           server.calls.map((c) => c.name),
           ['flights.book', 'flights.refresh'],
         )
+      },
+      { second: true },
+    )
+  })
+}
+
+// ── apps per server: off for one, on for another ────────────────────────────
+
+test('guard per server: the server’s own setting wins; false is "declined", not "unknown"', () => {
+  assert.equal(mcpAppsModeOf(undefined, undefined), 'off')
+  assert.equal(mcpAppsModeOf(undefined, false), 'off')
+  assert.equal(mcpAppsModeOf(undefined, true), 'on')
+  assert.equal(mcpAppsModeOf(true, undefined), 'on')
+  assert.equal(mcpAppsModeOf(true, false), 'on')
+  assert.equal(mcpAppsModeOf(false, true), 'declined')
+  assert.equal(mcpAppsModeOf(false, undefined), 'declined')
+})
+
+const appRequests = (server: ILocalMcpServer) =>
+  server.requests.filter((r) => r.method === 'resources/read').length
+
+for (const era of ERAS) {
+  test(`${era}: guard per server - apps off for one server: nothing declared or read, its app-only tools hidden, no event`, async () => {
+    const off = await startLocalMcpServer({ protocol: era, appTools: true })
+    const on = await startLocalMcpServer({ protocol: era, appTools: true })
+    const protocol = era === 'modern' ? { protocol: 'modern' as const } : {}
+    const mcp = await connectMcpHttp(
+      { off: { url: off.url, apps: false, ...protocol }, on: { url: on.url, ...protocol } },
+      { apps: true },
+    )
+    try {
+      const keys = Object.keys(mcp.tools)
+        .filter((k) => k.includes('flights'))
+        .sort()
+      // Declined: the app-only tool is mounted for nobody; the tool with an app is a plain tool.
+      assert.deepEqual(
+        keys.filter((k) => k.startsWith('off__')),
+        ['off__flights_admin', 'off__flights_bad', 'off__flights_book', 'off__flights_search'],
+      )
+      assert.ok(!keys.includes('off__flights_refresh'))
+      assert.equal(
+        mcp.catalog.some((c) => c.server === 'off' && 'app' in c),
+        false,
+      )
+      // The other server is untouched.
+      assert.equal(mcp.catalog.find((c) => c.name === 'on__flights_search')?.app, TRAVEL_APP_URI)
+      const apps = mcp.apps!
+      assert.equal(apps.appTool('off', 'flights.refresh'), undefined)
+      assert.equal(apps.appTool('off', 'flights.book'), undefined)
+      assert.ok(apps.appTool('on', 'flights.refresh'))
+      // No event: no frame is drawn for it.
+      const events: unknown[] = []
+      await (mcp.tools.off__flights_search as { execute: Function }).execute(
+        { from: 'LIS', to: 'VIE' },
+        { agentRun: { emit: (e: unknown) => events.push(e) } },
+      )
+      assert.deepEqual(events, [])
+      // Nothing of it is read or called for an app - refused before anything is sent.
+      await assert.rejects(apps.readUiResource('off', TRAVEL_APP_URI), /declares the app/)
+      await assert.rejects(apps.readResource('off', TRAVEL_BAD_APP_URI), /off for the MCP server/)
+      const before = off.calls.length
+      await assert.rejects(apps.callAppTool('off', 'flights.refresh', {}), /that an app may call/)
+      assert.equal(off.calls.length, before)
+      assert.equal(appRequests(off), 0)
+      if (era === 'legacy') {
+        // Not told of apps at all; the other one is.
+        assert.equal(off.initializeCapabilities.at(-1)?.extensions, undefined)
+        assert.deepEqual(on.initializeCapabilities.at(-1)?.extensions, {
+          [EXTENSION]: { mimeTypes: ['text/html;profile=mcp-app'] },
+        })
+      }
+    } finally {
+      await mcp.close()
+      await off.close()
+      await on.close()
+    }
+  })
+}
+
+test('per server: apps: true turns them on for that server alone; the connection stays off', async () => {
+  const one = await startLocalMcpServer({ appTools: true })
+  const two = await startLocalMcpServer({ appTools: true })
+  const mcp = await connectMcpHttp({ one: { url: one.url, apps: true }, two: { url: two.url } })
+  try {
+    assert.equal(mcp.catalog.find((c) => c.name === 'one__flights_search')?.app, TRAVEL_APP_URI)
+    assert.ok(!Object.keys(mcp.tools).includes('one__flights_refresh'))
+    // The other: as before the extension - every tool mounted, nothing read.
+    assert.ok(Object.keys(mcp.tools).includes('two__flights_refresh'))
+    assert.equal(mcp.apps?.appTool('two', 'flights.book'), undefined)
+    assert.ok(mcp.apps?.appTool('one', 'flights.book'))
+    assert.equal(two.initializeCapabilities.at(-1)?.extensions, undefined)
+  } finally {
+    await mcp.close()
+    await one.close()
+    await two.close()
+  }
+})
+
+// ── a file an app asks to save: a resource of ITS server, read through the connection ────────
+
+test('guard download read: the exact URI, text as UTF-8 or base64, capped; any type', () => {
+  const answer = (entry: Record<string, unknown>) => ({ contents: [entry] })
+  const text = mcpAppDownloadOf(
+    'file:///a.txt',
+    answer({ uri: 'file:///a.txt', mimeType: 'text/plain', text: 'Olá' }),
+  )
+  assert.deepEqual([text.mimeType, [...text.bytes]], ['text/plain', [79, 108, 195, 161]])
+  const blob = mcpAppDownloadOf('file:///b', answer({ uri: 'file:///b', blob: 'AAEC' }))
+  assert.deepEqual([blob.mimeType, [...blob.bytes]], [undefined, [0, 1, 2]])
+  assert.throws(
+    () => mcpAppDownloadOf('file:///a', answer({ uri: 'file:///other', text: 'x' })),
+    /does not contain/,
+  )
+  assert.throws(
+    () => mcpAppDownloadOf('file:///a', answer({ uri: 'file:///a' })),
+    /neither text nor blob/,
+  )
+  assert.throws(
+    () => mcpAppDownloadOf('file:///a', answer({ uri: 'file:///a', blob: '!!' })),
+    /not base64/,
+  )
+  assert.throws(
+    () => mcpAppDownloadOf('file:///a', answer({ uri: 'file:///a', text: 'x'.repeat(11) }), 10),
+    /larger than 10 bytes/,
+  )
+  // Three bytes a character: a text of 4 characters is 12 bytes.
+  assert.throws(
+    () => mcpAppDownloadOf('file:///a', answer({ uri: 'file:///a', text: '€€€€' }), 10),
+    /larger than/,
+  )
+  assert.throws(
+    () => mcpAppDownloadOf('file:///a', answer({ uri: 'file:///a', blob: 'A'.repeat(40) }), 10),
+    /larger than/,
+  )
+  assert.equal(MCP_APP_MAX_DOWNLOAD_BYTES, 20 * 1024 * 1024)
+})
+
+for (const era of ERAS) {
+  test(`${era}: guard download read - resources/read on the app's own server, never another; bad URIs never sent`, async () => {
+    await withApps(
+      era,
+      async ({ server, mcp, reads }) => {
+        const apps = mcp.apps!
+        const file = await apps.readResource('wx', TRAVEL_BAD_APP_URI)
+        assert.equal(file.uri, TRAVEL_BAD_APP_URI)
+        assert.equal(file.mimeType, 'text/html')
+        assert.equal(new TextDecoder().decode(file.bytes), '<p>not an app</p>')
+        assert.equal(reads(), 1)
+        // Not cached: a download is read when it is asked for.
+        await apps.readResource('wx', TRAVEL_BAD_APP_URI)
+        assert.equal(reads(), 2)
+        await assert.rejects(
+          apps.readResource('wx', TRAVEL_BAD_APP_URI, { maxBytes: 5 }),
+          /larger than 5 bytes/,
+        )
+        assert.equal(reads(), 3)
+        for (const bad of ['', 'ui://a b', 'ui://a\nb', `ui://${'x'.repeat(2050)}`, 42]) {
+          await assert.rejects(apps.readResource('wx', bad as string), /one line/)
+        }
+        // Through another server, it is THAT server that is asked (it has no such resource):
+        // never wx.
+        await assert.rejects(apps.readResource('other', TRAVEL_BAD_APP_URI))
+        await assert.rejects(apps.readResource('nobody', TRAVEL_BAD_APP_URI), /not connected/)
+        assert.equal(reads(), 3)
+        void server
       },
       { second: true },
     )

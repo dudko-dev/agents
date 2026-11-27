@@ -17,6 +17,11 @@ import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/client/valida
 import { dynamicTool, jsonSchema, type ToolSet } from 'ai'
 import {
   describeMcpAppPolicy,
+  MCP_APP_MAX_DOWNLOAD_BYTES,
+  mcpAppDownloadOf,
+  mcpAppsModeOf,
+  type McpAppDownloadResource,
+  type McpAppsMode,
   MCP_APP_MIME_TYPE,
   MCP_APPS_EXTENSION,
   mcpAppResourceOf,
@@ -128,6 +133,14 @@ export interface McpHttpServerConfig {
    * text is third-party - knowledge only, never policy; see the README, "MCP skills".
    */
   skills?: boolean
+  /**
+   * MCP Apps for THIS server, over the connection's `apps`: `false` keeps its apps off while
+   * other servers' are shown - nothing is declared to it, no app of it is read, no `mcp.app`
+   * event is told, and a tool it marks for its app only (`visibility` without `'model'`) is
+   * not mounted; its other tools are the model's, as plain tools. `true` turns them on for this
+   * server alone. Left out, the connection's `apps` decides.
+   */
+  apps?: boolean
 }
 
 export interface McpCatalogEntry {
@@ -229,6 +242,18 @@ export interface McpAppsConnection {
     options?: { signal?: AbortSignal },
   ) => Promise<McpAppResource>
   appTool: (server: string, name: string) => McpAppTool | undefined
+  /**
+   * A resource of that server for a file its app asks the host to save (`ui/download-file` with
+   * a `resource_link`): `resources/read` on THAT server only - never a fetch of the URI - its
+   * `text` or base64 `blob` as bytes, at most `maxBytes` (default `MCP_APP_MAX_DOWNLOAD_BYTES`),
+   * not cached. Only a server whose apps are on. It does NOT ask the user, nor judge the type:
+   * the host does both before it saves anything.
+   */
+  readResource: (
+    server: string,
+    uri: string,
+    options?: { signal?: AbortSignal; maxBytes?: number },
+  ) => Promise<McpAppDownloadResource>
   callAppTool: (
     server: string,
     name: string,
@@ -299,7 +324,7 @@ export interface ConnectMcpOptions {
    * is then not mounted (it is for its app only). The app's HTML never reaches the model.
    *
    * Off by default: nothing is declared, `_meta` is not read, every tool is mounted as before and
-   * the wire is unchanged.
+   * the wire is unchanged. A server's own `apps` (`McpHttpServerConfig.apps`) wins over this one.
    */
   apps?: boolean
 }
@@ -964,7 +989,9 @@ const connectAndList = async (
   // Without `protocol` (or with 'legacy') nothing is added here: the client is
   // built with exactly the options it always had.
   const negotiation = mcpVersionNegotiation(mode)
-  const apps = opts.apps === true
+  // MCP Apps: declared only where they are on for this server (`apps` of the server, else of
+  // the connection); a server whose apps are declined is not told of them.
+  const apps = mcpAppsModeOf(cfg.apps, opts.apps) === 'on'
   // `skills: true` (experimental): the Skills extension is written against 2026-07-28, so it is
   // declared only where that revision may be spoken; never on a 'legacy' connection.
   const skillsWanted = cfg.skills === true && mode !== 'legacy'
@@ -1158,8 +1185,12 @@ export const connectMcpHttp = async (
   // server name → its skills (`skills: true`, 2026-07-28, the server offers the extension).
   const skillCatalogs = new Map<string, NonNullable<ServerConnect['skills']>>()
   // MCP Apps (`apps: true`): per server, the tools as an app sees them (every listed tool, by
-  // its own name) and the app documents read so far (by URI; a failed read is not kept).
-  const appsOn = opts.apps === true
+  // its own name) and the app documents read so far (by URI; a failed read is not kept). Each
+  // server has a mode of its own (`McpHttpServerConfig.apps` over `ConnectMcpOptions.apps`).
+  const appsModes = new Map<string, McpAppsMode>(
+    Object.entries(servers).map(([name, cfg]) => [name, mcpAppsModeOf(cfg.apps, opts.apps)]),
+  )
+  const appsOn = [...appsModes.values()].includes('on')
   const appToolsOf = new Map<string, Map<string, McpAppTool>>()
   const appResources = new Map<string, Map<string, Promise<McpAppResource>>>()
   let appEventSeq = 0
@@ -1277,17 +1308,26 @@ export const connectMcpHttp = async (
     let schemaValidator: CfWorkerJsonSchemaValidator | undefined
 
     let mounted = 0
+    const appsMode = appsModes.get(name) ?? 'off'
     for (const t of listed) {
       const prefixed = prefix + sanitizeName(t.name)
-      // MCP Apps: only read with `apps` on. A tool for its app only is not the model's.
-      const ui = appsOn ? mcpAppToolMeta(t) : undefined
-      if (ui?.refusedUri !== undefined) {
+      // MCP Apps: read only with apps on for this server - or declined, for `visibility` alone. A
+      // tool for its app only is not the model's either way.
+      const ui = appsMode !== 'off' ? mcpAppToolMeta(t) : undefined
+      if (appsMode === 'on' && ui?.refusedUri !== undefined) {
         log(
           'warn',
           `[mcp] ${name}: tool "${t.name}" declares an app that is not a ui:// URI (${ui.refusedUri}); ignored`,
         )
       }
       if (ui && !ui.visibility.includes('model')) {
+        if (appsMode === 'declined') {
+          log(
+            'info',
+            `[mcp] ${name}: tool "${t.name}" is for its app only, and apps are off for this server; not mounted`,
+          )
+          continue
+        }
         if (ui.visibility.includes('app')) {
           appTools.set(t.name, {
             name: t.name,
@@ -1319,8 +1359,8 @@ export const connectMcpHttp = async (
       }
       const description = t.description ?? ''
       const readOnly = t.annotations?.readOnlyHint === true
-      const appUri = ui?.resourceUri
-      if (ui?.visibility.includes('app')) {
+      const appUri = appsMode === 'on' ? ui?.resourceUri : undefined
+      if (appsMode === 'on' && ui?.visibility.includes('app')) {
         appTools.set(t.name, {
           name: t.name,
           key,
@@ -1447,7 +1487,7 @@ export const connectMcpHttp = async (
       mounted += 1
     }
     mountedKeys.set(name, keys)
-    if (appsOn) {
+    if (appsMode === 'on') {
       appToolsOf.set(name, appTools)
       // A new listing may declare other apps: what was read for the old one is read again.
       appResources.delete(name)
@@ -1540,6 +1580,28 @@ export const connectMcpHttp = async (
         appTool: (server, toolName) => {
           const tool = appToolsOf.get(server)?.get(toolName)
           return tool ? { ...tool, visibility: [...tool.visibility] } : undefined
+        },
+        readResource: async (server, uri, readOptions) => {
+          const client = connectedClient(server)
+          // Only a server whose apps are on: a declined one's app never runs here.
+          if (!appToolsOf.has(server)) {
+            throw new Error(`MCP Apps are off for the MCP server "${server}"`)
+          }
+          if (
+            typeof uri !== 'string' ||
+            uri.length === 0 ||
+            uri.length > 2048 ||
+            // eslint-disable-next-line no-control-regex
+            /[\u0000-\u001f\u007f\s]/.test(uri)
+          ) {
+            throw new Error('a resource URI is one line of at most 2048 characters')
+          }
+          log('info', `[mcp] ${server}: an app's download reads ${uri.slice(0, 200)}`)
+          const result = await client.request(
+            { method: 'resources/read', params: { uri } },
+            readOptions?.signal ? { signal: readOptions.signal } : undefined,
+          )
+          return mcpAppDownloadOf(uri, result, readOptions?.maxBytes ?? MCP_APP_MAX_DOWNLOAD_BYTES)
         },
         callAppTool: async (server, toolName, args, callOptions) => {
           const client = connectedClient(server)

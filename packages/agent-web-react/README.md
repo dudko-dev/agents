@@ -199,6 +199,7 @@ function Custom() {
 | `usage` / `totalUsage` | tokens of this run / of the conversation, by kind - plus `mediaCalls` and `decisionCalls` (calls, not tokens) when the run made some |
 | `pendingApprovals`, `approve(id, { remember })`, `deny(id)` | tool consent (a request made by a helper the model started carries `subagent: { id, depth, name?, role? }`). A request the core stops waiting for - no decision within `toolApproval.timeoutMs` (default five minutes), the run stopped - is settled by the core and leaves the list; a late `approve` does nothing |
 | `approvalMode` / `setApprovalMode(mode)` | the autopilot switch, live |
+| `approveAppToolCall(call, signal)` / `sampleForApp(request, approve, signal)` | for MCP Apps: an app's tool call through the agent's consent gate; an app's `sampling/createMessage` answered by the agent's model (the core's `Agent.sampleForApp`: checked, rate-limited, put to `approve`, no tools, none of the chat; its tokens count in `totalUsage` only, the answer goes to the caller only) - `<AgentChat>` wires both |
 | `compact()` | summarise the stored transcript now |
 | `sessionId` / `loadChat(chat)` | the memory session; switch conversations |
 | `subagents`, `skills`, `discoveredTools`, `compactions`, `budget` | the rest of the run, folded. `subagents` is a **tree**: static subagents and the helpers the model started (`subagents.dynamic`), each node with `parentId` / `depth`, status, model, tokens, tool calls and time; `subagentTree(subagents)` nests it - see [docs/chat.md](docs/chat.md#subagents-and-helpers-the-tree) |
@@ -527,9 +528,10 @@ const config = { model, tools: { ...myTools, ...mcp.tools } } // "<name>__<tool>
 `useMcpServers` takes the options of `useMcp` (`clientName`, `clientMetadataUrl`, `onLog`,
 `elicitation`) plus `persist`, `storageKey`, `autoConnect` and `connectTimeoutMs`, and returns
 `{ servers, tools, catalog, protocols, connectedCount, pendingElicitations, answerElicitation, … }`.
-A server may be added with its own `protocol` (`add({ name, url, protocol: 'auto' })`) and
-`skills: true` ([MCP skills](#mcp-skills-experimental); `servers[i].skills`), both
-remembered with the list; `servers[i].protocolMode` is what it was added with and
+A server may be added with its own `protocol` (`add({ name, url, protocol: 'auto' })`),
+`skills: true` ([MCP skills](#mcp-skills-experimental); `servers[i].skills`) and `apps: false`
+(that server's [MCP Apps](#mcp-apps--a-servers-interface-in-the-chat) off while the others' are
+shown; `servers[i].apps`), all remembered with the list; `servers[i].protocolMode` is what it was added with and
 `servers[i].protocol` (`{ version, era }`) what was negotiated while it is connected - `protocols`
 lists them for every connected server. A server added with
 `auth: 'oauth'` may carry its own `oauth: { redirectUrl, scope, clientName, clientMetadataUrl }`,
@@ -675,6 +677,26 @@ const agent = useAgent({ model, tools: mcp.tools }, { deps: [mcp.tools] })
 Off by default (the hooks declare nothing and every tool is mounted as before). Needs a core with
 MCP Apps. See [docs/chat.md](docs/chat.md#mcp-apps-a-servers-interface-in-the-chat).
 
+**One server's apps off.** `useMcpServers({ apps: true })` with `add({ name, url, apps: false })`:
+that server is not told of apps, none of its apps is read or drawn, a tool it marks for its app
+only is mounted for nobody, and its other tools are plain tools.
+
+**What an app may ask for besides** - each off by default, each put to the user:
+
+```tsx
+<AgentChat
+  controller={agent}
+  mcpApps={mcp.apps}
+  appFullscreen // ui/request-display-mode: full screen over the chat, after a click in the app; Esc / Exit back
+  appDownloads // ui/download-file: name, type, size shown; saved by your page; programs, scripts, pages refused
+  appSampling // sampling/createMessage: the agent's model answers the app; no tools; the answer never in the chat
+/>
+```
+
+`hostCapabilities` names only what is on (`downloadFile`, `sampling` - never `sampling.tools`);
+`hostContext.availableDisplayModes` is `['inline', 'fullscreen']` with `appFullscreen` (no
+picture-in-picture). The rules: [docs/chat.md](docs/chat.md#what-an-app-may-ask-for-besides-a-tool-call).
+
 **An origin of its own (opt-in).** By default an app runs in an opaque frame: no storage or
 cookies of its own, requests with `Origin: null`. Serve the sandbox page of
 `@dudko.dev/agent-web-react/mcp-app-sandbox` on ANOTHER origin and pass its URL, and apps run on
@@ -719,8 +741,8 @@ use them standalone. The full guide: [docs/chat.md](docs/chat.md).
 | `<SandboxedFrame>` / `<SourceView>` | Untrusted HTML inside chrome the host draws: `<iframe sandbox>` without `allow-same-origin`, by `srcdoc`, no network, fixed height (`html`, `scripts`, `title`, `label`, `actions`, `footer`, `height`) / a file's text with line numbers, never markup. See [the boundary](#the-html-preview-is-a-security-boundary). |
 | `<ToolApprovalPrompt>` | Consent cards (Allow once / Always / Deny); a helper's request says which helper asks (`showHelper`); an MCP App's says the APP asks, with the server's own tool name. |
 | `<ElicitationPrompt>` | A question an MCP server puts to the user during a tool call: a form (Submit / Decline / Cancel, checked by the core's rules) or a link opened only by a click, one at a time with a count, the time left, and the questions nobody answered (`elicitations`, `onAnswer`, `outcomes`, `showOutcomes`, `showExpiry`, `showHelper`, `renderElicitation`). See [MCP elicitation](#mcp-elicitation--a-server-asks-the-user). |
-| `<McpAppFrame>` / `<McpAppLine>` | An MCP App in host-drawn chrome ("App from server “travel” · sandboxed", panel, menu: reload / open in panel / hide): an opaque-origin frame - or, with `host.sandbox` (`useMcpAppHost({ sandbox })`, `<AgentChat appSandbox>`), an origin of its own behind your sandbox page ("· sandboxed on its own origin") - network only to the origins its resource declared, a bridge with an allow-list; inline, folded or in a panel (`app`, `host`, `variant`, `theme`, `defaultCollapsed`, `onOpenPanel`, `onClosePanel`, `showCalls`). `<AgentChat mcpApps>` places them under the answer. See [the boundary](#an-mcp-app-is-a-security-boundary). |
-| `<AppRequestPrompt>` | What an MCP App asks for besides a tool call: a link (its host highlighted, opened only on the user's click) or a message (put in the message box as a draft, never sent for the user). |
+| `<McpAppFrame>` / `<McpAppLine>` | An MCP App in host-drawn chrome ("App from server “travel” · sandboxed", panel, menu: reload / open in panel / hide): an opaque-origin frame - or, with `host.sandbox` (`useMcpAppHost({ sandbox })`, `<AgentChat appSandbox>`), an origin of its own behind your sandbox page ("· sandboxed on its own origin") - network only to the origins its resource declared, a bridge with an allow-list; inline, folded, in a panel or - with `allowFullscreen`, asked for by the app after a click in it - full screen over the chat with Exit / Esc (`app`, `host`, `variant`, `theme`, `defaultCollapsed`, `onOpenPanel`, `onClosePanel`, `showCalls`, `allowFullscreen`). `<AgentChat mcpApps>` places them under the answer. See [the boundary](#an-mcp-app-is-a-security-boundary). |
+| `<AppRequestPrompt>` | What an MCP App asks for besides a tool call: a link (its host highlighted, opened only on the user's click), a message (put in the message box as a draft, never sent for the user), a file (its sanitized name, type and size; saved by the page on Save file) or an answer of the agent's model (the app's text as text, the token cap; Allow once / Always for this app / Deny). |
 | `<ApprovalModeSwitch>` | Segmented consent-mode switch. |
 | `<ChatHistoryList>` | Saved chats (from `useChatHistory`). |
 | `<FilesPanel>` | A `VirtualFileSystem`, live: preview, download, delete, upload. |
@@ -769,7 +791,10 @@ HTML preview's boundary and adds a bridge:
 | a policy built from the resource's declared origins only (`connectDomains`, `resourceDomains`), re-checked; nothing declared = no network | `fetch` / images / scripts to an origin the server did not declare; a declared entry that is not an origin (`*`, `'unsafe-eval'`, `; script-src *`) |
 | the policy first in the app's document AND inherited from a shell of ours; the shell's `frame-src 'none'` | the app pre-empting the policy; navigating itself to the network |
 | a relay in the shell by window; your page listens to the frame it drew only (`event.source`) | an app (or anything else) posting to your page directly |
-| an allow-list of methods, parameters checked, at most 3 requests in flight, nothing but `ping` before `ui/initialize` | resource reads, model-context updates, downloads, sampling; floods |
+| an allow-list of methods, parameters checked, at most 3 requests in flight, nothing but `ping` before `ui/initialize`; `ui/download-file` / `sampling/createMessage` only when on | resource reads, model-context updates; downloads and sampling the host did not offer; floods |
+| full screen only for an app that declared it, right after a click or a key inside its frame, never while it waits for the user; the host's chrome (who asked, Exit, Esc) on top, the focus kept inside | an app taking over the chat unasked, or hiding a prompt |
+| a file: one per request, its name sanitized, programs / scripts / HTML / SVG / XML refused by name and type, 20 MB, a linked file read through its own server only, saved by your page as `application/octet-stream` on the click | path tricks, a page or a program saved in the user's name, a fetch to an address the app chose |
+| sampling: the core's rules (text, no tools, caps, a rate per app), the user shown exactly what the model gets, the answer to the app only | an app spending the user's model unasked, or reading the conversation through it |
 | tool calls through the agent's consent gate (writes always ask, "always allow" is the app's alone), only tools of its own server that let apps call them; links only on the user's click; messages only as a draft | an app acting with the user's authority, silently |
 | the label, the controls, the menu and every prompt drawn by the host outside the frame; the height clamped to 120 - 800 px | an app imitating or covering a control of the chat |
 

@@ -7,7 +7,7 @@ import { tripBoardHtml } from './trip-board-app.ts'
  * trip board. Three tools and one resource, all stateless and side-effect free:
  *
  * - `trip_board` (the model's, and the app's): a day-by-day plan for a trip, computed from its
- *   inputs. It declares the app (`_meta.ui.resourceUri`), so a host that shows MCP Apps draws the
+ *   inputs (and, when no first day is given, from the day of the request: `defaultTripStart`). It declares the app (`_meta.ui.resourceUri`), so a host that shows MCP Apps draws the
  *   board with the result; any other host has the same plan as text.
  * - `reshuffle_day` (the app's only: `visibility: ['app']`, read-only): other ideas for one day.
  *   A host that speaks MCP Apps never hands it to the model, and runs it for the app without a
@@ -42,6 +42,11 @@ export const APP_DOCS_PATH = '/docs/browser/capabilities/#mcp-apps-a-servers-int
 
 /** The longest trip the board plans. */
 export const TRIP_MAX_NIGHTS = 14
+
+/** A trip asked for without a first day starts at least this many days after the request... */
+export const TRIP_DEFAULT_LEAD_DAYS = 14
+/** ...on the next Friday (0 = Sunday): a long weekend, with dates the board can show. */
+export const TRIP_DEFAULT_WEEKDAY = 5
 
 export const BUDGETS = ['shoestring', 'comfortable', 'luxury'] as const
 export type Budget = (typeof BUDGETS)[number]
@@ -192,6 +197,23 @@ const addDays = (isoDate: string, days: number): string => {
 }
 
 /**
+ * The first day of a trip asked for without one (YYYY-MM-DD): the first Friday at least
+ * `TRIP_DEFAULT_LEAD_DAYS` (14) days after `today`, in UTC. The same request day, the same date:
+ * the server keeps nothing, and the date depends on nothing but the day of the request.
+ */
+export const defaultTripStart = (today: Date): string => {
+  const day = new Date(
+    Date.UTC(
+      today.getUTCFullYear(),
+      today.getUTCMonth(),
+      today.getUTCDate() + TRIP_DEFAULT_LEAD_DAYS,
+    ),
+  )
+  day.setUTCDate(day.getUTCDate() + ((TRIP_DEFAULT_WEEKDAY - day.getUTCDay() + 7) % 7))
+  return day.toISOString().slice(0, 10)
+}
+
+/**
  * One day of a trip of `days` days (the first is the arrival, the last the departure). The
  * template is `(seed + 3·day + 5·variant) mod 8`: 3 and 5 are prime to 8, so the first eight days
  * of a trip differ, and so do the first eight alternatives of a day.
@@ -292,7 +314,7 @@ export const bookingCode = (trip: Trip, variants: readonly number[]): string => 
 const euros = (value: number): string => `€${value.toLocaleString('en-GB')}`
 
 /** The plan as text: what the model reads, and what a host without MCP Apps shows. */
-const planText = (plan: ReturnType<typeof tripPlan>): string => {
+const planText = (plan: ReturnType<typeof tripPlan>, defaulted = false): string => {
   const { trip, days, estimate } = plan
   const people = trip.travellers === 1 ? '1 traveller' : `${trip.travellers} travellers`
   const nights = trip.nights === 1 ? '1 night' : `${trip.nights} nights`
@@ -305,6 +327,12 @@ const planText = (plan: ReturnType<typeof tripPlan>): string => {
   )
   return [
     `Trip board for ${trip.destination}: ${nights}${when}, ${people}, ${trip.budget} budget.`,
+    ...(defaulted
+      ? [
+          `No first day was given, so the trip starts on ${trip.start}: the first Friday at least ` +
+            `${TRIP_DEFAULT_LEAD_DAYS} days from today (UTC). Pass start to plan other dates.`,
+        ]
+      : []),
     ...lines,
     `Rough estimate: ${euros(estimate.total)} in all, ${euros(estimate.perPerson)} each (demo numbers).`,
     'A host that shows MCP Apps draws this as a board the user works with: other ideas for a ' +
@@ -316,6 +344,13 @@ const planText = (plan: ReturnType<typeof tripPlan>): string => {
 
 const Destination = z.string().min(1).max(80).describe('A city or a region')
 const Start = z.iso.date().optional().describe('The first day (YYYY-MM-DD), when it is known')
+const BoardStart = z.iso
+  .date()
+  .optional()
+  .describe(
+    'The first day (YYYY-MM-DD). Optional: without it the trip starts on the first Friday at ' +
+      `least ${TRIP_DEFAULT_LEAD_DAYS} days from today (UTC).`,
+  )
 const Nights = z.number().int().min(1).max(TRIP_MAX_NIGHTS)
 const Travellers = z.number().int().min(1).max(12)
 const BudgetSchema = z.enum(BUDGETS)
@@ -427,10 +462,12 @@ export const registerTripBoard = (server: McpServer, ctx: TripBoardContext): voi
         'Plan a trip day by day (an MCP App: a host that shows apps draws it as a board the ' +
         'user works with - other ideas for a day, a demo booking, the plan sent to the chat). ' +
         'Pass what you know; the plan is made up from the inputs (demo data, no real places or ' +
-        'prices), and nothing is booked or kept.',
+        'prices), and nothing is booked or kept. The start date is optional: without one the ' +
+        `trip starts on the first Friday at least ${TRIP_DEFAULT_LEAD_DAYS} days from today ` +
+        '(UTC), so every day has a date.',
       inputSchema: z.object({
         destination: Destination,
-        start: Start,
+        start: BoardStart,
         nights: Nights.default(3).describe(`Nights (1-${TRIP_MAX_NIGHTS})`),
         travellers: Travellers.default(2).describe('Travellers (1-12)'),
         budget: BudgetSchema.default('comfortable'),
@@ -445,10 +482,15 @@ export const registerTripBoard = (server: McpServer, ctx: TripBoardContext): voi
       },
     },
     (args) => {
-      const trip = tripOf(args)
+      // No first day: one computed from the day of THIS request (UTC), so the board has dates.
+      const defaulted = args.start === undefined
+      const trip = tripOf({ ...args, start: args.start ?? defaultTripStart(new Date()) })
       if (!trip) return text(NO_PLACE, true)
       const plan = tripPlan(trip)
-      return { content: [{ type: 'text', text: planText(plan) }], structuredContent: plan }
+      return {
+        content: [{ type: 'text', text: planText(plan, defaulted) }],
+        structuredContent: plan,
+      }
     },
   )
 

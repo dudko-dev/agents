@@ -41,13 +41,22 @@ Apps to a visitor who brings no server.
   fetch, no external script / style / image / font, no frame. It talks to the host only, by hand
   (no SDK bundle), exactly as the extension's revision 2026-01-26 says (`ui/initialize` with
   `appInfo` / `appCapabilities` / `protocolVersion`, then `ui/notifications/initialized`; it
-  answers `ping` and `ui/resource-teardown`, follows the host's theme, reports its height). Text
-  from the server is set with `textContent` only; `innerHTML` takes the constant icons. Keep it
-  under 40 KB (about 26 KB now): `tests/demo-server.test.ts` checks the size, the empty lists, that
-  there is no URL in it but the docs link, and compiles the script. No backticks and no backslashes
-  in that script: it is a template literal.
+  answers `ping` and `ui/resource-teardown`, follows the host's theme, reports its height). It
+  declares `['inline', 'fullscreen']` and has a Full screen button (`ui/request-display-mode`, shown
+  only when the host offers it; Esc inside asks for inline), and - only where `hostCapabilities`
+  says so - Download itinerary (`ui/download-file`, an embedded `.txt`, `downloadFile`) and, per
+  day, Dinner idea (`sampling/createMessage` to the HOST's model, no tools, `maxTokens: 120`,
+  `sampling`; the answer set with `textContent`). Text from the server or the model is set with
+  `textContent` only; `innerHTML` takes the constant icons. Keep it under 40 KB (about 30 KB now;
+  the script is sent without its indentation and whole-line comments, `shipped()`):
+  `tests/demo-server.test.ts` checks the size, the empty lists, that there is no URL in it but the
+  docs link, what it declares and asks for, and compiles the script. No backticks and no
+  backslashes in that script: it is a template literal.
 - **App tools: all stateless, listed to everyone.** `trip_board` (model and app, read-only) plans a
-  trip from its inputs; `reshuffle_day` (`visibility: ['app']`, read-only) and `book_trip`
+  trip from its inputs - and, when the model gives no `start`, from the day of the request: the
+  first Friday at least 14 days later, in UTC (`defaultTripStart`; the same request day, the same
+  dates; the text tells the model the date was picked and how to change it), so the board always
+  shows real dates; `reshuffle_day` (`visibility: ['app']`, read-only) and `book_trip`
   (`visibility: ['app']`) are the board's. `book_trip` books nothing (the code is a hash of the
   inputs, `bookingCode`) yet is declared NOT read-only on purpose: a host asks the user before an
   app runs a write, and that prompt is what the demo shows. It is the one exception to "read-only
@@ -90,7 +99,10 @@ Apps to a visitor who brings no server.
   called as a host does). `tests/worker.test.ts` — `wrangler.jsonc` (only `/mcp/*` reaches the
   Worker) and the routing, on the source and on the bundle, and that the docs links (`open_docs`,
   the app) name headings that exist. The React package's `e2e/demo-server-app.spec.ts` drives the app in
-  the demo: its consent prompt, link prompt, message draft, height and the phone sheet.
+  the demo: its consent prompt, link prompt, message draft, height and the phone sheet, full screen
+  (and a request without a click refused), the download prompt (Save / Cancel), the sampling
+  prompt (Allow once / Always / Deny; the answer only in the app), and the server added with its
+  apps off.
 
 ## Commands
 
@@ -122,4 +134,4 @@ Cloudflare does, after `pnpm nx build site`: `npx wrangler dev --local` at the r
   own test; add it to `DEMO_TOOL_NAMES`, the server's `DEMO_INSTRUCTIONS` and the demo's text on
   the MCP tab if it is worth naming.
 - `DEMO_LIMITS.responseBytes` (64 KiB) is twice the largest answer (the app's `resources/read`,
-  about 27 KiB on the wire): a bigger app needs a test-backed reason to raise it.
+  about 31 KiB on the wire): a bigger app needs a test-backed reason to raise it.

@@ -593,6 +593,10 @@ export const App = () => {
                   {...chatCommon}
                   mcpApps={showApps ? mcp.apps : undefined}
                   appSandbox={APP_SANDBOX}
+                  // Everything an app may ask for besides a tool call, each behind its prompt.
+                  appFullscreen
+                  appDownloads
+                  appSampling
                   appPanel={wide ? appPanelEl : 'sheet'}
                   onAppPanel={(app) => setAppInPanel(Boolean(app))}
                 />

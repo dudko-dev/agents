@@ -393,3 +393,50 @@ for (const protocol of ['legacy', 'dual'] as const) {
     ).toEqual(['elicit_twice', 'flights.book'])
   })
 }
+
+/** Post a request from inside the app's frame as the app would, and read the host's answer. */
+const fromApp = (app: ReturnType<typeof appOf>, method: string, params: unknown) =>
+  app.locator('body').evaluate(
+    (_, [m, p]) =>
+      new Promise<{ result?: Record<string, unknown>; error?: { code: number; message: string } }>(
+        (resolve) => {
+          const id = `e2e-${Math.random()}`
+          addEventListener('message', (e) => {
+            if (e.data && e.data.id === id && !e.data.method) resolve(e.data)
+          })
+          parent.postMessage({ jsonrpc: '2.0', id, method: m, params: p }, '*')
+        },
+      ),
+    [method, params] as const,
+  )
+
+for (const mode of ['origin', 'opaque'] as const) {
+  test(`guard (${mode}): full screen for an app that did not declare it, a file it links from elsewhere - nothing granted, nothing fetched`, async ({
+    page,
+  }) => {
+    const { frame, app } = await openWithApp(page, undefined, mode)
+    // A click inside the frame (a gesture, the focus) - but the travel app declared only inline.
+    await app.locator('.f').first().getByRole('button', { name: 'Select' }).click()
+    const full = await fromApp(app, 'ui/request-display-mode', { mode: 'fullscreen' })
+    expect(full.result).toEqual({ mode: 'inline' })
+    await expect(frame).toHaveAttribute('data-display', 'inline')
+    // A link to a URL: asked of the app's OWN server (it has no such resource) - never fetched.
+    const reads = () => mcp.requests.filter((r) => r.method === 'resources/read').length
+    const before = reads()
+    const link = await fromApp(app, 'ui/download-file', {
+      contents: [{ type: 'resource_link', uri: `${undeclared.url}/report.txt`, name: 'report' }],
+    })
+    expect(link.error?.code).toBe(-32000)
+    expect(link.error?.message).toMatch(/Invalid content/)
+    expect(reads()).toBe(before + 1)
+    // A page of its server: refused by its name before anything is read.
+    const html = await fromApp(app, 'ui/download-file', {
+      contents: [{ type: 'resource_link', uri: 'ui://travel/bad.html' }],
+    })
+    expect(html.error?.code).toBe(-32602)
+    expect(reads()).toBe(before + 1)
+    await page.waitForTimeout(300)
+    expect(undeclared.hits).toEqual([])
+    await expect(page.locator('.awr-approval--app')).toHaveCount(0)
+  })
+}

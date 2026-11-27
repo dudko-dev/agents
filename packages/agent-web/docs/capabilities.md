@@ -858,6 +858,26 @@ This package is the data side of a host; drawing the app is a UI's (the React pa
 | the tools an app may call: `apps.appTool(server, name)` → `{ name, key, readOnly, visibility, … }` or `undefined` | `ConnectedMcp.apps` |
 | a call for an app: `apps.callAppTool(server, name, args)` → the raw result for the app | `ConnectedMcp.apps` |
 | consent for that call: `agent.approveAppToolCall(call, onEvent?, signal?)` | the agent |
+| a file an app links to, for a download the UI asks about: `apps.readResource(server, uri, { maxBytes? })` → `{ uri, mimeType?, bytes }` | `ConnectedMcp.apps` |
+| a completion an app asks for: `agent.sampleForApp(request, { approve, … })` ([below](#an-app-asks-the-model)) | the agent |
+
+**One server's apps off.** `McpHttpServerConfig.apps` wins over the connection's `apps`
+(`mcpAppsModeOf(server, connection)`):
+
+| Server's `apps` | Connection's `apps` | Mode | What happens |
+| --- | --- | --- | --- |
+| - | `true` | `'on'` | as above |
+| `true` | any | `'on'` | as above, for this server alone |
+| `false` | any | `'declined'` | the extension is NOT declared to it; `_meta.ui` is read for `visibility` only: a tool for its app only is mounted for nobody (it is for an app that will never run here); every other tool is the model's as a plain tool - no `McpCatalogEntry.app`, no `mcp.app`; `readUiResource`, `appTool`, `readResource` and `callAppTool` refuse it before anything is sent |
+| - | - / `false` | `'off'` | MCP Apps unknown: nothing declared, `_meta` not read, every tool mounted - the wire and the tools of before |
+
+**A file an app links to.** The draft revision's `ui/download-file` lets an app hand the host a
+`ResourceLink`; "the host can retrieve the content directly from the URI". This package never
+fetches it: `apps.readResource(server, uri)` is `resources/read` on that server (only one whose apps
+are on), its `text` (as UTF-8) or base64 `blob` as bytes, at most `maxBytes`
+(`MCP_APP_MAX_DOWNLOAD_BYTES`, 20 MB; `mcpAppDownloadOf`), any MIME type, not cached, the URI one
+line of at most 2048 characters. It neither asks the user nor judges the type: the UI does both
+(the React package refuses programs, scripts and pages, by name and by the type this returns).
 
 **What is checked before anything is shown.** The read goes only to the server whose tool
 declared the URI, and only for a URI a tool of that server declares in its current listing (a
@@ -905,9 +925,62 @@ it. The wait's bound is `toolApproval.timeoutMs`. A question the server asks dur
 (`callAppTool`, with `onElicitation`) is put to the host like any other, bounded by
 `elicitation.timeoutMs` and counted on its own (there is no run to count it on).
 
+### An app asks the model
+
+The draft revision lets an app send `sampling/createMessage` (MCP's own `CreateMessageRequest`) to
+the host: "The host has full discretion over model selection and SHOULD apply rate limiting, cost
+controls, and user approval". `agent.sampleForApp(request, options)` is that seam; the UI turns it
+into the prompt and the bridge's answer (the React package's `appSampling`):
+
+```ts
+const result = await agent.sampleForApp(
+  { server: 'demo', resourceUri: 'ui://demo/trip-board.html', params }, // the app's request params
+  {
+    approve: (view, signal) => askTheUser(view), // true sends it; the view is what the model gets
+    signal, // the app's frame went away
+    onEvent, // the one event: { type: 'usage', phase: 'app', usage }
+    sessionId, // whose sessionUsage is charged (default config.sessionId)
+  },
+)
+// → { role: 'assistant', content: { type: 'text', text }, model, stopReason: 'endTurn' | 'maxTokens' | … }
+```
+
+In this order, each step refusing with an `AppSamplingError` (`code`, and `rpcCode` - what the app
+is told):
+
+1. `config.appSampling: false` → `disabled` (`-32601`).
+2. **The request** (`appSamplingRequestOf`): 1 - 20 messages of role `user` / `assistant`, each a
+   text block or 1 - 10 blocks; text cleaned of what cannot be seen (bidirectional overrides,
+   zero-width, control characters) - the user is shown what the model reads; an image (PNG, JPEG,
+   GIF, WebP, base64, at most 4 MB, 4 per request) only in a user message and only for a model
+   KNOWN to read images (`inputs.images` / `vision` for the executor's model, `supportsImages`
+   otherwise); the system prompt at most 4 000 characters; the text in all at most
+   `maxInputChars` (16 000); `maxTokens` a whole number, lowered to `maxTokens` (1024; the app's
+   ask is kept as `requestedMaxTokens`); a temperature 0 - 2. Refused: `tools` / `toolChoice` and
+   tool-use / tool-result blocks (`unsupported`, `-32602`: `hostCapabilities.sampling.tools` is not
+   offered in this version), audio, anything else (`invalid`, `-32602`). Ignored:
+   `modelPreferences` (the host picks the model), `includeContext` (no context is ever added),
+   `stopSequences`, `metadata`.
+3. **The rate**, per app (server + resource): `maxRequestsPerMinute` (5) in any 60 s and
+   `maxRequests` (30) for the agent's life (`rate-limited`, `-32000`). Counted BEFORE the user is
+   asked, so an app cannot stack prompts; a refused request is not counted.
+4. **Consent**: `approve(view)` - `true` sends it. A `false`, a throw, no answer within
+   `toolApproval.timeoutMs`, or `signal` → `denied` (`-1`, MCP's "User rejected sampling
+   request"). No approval mode lets it through by itself: a host that wants "always for this app"
+   answers `true` itself (the React package keeps that until a reload).
+5. **The model**: the synthesizer's (a text completion with no tools is that stage's work), sent
+   the view's system prompt and messages and nothing else - no agent system prompt, no memory, no
+   tools, no MCP instructions, no thinking - with `maxOutputTokens: view.maxTokens` and
+   `chatTimeoutMs`. Its tokens are charged as they arrive (`agent.usage`, `sessionUsage`) and
+   reported as ONE `usage` event of phase `'app'`; a failed call's spend is charged too.
+
+The answer is returned and goes nowhere else: no memory, no event, no run. It is outside every
+run: no step clock, no run limits (`limits` are per run; the app's caps are its own).
+
 **Not here.** Links and messages an app asks for are the UI's to put to the user (the React package
-asks for both). `ui/update-model-context`, `resources/read` for an app, `ui/download-file`,
-sampling and display modes other than inline are not offered. The Node sibling has none of this:
+asks for both), and so are display modes (`fullscreen`, granted by the React package after a click
+inside the frame) and the saving of a file. `ui/update-model-context`, `resources/read` for an app
+itself, tools in sampling and picture-in-picture are not offered. The Node sibling has none of this:
 it renders no UI, and a server-side host that streams events to a browser would need the bridge
 there (see [design](design.md#mcp-apps-the-host-reads-the-browser-draws)).
 
@@ -2376,7 +2449,7 @@ Subscribe with `onEvent` (per run) or the handler you pass to `createAgent`; ren
 | Event | Payload |
 | --- | --- |
 | `decision` | `point: 'replan' \| 'route', accepted, choice?, confidence?, threshold, reason?, error?, durationMs, model?` — a [decision model](#decision-models) was asked a question; `reason` (`'low-confidence' \| 'invalid-choice' \| 'invalid-confidence' \| 'error' \| 'timeout' \| 'needs-model'`) says why the ordinary model call ran instead |
-| `usage` | `phase: 'plan' \| 'execute' \| 'replan' \| 'synthesize' \| 'compact' \| 'subagent' \| 'decision' \| 'media' \| 'search', usage` — per LLM call; counted live into [`agent.usage`](#usage-what-a-session-has-spent). Phase `'search'` is the model call behind a [`web_search` through Google](#the-google-provider-google-search-through-gemini-grounding): the tokens its API reported. Phase `'decision'` is a decision-model call (`usage.decisionCalls: 1` plus the tokens its API reported). Phase `'media'` is a call to a [media model](#media-images-speech-and-transcription): zero tokens, and the media fields of `usage` (`mediaCalls`, ...) with the units |
+| `usage` | `phase: 'plan' \| 'execute' \| 'replan' \| 'synthesize' \| 'compact' \| 'subagent' \| 'decision' \| 'media' \| 'search' \| 'app', usage` — per LLM call; counted live into [`agent.usage`](#usage-what-a-session-has-spent). Phase `'app'` is a completion an MCP App asked for ([`agent.sampleForApp`](#an-app-asks-the-model)), outside any run: given to its `onEvent`, never a run's. Phase `'search'` is the model call behind a [`web_search` through Google](#the-google-provider-google-search-through-gemini-grounding): the tokens its API reported. Phase `'decision'` is a decision-model call (`usage.decisionCalls: 1` plus the tokens its API reported). Phase `'media'` is a call to a [media model](#media-images-speech-and-transcription): zero tokens, and the media fields of `usage` (`mediaCalls`, ...) with the units |
 | `budget.exceeded` | `kind: 'input' \| 'output' \| 'reasoning' \| 'total' \| 'tool-calls', tokens, cap` |
 | `context.compacted` | `scope: 'history' \| 'trace' \| 'tool-results', beforeTokens, afterTokens` |
 

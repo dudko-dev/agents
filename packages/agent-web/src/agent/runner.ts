@@ -11,7 +11,7 @@ import {
   TOOL_SEARCH_WINDOW_SHARE,
   toolDefinitionTokens,
 } from '../context-window.js'
-import { clip } from '../llm/util.js'
+import { clip, normalizeUsage, usageOfError } from '../llm/util.js'
 import {
   compactSteps,
   compressHistory,
@@ -38,7 +38,18 @@ import {
   gateToolCall,
   type ToolApprovalMode,
   TOOL_APPROVAL_MODES,
+  withDeadline,
 } from '../tools/approval.js'
+import {
+  AppSamplingError,
+  appSamplingRequestOf,
+  appSamplingStopReason,
+  createAppSamplingLimiter,
+  resolveAppSampling,
+  type AppSamplingResult,
+  type AppSamplingView,
+} from '../app-sampling.js'
+import { generate } from '../llm/generate.js'
 import { createLearning } from '../learning.js'
 import { createEgressTools } from '../tools/egress.js'
 import { createSearchTools } from '../tools/web-search.js'
@@ -245,6 +256,18 @@ export interface Agent {
     signal?: AbortSignal,
   ): Promise<void>
   /**
+   * Answer a completion an MCP App asks for (its `sampling/createMessage`) with this agent's
+   * synthesizer model - outside any run, with no tools and none of the agent's context. The
+   * request (MCP `CreateMessageRequest.params`) is checked (`appSamplingRequestOf`: text, images
+   * only for a model that reads them, no tools, caps), counted against the app's rate limit
+   * (`config.appSampling`), and put to `options.approve` with what the model will get; only on
+   * `true` is it sent. Its tokens are charged to `usage` (and `sessionUsage`) and reported to
+   * `options.onEvent` as a `usage` event of phase `'app'` - the ONLY event: the answer goes to
+   * the caller, never into memory, an event or a run. Throws {@link AppSamplingError}
+   * (`rpcCode` is what the app is told), or the model's error.
+   */
+  sampleForApp(request: AppSamplingRequest, options: AppSamplingOptions): Promise<AppSamplingResult>
+  /**
    * What the executor model can take, per attachment kind: true / false, or
    * undefined when unknown (the run tries, and a provider refusal becomes a
    * clear error).
@@ -264,6 +287,30 @@ export interface Agent {
     /** The executor models by tier, when `config.executorTiers` is on (`standard` is `executor`). */
     tiers?: Partial<Record<ModelTier, LanguageModel>>
   }
+}
+
+/** A completion an MCP App asks for (see `Agent.sampleForApp`). */
+export interface AppSamplingRequest {
+  /** The server whose app asks. */
+  server: string
+  /** The app's `ui://` resource: with `server`, the key of its rate limit. */
+  resourceUri: string
+  /** The app's `sampling/createMessage` params, as they arrived: checked here. */
+  params: unknown
+}
+
+export interface AppSamplingOptions {
+  /**
+   * The user's consent: shown exactly what the model will get (the cleaned messages, the system
+   * prompt, the tokens it may write). `true` sends it. Bounded by `toolApproval.timeoutMs` (no
+   * answer = refused) and `signal`.
+   */
+  approve: (view: AppSamplingView, signal?: AbortSignal) => boolean | Promise<boolean>
+  signal?: AbortSignal
+  /** Receives the `usage` event (phase `'app'`) of the call. */
+  onEvent?: (event: AgentEvent) => void
+  /** The memory session whose `sessionUsage` is charged (default `config.sessionId`). */
+  sessionId?: string
 }
 
 /** A tool call an MCP App asks for (see `Agent.approveAppToolCall`). */
@@ -599,6 +646,18 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
   const approval = seed?.approval ?? createApprovalState(config.toolApproval)
   // "Always allow" an MCP App was given (`approveAppToolCall`): apart from the model's.
   const appRemembered = new Set<string>()
+  // MCP Apps asking the model (`sampleForApp`): the caps, and each app's rate (server + resource).
+  const appSampling = resolveAppSampling(config.appSampling)
+  const samplingLimiter = createAppSamplingLimiter(
+    appSampling.maxRequestsPerMinute,
+    appSampling.maxRequests,
+  )
+  // An app's images go only to a model known to read them (the host's `inputs` / `vision` speak
+  // for the executor; a synthesizer of its own is judged by what is known about it).
+  const samplingImages =
+    synthesizerModel === executorModel
+      ? accepts.image === true
+      : supportsImages(synthesizerModel) === true
   log.info(
     `agent ready — ${catalog.length} tool(s) (${strategy}, ~${toolTokens || '?'} tokens), window ${cfg.compaction.contextWindowTokens}${modelWindow ? ' (the model’s)' : ''}, skills: [${skills.map((s) => s.name).join(', ') || 'none'}], planner mode: ${plannerMode}, executor mode: ${executorMode}, approval: ${approval.mode}`,
   )
@@ -1572,6 +1631,94 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
         },
         signal,
       ),
+    sampleForApp: async (request, options) => {
+      if (!appSampling.enabled) {
+        throw new AppSamplingError('disabled', 'This host does not answer sampling requests')
+      }
+      const server = String(request?.server ?? '')
+      const resourceUri = String(request?.resourceUri ?? '')
+      if (!server || !resourceUri) throw new AppSamplingError('invalid', 'no app named')
+      const view: AppSamplingView = {
+        server,
+        resourceUri,
+        ...appSamplingRequestOf(request.params, {
+          maxTokens: appSampling.maxTokens,
+          maxInputChars: appSampling.maxInputChars,
+          images: samplingImages,
+        }),
+      }
+      // Counted before the user is asked: an app cannot put more prompts in front of them.
+      const limited = samplingLimiter.take(`${server}\u0000${resourceUri}`, Date.now())
+      if (limited) {
+        throw new AppSamplingError(
+          'rate-limited',
+          limited === 'minute'
+            ? `Too many sampling requests: at most ${appSampling.maxRequestsPerMinute} a minute`
+            : `Too many sampling requests: at most ${appSampling.maxRequests} for this app`,
+        )
+      }
+      log.info(
+        `app ${resourceUri} of ${server}: a sampling request (${view.messages.length} message(s), up to ${view.maxTokens} tokens)`,
+      )
+      let approved = false
+      try {
+        approved =
+          (await withDeadline(
+            Promise.resolve().then(() => options.approve(view, options.signal)),
+            approval.timeoutMs,
+            options.signal,
+          )) === true
+      } catch {
+        approved = false
+      }
+      if (!approved) throw new AppSamplingError('denied', 'User rejected sampling request')
+      const sessionId = options.sessionId ?? cfg.sessionId
+      const spend = (u: IUsage): void => {
+        charge(sessionId, u)
+        try {
+          options.onEvent?.({ type: 'usage', phase: 'app', usage: u })
+        } catch {
+          /* a bad handler must not lose the answer */
+        }
+      }
+      let result: Awaited<ReturnType<typeof generate>>
+      try {
+        result = await generate(synthesizerModel, {
+          ...(view.systemPrompt ? { system: view.systemPrompt } : {}),
+          messages: view.messages.map((m) =>
+            m.role === 'assistant'
+              ? { role: 'assistant' as const, content: m.text }
+              : {
+                  role: 'user' as const,
+                  content: [
+                    ...(m.text ? [{ type: 'text' as const, text: m.text }] : []),
+                    ...m.images.map((i) => ({
+                      type: 'file' as const,
+                      data: i.data,
+                      mediaType: i.mimeType,
+                    })),
+                  ],
+                },
+          ),
+          maxOutputTokens: view.maxTokens,
+          ...(view.temperature !== undefined ? { temperature: view.temperature } : {}),
+          ...(options.signal ? { abortSignal: options.signal } : {}),
+          timeoutMs: cfg.chatTimeoutMs,
+        })
+      } catch (err) {
+        // A failed call still cost what it cost.
+        const u = usageOfError(err)
+        if (u.totalTokens > 0) spend(u)
+        throw err
+      }
+      spend(normalizeUsage(result.usage))
+      return {
+        role: 'assistant',
+        content: { type: 'text', text: result.text },
+        model: modelIdOf(synthesizerModel),
+        stopReason: appSamplingStopReason(result.finishReason),
+      }
+    },
     forgetSkill: async (name: string, onEvent?: (event: AgentEvent) => void) =>
       learning ? learning.forget(name, onEvent) : false,
     capabilities: { images: accepts.image, pdf: accepts.pdf, files: accepts.file },

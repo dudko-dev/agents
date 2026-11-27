@@ -879,11 +879,53 @@ When the sandbox URL is refused or its page does not answer the handshake in tim
 in the opaque frame - the stricter mode, so an attacker who blocks the sandbox gains nothing - and
 the frame says so. The draft of the specification no longer prescribes the framing.
 
+**One server's apps off** (`McpHttpServerConfig.apps: false`): that server is not told of the
+extension, none of its apps is read, no `mcp.app` is emitted for it, and a tool it marks for its
+app only is mounted for NOBODY - not the model, not an app (`tests/mcp-apps.test.ts`, "guard per
+server"). Its other tools are plain tools, exactly as without the extension. The React hook also
+refuses to route anything of such a server to a frame (a core too old to know the field would
+still declare the extension; it then finds no app to read).
+
+**A file an app links to** (`apps.readResource`): `resources/read` on the app's OWN server, never a
+fetch of the URI the app named - a link to an address elsewhere is asked of that server and goes
+nowhere else; bounded (`maxBytes`, 20 MB by default) on the text and on the base64 before it is
+decoded; one-line URIs only; not cached; only for a server whose apps are on. The type is not
+judged here: the React package refuses programs, scripts and pages by name and by the type this
+returns, shows name, type and size, and saves only on the user's click
+(`tests/apps-features.test.ts`, `e2e/demo-server-app.spec.ts`).
+
 **Known gaps.** WebRTC is not governed by `connect-src` in Chromium (`webrtc 'block'` is set for
 browsers that implement it): an app with scripts can reach a STUN/TURN server it names. What it
 can send that way is what it already has - the tool's input and result, and what the user types
 into it - never anything of the page. A DNS lookup (`<link rel=dns-prefetch>`) is not a request
 the policy sees. Resource use (CPU, memory) of an app is not limited.
+
+### An app asks the model (`sampleForApp`)
+
+An app's `sampling/createMessage` spends the user's model on a third party's text. The guards
+(`src/app-sampling.ts`, `tests/app-sampling.test.ts` - each a test and a mutation check):
+
+- **Consent before anything is sent**, shown exactly what the model gets (the text cleaned of what
+  cannot be seen, so the user cannot be shown one thing and the model another). No approval mode
+  answers for the user - autopilot included; a host's "always for this app" is the host's own
+  `true`. A throw, a timeout (`toolApproval.timeoutMs`) or an abort is a no.
+- **Nothing of the agent goes with it.** The model gets the app's system prompt and messages and
+  nothing else: no agent system prompt, no memory, no MCP instructions, no tools; `includeContext`
+  is ignored. So an app cannot read the conversation through the model's answer - the answer is
+  made from what the app sent.
+- **No tools.** `tools`, `toolChoice` and tool-use / tool-result blocks are refused
+  (`hostCapabilities.sampling.tools` is not offered): a tool loop would be the agent acting for a
+  third party.
+- **The answer goes to the app only**: not into memory, an event, a run or the transcript. The
+  only event is the `usage` of phase `'app'`, with token counts.
+- **Bounded spend.** `maxTokens` lowered to 1024, 16 000 characters of input, 20 messages, images
+  only for a model known to read them (4 of at most 4 MB), and a rate per app - 5 a minute, 30 for
+  the agent's life - counted BEFORE the user is asked, so a flood is refused, not prompted. The
+  tokens are charged to `agent.usage` as they arrive.
+
+What it does not do: show the answer to the user for review before it is delivered (the MCP
+sampling page's "SHOULD"; the answer is made from the app's own text and goes back to that app),
+let the user edit the prompt, or honour `modelPreferences`.
 
 ## Pipelines: a definition is data
 

@@ -2,6 +2,8 @@
 export { createAgent } from './agent/runner.js'
 export type {
   Agent,
+  AppSamplingOptions,
+  AppSamplingRequest,
   AppToolCallRequest,
   CompactOptions,
   CompactResult,
@@ -522,6 +524,31 @@ export type {
   McpAppToolResult,
   McpAppVisibility,
 } from './mcp/apps.js'
+// MCP Apps asking the agent's model (`Agent.sampleForApp`): the rules, pure.
+export {
+  APP_SAMPLING_MAX_IMAGE_BYTES,
+  APP_SAMPLING_MAX_IMAGES,
+  APP_SAMPLING_MAX_INPUT_CHARS,
+  APP_SAMPLING_MAX_MESSAGES,
+  APP_SAMPLING_MAX_SYSTEM_CHARS,
+  APP_SAMPLING_MAX_TOKENS,
+  APP_SAMPLING_PER_APP,
+  APP_SAMPLING_PER_MINUTE,
+  APP_SAMPLING_RPC_CODES,
+  AppSamplingError,
+  appSamplingRequestOf,
+  appSamplingText,
+  createAppSamplingLimiter,
+  resolveAppSampling,
+} from './app-sampling.js'
+export type {
+  AppSamplingErrorCode,
+  AppSamplingImage,
+  AppSamplingMessage,
+  AppSamplingResult,
+  AppSamplingSettings,
+  AppSamplingView,
+} from './app-sampling.js'
 
 // ── Logging ──────────────────────────────────────────────────────────────────
 export { createLogger } from './logger.js'

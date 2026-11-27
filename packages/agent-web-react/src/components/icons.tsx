@@ -241,6 +241,13 @@ export const ExpandIcon = ({ size, className }: IconProps) => (
   </svg>
 )
 
+/** Four corners inward: leave full screen. */
+export const ShrinkIcon = ({ size, className }: IconProps) => (
+  <svg {...base(size)} className={className}>
+    <path d="M4 8h4V4M20 8h-4V4M4 16h4v4M20 16h-4v4" />
+  </svg>
+)
+
 // ── MCP Apps ─────────────────────────────────────────────────────────────────
 
 /** A window: an app a server shipped. */
