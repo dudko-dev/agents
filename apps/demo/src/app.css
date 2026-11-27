@@ -1174,6 +1174,17 @@ a:hover {
   white-space: pre-wrap;
 }
 
+/* The MCP protocol revision negotiated with a connected server. */
+.mcp__protocol {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
 /* MCP Apps: the app's panel takes the right column; the servers' apps in the panel's list. */
 .app__apppanel {
   height: 100%;

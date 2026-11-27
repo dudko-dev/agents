@@ -101,6 +101,8 @@ src/
 │   ├── engine.ts        validation, conditions, the scheduler - pure, a COPY of the Node sibling's
 │   └── index.ts         the adapter (a node = createAgent + a route call), nodeResolver
 ├── context-window.ts    the model's real window; compaction, tool search and caps sized to it
+├── wait-clock.ts        the run's clock: step / subagent limits that stop while a person is asked
+│                        (pure, a COPY of the Node sibling's)
 ├── thinking.ts limits.ts caching.ts skills.ts images.ts   — see docs/capabilities.md
 ├── llm/context-editing.ts  stale tool results → stubs inside one step's tool loop
 ├── llm/util.ts          clip / prompt helpers / usageOfError (the spend of a failed structured call)
@@ -758,16 +760,56 @@ the same in both. Only the adapter that runs a node with `createAgent` differs.
   2025 revisions, where the server then returns a perfectly good "the user cancelled" result,
   which is discarded. A result that says "cancelled" would read as the user's choice; it was
   not. A server that asks again after that has its call aborted.
-- **The step's limit stays the step's limit.** A question does not pause `chatTimeoutMs`: the
-  step ends, and says why (`step-timeout`). Pausing it would need a timer the tools can hold,
-  for one feature; tool approval has the same rule today. What is paused is the MCP SDK's
-  60-second request timeout on the 2025 revisions, where it would otherwise end every form
-  that takes longer than a minute to fill in.
+- **A question stops the step's clock.** While a question waits, `chatTimeoutMs` does not run
+  (see [Time a person takes](#time-a-person-takes-is-not-a-steps-time)); the question is bounded
+  by its own `timeoutMs` and by a stop. Separately, the MCP SDK's 60-second request timeout is
+  paused on the 2025 revisions, where it would otherwise end every form that takes longer than
+  a minute to fill in. `step-timeout` is left for a question that arrives when the step's time
+  is already spent, and for a time limit the host put on the run's signal.
 - **Events beside approval's.** `mcp.elicitation-requested` / `mcp.elicitation-answered`, in the
   shape of `tool.approval-requested` / `tool.approval-resolved`: an id to correlate, the step,
   the helper. No value in either.
 - The pure core (`mcp/elicitation.ts`) is a byte-for-byte copy of the Node package's
   `mcp-elicitation.ts`.
+
+## Time a person takes is not a step's time
+
+`chatTimeoutMs` (120 s by default) bounds a step so that a hung model or tool cannot freeze a
+run. A person answering a tool approval or an MCP question is neither: two minutes to read a
+form is ordinary, and the step used to end under them (the elicitation answered with
+`step-timeout`, the approval denied as aborted). So the limits that measure latency run on a
+**clock that stops while a person is asked**, and goes on with what it had left:
+
+- **One primitive, `wait-clock.ts`**, pure and shared with the Node sibling byte for byte (its
+  test compares them): `createWaitClock` (deadlines measured in running time; `pause()` returns
+  the resume, waits may overlap), `deadlineSignal` (what `AbortSignal.any([outer,
+  AbortSignal.timeout(ms)])` was, on the clock), `followHumanWaits` and `followClock`.
+- **One clock per run, on the run context** (`ToolRunContext.clock`): the executor's step limit
+  and the `timeoutMs` of every subagent the run's tool calls start are its deadlines. The
+  consent gate pauses it from `tool.approval-requested` to the decision, an MCP question from
+  `mcp.elicitation-requested` to the answer. Nothing else does: a tool that is merely slow is
+  still cut.
+- **Resumed, never reset.** A deadline keeps what it had left when the clock stopped; a fresh
+  limit after every question would let a run that asks often never time out, and a limit
+  extended past the wait would hide a real hang.
+- **The waits keep their own bounds** - `toolApproval.timeoutMs`, `elicitation.timeoutMs` - on
+  plain timers, never on the clock; and a stop (the run's signal, `stopSubagent`) is passed on
+  at once, paused or not: the clock only keeps time, it never holds an abort back. A limit the
+  host put on the run's signal is such a stop and is not paused; the config has no run-level
+  time limit.
+- **Subagents follow by events.** A subagent runs on a clock of its own; the tool that started
+  it reads its events (`followHumanWaits`: a `…-requested` holds the caller's clock until the
+  same question's `…-resolved` / `…-answered`, at any depth of `subagent.event`), so the
+  caller's step and the subagent's `timeoutMs` stop while anything below waits. The reverse
+  direction - a host tool of a subagent asked about by the PARENT's gate - pauses the parent's
+  clock, and the child's clock follows it for that call (`followClock`); a worker child is told
+  by a `tool-wait` message and its proxied call in flight follows. The worker cannot tell which
+  question is whose, so a proxied call follows every wait of the calling run: the child's step
+  is paused at most as long as the calling run's is.
+- **No wait, no change**: without a question the clock never stops and the deadline is the
+  timer it was.
+- **Approval's bound has no default.** A question without `toolApproval.timeoutMs` waits until
+  the run is stopped - as documented before, but the step's limit no longer caps it by accident.
 
 ## MCP Apps: the host reads, the browser draws
 
@@ -793,6 +835,11 @@ the same in both. Only the adapter that runs a node with `createAgent` differs.
   (writes ask), and an app's "always allow" is kept apart (the user trusted the agent, or the
   app, not both). `callAppTool` does not ask by itself: it is the host's capability, like a
   tool's `execute`.
+- **An app's call is not the step's.** Its consent and any question its server asks during it
+  wait outside the run's clock (see [Time a person takes](#time-a-person-takes-is-not-a-steps-time)):
+  the app's prompt may come while no run goes, and when one does, the step it would pause is
+  not waiting for that person. Its bounds are the gate's own `toolApproval.timeoutMs` and the
+  question's `elicitation.timeoutMs`.
 - **No `@modelcontextprotocol/ext-apps` dependency.** Its host helper (`AppBridge`) is built on
   the SDK's `Protocol` with zod schemas and console logging, peers `@modelcontextprotocol/client`,
   `core` and `zod`, and assumes a sandbox proxy on another origin. The host side we need is an

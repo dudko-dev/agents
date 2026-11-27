@@ -256,8 +256,8 @@ export interface ConnectMcpOptions {
    */
   onElicitation?: McpElicitationHandler
   /**
-   * Its settings: `timeoutMs` (default 300 000: a human is answering - but a
-   * question still ends with the step it belongs to, see `chatTimeoutMs`),
+   * Its settings: `timeoutMs` (default 300 000: a human is answering; the
+   * step's `chatTimeoutMs` stops while a question waits),
    * `maxPerToolCall` (5), `maxPerRun` (20), `url` (also accept URL mode; default
    * false), `subagents` (let a call made by a helper - a subagent - ask too;
    * default false: its question is cancelled without the callback being called).
@@ -298,8 +298,16 @@ interface ToolCallOptions {
     runId?: string
     subagent?: { id: string; depth: number }
     elicitations?: { count: number }
+    /** The run's clock: stopped while a question waits, so the step's limit does not run. */
+    clock?: { pause: () => () => void }
   }
-  subagentCall?: { id: string; depth: number; elicitations?: { count: number } }
+  subagentCall?: {
+    id: string
+    depth: number
+    elicitations?: { count: number }
+    /** Stops the clock of the run that delegated, for a call that reaches here without a run. */
+    pause?: () => () => void
+  }
 }
 
 /** Hard stop for a server whose pagination never ends (the Node sibling's cap and name). */
@@ -1099,6 +1107,10 @@ export const connectMcpHttp = async (
         // One count per run the host started: a subagent tool's child counts on the
         // run that delegated to it.
         const counter = call?.subagentCall?.elicitations ?? run?.elicitations
+        // While the user is asked, the step's time limit does not run: the clock of the run
+        // the call belongs to (or of the run that delegated it, from a worker's host tool).
+        // An app's call made outside a run has no clock, and nothing to pause.
+        const pause = run?.clock?.pause ?? call?.subagentCall?.pause
         const era = client.getProtocolEra() ?? 'legacy'
         const info: McpElicitationCallInfo = {
           tool: key,
@@ -1115,6 +1127,7 @@ export const connectMcpHttp = async (
           ...(run?.runId ? { runId: run.runId } : {}),
           ...(helper ? { subagent: { id: helper.id, depth: helper.depth } } : {}),
           ...(counter ? { run: counter } : {}),
+          ...(pause ? { pause } : {}),
         }
         return await elicitation.call(
           era,

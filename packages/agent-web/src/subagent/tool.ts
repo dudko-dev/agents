@@ -9,6 +9,7 @@ import type { CredentialStore } from '../secrets/store.js'
 import { isReadOnlyTool } from '../tools/approval.js'
 import type { AgentTool } from '../tools/types.js'
 import { toolRunContextOf } from '../tools/wrap.js'
+import { createWaitClock, followClock, followHumanWaits, type IWaitClock } from '../wait-clock.js'
 import { adoptSubagentEvent } from './dynamic-shared.js'
 import {
   safePost,
@@ -97,7 +98,11 @@ export interface SubagentToolOptions {
   tools?: ToolSet
   /** Parallel delegations allowed at once (default 4); extra calls queue. */
   maxConcurrent?: number
-  /** Give up on one delegated task after this many ms (default: none). */
+  /**
+   * Give up on one delegated task after this many ms (default: none). Time a person takes to
+   * answer a question (a tool approval, an MCP elicitation) of the child, of one of its host
+   * tools or of the calling run does not count.
+   */
   timeoutMs?: number
   /** Cap on the text handed back to the parent model (default 8000 chars). */
   outputMaxChars?: number
@@ -213,13 +218,21 @@ export const createSubagentTool = (opts: SubagentToolOptions): AgentTool => {
   // Every call a subagent makes says that it is the subagent's (`options.subagentCall`), not a
   // call of the run the host started: an MCP tool lets such a call ask the user something only
   // when its connection allows helpers to (`elicitation.subagents`). `id` is the delegated task;
-  // `elicitations` the parent run's count of such questions, so the child's count on it too.
+  // `elicitations` the parent run's count of such questions, so the child's count on it too;
+  // `pause` stops the parent run's clock while such a question waits (an MCP tool uses it when
+  // the call reaches it without a run of its own: a host tool called from a worker).
   const asSubagentCalls = (
     tools: ToolSet | undefined,
     id: string,
     elicitations: { count: number } | undefined,
+    clock?: IWaitClock,
   ): ToolSet => {
-    const subagentCall = { id, depth: 1, ...(elicitations ? { elicitations } : {}) }
+    const subagentCall = {
+      id,
+      depth: 1,
+      ...(elicitations ? { elicitations } : {}),
+      ...(clock ? { pause: clock.pause } : {}),
+    }
     return Object.fromEntries(
       Object.entries(tools ?? {}).map(([name, t]) => {
         const execute = (t as { execute?: (i: unknown, o: unknown) => unknown }).execute
@@ -243,8 +256,9 @@ export const createSubagentTool = (opts: SubagentToolOptions): AgentTool => {
     approve: ((name: string, input: unknown, readOnly: boolean) => Promise<void>) | undefined,
     id: string,
     elicitations: { count: number } | undefined,
+    clock: IWaitClock,
   ): ToolSet => {
-    const marked = asSubagentCalls(opts.tools, id, elicitations)
+    const marked = asSubagentCalls(opts.tools, id, elicitations, clock)
     if (!approve) return marked
     return Object.fromEntries(
       Object.entries(marked).map(([name, t]) => {
@@ -255,7 +269,16 @@ export const createSubagentTool = (opts: SubagentToolOptions): AgentTool => {
           {
             ...t,
             execute: async (input: unknown, o: unknown) => {
-              await approve(name, input, isReadOnlyTool(t as Tool))
+              // The PARENT's gate asks, and stops the parent's clock while a person decides; the
+              // child's step is waiting for this call too, so its clock follows meanwhile (in a
+              // worker the call carries no run of the child's: the worker follows by message).
+              const child = toolRunContextOf(o)?.clock
+              const unfollow = child ? followClock(child, clock) : undefined
+              try {
+                await approve(name, input, isReadOnlyTool(t as Tool))
+              } finally {
+                unfollow?.()
+              }
               return execute.call(t, input, o)
             },
           },
@@ -324,6 +347,7 @@ export const createSubagentTool = (opts: SubagentToolOptions): AgentTool => {
     forward: (e: AgentEvent) => void,
     hostTools: ToolSet,
     profile: SubagentProfile | undefined,
+    clock: IWaitClock,
   ): Promise<ChildOutcome> => {
     if (signal?.aborted) throw abortError()
     const [config, proxied] = await Promise.all([workerConfigFor(profile), proxiedSpecs()])
@@ -333,9 +357,11 @@ export const createSubagentTool = (opts: SubagentToolOptions): AgentTool => {
     const worker = (opts.worker as () => WorkerLike)()
     return new Promise<ChildOutcome>((resolve, reject) => {
       let settled = false
+      let unwatch: (() => void) | undefined
       const finish = (fn: () => void): void => {
         if (settled) return
         settled = true
+        unwatch?.()
         signal?.removeEventListener('abort', onAbort)
         worker.removeEventListener?.('message', onMessage)
         worker.removeEventListener?.('error', onError)
@@ -384,6 +410,16 @@ export const createSubagentTool = (opts: SubagentToolOptions): AgentTool => {
       worker.addEventListener('message', onMessage)
       worker.addEventListener('error', onError)
       signal?.addEventListener('abort', onAbort, { once: true })
+      // A host tool the child calls runs HERE, behind this run's consent gate: while this run
+      // waits for a person its clock is stopped, and the worker is told, so a step of the child
+      // that is waiting for a host tool's result does not run out of time meanwhile. The worker
+      // cannot tell which question is whose: a host call in flight follows every wait of this
+      // run - the child's step is paused at most as long as this run is.
+      const tell = (waiting: boolean): void => {
+        if (!settled) safePost(worker, { type: 'tool-wait', waiting })
+      }
+      unwatch = clock.watch(tell)
+      if (clock.paused) tell(true)
       safePost(worker, { type: 'run', task, config, proxied })
     })
   }
@@ -438,12 +474,16 @@ export const createSubagentTool = (opts: SubagentToolOptions): AgentTool => {
       if (parentSignal?.aborted) controller.abort()
       let timedOut = false
       let stoppedByUser = false
+      // The child's time limit is a deadline of the calling run's clock, and that clock - with
+      // the caller's step limit on it - is stopped while the child waits for a person.
+      const clock = runCtx?.clock ?? createWaitClock()
+      const waits = followHumanWaits(clock)
       const timer =
         opts.timeoutMs && opts.timeoutMs > 0
-          ? setTimeout(() => {
+          ? clock.timer(opts.timeoutMs, () => {
               timedOut = true
               controller.abort()
-            }, opts.timeoutMs)
+            })
           : undefined
       emit({
         type: 'subagent.start',
@@ -472,23 +512,28 @@ export const createSubagentTool = (opts: SubagentToolOptions): AgentTool => {
       )
       try {
         // A subagent the child started is one level deeper from here, and this child is its parent.
-        const forward = (event: AgentEvent) =>
+        const forward = (event: AgentEvent) => {
+          waits.see(event)
           emit({
             type: 'subagent.event',
             id,
             name: opts.name,
             event: adoptSubagentEvent(event, id),
           })
-        const hostTools = gatedHostTools(runCtx?.approve, id, runCtx?.elicitations)
-        const run = opts.worker ? runInWorker : runInProcess
-        const out = await run(
-          task,
-          controller.signal,
-          forward,
-          hostTools,
-          profile,
-          id,
-          runCtx?.elicitations,
+        }
+        const hostTools = gatedHostTools(runCtx?.approve, id, runCtx?.elicitations, clock)
+        const out = await (
+          opts.worker
+            ? runInWorker(task, controller.signal, forward, hostTools, profile, clock)
+            : runInProcess(
+                task,
+                controller.signal,
+                forward,
+                hostTools,
+                profile,
+                id,
+                runCtx?.elicitations,
+              )
         ).catch((err: unknown) => {
           // The user's stop wins over a deadline that fired at the same moment.
           if (stoppedByUser)
@@ -513,7 +558,8 @@ export const createSubagentTool = (opts: SubagentToolOptions): AgentTool => {
         throw err
       } finally {
         unregister?.()
-        if (timer !== undefined) clearTimeout(timer)
+        timer?.cancel()
+        waits.end()
         parentSignal?.removeEventListener('abort', onParentAbort)
         release()
       }

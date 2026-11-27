@@ -8,12 +8,20 @@ import { randomUUID } from 'node:crypto'
 import { isMainThread, parentPort, type MessagePort } from 'node:worker_threads'
 import { createAgent, type IAgent } from './agent.ts'
 import { markReadOnly } from './approval.ts'
+import { runContext } from './context.ts'
 import { toCloneable, type ParentToWorkerMessage, type WorkerToParentMessage } from './subagent.ts'
 import { errorMessage } from './utils.ts'
+import { createWaitClock, followClock } from './wait-clock.ts'
 
 export const serveSubagentWorker = (port: MessagePort): void => {
   const ac = new AbortController()
   const pending = new Map<string, (r: { ok: boolean; output: unknown }) => void>()
+  // The calling run's clock as this thread sees it: stopped while that run waits for a person
+  // ('tool-wait'). A proxied call runs over there, so while one is in flight the clock of the
+  // child run that made it follows this one (wait-clock.ts): the step waiting for the host
+  // tool's result does not run out of time while a person is asked.
+  const caller = createWaitClock()
+  let callerResume: (() => void) | undefined
   let started = false
   const post = (msg: WorkerToParentMessage): void => {
     try {
@@ -36,8 +44,10 @@ export const serveSubagentWorker = (port: MessagePort): void => {
             new Promise<unknown>((resolve, reject) => {
               const callId = randomUUID()
               const signal = options?.abortSignal
+              let unfollow: (() => void) | undefined
               const onAbort = (): void => {
                 pending.delete(callId)
+                unfollow?.()
                 reject(signal?.reason ?? new DOMException('Aborted', 'AbortError'))
               }
               if (signal?.aborted) {
@@ -45,8 +55,11 @@ export const serveSubagentWorker = (port: MessagePort): void => {
                 return
               }
               signal?.addEventListener('abort', onAbort, { once: true })
+              const clock = runContext.getStore()?.state?.clock
+              unfollow = clock ? followClock(clock, caller) : undefined
               pending.set(callId, (r) => {
                 pending.delete(callId)
+                unfollow?.()
                 signal?.removeEventListener('abort', onAbort)
                 if (r.ok) {
                   resolve(r.output)
@@ -90,6 +103,14 @@ export const serveSubagentWorker = (port: MessagePort): void => {
         break
       case 'tool-result':
         pending.get(msg.callId)?.({ ok: msg.ok, output: msg.output })
+        break
+      case 'tool-wait':
+        if (msg.waiting) {
+          callerResume ??= caller.pause()
+        } else {
+          callerResume?.()
+          callerResume = undefined
+        }
         break
     }
   })

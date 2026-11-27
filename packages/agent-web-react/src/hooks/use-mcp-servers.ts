@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { AgentToolSet } from '@dudko.dev/agent-web'
+import { elicitationConnectOptions } from '../elicitation.js'
 import type {
   BrowserOAuthProvider,
   ConnectedMcp,
   McpCatalogEntry,
   McpModule,
+  McpProtocolMode,
+  McpServerProtocol,
 } from '../mcp-types.js'
 import type { McpAppsConnectionLike } from './use-mcp-app-host.js'
 import {
@@ -15,13 +18,16 @@ import {
   mcpAppsRouter,
   mcpInstructionsOf,
   mcpOAuthProviderOptions,
+  mcpProtocolOf,
   OAUTH_UNSUPPORTED,
   PENDING_TTL_MS,
   readCallbackParams,
   readRecord,
   stripOAuthParams,
+  useElicitationQueue,
   watchAuthorization,
   writeRecord,
+  type McpElicitationControls,
   type McpOAuthOptions,
   type McpStatus,
   type UseMcpOptions,
@@ -43,6 +49,12 @@ export interface McpServerSpec {
   token?: string
   /** OAuth details for `auth: 'oauth'` (`clientMetadataUrl` for CIMD among them). */
   oauth?: McpOAuthOptions
+  /**
+   * The MCP protocol revisions this connection may use (`'legacy'` / `'auto'` / `'modern'`,
+   * see `McpConnectOptions.protocol`). Remembered with the server. Left out, nothing is passed
+   * and the core decides (`'legacy'`).
+   */
+  protocol?: McpProtocolMode
 }
 
 /** A server's live state. */
@@ -50,6 +62,10 @@ export interface McpServerView {
   name: string
   url: string
   auth: McpAuthMode
+  /** The protocol revisions the server was added with, when it was given any. */
+  protocolMode?: McpProtocolMode
+  /** What was negotiated (`version`, `era`), while it is connected and the core reports it. */
+  protocol?: Omit<McpServerProtocol, 'server'>
   status: McpStatus
   error?: string
   /** Where to send the user when `status === 'needs-authorization'`. */
@@ -77,12 +93,14 @@ export interface UseMcpServersOptions extends UseMcpOptions {
   connectTimeoutMs?: number
 }
 
-export interface UseMcpServersReturn {
+export interface UseMcpServersReturn extends McpElicitationControls {
   servers: McpServerView[]
   /** Tools of every connected server, merged — pass to `BrowserAgentConfig.tools`. */
   tools: AgentToolSet
   /** Catalogue of every connected server, merged. */
   catalog: McpCatalogEntry[]
+  /** The protocol revision negotiated with each connected server (cores that report it). */
+  protocols: McpServerProtocol[]
   connectedCount: number
   /** True while an OAuth redirect is being finished on mount. */
   completingAuthorization: boolean
@@ -111,6 +129,7 @@ interface StoredServer {
   url: string
   auth: McpAuthMode
   oauth?: McpServerSpec['oauth']
+  protocol?: McpProtocolMode
 }
 
 interface PendingRecord {
@@ -135,10 +154,15 @@ const DEFAULT_KEY = 'agent-web-react:mcp-servers'
 
 const sanitize = (s: string): string => s.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 32) || 'mcp'
 
+// The remembered list is read from localStorage: anything but the three names is dropped.
+const isProtocolMode = (value: unknown): value is McpProtocolMode =>
+  value === 'legacy' || value === 'auto' || value === 'modern'
+
 const view = (s: StoredServer, patch: Partial<McpServerView> = {}): McpServerView => ({
   name: s.name,
   url: s.url,
   auth: s.auth,
+  ...(isProtocolMode(s.protocol) ? { protocolMode: s.protocol } : {}),
   status: 'idle',
   catalog: [],
   ...patch,
@@ -192,12 +216,15 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
         url: s.url,
         auth: s.auth,
         ...(oauth && typeof oauth === 'object' ? { oauth } : {}),
+        ...(s.protocolMode ? { protocol: s.protocolMode } : {}),
       })
     }
   }
   const optionsRef = useRef(options)
   optionsRef.current = options
   const unmountedRef = useRef(false)
+  const elicitation = useElicitationQueue(optionsRef)
+  const cancelElicitations = elicitation.cancel
 
   const saveList = useCallback(() => {
     if (!persist) return
@@ -228,7 +255,11 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
       l.tools = undefined
       setToolsVersion((v) => v + 1)
     }
+    // Nobody is left to take the answers of a connection that is being closed.
+    cancelElicitations(name)
     if (open) await open.close().catch(() => {})
+    // `cancelElicitations` is stable (the queue lives as long as the hook).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const providerFor = (mod: McpModule, spec: StoredServer): BrowserOAuthProvider => {
@@ -257,6 +288,7 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
         authorizationUrl: undefined,
         catalog: [],
         instructions: undefined,
+        protocol: undefined,
       })
       try {
         const mod = await loadMcp()
@@ -276,6 +308,8 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
                   : undefined,
               authProvider: provider,
               connectTimeoutMs: optionsRef.current.connectTimeoutMs,
+              // Only when asked for: without it the connection is built as it always was.
+              ...(spec.protocol ? { protocol: spec.protocol } : {}),
             },
           },
           {
@@ -283,6 +317,8 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
             onLog: optionsRef.current.onLog,
             connectTimeoutMs: optionsRef.current.connectTimeoutMs,
             ...(optionsRef.current.apps ? { apps: true } : {}),
+            // Off: neither key is passed, so the core declares no capability.
+            ...elicitationConnectOptions(optionsRef.current.elicitation, elicitation.handler),
           },
         )
         if (!current()) {
@@ -312,10 +348,12 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
           })
         })
         setToolsVersion((v) => v + 1)
+        const negotiated = mcpProtocolOf(connection, name)
         patch(name, {
           status: 'connected',
           catalog: connection.catalog,
           instructions: mcpInstructionsOf(connection, name),
+          protocol: negotiated ? { version: negotiated.version, era: negotiated.era } : undefined,
         })
       } catch (err) {
         if (!current()) return
@@ -341,6 +379,7 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
         url: input.url,
         auth: input.auth ?? 'none',
         ...(input.oauth ? { oauth: input.oauth } : {}),
+        ...(isProtocolMode(input.protocol) ? { protocol: input.protocol } : {}),
       }
       specsRef.current.set(name, spec)
       live(name).token = input.auth === 'bearer' ? input.token : undefined
@@ -423,6 +462,7 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
         authorizationUrl: undefined,
         catalog: [],
         instructions: undefined,
+        protocol: undefined,
         error: undefined,
       })
     },
@@ -529,11 +569,22 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
     [appsOn],
   )
 
+  const protocols = useMemo<McpServerProtocol[]>(
+    () =>
+      servers.flatMap((s) =>
+        s.status === 'connected' && s.protocol ? [{ server: s.name, ...s.protocol }] : [],
+      ),
+    [servers],
+  )
+
   return {
     apps,
     servers,
     tools,
     catalog,
+    protocols,
+    pendingElicitations: elicitation.pendingElicitations,
+    answerElicitation: elicitation.answerElicitation,
     connectedCount: servers.filter((s) => s.status === 'connected').length,
     completingAuthorization,
     oauthSupported,

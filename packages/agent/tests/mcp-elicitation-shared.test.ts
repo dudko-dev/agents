@@ -858,13 +858,15 @@ test('ask: a stopped run cancels the wait and rethrows the abort; a step limit s
   assert.equal(hostSignal?.aborted, true)
   assert.equal((h.events.at(-1) as { reason?: string }).reason, 'aborted')
 
-  // The step's own time limit (AbortSignal.timeout): named, and warned about.
+  // A time limit on the call's signal that is not stopped while the host is asked (the step's
+  // own limit is: see `call.pause`) - AbortSignal.timeout, as a host may put on a run: named,
+  // and warned about.
   const limited = harness(() => new Promise(() => {}), {}, { signal: AbortSignal.timeout(20) })
   await assert.rejects(answerMcpElicitation(limited.deps, limited.call, NAME_FORM), {
     name: 'TimeoutError',
   })
   assert.equal((limited.events.at(-1) as { reason?: string }).reason, 'step-timeout')
-  assert.ok(limited.logs.some((l) => /the step's time limit ended/.test(l)))
+  assert.ok(limited.logs.some((l) => /a time limit on the tool call's signal ended/.test(l)))
 
   // Already stopped: nobody is asked.
   let called = 0
@@ -890,6 +892,116 @@ const sessionOf = (handler: McpElicitationHandler, settings: McpElicitationOptio
   const h = harness(handler, settings)
   return { session: createMcpElicitationSession('srv', h.deps), logs: h.logs }
 }
+
+test("ask: the run's time limits stop for exactly the length of the wait for the host", async () => {
+  // `call.pause` is what stops the step's clock: called once the question is put - after the
+  // requested event - and its resume once, whatever ended the wait.
+  const pausing = (log: string[]) => () => {
+    log.push('pause')
+    return () => log.push('resume')
+  }
+  const tracked = (log: string[]) => (event: McpElicitationEvent) => log.push(event.type)
+
+  // Answered.
+  const answered: string[] = []
+  const a = harness(
+    () => {
+      answered.push('handler')
+      return { action: 'accept', content: { name: 'Ada' } }
+    },
+    {},
+    { pause: pausing(answered), emit: tracked(answered) },
+  )
+  await answerMcpElicitation(a.deps, a.call, NAME_FORM)
+  assert.deepEqual(answered, [
+    'mcp.elicitation-requested',
+    'pause',
+    'handler',
+    'resume',
+    'mcp.elicitation-answered',
+  ])
+
+  // Its own bound ended it, the handler failed, the run was stopped: resumed once each time.
+  const timedOut: string[] = []
+  const t = harness(() => new Promise(() => {}), { timeoutMs: 20 }, { pause: pausing(timedOut) })
+  await answerMcpElicitation(t.deps, t.call, NAME_FORM)
+  assert.deepEqual(timedOut, ['pause', 'resume'])
+  const failed: string[] = []
+  const f = harness(
+    () => {
+      throw new Error('no UI')
+    },
+    {},
+    { pause: pausing(failed) },
+  )
+  await answerMcpElicitation(f.deps, f.call, NAME_FORM)
+  assert.deepEqual(failed, ['pause', 'resume'])
+  const stopped: string[] = []
+  const controller = new AbortController()
+  const s = harness(
+    () => new Promise(() => {}),
+    {},
+    {
+      pause: pausing(stopped),
+      signal: controller.signal,
+    },
+  )
+  const pending = answerMcpElicitation(s.deps, s.call, NAME_FORM)
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  controller.abort(new Error('stop'))
+  await assert.rejects(pending)
+  assert.deepEqual(stopped, ['pause', 'resume'])
+
+  // Nobody was asked - refused before the host saw it, or the run already stopped: no pause.
+  const refused: string[] = []
+  const r = harness(
+    () => ({ action: 'decline' }),
+    {},
+    { pause: pausing(refused), subagent: { id: 'h', depth: 1 } },
+  )
+  await answerMcpElicitation(r.deps, r.call, NAME_FORM)
+  const gone = harness(
+    () => ({ action: 'decline' }),
+    {},
+    {
+      pause: pausing(refused),
+      signal: AbortSignal.abort(new Error('stop')),
+    },
+  )
+  await assert.rejects(answerMcpElicitation(gone.deps, gone.call, NAME_FORM))
+  assert.deepEqual(refused, [])
+})
+
+test('session: the pause of the call info reaches the question, in both revisions', async () => {
+  for (const era of ['legacy', 'modern'] as const) {
+    const log: string[] = []
+    const { session } = sessionOf(ACCEPT)
+    let legs = 0
+    const info = {
+      ...INFO,
+      pause: () => {
+        log.push('pause')
+        return () => log.push('resume')
+      },
+    }
+    const result = await session.call(era, info, async () => {
+      legs += 1
+      if (era === 'legacy') {
+        // The server asks in the middle of this call.
+        await session.onRequest(NAME_FORM)
+        return DONE
+      }
+      return legs === 1
+        ? {
+            resultType: 'input_required',
+            inputRequests: { q1: { method: 'elicitation/create', params: NAME_FORM } },
+          }
+        : DONE
+    })
+    assert.equal(result, DONE)
+    assert.deepEqual(log, ['pause', 'resume'], era)
+  }
+})
 
 test('modern: input_required is answered and the same call is sent again with the answers and the state', async () => {
   const { session } = sessionOf(ACCEPT)

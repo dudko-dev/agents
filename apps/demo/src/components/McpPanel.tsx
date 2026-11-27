@@ -1,5 +1,9 @@
 import { useEffect, useState } from 'react'
-import type { McpAuthMode, UseMcpServersReturn } from '@dudko.dev/agent-web-react/mcp'
+import type {
+  McpAuthMode,
+  McpProtocolMode,
+  UseMcpServersReturn,
+} from '@dudko.dev/agent-web-react/mcp'
 
 export interface McpPanelProps {
   mcp: UseMcpServersReturn
@@ -15,6 +19,8 @@ export interface McpPanelProps {
   /** MCP Apps: whether the servers' apps are shown in the chat, and the switch (absent: none). */
   apps?: boolean
   onApps?: (on: boolean) => void
+  /** The page shows the servers' questions to the user (MCP elicitation): say so in the notes. */
+  elicitation?: boolean
 }
 
 const STATUS_TEXT: Record<string, string> = {
@@ -24,6 +30,15 @@ const STATUS_TEXT: Record<string, string> = {
   'needs-authorization': 'Authorization required',
   error: 'Failed',
 }
+
+// `auto` is the demo's default: the 2026-07-28 revision when the server offers it, the 2025
+// ones otherwise. It costs one probe request, and a server whose CORS does not allow the new
+// request headers is talked to the old way (with a warning in the console).
+const PROTOCOLS: [McpProtocolMode, string][] = [
+  ['auto', 'Auto — newest the server offers'],
+  ['legacy', 'Legacy — 2025 revisions'],
+  ['modern', 'Modern — 2026-07-28 only'],
+]
 
 const nameFromUrl = (url: string): string => {
   try {
@@ -47,10 +62,12 @@ export const McpPanel = ({
   searchMode,
   apps,
   onApps,
+  elicitation,
 }: McpPanelProps) => {
   const [url, setUrl] = useState('')
   const [name, setName] = useState('')
   const [mode, setMode] = useState<McpAuthMode>('none')
+  const [protocol, setProtocol] = useState<McpProtocolMode>('auto')
   const [token, setToken] = useState('')
   const [tokens, setTokens] = useState<Record<string, string>>({})
   const [open, setOpen] = useState<Record<string, boolean>>({})
@@ -71,6 +88,7 @@ export const McpPanel = ({
       url: url.trim(),
       auth: mode,
       token: mode === 'bearer' ? token.trim() : undefined,
+      protocol,
     })
     setUrl('')
     setName('')
@@ -145,6 +163,17 @@ export const McpPanel = ({
               </span>
             </div>
             <div className="mcp__server-url">{s.url}</div>
+            {s.status === 'connected' && s.protocol && (
+              <div className="mcp__protocol">
+                <span
+                  className={`mcp__badge${s.protocol.era === 'modern' ? '' : ' mcp__badge--muted'}`}
+                  title="The MCP protocol revision negotiated with this server"
+                >
+                  MCP {s.protocol.version}
+                </span>
+                {s.protocolMode && <span>asked for: {s.protocolMode}</span>}
+              </div>
+            )}
             {s.auth === 'bearer' && s.status !== 'connected' && (
               <input
                 className="mcp__input"
@@ -236,6 +265,21 @@ export const McpPanel = ({
           ))}
         </div>
 
+        <label className="settings__field">
+          <span className="settings__label">Protocol revision</span>
+          <select
+            className="mcp__input"
+            value={protocol}
+            onChange={(e) => setProtocol(e.target.value as McpProtocolMode)}
+          >
+            {PROTOCOLS.map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
+
         {mode === 'bearer' && (
           <label className="settings__field">
             <span className="settings__label">Token</span>
@@ -301,7 +345,11 @@ export const McpPanel = ({
         Servers connect in parallel, each with its own 30 s deadline; paginated tool lists are read
         to the end, and tools a server marks read-only skip the “ask before changes” prompt. Your
         browser talks to each server directly, so it must send CORS headers for this origin —
-        including <code>Access-Control-Expose-Headers: WWW-Authenticate, mcp-session-id</code>.
+        including <code>Access-Control-Expose-Headers: WWW-Authenticate, mcp-session-id</code> (and,
+        for the 2026-07-28 revision, <code>Mcp-Method</code> and <code>Mcp-Name</code> among the
+        allowed request headers; without them “Auto” falls back to the 2025 revisions).
+        {elicitation &&
+          ' In the chat, a server may ask you something in the middle of a tool call — a form, or a page to open: the question is shown as the server’s own text, and your answer goes to that server only.'}
       </p>
     </div>
   )

@@ -47,6 +47,7 @@ import type {
 import { ATTR, withSpan } from './tracing.ts'
 import { attachRunFiles } from './media.ts'
 import { accumulateUsage, clipText, combineSignals, isAuthError, normalizeUsage } from './utils.ts'
+import { createWaitClock } from './wait-clock.ts'
 
 // The default ('failure') replan trigger fires when:
 //   - the executor explicitly signalled a blocker (via the [BLOCKER] sentinel,
@@ -313,6 +314,7 @@ const runAgentLoopInner = async (
     escalations: resumed?.escalations ?? 0,
     ...(resumed?.subagentsSpawned ? { subagentsSpawned: resumed.subagentsSpawned } : {}),
     ...(ctx.spawn ? { spawn: ctx.spawn } : {}),
+    clock: createWaitClock(),
   }
 
   // proxiedCtx must be in scope BEFORE callPersistence so the persistence

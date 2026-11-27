@@ -280,6 +280,9 @@ export const createApprovalController = (
       ...(subagent ? { subagent } : {}),
     }
     let raw: ToolApprovalDecision
+    // A person is being asked: the step's time limit (and a subagent's) is about models and
+    // tools, and does not run meanwhile. The wait has its own bound, `timeoutMs`.
+    const resume = store?.state?.clock?.pause()
     try {
       raw = await awaitDecision(
         Promise.resolve().then(() => onRequest(request)),
@@ -303,6 +306,8 @@ export const createApprovalController = (
       }
       deny(`approval handler failed: ${(err as Error)?.message ?? String(err)}`, true)
       return
+    } finally {
+      resume?.()
     }
     const d = normalizeDecision(raw)
     if (d.approved && d.remember) {

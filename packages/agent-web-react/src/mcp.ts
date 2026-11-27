@@ -19,11 +19,13 @@ export {
   mcpAppsRouter,
   mcpInstructionsOf,
   mcpOAuthProviderOptions,
+  mcpProtocolOf,
   readCallbackParams,
   stripOAuthParams,
 } from './hooks/use-mcp.js'
 export type {
   McpConnectOptions,
+  McpElicitationControls,
   McpOAuthOptions,
   McpStatus,
   UseMcpOptions,
@@ -37,6 +39,19 @@ export type {
   UseMcpServersOptions,
   UseMcpServersReturn,
 } from './hooks/use-mcp-servers.js'
+// The queue behind `pendingElicitations` / `answerElicitation`, for a host that calls the core's
+// `connectMcpHttp` itself. (`<ElicitationPrompt>` and the form helpers are in the main entry.)
+export {
+  createElicitationQueue,
+  elicitationConnectOptions,
+  elicitationSettings,
+  elicitationTimeoutOf,
+} from './elicitation.js'
+export type {
+  ElicitationQueue,
+  ElicitationQueueOptions,
+  PendingElicitation,
+} from './elicitation.js'
 export type {
   BrowserOAuthProviderOptions,
   ConnectedMcp,
@@ -48,7 +63,9 @@ export type {
   McpElicitationResult,
   McpElicitationSchema,
   McpOAuthCallback,
+  McpProtocolMode,
   McpServerInstructions,
+  McpServerProtocol,
   McpServerResult,
   McpModule,
 } from './mcp-types.js'

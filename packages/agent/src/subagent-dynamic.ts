@@ -40,6 +40,7 @@ import { recordWrite, replayOutput, replayedWrite } from './tiers.ts'
 import { createFindToolsTool, FIND_TOOLS_TOOL } from './tool-search.ts'
 import type { AgentEvent, EventHandler, IAgentConfig, IUsage } from './types.ts'
 import { addUsage, emptyUsage, errorMessage, normalizeUsage } from './utils.ts'
+import { createWaitClock, followHumanWaits, type IWaitTimer } from './wait-clock.ts'
 
 export interface IDynamicSubagentDeps {
   settings: IResolvedDynamicSubagents
@@ -129,7 +130,11 @@ export const createDynamicSubagentTool = (deps: IDynamicSubagentDeps): Tool => {
       const onParentAbort = (): void => ac.abort(abortSignal?.reason)
       let timedOut = false
       let stoppedByUser = false
-      let timer: ReturnType<typeof setTimeout> | undefined
+      let timer: IWaitTimer | undefined
+      // The helper's time limit is a deadline of THIS run's clock, and that clock - with this
+      // run's step limit on it - is stopped while the helper waits for a person.
+      const clock = state.clock ?? createWaitClock()
+      const waits = followHumanWaits(clock)
       let unregister: (() => void) | undefined
       let reservation: ISpawnReservation | undefined
       let spent: IUsage = emptyUsage()
@@ -206,10 +211,10 @@ export const createDynamicSubagentTool = (deps: IDynamicSubagentDeps): Tool => {
           onParentAbort()
         }
         if (settings.timeoutMs > 0) {
-          timer = setTimeout(() => {
+          timer = clock.timer(settings.timeoutMs, () => {
             timedOut = true
             ac.abort(new Error(`the helper timed out after ${settings.timeoutMs}ms`))
-          }, settings.timeoutMs)
+          })
         }
         reservation = {
           limits: budget.limits,
@@ -220,6 +225,7 @@ export const createDynamicSubagentTool = (deps: IDynamicSubagentDeps): Tool => {
         scope.running.push(reservation)
 
         const onChildEvent: EventHandler = (event: AgentEvent) => {
+          waits.see(event)
           if (event.type === 'usage') {
             // Charged to the parent as it happens: the parent's limits see a long-running helper.
             const usage = normalizeUsage(event.usage)
@@ -298,9 +304,8 @@ export const createDynamicSubagentTool = (deps: IDynamicSubagentDeps): Tool => {
         throw err
       } finally {
         unregister?.()
-        if (timer) {
-          clearTimeout(timer)
-        }
+        timer?.cancel()
+        waits.end()
         abortSignal?.removeEventListener('abort', onParentAbort)
         if (reservation) {
           const i = scope.running.indexOf(reservation)

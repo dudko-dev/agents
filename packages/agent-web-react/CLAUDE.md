@@ -43,14 +43,30 @@ against its production build.
   kinds/refusals, notices); `src/image-resize.ts` — `downscaleImage`.
 - `src/labels.tsx` — every UI string (`defaultLabels`, `AgentLabelsProvider`,
   `useLabels`); components take `labels` overrides.
-- MCP elicitation: STATE ONLY so far. The reducer folds the core's `mcp.elicitation-requested` /
-  `mcp.elicitation-answered` into `AgentUiState.elicitations` (`ElicitationView`; optional - absent
-  until a server asks, so a state without the feature is what it was; a subagent's question
-  surfaces on the run; `stopped` cancels the pending ones). It is deliberately NOT mirrored onto
-  the run's `ChatMessage` (a saved conversation must not hold a server's form) and never holds an
-  answer. `src/mcp-types.ts` has the structural request / result / handler / options types. No
-  hook passes `onElicitation` yet and there is no component: that is the next step (a prompt
-  beside `ToolApprovalPrompt`, labels, `docs/chat.md`).
+- MCP elicitation (a server asks the USER something during a tool call), in four parts:
+  - state: the reducer folds the core's `mcp.elicitation-requested` / `mcp.elicitation-answered`
+    into `AgentUiState.elicitations` (`ElicitationView`; optional - absent until a server asks, so
+    a state without the feature is what it was; a subagent's question surfaces on the run;
+    `stopped` cancels the pending ones). It is deliberately NOT mirrored onto the run's
+    `ChatMessage` (a saved conversation must not hold a server's form) and never holds an answer.
+  - `src/elicitation.ts` - pure, no SDK, no `./mcp`: the queue the hooks hand the core as
+    `onElicitation` (`createElicitationQueue`: `request.id → resolver`, each question leaves once -
+    answered, `cancel` on `ctx.signal` abort, on a disconnect, on unmount), `elicitationConnectOptions`
+    (OFF adds no key at all: no capability, the wire unchanged), and the prompt's pure half (fields →
+    controls, the draft, `elicitationFormAnswer` with the core's own rules - `tests/elicitation.test.ts`
+    cross-checks it against the core's `validateMcpElicitationContent` - `elicitationLink`, the
+    countdown). The queue is exported from `./mcp`, the form helpers from the main entry.
+  - hooks (`./mcp` only): `useMcp` / `useMcpServers` take `elicitation: true | settings` and per
+    server `protocol: 'legacy' | 'auto' | 'modern'` (passed only when given), and return
+    `pendingElicitations`, `answerElicitation`, the negotiated `protocol` / `protocols`
+    (`useElicitationQueue` in `use-mcp.ts` is shared by both).
+  - `src/components/ElicitationPrompt.tsx` (main entry) beside `ToolApprovalPrompt` in `AgentChat`
+    (`elicitations`, `onElicitationAnswer`, `showElicitation`, `renderElicitation`,
+    `components.ElicitationPrompt`). A consent boundary: the server's text is plain text in a box
+    captioned as the server's, a link is opened only by the click on Open (`window.open(url,
+    '_blank', 'noopener,noreferrer')`; no `<a>`, no Open for anything but https / loopback http),
+    and typed values live in the form's own state only (`e2e/elicitation.spec.ts` looks for them in
+    the DOM, storage, IndexedDB, the console and the model's requests). Labels `elicitation*`.
 - `src/mcp-types.ts` — structural types for the core's optional `./mcp` subpath,
   which `use-mcp` loads with a dynamic import (never a static one).
 - `src/mcp.ts` — the **`./mcp` entry**: `useMcp`, `useMcpServers` and their helpers
@@ -86,7 +102,7 @@ against its production build.
 - `src/components/` — `AgentChat` (panel: history sidebar, transcript,
   composer, files panel; slots / render props / components / theme),
   `AgentComposer`, `MessageList`, `StepList` (+ `ToolCallRow`),
-  `ToolApprovalPrompt`, `ApprovalModeSwitch`, `ChatHistoryList`, `FilesPanel`, `LearnedSkills`
+  `ToolApprovalPrompt`, `ElicitationPrompt`, `ApprovalModeSwitch`, `ChatHistoryList`, `FilesPanel`, `LearnedSkills`
   (the agent's notebook: `learned` in the state belongs to the agent, not the conversation),
   `SubagentTree` (+ `SubagentRow`: `subagents` in the state is a flat list that IS a tree -
   `parentId` / `depth`, nested by `subagentTree`; nested `subagent.event` envelopes are unwrapped in
@@ -137,14 +153,20 @@ against its production build.
 - `tests/files.test.ts` — files of a turn: the reducer, the chips, and every guard of the sandboxed
   frame as a string check.
 - `tests/state.test.ts`, `tests/chat.test.ts` — `node --test` over the reducer,
-  composer helpers, labels and the history store (imports from `dist`).
+  composer helpers, labels and the history store (imports from `dist`). `tests/elicitation.test.ts`:
+  the queue, the form helpers against the core's validator, the prompt as markup, and the queue as
+  the core's `onElicitation` over real sockets (both revisions; off = no capability).
 - `tests/pipeline-state.test.ts` (the pipeline reducer against event sequences recorded from the
   core's own runner with a scripted `runNode`: linear, fan-in, a capped loop, a failed node, an
   abort), `tests/pipeline.test.ts` (editing helpers, the code generator, labels, the components
   rendered to markup), `tests/canvas.test.ts` (the canvas maths and its markup).
 - `e2e/` — Playwright over the built demo. `mcp.spec.ts`: MCP (several servers, the OAuth
   redirect round-trip, IndexedDB reuse, CORS — `servers.ts` starts a real MCP server + authorization
-  server on loopback). `agent.spec.ts`, `steering.spec.ts`, `learning.spec.ts`: the agent end to end
+  server on loopback). `elicitation.spec.ts`: a server's questions in the demo's chat against
+  `@dudko.dev/test-servers` (its `elicit_*` tools, both protocol revisions): accept / decline /
+  cancel reach the server, validation blocks Submit, a link opens only on the click, an expired
+  question (the page clock) is reported as answered automatically, typed values are nowhere after
+  Submit. `agent.spec.ts`, `steering.spec.ts`, `learning.spec.ts`: the agent end to end
   (a run, typing to it while it works, the notebook and the fetched pages) against a scripted Gemini
   endpoint (`gemini.ts`, routed by the stage markers; it can script tool calls and the notebook's
   `save_skill`). `apps.spec.ts`: MCP Apps - the app in the demo's MCP tab, its consent prompts

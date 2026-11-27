@@ -6,6 +6,8 @@ import { buildModelFromStage, resolveStage } from '../providers/registry.js'
 import type { ProviderModelSpec } from '../providers/types.js'
 import { MemoryCredentialStore } from '../secrets/store.js'
 import { markReadOnly } from '../tools/approval.js'
+import { toolRunContextOf } from '../tools/wrap.js'
+import { createWaitClock, followClock } from '../wait-clock.js'
 import {
   safePost,
   type MessageEndpoint,
@@ -65,6 +67,12 @@ export const serveSubagentWorker = (opts: ServeSubagentOptions = {}): void => {
   let controller: AbortController | undefined
   const pending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
   let callSeq = 0
+  // The calling run's clock as this worker sees it: stopped while that run waits for a person
+  // ('tool-wait'). A host tool runs over there, so while a call of one is in flight the clock of
+  // the child run that made it follows this one (wait-clock.ts): the step waiting for the
+  // result does not run out of time while a person is asked.
+  const caller = createWaitClock()
+  let callerResume: (() => void) | undefined
 
   const proxy = (spec: ProxiedToolSpec) => {
     const t = dynamicTool({
@@ -75,11 +83,23 @@ export const serveSubagentWorker = (opts: ServeSubagentOptions = {}): void => {
           const callId = `call-${(callSeq += 1)}`
           const signal = options?.abortSignal
           if (signal?.aborted) return reject(new Error('aborted'))
-          pending.set(callId, { resolve, reject })
+          const clock = toolRunContextOf(options)?.clock
+          const unfollow = clock ? followClock(clock, caller) : undefined
+          pending.set(callId, {
+            resolve: (v) => {
+              unfollow?.()
+              resolve(v)
+            },
+            reject: (e) => {
+              unfollow?.()
+              reject(e)
+            },
+          })
           signal?.addEventListener(
             'abort',
             () => {
-              if (pending.delete(callId)) reject(new Error('aborted'))
+              const p = pending.get(callId)
+              if (pending.delete(callId)) p?.reject(new Error('aborted'))
             },
             { once: true },
           )
@@ -136,6 +156,13 @@ export const serveSubagentWorker = (opts: ServeSubagentOptions = {}): void => {
         for (const [id, p] of pending) {
           pending.delete(id)
           p.reject(new Error('aborted'))
+        }
+        break
+      case 'tool-wait':
+        if (msg.waiting) callerResume ??= caller.pause()
+        else {
+          callerResume?.()
+          callerResume = undefined
         }
         break
       case 'tool-result': {

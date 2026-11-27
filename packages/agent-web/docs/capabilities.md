@@ -380,6 +380,20 @@ asked) and `tool.approval-resolved { id, name, approved, reason, automatic }`.
 The gate runs inside each tool's `execute`, so it covers native and prompted
 tool-calling, MCP tools and host tools called by subagents alike.
 
+**Time a person takes does not count.** From `tool.approval-requested` until
+the decision, the step's `chatTimeoutMs` (120 s by default) is stopped, and so
+is every limit the decision holds up: the `timeoutMs` of the subagent the call
+runs in, the step of the run that called it, and - for a host tool a subagent
+calls through the parent's gate - the child's own step, in a worker too. When
+the decision is in they go on with the time they had left: not a fresh limit,
+and no more than the wait added. The same holds for an
+[MCP elicitation](#mcp-elicitation-a-server-asks-the-user). The wait's own bound
+is `timeoutMs` here; without it a question waits until the run is stopped.
+Stopping the run (`signal`, `control.stopSubagent`) still ends a wait at once;
+token and tool-call budgets are not affected. There is no run-level time limit
+in the config; a limit you put on the run's `signal` yourself
+(`AbortSignal.timeout()`) is a stop like any other and is not paused.
+
 ## Large tool catalogues (several MCP servers)
 
 Several MCP servers easily add up to hundreds of tools. Sending every schema on
@@ -614,11 +628,13 @@ are exported from `./mcp` for a UI that wants to check a form before submitting 
 - Caps: `maxPerToolCall`, `maxPerRun`, and 10 `input_required` rounds per call on 2026-07-28.
 - Subagents: see below.
 
-**Time.** A question waits `elicitation.timeoutMs` at most - and no longer than the step that
-made the tool call. `chatTimeoutMs` (default 120 000) bounds a step; when it ends, the pending
-question is cancelled with `reason: 'step-timeout'` and a `warn` line says so. **Raise
-`chatTimeoutMs` on an agent whose servers may ask** (to at least `elicitation.timeoutMs`), or
-lower `elicitation.timeoutMs` to fit. The MCP SDK's own request timeout (60 s) is handled for
+**Time.** A question waits `elicitation.timeoutMs` at most. The step that made the tool call
+does not run out of time meanwhile: its `chatTimeoutMs` (default 120 000) **is stopped while a
+question waits** - as are the `timeoutMs` of a subagent the question holds up and the step of
+the run above it - and goes on with the time it had left once the question is settled (as for
+[tool consent](#tool-consent-and-autopilot)). `reason: 'step-timeout'` remains for a question
+that arrives when the step's time is already spent, and for a time limit you put on the run's
+`signal` yourself, which is not stopped (a `warn` line says so). The MCP SDK's own request timeout (60 s) is handled for
 you: on the 2025 revisions, where the tool call is one request that stays open while the user
 answers, the connector keeps that minute itself and stops it while a question waits. Stopping
 the run cancels a pending question (`reason: 'aborted'`).
@@ -932,7 +948,11 @@ serveSubagentWorker({
 - **Host tools** (`tools`) stay in the main thread and are proxied over
   `postMessage`; every such call passes the **parent's** consent gate.
 - The parent's abort signal and `timeoutMs` stop the child; a worker is
-  terminated after each task.
+  terminated after each task. `timeoutMs` does not count the time a person
+  takes to answer a question of the child, of a host tool it called (the
+  parent's consent gate) or of the calling run: while one waits, the
+  subagent's limit, the calling step's `chatTimeoutMs` and the child's own step
+  (in a worker too) are stopped.
 - Events: `subagent.start`, `subagent.event` (the child's events, verbatim),
   `subagent.complete { text, usage }`, `subagent.error`. Child tokens are
   charged to the parent (`usage` with phase `'subagent'`), so the parent's limits
@@ -1037,7 +1057,7 @@ other key is refused, not quietly cleaned.
 | `maxConcurrent` | `3` | Helpers of one parent running at once; further calls wait their turn. |
 | `budgetShare` | `0.5` | The share of what is **left** of the caller's run limits one helper may take: each of `limits.maxTotalTokens` / `maxInputTokens` / `maxOutputTokens` / `maxReasoningTokens` the caller has, and `maxToolCalls`. "Left" is after what the caller has spent and what its running helpers may still spend. Also the helper's `maxIterations` (that share of the caller's cap, at least 1). |
 | `minTokens` | `2000` | A helper is not started with a smaller total or input share (a quarter of it for the output cap; one tool call) - the call is refused with the numbers. |
-| `timeoutMs` | `300000` | Wall clock of one helper (`0` = none). The run itself has no wall-clock limit to share; `chatTimeoutMs` applies to each of the helper's calls as to the caller's. |
+| `timeoutMs` | `300000` | Time limit of one helper (`0` = none). It stops while a person is asked something (an approval, an MCP question) in the helper or in the run that called it, and goes on with what it had left. The run itself has no time limit to share; `chatTimeoutMs` applies to each of the helper's calls as to the caller's. |
 
 A helper's tokens are charged to the caller as they are spent (`usage` events with
 `phase: 'subagent'`), all the way up, so they count against the run's limits and in
