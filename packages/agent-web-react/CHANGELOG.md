@@ -1,3 +1,8 @@
+# 0.0.31 / 2026-11-27
+
+### :tada: Enhancements
+- MCP skills: the MCP hooks take `skills: { dynamic: true }` per server, and the skill card says when a skill comes with no checksums from its server (you approve the copy the agent just read) or when the server cannot list its files. Labels `skillConsentDynamic`, `skillConsentNoFileListing`. Needs `@dudko.dev/agent-web` 0.0.42 for those skills; an older core declines them
+
 # 0.0.30 / 2026-11-27
 
 ### :tada: Enhancements
