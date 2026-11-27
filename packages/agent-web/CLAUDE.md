@@ -213,7 +213,12 @@ behind every decision.
   emit `file.written` / `file.deleted` through the tool's run context, AFTER the write succeeded:
   it is how a UI knows the files of a turn. Browser only - the Node sibling has no VFS.
 - `src/mcp/` — optional HTTP connector (`./mcp` subpath): `http` (transport,
-  mount, refresh) + `oauth` (OAuth 2.1 / DCR provider, vault-backed tokens) + `enterprise-oauth`
+  mount, refresh) + `oauth` (OAuth 2.1 provider, vault-backed tokens; `registration: 'auto' |
+  'cimd' | 'dcr'` - how the client is registered, the Node package's names and rules: change both.
+  `'cimd'` refuses in `clientInformation()`, before the SDK can register; a stored client of the
+  other kind is forgotten with its tokens; the kind is stamped on the stored record. Every rule has
+  a test in `tests/mcp-oauth-registration.test.ts` - the same tests in both packages, over the test
+  authorization server - and a mutation check) + `enterprise-oauth`
   (enterprise-managed authorization / ID-JAG: token exchange at the IdP, then the SDK's `jwt-bearer`
   grant; non-interactive; client secret or `private_key_jwt` signed with WebCrypto). A copy of the Node
   package's `mcp-enterprise-oauth.ts` except for the signing section - change both.

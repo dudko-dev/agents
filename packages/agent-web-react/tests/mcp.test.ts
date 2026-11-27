@@ -1,14 +1,20 @@
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import test from 'node:test'
+import { startLocalMcp } from '@dudko.dev/test-servers'
 import {
   claimOAuthCallback,
   describeMcpResult,
   isUnauthorizedError,
   mcpInstructionsOf,
+  mcpOAuthOptionsOfRecord,
   mcpOAuthProviderOptions,
+  mcpOAuthRecordOf,
+  mcpOAuthRegistrationOf,
+  newMcpOAuthProvider,
   readCallbackParams,
   stripOAuthParams,
+  type McpModule,
 } from '../dist/mcp.js'
 
 // The connect/OAuth machinery lives in the core and is covered there; what this
@@ -373,6 +379,204 @@ test("clientMetadataUrl: the core's provider takes what the hooks hand it, and r
   // The hooks catch this and report it as the server's error; nothing is requested.
   assert.throws(() => build('http://app.example.test/oauth/client.json'), /clientMetadataUrl/)
   assert.throws(() => build('https://app.example.test/'), /clientMetadataUrl/)
+})
+
+// oauth.registration ('auto' | 'cimd' | 'dcr'): how the client is registered. The hooks hand it
+// to the core through mcpOAuthProviderOptions, keep it in the redirect record (mcpOAuthRecordOf /
+// mcpOAuthOptionsOfRecord - written before the user leaves, read on the way back), build the
+// provider with newMcpOAuthProvider and report which way was taken (mcpOAuthRegistrationOf).
+
+const MCP_URL = 'https://mcp.example.test/mcp'
+
+test('mcpOAuthProviderOptions: registration is passed through when set, and absent when not', () => {
+  const opts = mcpOAuthProviderOptions(
+    MCP_URL,
+    { registration: 'dcr' },
+    { clientMetadataUrl: CIMD_URL },
+  )
+  assert.equal(opts.registration, 'dcr')
+  assert.equal(
+    opts.clientMetadataUrl,
+    CIMD_URL,
+    'the document stays: the core decides not to use it',
+  )
+  assert.equal('registration' in mcpOAuthProviderOptions(MCP_URL, {}, {}), false)
+  assert.equal('registration' in mcpOAuthProviderOptions(MCP_URL, undefined, {}), false)
+})
+
+test('redirect record: registration survives the trip (JSON, the way localStorage keeps it)', () => {
+  const started = mcpOAuthProviderOptions(
+    MCP_URL,
+    { redirectUrl: 'https://app.example.test/', scope: 'mcp:tools', registration: 'cimd' },
+    { clientName: 'my-app', clientMetadataUrl: CIMD_URL },
+  )
+  const stored = JSON.parse(JSON.stringify(mcpOAuthRecordOf(started)))
+  assert.equal(stored.registration, 'cimd')
+  const back = mcpOAuthOptionsOfRecord(stored)
+  assert.deepEqual(back, {
+    redirectUrl: 'https://app.example.test/',
+    scope: 'mcp:tools',
+    clientName: 'my-app',
+    clientMetadataUrl: CIMD_URL,
+    registration: 'cimd',
+  })
+  // On the way back the hooks build the provider from it: the same client as before the trip,
+  // whatever the hook's defaults are now.
+  assert.deepEqual(
+    mcpOAuthProviderOptions(MCP_URL, back, {
+      clientName: 'renamed',
+      clientMetadataUrl: 'https://x.test/c.json',
+    }),
+    started,
+  )
+})
+
+test('redirect record: without registration the record and the options carry none', () => {
+  const started = mcpOAuthProviderOptions(MCP_URL, { redirectUrl: 'https://app.example.test/' })
+  const stored = JSON.parse(JSON.stringify(mcpOAuthRecordOf(started)))
+  assert.equal('registration' in stored, false)
+  assert.equal('registration' in mcpOAuthOptionsOfRecord(stored), false)
+  // A record written before the option existed reads the same way.
+  assert.equal(
+    'registration' in mcpOAuthOptionsOfRecord({ redirectUrl: 'https://app.example.test/' }),
+    false,
+  )
+})
+
+test("newMcpOAuthProvider: the core's provider takes registration; 'dcr' hides the document, 'cimd' needs one", async () => {
+  const core = (await import('@dudko.dev/agent-web/mcp')) as unknown as McpModule
+  const build = (oauth: Record<string, unknown>) =>
+    newMcpOAuthProvider(
+      core,
+      mcpOAuthProviderOptions(MCP_URL, { redirectUrl: 'https://app.example.test/', ...oauth }),
+    ) as unknown as { registration?: string; clientMetadataUrl?: string }
+  assert.equal(build({}).registration, 'auto')
+  const dcr = build({ registration: 'dcr', clientMetadataUrl: CIMD_URL })
+  assert.equal(dcr.registration, 'dcr')
+  assert.equal(dcr.clientMetadataUrl, undefined)
+  const cimd = build({ registration: 'cimd', clientMetadataUrl: CIMD_URL })
+  assert.equal(cimd.registration, 'cimd')
+  assert.equal(cimd.clientMetadataUrl, CIMD_URL)
+  // The hooks report these as the server's error; nothing is requested.
+  assert.throws(
+    () => build({ registration: 'cimd' }),
+    /registration 'cimd' needs a clientMetadataUrl/,
+  )
+  assert.throws(() => build({ registration: 'both' }), /registration must be/)
+})
+
+test("newMcpOAuthProvider: a core that does not know registration is refused for 'cimd' / 'dcr', used for the rest", () => {
+  // A core from before the option: it ignores the field and would register the old way.
+  class OldProvider {
+    serverUrl: string
+    constructor(opts: { serverUrl: string }) {
+      this.serverUrl = opts.serverUrl
+    }
+    async isAuthorized() {
+      return false
+    }
+    async reset() {}
+  }
+  const old = { BrowserOAuthProvider: OldProvider } as unknown as McpModule
+  const opts = (registration?: 'auto' | 'cimd' | 'dcr') =>
+    mcpOAuthProviderOptions(
+      MCP_URL,
+      { redirectUrl: 'https://app.example.test/', registration },
+      {
+        clientMetadataUrl: CIMD_URL,
+      },
+    )
+  assert.throws(
+    () => newMcpOAuthProvider(old, opts('cimd')),
+    /does not support oauth\.registration \('cimd'\)/,
+  )
+  assert.throws(
+    () => newMcpOAuthProvider(old, opts('dcr')),
+    /does not support oauth\.registration \('dcr'\)/,
+  )
+  assert.ok(newMcpOAuthProvider(old, opts()) instanceof OldProvider)
+  assert.ok(newMcpOAuthProvider(old, opts('auto')) instanceof OldProvider)
+  assert.throws(() => newMcpOAuthProvider({} as McpModule, opts()), /has no MCP OAuth support/)
+})
+
+test('mcpOAuthRegistrationOf: the stored kind from the core, and nothing from what cannot say', async () => {
+  const core = await import('@dudko.dev/agent-web/mcp')
+  const provider = new core.BrowserOAuthProvider({
+    ...mcpOAuthProviderOptions(
+      MCP_URL,
+      { redirectUrl: 'https://app.example.test/' },
+      {
+        clientMetadataUrl: CIMD_URL,
+      },
+    ),
+    storage: new core.MemoryOAuthStorage(),
+  })
+  assert.equal(await mcpOAuthRegistrationOf(provider), undefined, 'nothing stored yet')
+  await provider.saveClientInformation({ client_id: CIMD_URL })
+  assert.equal(await mcpOAuthRegistrationOf(provider), 'cimd')
+  await provider.saveClientInformation({ client_id: 'dcr-1' })
+  assert.equal(await mcpOAuthRegistrationOf(provider), 'dcr')
+
+  assert.equal(await mcpOAuthRegistrationOf(undefined), undefined)
+  const older = { serverUrl: MCP_URL, isAuthorized: async () => true, reset: async () => {} }
+  assert.equal(await mcpOAuthRegistrationOf(older), undefined, 'a core without the method')
+  assert.equal(
+    await mcpOAuthRegistrationOf({ ...older, registrationKind: async () => 'static' as never }),
+    undefined,
+  )
+  assert.equal(
+    await mcpOAuthRegistrationOf({
+      ...older,
+      registrationKind: async () => {
+        throw new Error('storage gone')
+      },
+    }),
+    undefined,
+    'never throws: it is what the UI shows',
+  )
+})
+
+test("the hooks' sequence over real sockets: record, redirect, the way back, connected - and the entry's kind", async () => {
+  const core = (await import('@dudko.dev/agent-web/mcp')) as unknown as McpModule & {
+    MemoryOAuthStorage: new () => unknown
+    connectMcpHttp: McpModule['connectMcpHttp']
+  }
+  for (const [cimd, registration, expected] of [
+    [true, 'cimd', 'cimd'],
+    [true, 'dcr', 'dcr'],
+    [false, undefined, 'dcr'],
+  ] as const) {
+    const mcp = await startLocalMcp({ requireAuth: true, clientIdMetadataDocument: cimd })
+    try {
+      const storage = new core.MemoryOAuthStorage()
+      const options = (oauth: Parameters<typeof mcpOAuthProviderOptions>[1]) => ({
+        ...mcpOAuthProviderOptions(mcp.url, oauth, { clientMetadataUrl: CIMD_URL }),
+        storage,
+      })
+      // Connect: the server challenges, the provider is registered, the user is to be sent away.
+      const first = newMcpOAuthProvider(
+        core,
+        options({ redirectUrl: 'http://127.0.0.1:9/cb', registration }),
+      )
+      const record = JSON.stringify(
+        mcpOAuthRecordOf(options({ redirectUrl: 'http://127.0.0.1:9/cb', registration })),
+      )
+      const challenged = await core.connectMcpHttp({ s: { url: mcp.url, authProvider: first } })
+      assert.equal(challenged.results[0]?.needsAuthorization, true)
+      await challenged.close()
+      const state = first.authorizationUrl?.searchParams.get('state') ?? undefined
+      // ...and back: a new page, a provider built from the record alone.
+      const back = newMcpOAuthProvider(core, options(mcpOAuthOptionsOfRecord(JSON.parse(record))))
+      await core.finishMcpOAuth!(back, { code: 'auth-code-1', state })
+      const connection = await core.connectMcpHttp({ s: { url: mcp.url, authProvider: back } })
+      assert.equal(connection.results[0]?.connected, true)
+      await connection.close()
+      assert.equal(await mcpOAuthRegistrationOf(back), expected, `${registration ?? 'auto'}`)
+      assert.equal(mcp.registrations(), expected === 'dcr' ? 1 : 0)
+    } finally {
+      await mcp.close()
+    }
+  }
 })
 
 test('mcpInstructionsOf: the text one server sent, by its name', () => {

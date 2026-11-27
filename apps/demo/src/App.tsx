@@ -51,6 +51,7 @@ import {
   useDemoTiers,
 } from './use-model'
 import { pdfToMarkdown, workspace } from './workspace'
+import { demoClientMetadataUrl } from './oauth-client'
 
 const NOTES_PROMPT = `You manage a sticky-notes board through the provided tools.
 Add, update, remove and list notes to satisfy the user's request. Keep each note
@@ -238,6 +239,7 @@ export const App = () => {
   // on a phone it is a sheet.
   const mcp = useMcpServers({
     clientName: 'agent-web-demo',
+    clientMetadataUrl: demoClientMetadataUrl(),
     elicitation: { url: true },
     apps: true,
   })

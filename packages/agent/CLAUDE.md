@@ -100,8 +100,10 @@
     subagent). The runner drains it at round / step / final boundaries; messages are
     recorded in `IRunState.userUpdates` and in run snapshots.
   - `provider.ts` (`resolveStage` / model factory per provider), `mcp.ts` (stdio + streamable-HTTP
-    MCP connections, reconnect, paginated `tools/list`) + `mcp-oauth.ts` (OAuth 2.1 / DCR provider,
-    file-backed tokens) + `mcp-enterprise-oauth.ts` (enterprise-managed authorization / ID-JAG: token
+    MCP connections, reconnect, paginated `tools/list`) + `mcp-oauth.ts` (OAuth 2.1 provider,
+    file-backed tokens; `registration: 'auto' | 'cimd' | 'dcr'`, the browser sibling's names and
+    rules - change both; every rule a test in `tests/mcp-oauth-registration.test.ts`, the same tests
+    in both packages, and a mutation check) + `mcp-enterprise-oauth.ts` (enterprise-managed authorization / ID-JAG: token
     exchange at the IdP, then the SDK's `jwt-bearer` grant; non-interactive; client secret or
     `private_key_jwt` signed with `node:crypto`; `transportFetch` turns a refused grant into a short
     `EnterpriseOAuthError` and sends the redacted detail to the log. Security boundary: every

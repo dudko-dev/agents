@@ -178,9 +178,23 @@ export interface McpOAuthCallback {
   errorDescription?: string
 }
 
+/**
+ * How a server's OAuth client is registered (the core's `McpOAuthRegistration`): `'auto'` the
+ * client ID metadata document (CIMD) where the authorization server supports it and dynamic
+ * registration (DCR) otherwise, `'cimd'` the document only, `'dcr'` dynamic registration only.
+ */
+export type McpOAuthRegistration = 'auto' | 'cimd' | 'dcr'
+
+/** How a stored OAuth client was registered (the core's `McpOAuthRegistrationKind`). */
+export type McpOAuthRegistrationKind = 'cimd' | 'dcr'
+
 export interface BrowserOAuthProvider {
   serverUrl: string
   authorizationUrl?: URL
+  /** The provider's `registration`. Absent on cores older than the option. */
+  readonly registration?: McpOAuthRegistration
+  /** How the stored client was registered. Absent on cores older than the option. */
+  registrationKind?(): Promise<McpOAuthRegistrationKind | undefined>
   isAuthorized(): Promise<boolean>
   reset(): Promise<void>
 }
@@ -192,6 +206,11 @@ export interface BrowserOAuthProviderOptions {
   scope?: string
   /** Client ID metadata document URL (CIMD). Cores without it ignore the field. */
   clientMetadataUrl?: string
+  /**
+   * How the client is registered. Cores without it ignore the field - which is why the hooks
+   * refuse a `'cimd'` / `'dcr'` such a core did not take (`newMcpOAuthProvider`).
+   */
+  registration?: McpOAuthRegistration
 }
 
 /** The shape of the subpath module, as far as this package uses it. */

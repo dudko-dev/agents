@@ -28,6 +28,7 @@ import {
   useDemoTiers,
 } from '../use-model'
 import { workspace } from '../workspace'
+import { demoClientMetadataUrl } from '../oauth-client'
 import { EXAMPLES, STARTER } from './examples'
 
 // The pipeline editor as a page of its own, at /pipeline/. It is the same origin as the demo,
@@ -159,7 +160,10 @@ export const PipelineApp = () => {
   )
 
   // The servers connected in the demo are connected here: the list is in localStorage.
-  const mcp = useMcpServers({ clientName: 'agent-web-demo' })
+  const mcp = useMcpServers({
+    clientName: 'agent-web-demo',
+    clientMetadataUrl: demoClientMetadataUrl(),
+  })
   const connected = mcp.servers.filter((s) => s.status === 'connected')
   const connectedKey = connected.map((s) => s.name).join('|')
   const mcpRegistry = useMemo(
