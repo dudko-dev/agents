@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { AgentToolSet } from '@dudko.dev/agent-web'
+import type { McpAppsConnectionLike } from './use-mcp-app-host.js'
 import type {
   BrowserOAuthProvider,
   BrowserOAuthProviderOptions,
@@ -58,6 +59,36 @@ export interface UseMcpOptions {
   clientMetadataUrl?: string
   /** Called with connector log lines — handy while debugging a server. */
   onLog?: (level: string, message: string) => void
+  /**
+   * MCP Apps: declare the extension and read the tools' apps (default false). The hook then
+   * returns `apps` - pass it to `<AgentChat mcpApps>` - and a tool's results come with an app.
+   * A tool for its app only is then not in `tools`. Needs a core with MCP Apps.
+   */
+  apps?: boolean
+}
+
+/**
+ * A stable `McpAppsConnectionLike` for the hooks: each call reaches the connection the server is
+ * on NOW (or says it is not connected), so it can be handed to `<AgentChat>` once.
+ */
+export const mcpAppsRouter = (
+  connectionOf: (server: string) => ConnectedMcp | undefined,
+): McpAppsConnectionLike => {
+  const appsOf = (server: string) => connectionOf(server)?.apps
+  const notConnected = (server: string) => new Error(`the server “${server}” is not connected`)
+  return {
+    readUiResource: (server, uri, options) => {
+      const apps = appsOf(server)
+      return apps ? apps.readUiResource(server, uri, options) : Promise.reject(notConnected(server))
+    },
+    appTool: (server, name) => appsOf(server)?.appTool(server, name),
+    callAppTool: (server, name, args, options) => {
+      const apps = appsOf(server)
+      return apps
+        ? apps.callAppTool(server, name, args, options)
+        : Promise.reject(notConnected(server))
+    },
+  }
 }
 
 export interface UseMcpReturn {
@@ -90,6 +121,8 @@ export interface UseMcpReturn {
   forgetAuthorization: () => Promise<void>
   /** Load the optional subpath and report whether it can do OAuth. */
   checkOAuthSupport: () => Promise<boolean>
+  /** MCP Apps of the connected server (with `apps: true`): pass it to `<AgentChat mcpApps>`. */
+  apps?: McpAppsConnectionLike
 }
 
 /**
@@ -457,7 +490,11 @@ export const useMcp = (options: UseMcpOptions = {}): UseMcpReturn => {
               authProvider,
             },
           },
-          { clientName: optionsRef.current.clientName, onLog: optionsRef.current.onLog },
+          {
+            clientName: optionsRef.current.clientName,
+            onLog: optionsRef.current.onLog,
+            ...(optionsRef.current.apps ? { apps: true } : {}),
+          },
         )
 
         if (!current()) {
@@ -626,7 +663,14 @@ export const useMcp = (options: UseMcpOptions = {}): UseMcpReturn => {
     [closeConnection],
   )
 
+  const appsOn = options.apps === true
+  const apps = useMemo(
+    () => (appsOn ? mcpAppsRouter(() => connectionRef.current) : undefined),
+    [appsOn],
+  )
+
   return {
+    apps,
     status,
     tools,
     catalog,

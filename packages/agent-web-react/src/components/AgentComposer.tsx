@@ -137,6 +137,12 @@ export interface AgentComposerProps {
   toolbarEnd?: ReactNode
   /** Render an attachment chip yourself (`remove` drops it). */
   renderAttachment?: (attachment: ComposerAttachment, remove: () => void) => ReactNode
+  /**
+   * Text to put in the message field as a draft - e.g. a message an MCP App asked to send that
+   * the user accepted. Each new `id` appends its `text` (on a new line after what is there) and
+   * focuses the field; it is never sent: the user sends it, or not.
+   */
+  draft?: { id: string; text: string }
   disabled?: boolean
   className?: string
 }
@@ -268,6 +274,7 @@ export const AgentComposer = ({
   toolbarExtra,
   toolbarEnd,
   renderAttachment,
+  draft,
   disabled = false,
   className,
 }: AgentComposerProps) => {
@@ -300,6 +307,14 @@ export const AgentComposer = ({
   }, [compactWidth])
   const fileRef = useRef<HTMLInputElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  // A draft handed in from outside (an app's accepted message): appended once per id.
+  const draftId = draft?.id
+  const draftText = draft?.text
+  useEffect(() => {
+    if (draftId === undefined || !draftText) return
+    setText((t) => (t.trim() ? `${t.trimEnd()}\n${draftText}` : draftText))
+    inputRef.current?.focus()
+  }, [draftId, draftText])
 
   const busy = agent.isRunning
   const ready = agent.isReady && !disabled

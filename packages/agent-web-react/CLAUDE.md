@@ -95,7 +95,8 @@ against its production build.
   `TranscriptBlock`),
   `FileChips` (+ `FileChip`, `SourceView`: the files an answer wrote - `writtenFiles` in the
   state, folded from the core's `file.written` / `file.deleted`; a file's text is always text
-  nodes), `SandboxedFrame` (untrusted HTML in host-drawn chrome; the next user is MCP Apps),
+  nodes), `SandboxedFrame` (untrusted HTML in host-drawn chrome), `McpAppFrame` / `McpAppLine` /
+  `AppRequestPrompt` (MCP Apps, below),
   `ContextMeter`, `Composer` (minimal), `PlanView`, `ModelLoadBar`,
   `UsageBadge`, `ApiKeyForm`, `icons`, `format`. Docs: `docs/chat.md`.
 - `apps/demo/src/components/McpPanel.tsx` (monorepo root) — the demo's "bring your own MCP" panel.
@@ -107,6 +108,29 @@ against its production build.
   `e2e/files.spec.ts` (a real browser, hostile pages, a counted endpoint), and a change needs a
   mutation check. Never render a workspace file by `blob:` / `data:` URL or as markup.
   `src/file-kinds.ts` — `fileKindOf` (only the core's image types are pictures; SVG is source).
+- MCP Apps (the `io.modelcontextprotocol/ui` extension) — `src/mcp-app.ts`: the frame's security
+  core as pure code (no React, no DOM): `mcpAppCsp` (the app's policy from its resource's declared
+  origins ONLY, each re-checked with the core's `mcpAppOrigin`; frames / workers / `<base>` never
+  granted), `buildMcpAppDocument` (the shell: the policy first, one inner `sandbox="allow-scripts"`
+  frame with the same policy first in it, and `MCP_APP_RELAY` - by window, never the reserved
+  `ui/notifications/sandbox-*`), `appLinkOf`, `appMessageTextOf`, and `McpAppBridge` (the
+  extension's JSON-RPC: an allow-list of methods, parameters checked, `MCP_APP_MAX_IN_FLIGHT`,
+  nothing but `ping` before `ui/initialize`, the tool's input / result once after `initialized`).
+  `src/hooks/use-mcp-app-host.ts` (`useMcpAppHost`: reads an app through the connection, puts each
+  tool call through `useAgent().approveAppToolCall` - the core's gate - and holds link / message
+  requests until the user answers; a link is opened only in `answer`, on the click, `noopener`),
+  `src/components/McpAppFrame.tsx` (chrome outside the frame, folded / inline / panel variants,
+  the listener checks `event.source === iframe.contentWindow`), `AppRequestPrompt.tsx`. The state:
+  `mcp.app` → `apps` → `message.apps`, the tool call tagged (`ToolCallView.app`, kept through
+  `step.complete`); an app's consent request (`ApprovalView.app`) outlives `run.start` and
+  `stopped`, and is NEVER mirrored onto a message; `useAgent` keeps its resolvers apart (a run
+  ending does not answer them). `<AgentChat mcpApps appPanel …>`, `<AgentComposer draft>` (an
+  accepted app message, never sent). The MCP hooks take `apps: true` and return `apps`
+  (`mcpAppsRouter`, `./mcp` entry). **Security boundary**: every guard has a `guard …` test in
+  `tests/apps.test.ts` AND in `e2e/apps.spec.ts` (the demo, a real MCP server with the test
+  server's hostile "travel" app, counted endpoints for a declared and an undeclared origin), and a
+  change needs a mutation check. Never add `allow-same-origin`, an `allow` attribute, or a method
+  to the allow-list without its consent and a test.
 - `src/util.ts` — tiny shared helpers (`errMessage`).
 - `src/styles.css` — optional theme (light + dark).
 - `src/index.ts` — public surface (+ curated re-exports from the core).
@@ -123,7 +147,10 @@ against its production build.
   server on loopback). `agent.spec.ts`, `steering.spec.ts`, `learning.spec.ts`: the agent end to end
   (a run, typing to it while it works, the notebook and the fetched pages) against a scripted Gemini
   endpoint (`gemini.ts`, routed by the stage markers; it can script tool calls and the notebook's
-  `save_skill`). `files.spec.ts`: files written in a turn - the chips in the demo, and the sandboxed HTML frame against hostile pages on a test-only page with scripts on (`fixtures/files-page.ts`). `helpers.spec.ts`: helpers the model starts (`spawn_subagent`) - the tree, Stop on a
+  `save_skill`). `apps.spec.ts`: MCP Apps - the app in the demo's MCP tab, its consent prompts
+  (tool call, link, message), the clamped height, the panel / sheet, and what a hostile app tries
+  (the page, storage, an undeclared origin, navigation, the top window) against
+  `@dudko.dev/test-servers` (`appTools`). `files.spec.ts`: files written in a turn - the chips in the demo, and the sandboxed HTML frame against hostile pages on a test-only page with scripts on (`fixtures/files-page.ts`). `helpers.spec.ts`: helpers the model starts (`spawn_subagent`) - the tree, Stop on a
   slow helper, a helper's consent prompt; a helper's calls are told from the run's by what they
   were given (a helper knows its task, never the user's goal). `defaults.spec.ts`: the demo's
   defaults (every capability on; the ones that need a key say which) and the settings migration

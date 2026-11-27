@@ -16,6 +16,7 @@ implements the same features with the same field and event names.
 - [Tool consent and autopilot](#tool-consent-and-autopilot)
 - [Large tool catalogues (several MCP servers)](#large-tool-catalogues-several-mcp-servers)
 - [MCP servers behind OAuth](#mcp-servers-behind-oauth)
+- [MCP Apps: a server's interface for a tool](#mcp-apps-a-servers-interface-for-a-tool)
 - [Subagents (in-process or Web Workers)](#subagents-in-process-or-web-workers)
 - [Images, PDFs, files and URLs in](#images-pdfs-files-and-urls-in--and-models-that-cant-take-them)
 - [Virtual file system](#virtual-file-system)
@@ -652,6 +653,73 @@ be shown has an answered event and no requested one.
 tool error it is; `notifications/elicitation/complete` is not surfaced; a resumed run starts its
 `maxPerRun` count again. The React package has the view state (`state.elicitations`) but no
 component yet.
+
+## MCP Apps: a server's interface for a tool
+
+[MCP Apps](https://github.com/modelcontextprotocol/ext-apps) is the stable MCP extension
+`io.modelcontextprotocol/ui` (revision 2026-01-26): a tool declares an HTML app in its
+`_meta.ui.resourceUri` (a `ui://` resource, MIME type `text/html;profile=mcp-app`), the host reads
+it with `resources/read` and shows it next to the tool's result, and the app talks to the host
+over `postMessage` (JSON-RPC: `ui/initialize`, then the tool's input and result, then its own
+requests - `tools/call` on its server, `ui/open-link`, `ui/message`, size changes).
+
+This package is the data side of a host; drawing the app is a UI's (the React package's
+`<McpAppFrame>` / `<AgentChat mcpApps>`). On a connection made with `apps: true` (`./mcp`):
+
+| What | Where |
+| --- | --- |
+| the extension declared in the handshake: `capabilities.extensions['io.modelcontextprotocol/ui'] = { mimeTypes: ['text/html;profile=mcp-app'] }` | `connectMcpHttp` |
+| each tool's `_meta.ui`: its app (`resourceUri`; the deprecated flat `_meta['ui/resourceUri']` too) and who may call it (`visibility`, default `['model', 'app']`) | at list time; `McpCatalogEntry.app` |
+| a tool whose `visibility` leaves out `'model'` is not mounted (it is for its app) | `tools`, `catalog` |
+| a tool with an app emits `mcp.app` in the run when a result arrives (also an `isError` one): `id, server, tool, toolName, resourceUri, input, result?, step?` | the tool's `execute` |
+| the app's document: `apps.readUiResource(server, uri)` → `{ server, uri, html, csp, refusedDomains, permissions, prefersBorder?, domain? }` | `ConnectedMcp.apps` |
+| the tools an app may call: `apps.appTool(server, name)` → `{ name, key, readOnly, visibility, … }` or `undefined` | `ConnectedMcp.apps` |
+| a call for an app: `apps.callAppTool(server, name, args)` → the raw result for the app | `ConnectedMcp.apps` |
+| consent for that call: `agent.approveAppToolCall(call, onEvent?, signal?)` | the agent |
+
+**What is checked before anything is shown.** The read goes only to the server whose tool
+declared the URI, and only for a URI a tool of that server declares in its current listing (a
+refresh of the server's tools drops what was read). The answer must hold that exact URI, the MIME
+type `text/html;profile=mcp-app` (`charset=utf-8` may come along), at most
+`MCP_APP_MAX_HTML_CHARS` (2 000 000) characters as `text` or base64 `blob` (capped before and
+after decoding). A refused read throws `McpAppResourceError` and is not cached. The resource's
+`_meta.ui.csp` is cleaned to origins - `https://` / `wss://` hosts (a `*.` wildcard over at least
+two labels), `http://` / `ws://` on loopback, at most `MCP_APP_MAX_DOMAINS` (32) per list - and
+the rest is listed in `refusedDomains`; `permissions` (camera, microphone, geolocation,
+clipboardWrite) are reported, never granted by this package. The policy of each read is logged
+(`onLog`, info) as the specification's audit trail - never the document.
+
+**What reaches the model: nothing of the app.** The tool result the model reads is what it would
+be without apps. The HTML is in no tool result, event, log or run checkpoint. `mcp.app` carries
+the call's arguments and the result the app is given (`content`, `structuredContent`, `isError`,
+`_meta`), left out when larger than `MCP_APP_MAX_RESULT_CHARS` (512 000; the app is then told
+the call was cancelled).
+
+**Who may call what.** An app calls only tools of its own server (every method names the server;
+a UI passes the app's own) whose `visibility` includes `'app'` (the default) and that the server
+lists; anything else is refused before a request is sent. `callAppTool` goes through the
+connection's elicitation session when there is one (a 2025 server's question must not be put to
+the wrong call). It does not ask the user: consent is the agent's.
+
+**Consent: `agent.approveAppToolCall`.** The agent's own gate - `toolApproval.rules`, `onRequest`,
+`timeoutMs` - with two differences:
+
+- under `'autopilot'` an app's write still asks; read-only tools (`readOnlyHint`) run, as under
+  `'ask-writes'`. `'read-only'` refuses its writes, `'ask-all'` asks for everything, a rule wins.
+  An app never writes silently, whatever the model is allowed;
+- "always allow" given to an app is remembered for apps only: the model's calls of the same tool
+  still ask, and the model's "always allow" does not let an app through.
+
+The request (`ToolApprovalRequest`, and the `tool.approval-requested` event) carries
+`app: { server, tool, resourceUri }`: a UI says the APP asks. `name` is the key the rules match
+(`server__tool`, also for a tool not mounted). `onEvent` gets the two events (there may be no run);
+`signal` gives up (the app's frame went away).
+
+**Not here.** Links and messages an app asks for are the UI's to put to the user (the React package
+asks for both). `ui/update-model-context`, `resources/read` for an app, `ui/download-file`,
+sampling and display modes other than inline are not offered. The Node sibling has none of this:
+it renders no UI, and a server-side host that streams events to a browser would need the bridge
+there (see [design](design.md#mcp-apps-the-host-reads-the-browser-draws)).
 
 ## MCP servers behind OAuth
 
@@ -2122,10 +2190,11 @@ Subscribe with `onEvent` (per run) or the handler you pass to `createAgent`; ren
 | --- | --- |
 | `skill.activated` | `name, by: 'plan' \| 'tool'` |
 | `tools.discovered` | `step?, query, names` — `find_tools` activated more tools |
-| `tool.approval-requested` | `id, name, input, readOnly, step?, subagent?` (`subagent: { id, depth }` when a helper the model started is asking) |
+| `tool.approval-requested` | `id, name, input, readOnly, step?, subagent?, app?` (`subagent: { id, depth }` when a helper the model started is asking; `app: { server, tool, resourceUri }` when an [MCP App](#mcp-apps-a-servers-interface-for-a-tool) asks - `agent.approveAppToolCall`) |
 | `tool.approval-resolved` | `id, name, approved, reason?, automatic` |
 | `mcp.elicitation-requested` | `id, server, tool, mode: 'form' \| 'url', message, requestedSchema?, url?, step?, subagent?` — an MCP server asked the user for input during a tool call and the connection's `onElicitation` is being called. The server's text, cleaned and capped ([elicitation](#mcp-elicitation-a-server-asks-the-user)) |
 | `mcp.elicitation-answered` | `id, server, tool, action: 'accept' \| 'decline' \| 'cancel', automatic, reason?, fields?` — the question was settled. `fields`: the NAMES of the fields an accepted form was answered with, never a value. `automatic`: nobody decided, the tool call fails, `reason` says why |
+| `mcp.app` | `id, server, tool, toolName, resourceUri, input, result?, step?` — a tool that declares an [MCP App](#mcp-apps-a-servers-interface-for-a-tool) returned (a connection with `apps: true`); `result` is what the app is given, absent above 512 000 characters. Never the app's HTML |
 | `egress.request` | `url` (origin + path), `allowed`, `status?`, `reason?` — a `web_fetch` request (or `web_search`'s call to its [search API](#search-finding-the-page-to-fetch)), allowed or refused ([egress](#egress-what-the-model-may-fetch)) |
 | `media.generated` | `kind: 'image' \| 'speech'`, `path`, `mediaType`, `bytes`, `model`, `step?` — a media tool wrote a file to the virtual file system; read it with `vfs.readDataUrl(path)` ([media](#media-images-speech-and-transcription)) |
 | `file.written` | `path`, `mediaType`, `bytes`, `step?` — `fs_write` or the sandbox's `fs.writeFile` wrote a file to the virtual file system (after the write succeeded; the content is not in the event) ([virtual file system](#virtual-file-system)) |

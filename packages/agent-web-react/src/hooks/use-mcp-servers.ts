@@ -6,11 +6,13 @@ import type {
   McpCatalogEntry,
   McpModule,
 } from '../mcp-types.js'
+import type { McpAppsConnectionLike } from './use-mcp-app-host.js'
 import {
   claimOAuthCallback,
   defaultRedirectUrl,
   describeMcpResult,
   loadMcp,
+  mcpAppsRouter,
   mcpInstructionsOf,
   mcpOAuthProviderOptions,
   OAUTH_UNSUPPORTED,
@@ -97,6 +99,11 @@ export interface UseMcpServersReturn {
   authorize: (name: string) => void
   /** Drop a server's stored OAuth tokens and registration. */
   forgetAuthorization: (name: string) => Promise<void>
+  /**
+   * MCP Apps of every connected server (with `apps: true`): pass it to `<AgentChat mcpApps>`.
+   * Each call goes to the server it names, on the connection it has now.
+   */
+  apps?: McpAppsConnectionLike
 }
 
 interface StoredServer {
@@ -275,6 +282,7 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
             clientName: optionsRef.current.clientName,
             onLog: optionsRef.current.onLog,
             connectTimeoutMs: optionsRef.current.connectTimeoutMs,
+            ...(optionsRef.current.apps ? { apps: true } : {}),
           },
         )
         if (!current()) {
@@ -515,7 +523,14 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
     [servers],
   )
 
+  const appsOn = options.apps === true
+  const apps = useMemo(
+    () => (appsOn ? mcpAppsRouter((server) => liveRef.current.get(server)?.connection) : undefined),
+    [appsOn],
+  )
+
   return {
+    apps,
     servers,
     tools,
     catalog,

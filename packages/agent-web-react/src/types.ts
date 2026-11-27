@@ -6,6 +6,7 @@ import type {
   IPlan,
   IPlanStep,
   IUsage,
+  McpAppToolResult,
   ModelTier,
   ReplanMode,
   TierReason,
@@ -79,6 +80,12 @@ export interface ChatMessage {
    * tools and the sandbox; a subagent's are here too). Absent until the first one.
    */
   writtenFiles?: WrittenFileView[]
+  /**
+   * Assistant turn: the MCP Apps its tool calls came with (the core's `mcp.app`, on a
+   * connection made with `apps: true`). Absent until the first one. Holds the call's input and
+   * result for the app - never the app's HTML, which is read from its server when it is shown.
+   */
+  apps?: AppView[]
   /** Assistant turn ended with an error. */
   error?: boolean
 }
@@ -108,6 +115,30 @@ export interface ToolCallView {
    * at the step, and the model was handed that result (`output` carries the core's note).
    */
   replayed?: boolean
+  /** The call came with an MCP App (an `mcp.app` event): the `AppView` id. */
+  app?: string
+}
+
+/**
+ * An MCP App that came with a tool call (the core's `mcp.app` event): which server, which tool,
+ * which `ui://` resource, and the call's input and result - what the app is shown. Never the
+ * app itself: `<McpAppFrame>` reads it from the server that declared it when it is drawn.
+ */
+export interface AppView {
+  /** The core's event id: unique per call. */
+  id: string
+  server: string
+  /** The tool as the model called it (`server__tool`). */
+  tool: string
+  /** The server's own name for it. */
+  toolName: string
+  resourceUri: string
+  input: Record<string, unknown>
+  /** What the app is given; absent when the result was too large to hand to it. */
+  result?: McpAppToolResult
+  stepId?: string
+  /** A subagent's (or helper's) call: who made it. */
+  by?: { id: string; name: string; role?: string }
 }
 
 /**
@@ -232,6 +263,13 @@ export interface ApprovalView {
   reason?: string
   /** Decided by policy (rule / read-only mode), not by a person. */
   automatic?: boolean
+  /**
+   * Set when an MCP App asks, not the model (`useAgent().approveAppToolCall`): its server, the
+   * tool's own name there and the app's resource. `name` is then the key the consent rules
+   * match. Such a request outlives a run (it is the user's, not the run's) and is never kept on
+   * a message.
+   */
+  app?: { server: string; tool: string; resourceUri: string }
 }
 
 /**
@@ -472,6 +510,8 @@ export interface AgentUiState {
   transcripts?: TranscriptView[]
   /** Files written in this run and still there (`file.written` / `file.deleted`). Absent until the first one. */
   writtenFiles?: WrittenFileView[]
+  /** MCP Apps this run's tool calls came with (`mcp.app`). Absent until the first one. */
+  apps?: AppView[]
   /**
    * Questions put to `config.decisionModel` before any step existed (a decision that follows a
    * step is on that step). Absent until the first one.

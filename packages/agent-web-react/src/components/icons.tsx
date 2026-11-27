@@ -224,3 +224,54 @@ export const ExpandIcon = ({ size, className }: IconProps) => (
     <path d="M8 3H4v4M16 3h4v4M8 21H4v-4M16 21h4v-4" />
   </svg>
 )
+
+// ── MCP Apps ─────────────────────────────────────────────────────────────────
+
+/** A window: an app a server shipped. */
+export const AppIcon = ({ size, className }: IconProps) => (
+  <svg {...base(size)} className={className}>
+    <rect x="3" y="3" width="18" height="18" rx="3" />
+    <path d="M3 9h18M8 6h.01" />
+  </svg>
+)
+
+export const MoreIcon = ({ size, className }: IconProps) => (
+  <svg {...base(size)} className={className}>
+    <circle cx="5" cy="12" r="1" />
+    <circle cx="12" cy="12" r="1" />
+    <circle cx="19" cy="12" r="1" />
+  </svg>
+)
+
+export const ReloadIcon = ({ size, className }: IconProps) => (
+  <svg {...base(size)} className={className}>
+    <path d="M3 12a9 9 0 0 1 15.5-6.2L21 8M21 3v5h-5M21 12a9 9 0 0 1-15.5 6.2L3 16M3 21v-5h5" />
+  </svg>
+)
+
+/** A side panel. */
+export const PanelIcon = ({ size, className }: IconProps) => (
+  <svg {...base(size)} className={className}>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <path d="M14 4v16" />
+  </svg>
+)
+
+export const EyeOffIcon = ({ size, className }: IconProps) => (
+  <svg {...base(size)} className={className}>
+    <path d="M10.6 5.1A9.8 9.8 0 0 1 12 5c6.4 0 10 7 10 7a17 17 0 0 1-3 3.8M6.5 6.6A16.6 16.6 0 0 0 2 12s3.6 7 10 7a9.7 9.7 0 0 0 5.3-1.6M3 3l18 18" />
+  </svg>
+)
+
+/** A link that leaves the page. */
+export const ExternalIcon = ({ size, className }: IconProps) => (
+  <svg {...base(size)} className={className}>
+    <path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+  </svg>
+)
+
+export const MessageIcon = ({ size, className }: IconProps) => (
+  <svg {...base(size)} className={className}>
+    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+  </svg>
+)

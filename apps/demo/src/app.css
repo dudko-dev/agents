@@ -1173,3 +1173,25 @@ a:hover {
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
+
+/* MCP Apps: the app's panel takes the right column; the servers' apps in the panel's list. */
+.app__apppanel {
+  height: 100%;
+  min-height: 0;
+}
+.app__apppanel[hidden] {
+  display: none;
+}
+.mcp__apps {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0 2px;
+  min-width: 0;
+}
+.mcp__app {
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}

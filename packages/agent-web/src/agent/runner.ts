@@ -31,6 +31,7 @@ import {
 } from '../skills.js'
 import {
   createApprovalState,
+  gateToolCall,
   type ToolApprovalMode,
   TOOL_APPROVAL_MODES,
 } from '../tools/approval.js'
@@ -223,6 +224,21 @@ export interface Agent {
    */
   forgetSkill(name: string, onEvent?: (event: AgentEvent) => void): Promise<boolean>
   /**
+   * Ask this agent's consent gate about a tool call an MCP App wants to make (`./mcp` with
+   * `apps: true`: the app's `tools/call`), not the model. The same `toolApproval` - its rules,
+   * its handler (`onRequest`), its timeout - with two differences: under 'autopilot' a write
+   * still asks (an app never writes silently; read-only tools run, as in 'ask-writes'), and
+   * "always allow" given to an app is remembered for apps only, apart from the model's.
+   * `onEvent` receives `tool.approval-requested` (with `app`) and `tool.approval-resolved`; a UI
+   * shows the request as the app's. Resolves when the call may go; throws `ToolDeniedError`.
+   * Make the call afterwards with `ConnectedMcp.apps.callAppTool`.
+   */
+  approveAppToolCall(
+    call: AppToolCallRequest,
+    onEvent?: (event: AgentEvent) => void,
+    signal?: AbortSignal,
+  ): Promise<void>
+  /**
    * What the executor model can take, per attachment kind: true / false, or
    * undefined when unknown (the run tries, and a provider refusal becomes a
    * clear error).
@@ -242,6 +258,21 @@ export interface Agent {
     /** The executor models by tier, when `config.executorTiers` is on (`standard` is `executor`). */
     tiers?: Partial<Record<ModelTier, LanguageModel>>
   }
+}
+
+/** A tool call an MCP App asks for (see `Agent.approveAppToolCall`). */
+export interface AppToolCallRequest {
+  /** The name the consent rules match: the tool's key, `server__tool` (`McpAppTool.key`). */
+  tool: string
+  /** The tool's own name on its server. */
+  toolName: string
+  /** The server the app came from. */
+  server: string
+  /** The app's `ui://` resource. */
+  resourceUri: string
+  input: unknown
+  /** The server marked the tool read-only (`McpAppTool.readOnly`). */
+  readOnly: boolean
 }
 
 const errMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err))
@@ -546,6 +577,8 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
   }
   // A helper the model started shares the caller's consent state itself: one gate for the tree.
   const approval = seed?.approval ?? createApprovalState(config.toolApproval)
+  // "Always allow" an MCP App was given (`approveAppToolCall`): apart from the model's.
+  const appRemembered = new Set<string>()
   log.info(
     `agent ready — ${catalog.length} tool(s) (${strategy}, ~${toolTokens || '?'} tokens), window ${cfg.compaction.contextWindowTokens}${modelWindow ? ' (the model’s)' : ''}, skills: [${skills.map((s) => s.name).join(', ') || 'none'}], planner mode: ${plannerMode}, executor mode: ${executorMode}, approval: ${approval.mode}`,
   )
@@ -1459,6 +1492,34 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
       }))
     },
     listLearnedSkills: () => (learning ? learning.learned().map((s) => ({ ...s })) : []),
+    approveAppToolCall: (call, onEvent, signal) =>
+      gateToolCall(
+        // The agent's policy, but never 'autopilot' for an app, and "always allow" kept apart.
+        {
+          mode: approval.mode === 'autopilot' ? 'ask-writes' : approval.mode,
+          config: approval.config,
+          remembered: appRemembered,
+        },
+        {
+          toolName: call.tool,
+          input: call.input,
+          readOnly: call.readOnly === true,
+          app: { server: call.server, tool: call.toolName, resourceUri: call.resourceUri },
+        },
+        {
+          requested: (req) =>
+            onEvent?.({
+              type: 'tool.approval-requested',
+              id: req.id,
+              name: req.toolName,
+              input: req.input,
+              readOnly: req.readOnly,
+              ...(req.app ? { app: req.app } : {}),
+            }),
+          resolved: (r) => onEvent?.({ type: 'tool.approval-resolved', ...r }),
+        },
+        signal,
+      ),
     forgetSkill: async (name: string, onEvent?: (event: AgentEvent) => void) =>
       learning ? learning.forget(name, onEvent) : false,
     capabilities: { images: accepts.image, pdf: accepts.pdf, files: accepts.file },

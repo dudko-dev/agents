@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
 import type { IUsage, VirtualFileSystem } from '@dudko.dev/agent-web'
 import { useLabels, type AgentLabels, type AgentLabelsOverride } from '../labels.js'
-import type { ChatAttachment, ChatMessage, MediaView, WrittenFileView } from '../types.js'
+import type { AppView, ChatAttachment, ChatMessage, MediaView, WrittenFileView } from '../types.js'
 import { formatDuration, formatTokens } from './format.js'
 import { BookIcon, BrainIcon, FileIcon, GlobeIcon, SpinnerIcon } from './icons.js'
 import { FileChips, type FileChipsProps } from './FileChips.js'
@@ -76,6 +76,13 @@ export interface MessageListProps {
   renderAttachment?: (attachment: ChatAttachment, message: ChatMessage) => ReactNode
   /** Tool calls inside the activity. */
   renderToolCall?: RenderToolCall
+  /**
+   * The MCP Apps an answer's tool calls came with (`message.apps`), drawn between its activity
+   * and its text. `<AgentChat mcpApps>` passes `<McpAppFrame>`; without this prop none is drawn.
+   */
+  renderApp?: (app: AppView, message: ChatMessage) => ReactNode
+  /** Draw the apps of an answer (default true; needs `renderApp`). */
+  showApps?: boolean
   labels?: AgentLabelsOverride
   className?: string
 }
@@ -114,6 +121,7 @@ const activitySummary = (
   showTiers: boolean,
   showFileChips: boolean,
   L: AgentLabels,
+  showApps = false,
 ): string => {
   const steps = m.steps ?? []
   const parts = [L.steps(steps.length)]
@@ -125,6 +133,7 @@ const activitySummary = (
   if (showLearned && m.learned?.length) parts.push(L.learnedNow(m.learned.join(', ')))
   if (showLearned && m.fetches?.length) parts.push(L.fetches(m.fetches.length))
   if (showFileChips && m.writtenFiles?.length) parts.push(L.filesCount(m.writtenFiles.length))
+  if (showApps && m.apps?.length) parts.push(L.appsCount(m.apps.length))
   return parts.join(' · ')
 }
 
@@ -165,6 +174,8 @@ export const MessageList = ({
   renderMessage,
   renderAttachment,
   renderToolCall,
+  renderApp,
+  showApps = true,
   labels,
   className,
 }: MessageListProps) => {
@@ -189,7 +200,15 @@ export const MessageList = ({
               {m.role === 'assistant' && hasActivity && (
                 <details className="awr-activity" open={m.pending || activityOpen}>
                   <summary className="awr-activity__summary">
-                    {activitySummary(m, showToolCalls, showLearned, showTiers, showFileChips, L)}
+                    {activitySummary(
+                      m,
+                      showToolCalls,
+                      showLearned,
+                      showTiers,
+                      showFileChips,
+                      L,
+                      showApps && Boolean(renderApp),
+                    )}
                   </summary>
                   {m.pending && liveExtra}
                   <StepList
@@ -241,6 +260,15 @@ export const MessageList = ({
                   )}
                 </details>
               )}
+              {showApps && renderApp && m.role === 'assistant' && m.apps?.length ? (
+                <div className="awr-msg__apps">
+                  {m.apps.map((app) => (
+                    <div key={app.id} className="awr-msg__app">
+                      {renderApp(app, m)}
+                    </div>
+                  ))}
+                </div>
+              ) : null}
               {showMedia && m.transcripts?.length ? (
                 <div className="awr-msg__transcripts">
                   {m.transcripts.map((t, i) => (

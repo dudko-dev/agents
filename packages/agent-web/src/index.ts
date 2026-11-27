@@ -1,6 +1,13 @@
 // ── Agent ──────────────────────────────────────────────────────────────────
 export { createAgent } from './agent/runner.js'
-export type { Agent, CompactOptions, CompactResult, RunOptions, RunResult } from './agent/runner.js'
+export type {
+  Agent,
+  AppToolCallRequest,
+  CompactOptions,
+  CompactResult,
+  RunOptions,
+  RunResult,
+} from './agent/runner.js'
 // Steer a run while it goes: send a message, stop one subagent.
 export { createRunControl } from './agent/control.js'
 export type { RunControl, SubagentInfo } from './agent/control.js'
@@ -401,6 +408,7 @@ export {
   TOOL_APPROVAL_MODES,
 } from './tools/approval.js'
 export type {
+  ToolApprovalApp,
   ToolApprovalConfig,
   ToolApprovalDecision,
   ToolApprovalMode,
@@ -479,6 +487,22 @@ export type {
   McpElicitationReason,
   McpElicitationSchema,
 } from './mcp/elicitation.js'
+// MCP Apps: the `mcp.app` event's types and the pure guards a UI re-applies (no SDK behind them;
+// the connector is the `./mcp` entry).
+export {
+  MCP_APP_MAX_HTML_CHARS,
+  MCP_APP_MAX_RESULT_CHARS,
+  MCP_APP_MIME_TYPE,
+  MCP_APPS_EXTENSION,
+  mcpAppOrigin,
+} from './mcp/apps.js'
+export type {
+  McpAppCsp,
+  McpAppPermissions,
+  McpAppResource,
+  McpAppToolResult,
+  McpAppVisibility,
+} from './mcp/apps.js'
 
 // ── Logging ──────────────────────────────────────────────────────────────────
 export { createLogger } from './logger.js'

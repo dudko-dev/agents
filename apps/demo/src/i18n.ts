@@ -286,6 +286,45 @@ export const ES_LABELS: AgentLabels = {
   htmlTaller: 'Hacer la vista previa más alta',
   htmlShorter: 'Hacer la vista previa más baja',
   htmlFrameName: (path) => `Vista previa de ${path}`,
+
+  appFrom: (server) => `App del servidor «${server}»`,
+  appSandboxed: 'aislada',
+  appWaiting: 'le espera',
+  appTag: 'app',
+  appsCount: (n) => count(n, 'app', 'apps'),
+  appLoading: 'Cargando la app…',
+  appFailed: (reason) => `No se pudo mostrar la app: ${reason}`,
+  appUnavailable: (server) =>
+    `El servidor «${server}» no está conectado, así que su app no se puede mostrar.`,
+  appHidden: 'oculta',
+  appShow: 'Mostrar',
+  appMenu: 'Menú de la app',
+  appReload: 'Recargar la app',
+  appOpenPanel: 'Abrir en el panel',
+  appHide: 'Ocultar la app',
+  appServedBy: (server, uri) =>
+    `La sirve ${server} como ${uri}. No puede leer este chat, sus claves ni sus archivos.`,
+  appInPanel: 'abierta en el panel',
+  appBringBack: 'Traer de vuelta',
+  appClosePanel: 'Cerrar el panel',
+  appPanelNote: (server) =>
+    `Contenido del servidor «${server}». No puede leer este chat, sus claves ni sus archivos.`,
+  appFrameName: (server) => `App del servidor ${server}`,
+  appRan: (names) => `La app ejecutó ${names}`,
+  appRefused: 'rechazada',
+  approvalLeadApp: (server) => `La app «${server}» quiere ejecutar`,
+  approvalFromApp: (server, readOnly) =>
+    `Lo pide la app, no el agente. Esta herramienta ${readOnly ? 'solo lee' : 'modifica'} datos en el servidor «${server}».`,
+  appLinkLead: (server) => `La app «${server}» quiere abrir un enlace. ¿Abrirlo?`,
+  appLinkNote:
+    'Se abre en una pestaña nueva, fuera de este chat. Compruebe el nombre del sitio antes de seguir.',
+  appLinkOpen: 'Abrir',
+  appCancel: 'Cancelar',
+  appMessageLead: (server) => `La app «${server}» quiere poner un mensaje en su cuadro de texto`,
+  appMessageNote:
+    'No se envía nada hasta que lo envíe usted, y puede cambiarlo antes. Es el texto de la app, no el suyo.',
+  appMessageAccept: 'Poner en el cuadro de texto',
+  appMessageDiscard: 'Descartar',
 }
 
 /** The same, in German (formal "Sie" where the visitor is addressed). */
@@ -548,6 +587,45 @@ export const DE_LABELS: AgentLabels = {
   htmlTaller: 'Vorschau höher machen',
   htmlShorter: 'Vorschau niedriger machen',
   htmlFrameName: (path) => `Vorschau von ${path}`,
+
+  appFrom: (server) => `App vom Server „${server}“`,
+  appSandboxed: 'abgeschottet',
+  appWaiting: 'wartet auf Sie',
+  appTag: 'App',
+  appsCount: (n) => count(n, 'App', 'Apps'),
+  appLoading: 'Die App wird geladen…',
+  appFailed: (reason) => `Die App konnte nicht angezeigt werden: ${reason}`,
+  appUnavailable: (server) =>
+    `Der Server „${server}“ ist nicht verbunden, daher kann seine App nicht angezeigt werden.`,
+  appHidden: 'ausgeblendet',
+  appShow: 'Anzeigen',
+  appMenu: 'App-Menü',
+  appReload: 'App neu laden',
+  appOpenPanel: 'Im Seitenbereich öffnen',
+  appHide: 'App ausblenden',
+  appServedBy: (server, uri) =>
+    `Bereitgestellt von ${server} als ${uri}. Sie kann diesen Chat, Ihre Schlüssel und Ihre Dateien nicht lesen.`,
+  appInPanel: 'im Seitenbereich geöffnet',
+  appBringBack: 'Zurückholen',
+  appClosePanel: 'Seitenbereich schließen',
+  appPanelNote: (server) =>
+    `Inhalt vom Server „${server}“. Er kann diesen Chat, Ihre Schlüssel und Ihre Dateien nicht lesen.`,
+  appFrameName: (server) => `App vom Server ${server}`,
+  appRan: (names) => `Die App hat ausgeführt: ${names}`,
+  appRefused: 'abgelehnt',
+  approvalLeadApp: (server) => `Die App „${server}“ möchte ausführen:`,
+  approvalFromApp: (server, readOnly) =>
+    `Von der App angefragt, nicht vom Agenten. Dieses Werkzeug ${readOnly ? 'liest nur' : 'ändert'} Daten auf dem Server „${server}“.`,
+  appLinkLead: (server) => `Die App „${server}“ möchte einen Link öffnen. Öffnen?`,
+  appLinkNote:
+    'Öffnet sich in einem neuen Tab, außerhalb dieses Chats. Prüfen Sie den Namen der Website, bevor Sie fortfahren.',
+  appLinkOpen: 'Öffnen',
+  appCancel: 'Abbrechen',
+  appMessageLead: (server) => `Die App „${server}“ möchte eine Nachricht in Ihr Eingabefeld setzen`,
+  appMessageNote:
+    'Nichts wird gesendet, bis Sie es selbst senden, und Sie können es vorher ändern. Es ist der Text der App, nicht Ihrer.',
+  appMessageAccept: 'Ins Eingabefeld setzen',
+  appMessageDiscard: 'Verwerfen',
 }
 
 /** The label set of a chat language; English is the library's own defaults. */

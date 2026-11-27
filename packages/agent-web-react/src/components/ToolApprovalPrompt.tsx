@@ -41,27 +41,35 @@ export const ToolApprovalPrompt = ({
       {approvals.map((a) => {
         // A helper's role is text the model wrote: shown as plain text, shortened.
         const helper = showHelper ? a.subagent : undefined
+        // An MCP App asks, not the agent: said in the lead, with the server's own tool name.
+        const app = a.app
         const card = (
           <div
             key={a.id}
-            className={`awr-approval${helper ? ' awr-approval--helper' : ''}`}
+            className={`awr-approval${helper ? ' awr-approval--helper' : ''}${app ? ' awr-approval--app' : ''}`}
             data-subagent={helper?.id}
+            data-app-server={app?.server}
           >
             <div className="awr-approval__head">
               <ShieldIcon size={14} className="awr-approval__icon" />
               <span>
-                {helper
-                  ? L.approvalLeadHelper(
-                      previewValue(helper.role ?? '', 60) || undefined,
-                      helper.depth,
-                    )
-                  : L.approvalLead}{' '}
-                <code className="awr-tool__name">{a.name}</code>
-                {a.readOnly ? ` (${L.readOnlyTool})` : ''}
+                {app
+                  ? L.approvalLeadApp(app.server)
+                  : helper
+                    ? L.approvalLeadHelper(
+                        previewValue(helper.role ?? '', 60) || undefined,
+                        helper.depth,
+                      )
+                    : L.approvalLead}{' '}
+                <code className="awr-tool__name">{app ? app.tool : a.name}</code>
+                {a.readOnly && !app ? ` (${L.readOnlyTool})` : ''}
               </span>
             </div>
             {previewValue(a.input, 300) && (
               <pre className="awr-approval__input">{previewValue(a.input, 300)}</pre>
+            )}
+            {app && (
+              <p className="awr-approval__from">{L.approvalFromApp(app.server, a.readOnly)}</p>
             )}
             <div className="awr-approval__actions">
               <button

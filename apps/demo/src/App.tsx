@@ -101,6 +101,19 @@ const initialView = (): View => {
   return VIEWS.includes(hash) ? hash : 'notes'
 }
 
+/** Two columns (the chat and the panel beside it): the demo's own breakpoint, app.css. */
+const WIDE = '(min-width: 901px)'
+const useWideLayout = (): boolean => {
+  const [wide, setWide] = useState(() => window.matchMedia(WIDE).matches)
+  useEffect(() => {
+    const mq = window.matchMedia(WIDE)
+    const on = () => setWide(mq.matches)
+    mq.addEventListener('change', on)
+    return () => mq.removeEventListener('change', on)
+  }, [])
+  return wide
+}
+
 export const App = () => {
   // The chosen model, its key and the model object: shared with the pipeline page (use-model.ts).
   const {
@@ -218,7 +231,13 @@ export const App = () => {
 
   // ── Tab 2: any number of MCP servers (+ an optional mock catalogue) ────────
   const [view, setView] = useState<View>(initialView)
-  const mcp = useMcpServers({ clientName: 'agent-web-demo' })
+  const mcp = useMcpServers({ clientName: 'agent-web-demo', apps: true })
+  // MCP Apps: shown in the chat (the switch in the panel); on a wide page the app's panel takes
+  // the right column, on a phone it is a sheet.
+  const [showApps, setShowApps] = useState(true)
+  const [appPanelEl, setAppPanelEl] = useState<HTMLDivElement | null>(null)
+  const [appInPanel, setAppInPanel] = useState(false)
+  const wide = useWideLayout()
   const [mockCatalog, setMockCatalog] = useState(false)
   const mcpTools = useMemo<AgentToolSet>(
     () => ({ ...mcp.tools, ...fileTools, ...(mockCatalog ? buildMockCatalog() : {}) }),
@@ -560,6 +579,9 @@ export const App = () => {
                   history={settings.history ? histories.mcp : false}
                   composer={composer('e.g. What can you do? Then ask it to actually do it.')}
                   {...chatCommon}
+                  mcpApps={showApps ? mcp.apps : undefined}
+                  appPanel={wide ? appPanelEl : 'sheet'}
+                  onAppPanel={(app) => setAppInPanel(Boolean(app))}
                 />
               ) : (
                 <div className="app__empty">
@@ -595,7 +617,12 @@ export const App = () => {
         <section className="app__right">
           {view === 'notes' && <NotesBoard notes={board.notes} onClear={board.clear} />}
           {view === 'mcp' && (
+            <div ref={setAppPanelEl} className="app__apppanel" hidden={!(wide && appInPanel)} />
+          )}
+          {view === 'mcp' && !(wide && appInPanel) && (
             <McpPanel
+              apps={showApps}
+              onApps={setShowApps}
               mcp={mcp}
               mockCatalog={mockCatalog}
               onMockCatalog={setMockCatalog}

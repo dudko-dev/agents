@@ -151,6 +151,7 @@ export {
   sandboxTokens,
   tokenizeHtml,
   withCspFirst,
+  withPolicyFirst,
   HTML_PREVIEW_MAX_CHARS,
 } from './html-preview.js'
 export type { SandboxedDocumentOptions, SourceToken } from './html-preview.js'
@@ -239,4 +240,53 @@ export type {
   VirtualFile,
   VirtualFileInfo,
   FileToolsOptions,
+} from '@dudko.dev/agent-web'
+
+// ── MCP Apps (an app a server's tool came with, in a sandboxed frame) ───────
+export { McpAppFrame, McpAppLine } from './components/McpAppFrame.js'
+export type { McpAppFrameProps, McpAppLineProps } from './components/McpAppFrame.js'
+export { AppRequestPrompt } from './components/AppRequestPrompt.js'
+export type { AppRequestPromptProps } from './components/AppRequestPrompt.js'
+export { useMcpAppHost } from './hooks/use-mcp-app-host.js'
+export type {
+  AppRequestView,
+  McpAppHost,
+  McpAppsConnectionLike,
+  UseMcpAppHostOptions,
+} from './hooks/use-mcp-app-host.js'
+export {
+  APP_DEFAULT_HEIGHT,
+  APP_MAX_HEIGHT,
+  APP_MIN_HEIGHT,
+  appLinkOf,
+  appMessageTextOf,
+  buildMcpAppDocument,
+  clampAppHeight,
+  grantedAppCsp,
+  MCP_APP_MAX_ARGS_CHARS,
+  MCP_APP_MAX_IN_FLIGHT,
+  MCP_APP_MAX_MESSAGE_CHARS,
+  MCP_APP_MAX_URL_CHARS,
+  MCP_APP_NOTIFICATIONS,
+  MCP_APP_PROTOCOL_VERSION,
+  MCP_APP_REFUSED,
+  MCP_APP_RELAY,
+  MCP_APP_REQUESTS,
+  McpAppBridge,
+  mcpAppCsp,
+  mcpAppHostCapabilities,
+  McpAppRpcError,
+} from './mcp-app.js'
+export type {
+  AppLink,
+  McpAppBridgeHandlers,
+  McpAppBridgeOptions,
+  McpAppRpcMessage,
+} from './mcp-app.js'
+export type { AppView } from './types.js'
+export type {
+  AppToolCallRequest,
+  McpAppCsp,
+  McpAppResource,
+  McpAppToolResult,
 } from '@dudko.dev/agent-web'

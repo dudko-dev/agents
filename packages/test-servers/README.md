@@ -18,7 +18,7 @@ TypeScript run directly by Node (type stripping, Node ≥ 22.6); there is no bui
 | --- | --- | --- |
 | Identity provider | `startLocalIdp(opts)` | Issues signed ID tokens for a test user, serves its JWKS, and answers the RFC 8693 token exchange with a signed ID-JAG (draft-ietf-oauth-identity-assertion-authz-grant) after authenticating the client. |
 | Authorization server | `startLocalAuthorizationServer(opts)` | Metadata (RFC 8414), dynamic registration and a token endpoint that rotates the access token. With `enterprise`: only the `jwt-bearer` grant with an ID-JAG from one IdP, verified claim by claim. |
-| MCP server | `startLocalMcpServer(opts)` | The MCP SDK's streamable-HTTP server with three tools (`echo`, `secret`, `boom`), optional `instructions` in its `initialize` / `server/discover` result (`mcp.setInstructions()` changes them for the next client to connect), optional structured tools (`structuredTools`: `report` and `report_mixed` declare an `outputSchema` and answer with `structuredContent`), optional elicitation tools (`elicitationTools`, below), protected resource metadata (RFC 9728) and, with `requireAuth`, the 401 challenge. `protocol` picks the revisions it speaks: `'legacy'` (default), `'modern'` or `'dual'` (below). |
+| MCP server | `startLocalMcpServer(opts)` | The MCP SDK's streamable-HTTP server with three tools (`echo`, `secret`, `boom`), optional `instructions` in its `initialize` / `server/discover` result (`mcp.setInstructions()` changes them for the next client to connect), optional structured tools (`structuredTools`: `report` and `report_mixed` declare an `outputSchema` and answer with `structuredContent`), optional elicitation tools (`elicitationTools`, below), optional MCP Apps tools (`appTools`, below), protected resource metadata (RFC 9728) and, with `requireAuth`, the 401 challenge. `protocol` picks the revisions it speaks: `'legacy'` (default), `'modern'` or `'dual'` (below). |
 | The pair | `startLocalMcp(opts)` | An MCP server and the authorization server that guards it, on two ports, already wired together. What most tests want. |
 
 Every one returns its URLs, what it recorded, and `close()`.
@@ -153,6 +153,37 @@ On the legacy wire the server is stateless, so it judges the client's `elicitati
 the latest `initialize` it received; a mode that was not declared fails the tool call without a
 request being sent. It gives up after 8 rounds of one call.
 
+### MCP Apps tools
+
+`appTools: true` (or an object) adds the "travel" server of the MCP Apps extension
+(`io.modelcontextprotocol/ui`): tools that declare an app in `_meta.ui`, and the app itself as a
+resource, served by both SDK generations.
+
+| Tool | `_meta.ui` | What it does |
+| --- | --- | --- |
+| `flights.search` | `resourceUri: ui://travel/results.html` | read-only; three flights as `structuredContent` (`TRAVEL_FLIGHTS`) and a sentence |
+| `flights.book` | the app, `visibility: ['model', 'app']` | writes; answers `booked:<flight>` |
+| `flights.refresh` | the app, `visibility: ['app']` | read-only, for the app only |
+| `flights.admin` | `visibility: ['model']` | for the model only; an app may not call it |
+| `flights.bad` | `resourceUri: ui://travel/bad.html` | its "app" is plain `text/html`: not an app |
+
+`ui://travel/results.html` is `text/html;profile=mcp-app` with `_meta.ui.csp.connectDomains` from
+the option, `permissions: { camera: {} }` and `prefersBorder: true`. The app (`travelAppHtml`,
+`src/mcp-app.ts`) speaks the extension's JSON-RPC by hand: it renders the tool's input and
+result, calls `flights.book` / `flights.refresh` / `flights.admin`, asks for a link
+(`TRAVEL_CHECKOUT_URL`), a message (`TRAVEL_MESSAGE`) and a height of 5000 px, and - its buttons
+"Run probes", "Talk to the page", "Leave" - tries the page's DOM, `top.location`, storage,
+cookies, IndexedDB, a popup, navigating the top window, `fetch` and an image to the undeclared
+URL, `fetch` to the declared one, `postMessage` straight to the top window, and navigating
+itself. Each probe writes `blocked` or `allowed: …` into `[data-probe=<name>]`.
+
+| Option (object form) | |
+| --- | --- |
+| `connectDomains` | the origins the resource declares (default none) |
+| `declaredUrl` | a URL on a declared origin: the `fetch-declared` probe |
+| `undeclaredUrl` | a URL on an origin it did not declare: the fetch, image and navigation probes |
+| `html` | replace the app's document |
+
 ## The misbehaviour switches
 
 Set one at a time; that is how a negative test stays about one thing.
@@ -193,6 +224,15 @@ in every `protocol` mode; only `server/discover` is touched:
 | `'server_error'` | answers 503 with a plain-text body |
 | `'garbage'` | answers 200 `application/json` with a body that is not JSON |
 | `'cors'` | is blocked in a browser: every preflight answers with the request headers a pre-2026 deployment allows (no `Mcp-Method`, no `Mcp-Name`). A client that is not a browser is not subject to CORS and sees no difference. |
+
+**MCP server** — `mcp.appFaults` (with `appTools`), both eras:
+
+| Field | `resources/read` of the app then |
+| --- | --- |
+| `mime` | answers with this MIME type |
+| `padTo` | pads the HTML (a comment) to this many characters |
+| `otherUri` | answers for `ui://travel/other.html` instead |
+| `cspInjection` | adds declared CSP entries that are not origins (`https://ok.example; script-src *`, `*`, `'unsafe-eval'`, `data:`, `https://*.com`) |
 
 **MCP server** — `mcp.elicitationFaults` (with `elicitationTools`), both eras:
 

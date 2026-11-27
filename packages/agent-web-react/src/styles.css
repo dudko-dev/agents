@@ -2231,3 +2231,272 @@
     flex: 1 1 0;
   }
 }
+
+/* ── MCP Apps: an app a server shipped, in host-drawn chrome ──────────────── */
+.awr-msg__apps {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.awr-frame--app.is-waiting {
+  border-color: color-mix(in srgb, var(--awr-warn) 55%, var(--awr-border));
+}
+.awr-frame--app .awr-frame__iframe {
+  height: 360px;
+  transition: height 0.15s ease;
+}
+.awr-frame__state {
+  flex: none;
+  padding: 0 7px;
+  border: 1px solid color-mix(in srgb, var(--awr-warn) 55%, transparent);
+  border-radius: 999px;
+  color: var(--awr-warn);
+  font-size: 11px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+.awr-frame__status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 12px;
+  border-top: 1px solid color-mix(in srgb, var(--awr-fg) 14%, var(--awr-border));
+  font-size: 12.5px;
+  color: var(--awr-muted);
+  overflow-wrap: anywhere;
+}
+.awr-frame__status svg {
+  flex: none;
+}
+.awr-frame__status--error {
+  color: var(--awr-danger);
+}
+/* The app's menu: the host's, drawn over the frame - the app cannot draw over it. */
+.awr-frame__menu {
+  position: absolute;
+  top: 36px;
+  right: 4px;
+  z-index: 3;
+  min-width: 208px;
+  max-width: calc(100% - 8px);
+  padding: 4px;
+  border: 1px solid color-mix(in srgb, var(--awr-fg) 18%, var(--awr-border));
+  border-radius: 10px;
+  background: var(--awr-bg);
+  box-shadow: 0 10px 30px rgb(0 0 0 / 0.35);
+  font-size: 13px;
+  color: var(--awr-fg);
+}
+.awr-frame__menuitem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.awr-frame__menuitem:hover {
+  background: var(--awr-subtle);
+}
+.awr-frame__menuitem svg {
+  flex: none;
+  color: var(--awr-muted);
+}
+.awr-frame__menusep {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--awr-border);
+}
+.awr-frame__menunote {
+  margin: 0;
+  padding: 4px 8px 6px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--awr-muted);
+  overflow-wrap: anywhere;
+}
+/* Folded to one line ("hidden", "open in the panel"). */
+.awr-frame--line .awr-frame__head {
+  min-height: 40px;
+}
+.awr-frame__show {
+  flex: none;
+}
+/* The tag on the tool call an app came with. */
+.awr-tool__tag--app {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--awr-fg);
+}
+/* A request an app made: said to be the app's, not the agent's. */
+.awr-approval--app .awr-approval__head {
+  align-items: flex-start;
+  line-height: 1.45;
+}
+.awr-approval--app .awr-approval__icon {
+  margin-top: 3px;
+}
+.awr-approval__from {
+  margin: 0;
+  font-size: 12px;
+  color: var(--awr-muted);
+}
+.awr-approval__url,
+.awr-approval__quote {
+  margin: 0;
+  padding: 7px 9px;
+  border-radius: 6px;
+  background: var(--awr-subtle);
+  font-size: 12.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.awr-approval__url {
+  font-family: var(--awr-mono);
+  color: var(--awr-muted);
+}
+/* The host of a link: what the user checks. */
+.awr-approval__url b {
+  color: var(--awr-fg);
+  font-weight: 600;
+  background: color-mix(in srgb, var(--awr-warn) 16%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--awr-warn) 40%, transparent);
+  border-radius: 4px;
+  padding: 1px 3px;
+}
+.awr-approval__quote {
+  border-left: 3px solid color-mix(in srgb, var(--awr-fg) 25%, var(--awr-border));
+  white-space: pre-wrap;
+}
+/* The app in a panel beside the chat (wide), or a sheet from the bottom (narrow). */
+.awr-frame--panel {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-radius: 0;
+  border: 0;
+}
+.awr-frame--panel .awr-frame__head {
+  min-height: 46px;
+  padding-left: 14px;
+  background: var(--awr-subtle);
+}
+.awr-frame--panel .awr-frame__badges {
+  font-size: 11.5px;
+}
+.awr-frame--panel .awr-frame__well {
+  flex: 1 1 auto;
+  display: flex;
+  min-height: 0;
+}
+.awr-frame--panel .awr-frame__iframe {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 240px;
+}
+.awr-chat__apppanel {
+  position: relative;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  width: var(--awr-apppanel-width, min(480px, 45%));
+  min-height: 0;
+  border-left: 1px solid var(--awr-border);
+  background: var(--awr-bg);
+}
+.awr-sheet__scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  background: rgb(2 4 9 / 0.55);
+}
+.awr-chat__appsheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 21;
+  display: flex;
+  flex-direction: column;
+  height: min(80vh, 760px);
+  border: 1px solid var(--awr-border);
+  border-bottom: 0;
+  border-radius: 18px 18px 0 0;
+  background: var(--awr-bg);
+  box-shadow: 0 -12px 40px rgb(0 0 0 / 0.35);
+  overflow: hidden;
+}
+.awr-sheet__grab {
+  flex: none;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--awr-subtle);
+}
+.awr-sheet__grab::after {
+  content: '';
+  width: 38px;
+  height: 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--awr-fg) 25%, var(--awr-border));
+}
+@media (max-width: 480px), (pointer: coarse) {
+  .awr-frame__menuitem {
+    min-height: 40px;
+  }
+  .awr-frame__menu {
+    top: 48px;
+  }
+  .awr-frame__show {
+    min-height: 40px;
+  }
+}
+@media (max-width: 480px) {
+  /* A tool row with the app tag: the arguments take a line of their own, nothing is cut. */
+  .awr-tool__row:has(.awr-tool__tag--app) {
+    flex-wrap: wrap;
+  }
+  .awr-tool__row:has(.awr-tool__tag--app) .awr-tool__args {
+    flex: 1 1 100%;
+    order: 3;
+  }
+  .awr-tool__row:has(.awr-tool__tag--app) .awr-tool__tag--app {
+    order: 4;
+  }
+  .awr-tool__row:has(.awr-tool__tag--app) .awr-tool__cost {
+    order: 5;
+    margin-left: auto;
+  }
+  /* The title takes its line; the badges ("sandboxed", "waiting for you") go under it. */
+  .awr-frame--app .awr-frame__label {
+    flex-wrap: wrap;
+    row-gap: 0;
+  }
+  .awr-frame--app:not(.awr-frame--panel) .awr-frame__title {
+    flex: 1 1 100%;
+  }
+}
+/* The panel rendered into a host's element (`appPanel={element}`): it fills it. */
+.awr-apppanel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  border: 1px solid var(--awr-border);
+  border-radius: var(--awr-radius, 10px);
+  background: var(--awr-bg);
+  color: var(--awr-fg);
+  font-family: var(--awr-font);
+  overflow: hidden;
+}

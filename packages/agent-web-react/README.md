@@ -530,6 +530,23 @@ changes" prompt. With hundreds of tools the core switches to **tool search**
 (a compact catalogue + `find_tools`) above `toolSearchThreshold` — see the
 core's [capabilities doc](https://github.com/dudko-dev/agents/blob/main/packages/agent-web/docs/capabilities.md).
 
+### MCP Apps — a server's interface in the chat
+
+`apps: true` (on `useMcp` or `useMcpServers`) declares the [MCP Apps](https://github.com/modelcontextprotocol/ext-apps)
+extension: a tool whose server ships an HTML app for its result comes with that app, and
+`<AgentChat mcpApps>` draws it under the answer in a sandboxed frame. Whatever the app asks the
+host to do - call a tool of its server, open a link, put a message in the chat - is put to the
+user in the chat's consent area, labelled as the app's.
+
+```tsx
+const mcp = useMcpServers({ apps: true })
+const agent = useAgent({ model, tools: mcp.tools }, { deps: [mcp.tools] })
+<AgentChat controller={agent} mcpApps={mcp.apps} appPanel="auto" />
+```
+
+Off by default (the hooks declare nothing and every tool is mounted as before). Needs a core with
+MCP Apps. See [docs/chat.md](docs/chat.md#mcp-apps-a-servers-interface-in-the-chat).
+
 ## Components
 
 All components are optional and styled by `styles.css` (class-prefixed `awr-`,
@@ -547,7 +564,9 @@ use them standalone. The full guide: [docs/chat.md](docs/chat.md).
 | `<GeneratedMedia>` / `<TranscriptBlock>` | A file a media tool wrote, read from the workspace: an image inline or a native audio player (only the types the core generates; never SVG) / a folded "Transcript of …" block. `<MessageList files showMedia renderMedia>` places them in the answer. |
 | `<FileChips>` / `<FileChip>` | The files an answer wrote to the workspace (the core's `file.written` / `file.deleted`), as chips: name, kind, size, open, download; an inline preview (text with line numbers, a picture, your own rendering through `renderFileContent`), and an `.html` file in a sandboxed frame with Preview / Source. `<MessageList files showFileChips htmlPreview renderFile renderFileContent>` places them under the answer. |
 | `<SandboxedFrame>` / `<SourceView>` | Untrusted HTML inside chrome the host draws: `<iframe sandbox>` without `allow-same-origin`, by `srcdoc`, no network, fixed height (`html`, `scripts`, `title`, `label`, `actions`, `footer`, `height`) / a file's text with line numbers, never markup. See [the boundary](#the-html-preview-is-a-security-boundary). |
-| `<ToolApprovalPrompt>` | Consent cards (Allow once / Always / Deny); a helper's request says which helper asks (`showHelper`). |
+| `<ToolApprovalPrompt>` | Consent cards (Allow once / Always / Deny); a helper's request says which helper asks (`showHelper`); an MCP App's says the APP asks, with the server's own tool name. |
+| `<McpAppFrame>` / `<McpAppLine>` | An MCP App in host-drawn chrome ("App from server “travel” · sandboxed", panel, menu: reload / open in panel / hide): an opaque-origin frame, network only to the origins its resource declared, a bridge with an allow-list; inline, folded or in a panel (`app`, `host`, `variant`, `theme`, `defaultCollapsed`, `onOpenPanel`, `onClosePanel`, `showCalls`). `<AgentChat mcpApps>` places them under the answer. See [the boundary](#an-mcp-app-is-a-security-boundary). |
+| `<AppRequestPrompt>` | What an MCP App asks for besides a tool call: a link (its host highlighted, opened only on the user's click) or a message (put in the message box as a draft, never sent for the user). |
 | `<ApprovalModeSwitch>` | Segmented consent-mode switch. |
 | `<ChatHistoryList>` | Saved chats (from `useChatHistory`). |
 | `<FilesPanel>` | A `VirtualFileSystem`, live: preview, download, delete, upload. |
@@ -584,6 +603,27 @@ the frame says so; a DNS prefetch is not a request the policy sees (it can carry
 agent itself wrote into the page); the guards are verified in Chromium. Every guard has a test in
 `tests/files.test.ts` and, in a real browser, in `e2e/files.spec.ts`. Details:
 [docs/chat.md](docs/chat.md#the-html-preview-is-a-security-boundary).
+
+### An MCP App is a security boundary
+
+An MCP App is third-party HTML **with scripts** that talks to your page. `<McpAppFrame>` keeps the
+HTML preview's boundary and adds a bridge:
+
+| Guard | What it stops |
+| --- | --- |
+| `<iframe sandbox="allow-scripts">` (outer and inner), never `allow-same-origin`, no `allow` attribute | your DOM, `localStorage`, cookies, IndexedDB (the key vault); navigating your tab, popups, forms; camera, microphone, location, clipboard |
+| a policy built from the resource's declared origins only (`connectDomains`, `resourceDomains`), re-checked; nothing declared = no network | `fetch` / images / scripts to an origin the server did not declare; a declared entry that is not an origin (`*`, `'unsafe-eval'`, `; script-src *`) |
+| the policy first in the app's document AND inherited from a shell of ours; the shell's `frame-src 'none'` | the app pre-empting the policy; navigating itself to the network |
+| a relay in the shell by window; your page listens to the frame it drew only (`event.source`) | an app (or anything else) posting to your page directly |
+| an allow-list of methods, parameters checked, at most 3 requests in flight, nothing but `ping` before `ui/initialize` | resource reads, model-context updates, downloads, sampling; floods |
+| tool calls through the agent's consent gate (writes always ask, "always allow" is the app's alone), only tools of its own server that let apps call them; links only on the user's click; messages only as a draft | an app acting with the user's authority, silently |
+| the label, the controls, the menu and every prompt drawn by the host outside the frame; the height clamped to 120 - 800 px | an app imitating or covering a control of the chat |
+
+The specification asks a web host for a sandbox proxy on a second origin with `allow-same-origin`;
+a library in your page has no second origin, so an app gets an opaque one (no storage or cookies
+of its own; its requests carry `Origin: null`). WebRTC is not governed by `connect-src` in
+Chromium. Every guard has a test in `tests/apps.test.ts` and, in a real browser against a hostile
+app, in `e2e/apps.spec.ts`. Details: [docs/chat.md](docs/chat.md#an-app-is-a-security-boundary).
 
 ### Build your own UI
 

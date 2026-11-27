@@ -265,6 +265,56 @@ export interface AgentLabels {
   searchFiltered: (n: number) => string
   /** The list was cut to the cap. */
   searchTruncated: string
+
+  // ── MCP Apps (an app a server's tool came with) ────────────────────────────
+  /** The host's label on an app's frame: "App from server “travel”". */
+  appFrom: (server: string) => string
+  /** The badge beside it. */
+  appSandboxed: string
+  /** The badge while a request of the app waits for the user. */
+  appWaiting: string
+  /** The tag on the tool call an app came with, and the activity summary's count. */
+  appTag: string
+  appsCount: (n: number) => string
+  appLoading: string
+  /** The app could not be read or is refused (`reason` is the core's message). */
+  appFailed: (reason: string) => string
+  /** No connection to its server (not connected any more, or apps are off). */
+  appUnavailable: (server: string) => string
+  /** The folded line: "App from server “travel” · hidden [Show]". */
+  appHidden: string
+  appShow: string
+  /** The app's menu and what is in it. */
+  appMenu: string
+  appReload: string
+  appOpenPanel: string
+  appHide: string
+  /** The note at the bottom of the menu. */
+  appServedBy: (server: string, uri: string) => string
+  /** The line left in the transcript while the app is in the panel, and its button. */
+  appInPanel: string
+  appBringBack: string
+  appClosePanel: string
+  /** The panel's footer. */
+  appPanelNote: (server: string) => string
+  /** The accessible name of the app's frame. */
+  appFrameName: (server: string) => string
+  /** Under the frame: the tools the app called, and the ones that were refused. */
+  appRan: (names: string) => string
+  appRefused: string
+  /** A tool call the app asks for (`<ToolApprovalPrompt>`): the lead and the note. */
+  approvalLeadApp: (server: string) => string
+  approvalFromApp: (server: string, readOnly: boolean) => string
+  /** A link the app asks to open (`<AppRequestPrompt>`). */
+  appLinkLead: (server: string) => string
+  appLinkNote: string
+  appLinkOpen: string
+  appCancel: string
+  /** A message the app asks to put in the chat. */
+  appMessageLead: (server: string) => string
+  appMessageNote: string
+  appMessageAccept: string
+  appMessageDiscard: string
 }
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`
@@ -508,6 +558,44 @@ export const defaultLabels: AgentLabels = {
   searchNoResults: 'no results',
   searchFiltered: (n) => `${n} left out by the web access policy`,
   searchTruncated: 'list cut short',
+
+  appFrom: (server) => `App from server “${server}”`,
+  appSandboxed: 'sandboxed',
+  appWaiting: 'waiting for you',
+  appTag: 'app',
+  appsCount: (n) => plural(n, 'app', 'apps'),
+  appLoading: 'Loading the app…',
+  appFailed: (reason) => `The app could not be shown: ${reason}`,
+  appUnavailable: (server) =>
+    `The server “${server}” is not connected, so its app cannot be shown.`,
+  appHidden: 'hidden',
+  appShow: 'Show',
+  appMenu: 'App menu',
+  appReload: 'Reload app',
+  appOpenPanel: 'Open in panel',
+  appHide: 'Hide app',
+  appServedBy: (server, uri) =>
+    `Served by ${server} as ${uri}. It cannot read this chat, your keys or your files.`,
+  appInPanel: 'open in the panel',
+  appBringBack: 'Bring back',
+  appClosePanel: 'Close the panel',
+  appPanelNote: (server) =>
+    `Content from the server “${server}”. It cannot read this chat, your keys or your files.`,
+  appFrameName: (server) => `App from server ${server}`,
+  appRan: (names) => `The app ran ${names}`,
+  appRefused: 'refused',
+  approvalLeadApp: (server) => `The app “${server}” wants to run`,
+  approvalFromApp: (server, readOnly) =>
+    `Asked by the app, not by the agent. This tool ${readOnly ? 'only reads' : 'changes'} data on the server “${server}”.`,
+  appLinkLead: (server) => `The app “${server}” wants to open a link. Open it?`,
+  appLinkNote: 'Opens in a new tab, outside this chat. Check the site name before you continue.',
+  appLinkOpen: 'Open',
+  appCancel: 'Cancel',
+  appMessageLead: (server) => `The app “${server}” wants to put a message in your message box`,
+  appMessageNote:
+    'Nothing is sent until you send it yourself, and you can change it first. It is the app’s text, not yours.',
+  appMessageAccept: 'Put in the message box',
+  appMessageDiscard: 'Discard',
 }
 
 /** Overrides: any label, with the nested groups merged key by key. */

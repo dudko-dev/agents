@@ -54,8 +54,11 @@ export const sandboxTokens = (scripts = false): string => (scripts ? 'allow-scri
 export const escapeAttribute = (value: string): string =>
   value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 
-const cspMeta = (scripts: boolean): string =>
-  `<meta http-equiv="Content-Security-Policy" content="${escapeAttribute(sandboxedCsp(scripts))}">`
+/** A `<meta>` that carries a Content-Security-Policy. */
+export const cspMetaTag = (policy: string): string =>
+  `<meta http-equiv="Content-Security-Policy" content="${escapeAttribute(policy)}">`
+
+const cspMeta = (scripts: boolean): string => cspMetaTag(sandboxedCsp(scripts))
 
 // A DOCTYPE token ends at the first ">" whatever is inside it (the tokenizer's rule), so this is
 // exactly where the parser leaves it.
@@ -67,9 +70,13 @@ const DOCTYPE = /^[﻿\t\n\f\r ]*<!doctype[^>]*>/i
  * come earlier - not its own `<meta>`, not a `<base>`, not a script before `<html>` - and a
  * later policy of its own can only narrow ours.
  */
-export const withCspFirst = (html: string, scripts = false): string => {
+export const withCspFirst = (html: string, scripts = false): string =>
+  withPolicyFirst(html, sandboxedCsp(scripts))
+
+/** `withCspFirst` with a policy of the caller's (an MCP App's, built by `mcpAppCsp`). */
+export const withPolicyFirst = (html: string, policy: string): string => {
   const doctype = DOCTYPE.exec(html)?.[0] ?? ''
-  return `${doctype}${cspMeta(scripts)}${html.slice(doctype.length)}`
+  return `${doctype}${cspMetaTag(policy)}${html.slice(doctype.length)}`
 }
 
 /**
