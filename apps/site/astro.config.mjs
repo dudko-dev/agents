@@ -5,6 +5,9 @@ import starlightLlmsTxt from 'starlight-llms-txt'
 const SITE = 'https://agent.dudko.dev'
 const DESCRIPTION =
   'Planning AI agents in TypeScript for Node and the browser: plan, execute, replan and answer over MCP tools, with React bindings and a live demo.'
+// The docs share the site's card (public/og.png, drawn by scripts/og-cards.mjs): a docs page's own
+// title and description are what a link preview shows next to it.
+const OG_IMAGE_ALT = 'dudko.dev agents: planning AI agents for Node and the browser'
 
 // One site: the landing page (src/pages/index.astro), the documentation (Starlight, generated
 // from the packages' own Markdown by scripts/sync-docs.mjs) and the demo, which is built by
@@ -34,6 +37,7 @@ export default defineConfig({
         { tag: 'meta', attrs: { property: 'og:image', content: `${SITE}/og.png` } },
         { tag: 'meta', attrs: { property: 'og:image:width', content: '1200' } },
         { tag: 'meta', attrs: { property: 'og:image:height', content: '630' } },
+        { tag: 'meta', attrs: { property: 'og:image:alt', content: OG_IMAGE_ALT } },
         { tag: 'meta', attrs: { name: 'twitter:card', content: 'summary_large_image' } },
       ],
       sidebar: [

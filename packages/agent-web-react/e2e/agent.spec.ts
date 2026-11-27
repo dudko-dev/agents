@@ -375,3 +375,33 @@ test('labels: every text of the chat can be swapped (Spanish, German)', async ({
   await expect(page.getByRole('button', { name: 'Send' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Show chats' })).toBeVisible()
 })
+
+test('the page has a proper head: canonical, description and its own social card', async ({
+  page,
+}) => {
+  await page.goto('/')
+  await expect(page).toHaveTitle('Live demo · dudko.dev agents')
+  await expect(page.locator('link[rel="canonical"]')).toHaveAttribute(
+    'href',
+    'https://agent.dudko.dev/demo/',
+  )
+  const description = await page.locator('meta[name="description"]').getAttribute('content')
+  expect(description?.length).toBeGreaterThanOrEqual(120)
+  expect(description?.length).toBeLessThanOrEqual(160)
+  await expect(page.locator('meta[property="og:description"]')).toHaveAttribute(
+    'content',
+    description!,
+  )
+  // Its own card (apps/site/public/og/demo.png), with the size and the alt text previews read.
+  await expect(page.locator('meta[property="og:image"]')).toHaveAttribute(
+    'content',
+    'https://agent.dudko.dev/og/demo.png',
+  )
+  await expect(page.locator('meta[property="og:image:width"]')).toHaveAttribute('content', '1200')
+  await expect(page.locator('meta[property="og:image:height"]')).toHaveAttribute('content', '630')
+  await expect(page.locator('meta[property="og:image:alt"]')).toHaveAttribute('content', /\S/)
+  await expect(page.locator('meta[property="og:site_name"]')).toHaveAttribute(
+    'content',
+    'dudko.dev agents',
+  )
+})
