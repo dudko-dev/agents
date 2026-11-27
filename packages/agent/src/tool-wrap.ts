@@ -1,5 +1,5 @@
 import type { Tool, ToolExecutionOptions, ToolSet } from 'ai'
-import { isReadOnlyTool, type IApprovalController } from './approval.ts'
+import { isCodeExecutionTool, isReadOnlyTool, type IApprovalController } from './approval.ts'
 import { withToolOutputLimit } from './compaction.ts'
 import { runContext } from './context.ts'
 import type { IRunState } from './internal.ts'
@@ -80,6 +80,7 @@ export const wrapTool = (
     return tool
   }
   const readOnly = isReadOnlyTool(tool)
+  const codeExecution = isCodeExecutionTool(tool)
   const builtIn = opts.builtIn === true
   const inner = tool.execute as
     ((input: unknown, options: ToolExecutionOptions<unknown>) => unknown) | undefined
@@ -89,6 +90,7 @@ export const wrapTool = (
       await deps.approval.gate(name, input, {
         readOnly,
         builtIn,
+        ...(codeExecution ? { codeExecution } : {}),
         signal: options?.abortSignal,
       })
     } catch (err) {

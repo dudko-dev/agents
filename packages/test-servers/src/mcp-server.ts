@@ -38,6 +38,7 @@ import {
   type IToolResult,
   type IUrlElicitation,
 } from './mcp-elicitation.ts'
+import { createSkillCatalog, type ISkillFaults } from './mcp-skills.ts'
 import {
   TRAVEL_APP_URI,
   TRAVEL_BAD_APP_URI,
@@ -127,6 +128,14 @@ export interface ILocalMcpServerOptions extends IListenOptions {
    * plain `text/html`). An object configures the app (`ITravelAppOptions`). Default: off.
    */
   appTools?: boolean | ITravelAppOptions
+  /**
+   * Also serve skills (the `io.modelcontextprotocol/skills` extension, SEP-2640) through the 2.x
+   * SDK's `SkillsExtension`: `git-workflow`, `pdf-processing` (with `references/FORMS.md` and
+   * `scripts/extract.py`), `acme/billing/refunds` and `acme/support/refunds` (one name, two
+   * skills). 2026-07-28 only (`modern`, and the modern side of `dual`): the extension is written
+   * against that revision. `skillFaults` adds the misbehaving ones. Default: off.
+   */
+  skills?: boolean
 }
 
 /**
@@ -227,6 +236,16 @@ export interface ILocalMcpServer {
   elicitationFaults: IElicitationFaults
   /** Mutable: make the app resource misbehave (with `appTools`). */
   appFaults: IAppFaults
+  /** Mutable (with `skills`): the misbehaving skills the listing gets from now on. */
+  skillFaults: ISkillFaults
+  /** Every skill file (`resources/read` of a skill URI) a client read, in order (with `skills`). */
+  skillReads: string[]
+  /**
+   * Serve one more skill (with `skills`) - `path` is its skill path, its last segment its name -
+   * and announce a resource list change (`notifications/resources/list_changed`) to every
+   * listening client, which is how a skills change reaches one.
+   */
+  addSkill: (path: string, description: string, body: string) => Promise<void>
   /** Every round of every elicitation tool: what the client declared, answered and echoed. */
   elicitations: IElicitationRound[]
   /** The pages URL-mode elicitations pointed at. `POST` to a page's `url` submits it. */
@@ -315,6 +334,8 @@ export const startLocalMcpServer = async (
   const appOptions: ITravelAppOptions | undefined =
     opts.appTools === true ? {} : opts.appTools || undefined
   const extraTools: string[] = []
+  // Modern only: the SDK's skills extension over a source of ours (see `mcp-skills.ts`).
+  const skillCatalog = opts.skills ? await createSkillCatalog() : undefined
   let instructions = opts.instructions
   let mcpOrigin = ''
   const elicitation = createElicitation({
@@ -840,6 +861,8 @@ export const startLocalMcpServer = async (
         },
       )
     }
+    // Before the handler connects it: the capability is declared by `attach`.
+    skillCatalog?.extension.attach(server)
     return server
   }
 
@@ -1023,6 +1046,28 @@ export const startLocalMcpServer = async (
     ) {
       return
     }
+    // `skillFaults.nameMismatch`: the SDK drops an entry whose URI and name disagree, so the
+    // listing that carries one is answered here, before the SDK sees the request.
+    if (
+      skillCatalog?.faults.nameMismatch &&
+      isObject(message) &&
+      message.method === 'skills/list' &&
+      isObject(message.params) &&
+      isObject(message.params._meta) &&
+      message.params._meta[PROTOCOL_VERSION_KEY] !== undefined
+    ) {
+      json(res, 200, {
+        jsonrpc: '2.0',
+        id: message.id ?? null,
+        result: {
+          resultType: 'complete',
+          skills: await skillCatalog.listing(),
+          ttlMs: 0,
+          cacheScope: 'private',
+        },
+      })
+      return
+    }
     // The answer of a legacy client to a request this server sent it.
     if (isObject(message) && message.method === undefined && typeof message.id === 'number') {
       const deliver = awaitedReplies.get(message.id)
@@ -1089,6 +1134,15 @@ export const startLocalMcpServer = async (
     heldListens: () => heldListens.size,
     elicitationFaults: elicitation.faults,
     appFaults,
+    skillFaults: skillCatalog?.faults ?? {},
+    skillReads: skillCatalog?.reads ?? [],
+    addSkill: async (path, description, body) => {
+      if (!skillCatalog) {
+        throw new Error('addSkill: this server was started without `skills`')
+      }
+      await skillCatalog.add(path, description, body)
+      modern?.notify.resourcesChanged()
+    },
     elicitations: elicitation.rounds,
     urlElicitations: elicitation.urlElicitations,
     setInstructions: (next) => {
@@ -1145,6 +1199,8 @@ export interface ILocalMcpOptions extends Pick<IListenOptions, 'host' | 'cors'> 
   cacheHint?: { ttlMs: number; cacheScope: 'public' | 'private' }
   /** Also mount the MCP Apps tools and resources (see `ILocalMcpServerOptions.appTools`). */
   appTools?: boolean | ITravelAppOptions
+  /** Also serve skills, 2026-07-28 only (see `ILocalMcpServerOptions.skills`). */
+  skills?: boolean
 }
 
 export interface ILocalMcp extends ILocalMcpServer {
@@ -1202,6 +1258,7 @@ export const startLocalMcp = async (opts: ILocalMcpOptions = {}): Promise<ILocal
       urlElicitationWaitMs: opts.urlElicitationWaitMs,
       cacheHint: opts.cacheHint,
       appTools: opts.appTools,
+      skills: opts.skills,
     })
   } catch (err) {
     await as.close()

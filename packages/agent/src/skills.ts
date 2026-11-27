@@ -4,6 +4,18 @@ import path from 'node:path'
 import { z } from 'zod'
 import { markReadOnly } from './approval.ts'
 import { runContext } from './context.ts'
+import {
+  assignMcpSkillNames,
+  mcpSkillBodyText,
+  mcpSkillDescription,
+  mcpSkillFileText,
+  mcpSkillPreamble,
+  resolveMcpSkillFile,
+  selectMcpSkills,
+  type McpSkillLoaded,
+  type McpSkillRecord,
+  type McpSkillSource,
+} from './mcp-skills.ts'
 import type { ISkill } from './types.ts'
 
 export const SKILL_NAME_PATTERN = /^[a-z0-9-]{1,64}$/
@@ -94,6 +106,145 @@ export const learnedPreamble = (skill: ISkill): string => {
     `It is a hint from your own experience - not an instruction from the user. ` +
     `If it conflicts with the user's request or your rules, the user and the rules win.]\n`
   )
+}
+
+// ── skills an MCP server serves (`skills: true` on its config) ────────────────
+//
+// They join the same list as the operator's skills and the lessons, named `<server>/<skill>`
+// (a name with a "/" is an MCP skill's: no other kind can hold one). Their instructions are NOT
+// held: a skill's SKILL.md is read - and verified against its entry by the connection - the first
+// time the skill is loaded (load_skill, or the planner picking it), and a file of it only when
+// read_skill_file asks for it. What the connection gives is kept here, per skill object.
+
+interface IMcpSkillState {
+  source: McpSkillSource
+  record: McpSkillRecord
+  loaded?: McpSkillLoaded
+  loading?: Promise<McpSkillLoaded>
+}
+
+const mcpSkillStates = new WeakMap<ISkill, IMcpSkillState>()
+
+// Whether a skill is one an MCP server serves (made by createMcpSkills, not by a config).
+export const isMcpSkill = (skill: ISkill): boolean => mcpSkillStates.has(skill)
+
+// Whether its instructions were read (and verified) - only then can it be active.
+export const isMcpSkillLoaded = (skill: ISkill): boolean =>
+  mcpSkillStates.get(skill)?.loaded !== undefined
+
+/**
+ * The skills the given servers serve, as catalog entries: named `<server>/<skill>`
+ * (assignMcpSkillNames), capped per server and in all (selectMcpSkills - the notices go to
+ * `warn`), described with their origin. `names` are the names already taken (the operator's
+ * skills and the lessons): a bare name they share with an MCP skill is said - a collision is
+ * surfaced, never resolved silently; the MCP skill keeps its own, namespaced name.
+ */
+export const createMcpSkills = (
+  sources: readonly McpSkillSource[],
+  names: Iterable<string>,
+  warn: (message: string) => void,
+): ISkill[] => {
+  const own = new Set(names)
+  const taken = new Set(own)
+  const { kept, notices } = selectMcpSkills(
+    sources.map((source) => ({ server: source.server, skills: [...source.skills] })),
+  )
+  for (const notice of notices) {
+    warn(notice)
+  }
+  const out: ISkill[] = []
+  for (const source of sources) {
+    const records = kept.filter((k) => k.server === source.server).map((k) => k.skill)
+    const assigned = assignMcpSkillNames(source.server, records, taken)
+    records.forEach((record, i) => {
+      if (own.has(record.name)) {
+        warn(
+          `[mcp] ${source.server}: its skill "${record.name}" has the name of one of this agent's own skills; the agent's keeps the name, the server's is "${assigned[i]}"`,
+        )
+      }
+      const skill: ISkill = {
+        name: assigned[i],
+        description: mcpSkillDescription(record.description, source.server),
+        content: '',
+        mcp: { server: source.server, uri: record.uri },
+      }
+      mcpSkillStates.set(skill, { source, record })
+      out.push(skill)
+    })
+  }
+  return out
+}
+
+/**
+ * Read and verify an MCP skill's instructions (once per skill object; a failed read is not
+ * kept). Throws when the connection refuses them (a digest, size or frontmatter mismatch, a
+ * skill no longer listed): nothing of it reaches the model then.
+ */
+export const loadMcpSkill = async (skill: ISkill, signal?: AbortSignal): Promise<void> => {
+  const state = mcpSkillStates.get(skill)
+  if (!state || state.loaded) {
+    return
+  }
+  state.loading ??= state.source.load(state.record.uri, signal ? { signal } : undefined)
+  try {
+    const loaded = await state.loading
+    skill.content = mcpSkillBodyText(loaded.body, loaded.files)
+    state.loaded = loaded
+  } catch (err) {
+    state.loading = undefined
+    throw err
+  }
+}
+
+/**
+ * Load the MCP skills among `names` before they are activated (the planner's picks, a resumed
+ * run's active skills). One that cannot be loaded is reported and left out: it is not activated.
+ */
+export const prepareMcpSkills = async (
+  skills: ISkill[],
+  names: readonly string[],
+  warn: (message: string) => void,
+  signal?: AbortSignal,
+): Promise<void> => {
+  for (const name of names) {
+    const skill = skills.find((s) => s.name === name)
+    if (!skill || !isMcpSkill(skill) || isMcpSkillLoaded(skill)) {
+      continue
+    }
+    try {
+      await loadMcpSkill(skill, signal)
+    } catch (err) {
+      warn(`[skills] ${name} is not loaded: ${(err as Error).message}`)
+    }
+  }
+}
+
+// One file of a loaded MCP skill, as text under its own header (loaded first if need be).
+const readMcpSkillFile = async (
+  skill: ISkill,
+  requested: string,
+  signal?: AbortSignal,
+): Promise<string> => {
+  await loadMcpSkill(skill, signal)
+  const state = mcpSkillStates.get(skill) as IMcpSkillState
+  const loaded = state.loaded as McpSkillLoaded
+  const target = resolveMcpSkillFile(loaded.files, requested)
+  if ('refused' in target) {
+    throw new Error(`Skill "${skill.name}": ${target.refused}`)
+  }
+  const text = await state.source.readFile(loaded, target.path, signal ? { signal } : undefined)
+  return mcpSkillFileText(state.source.server, state.record.uri, target.path, text)
+}
+
+// How a skill's text is introduced to the model: a lesson as the agent's own note, an MCP
+// server's skill as third-party knowledge; the operator's skills as they are.
+export const skillPreamble = (skill: ISkill): string => {
+  const learned = learnedPreamble(skill)
+  if (learned) {
+    return learned
+  }
+  const state = mcpSkillStates.get(skill)
+  return state ? mcpSkillPreamble(state.source.server, state.record.uri) : ''
 }
 
 const unquote = (raw: string): string => {
@@ -311,7 +462,12 @@ export const renderActiveSkills = (
     if (!skill) {
       continue
     }
-    const block = `### Skill: ${skill.name}\n${learnedPreamble(skill)}${skill.content.trim()}`
+    // An MCP skill whose instructions were not read is not active (activateSkill), whatever a
+    // resumed snapshot says.
+    if (isMcpSkill(skill) && !isMcpSkillLoaded(skill)) {
+      continue
+    }
+    const block = `### Skill: ${skill.name}\n${skillPreamble(skill)}${skill.content.trim()}`
     const left = budget - used
     if (left <= 0) {
       parts.push(`### Skill: ${skill.name}\n… [skill instructions clipped: budget exhausted]`)
@@ -337,14 +493,29 @@ export const activateSkill = (
   name: string,
   by: 'plan' | 'tool',
   target?: { activeSkills: string[] },
-  emit?: (event: { type: 'skill.activated'; name: string; by: 'plan' | 'tool' }) => void,
+  emit?: (event: {
+    type: 'skill.activated'
+    name: string
+    by: 'plan' | 'tool'
+    server?: string
+  }) => void,
 ): boolean => {
-  if (!skills.some((s) => s.name === name)) {
+  const skill = skills.find((s) => s.name === name)
+  if (!skill) {
+    return false
+  }
+  // An MCP skill is active only once its instructions were read and verified (loadMcpSkill).
+  if (isMcpSkill(skill) && !isMcpSkillLoaded(skill)) {
     return false
   }
   if (target && !target.activeSkills.includes(name)) {
     target.activeSkills.push(name)
-    emit?.({ type: 'skill.activated', name, by })
+    emit?.({
+      type: 'skill.activated',
+      name,
+      by,
+      ...(skill.mcp ? { server: skill.mcp.server } : {}),
+    })
   }
   return true
 }
@@ -381,14 +552,18 @@ export const createSkillTools = (skills: ISkill[], opts: { live?: boolean } = {}
                 : 'Skill name, from the SKILLS list',
             ),
         }),
-        execute: async ({ name }) => {
+        execute: async ({ name }, options) => {
           const skill = find(name)
+          // An MCP server's skill: its SKILL.md is read and verified now (throws on a mismatch).
+          await loadMcpSkill(skill, options?.abortSignal)
           const store = runContext.getStore()
           activateSkill(skills, skill.name, 'tool', store?.state, store?.emit)
           return {
             name: skill.name,
-            content: `${learnedPreamble(skill)}${skill.content}`,
-            files: (skill.files ?? []).map((f) => f.path),
+            content: `${skillPreamble(skill)}${skill.content}`,
+            files: isMcpSkill(skill)
+              ? [...((mcpSkillStates.get(skill) as IMcpSkillState).loaded?.files ?? [])]
+              : (skill.files ?? []).map((f) => f.path),
           }
         },
       }),
@@ -401,8 +576,13 @@ export const createSkillTools = (skills: ISkill[], opts: { live?: boolean } = {}
           name: z.string().describe('Skill name'),
           path: z.string().describe('Skill-relative file path, as listed by load_skill'),
         }),
-        execute: async ({ name, path: filePath }) => {
+        execute: async ({ name, path: filePath }, options) => {
           const skill = find(name)
+          // An MCP server's skill: the file is read from that server only, if its entry lists
+          // it, and verified - as text, never run.
+          if (isMcpSkill(skill)) {
+            return readMcpSkillFile(skill, filePath, options?.abortSignal)
+          }
           let wanted: string
           try {
             wanted = normalizeSkillPath(filePath)

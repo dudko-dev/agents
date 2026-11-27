@@ -55,6 +55,12 @@ export interface McpServerSpec {
    * and the core decides (`'legacy'`).
    */
   protocol?: McpProtocolMode
+  /**
+   * EXPERIMENTAL: load the server's skills into the agent's catalog, as `<server>/<skill>` (see
+   * `McpConnectOptions.skills`; needs `protocol: 'auto'` or `'modern'`). Remembered with the
+   * server. Left out, nothing is passed (off).
+   */
+  skills?: boolean
 }
 
 /** A server's live state. */
@@ -64,6 +70,8 @@ export interface McpServerView {
   auth: McpAuthMode
   /** The protocol revisions the server was added with, when it was given any. */
   protocolMode?: McpProtocolMode
+  /** It was added with `skills: true`: its skills (if it serves any) are in the agent's catalog. */
+  skills?: boolean
   /** What was negotiated (`version`, `era`), while it is connected and the core reports it. */
   protocol?: Omit<McpServerProtocol, 'server'>
   status: McpStatus
@@ -130,6 +138,7 @@ interface StoredServer {
   auth: McpAuthMode
   oauth?: McpServerSpec['oauth']
   protocol?: McpProtocolMode
+  skills?: boolean
 }
 
 interface PendingRecord {
@@ -163,6 +172,7 @@ const view = (s: StoredServer, patch: Partial<McpServerView> = {}): McpServerVie
   url: s.url,
   auth: s.auth,
   ...(isProtocolMode(s.protocol) ? { protocolMode: s.protocol } : {}),
+  ...(s.skills === true ? { skills: true } : {}),
   status: 'idle',
   catalog: [],
   ...patch,
@@ -217,6 +227,7 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
         auth: s.auth,
         ...(oauth && typeof oauth === 'object' ? { oauth } : {}),
         ...(s.protocolMode ? { protocol: s.protocolMode } : {}),
+        ...(s.skills ? { skills: true } : {}),
       })
     }
   }
@@ -310,6 +321,7 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
               connectTimeoutMs: optionsRef.current.connectTimeoutMs,
               // Only when asked for: without it the connection is built as it always was.
               ...(spec.protocol ? { protocol: spec.protocol } : {}),
+              ...(spec.skills === true ? { skills: true } : {}),
             },
           },
           {
@@ -380,6 +392,7 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
         auth: input.auth ?? 'none',
         ...(input.oauth ? { oauth: input.oauth } : {}),
         ...(isProtocolMode(input.protocol) ? { protocol: input.protocol } : {}),
+        ...(input.skills === true ? { skills: true } : {}),
       }
       specsRef.current.set(name, spec)
       live(name).token = input.auth === 'bearer' ? input.token : undefined

@@ -11,6 +11,7 @@ import { tool, type Tool, type ToolSet } from 'ai'
 import { createRequire } from 'node:module'
 import { Worker } from 'node:worker_threads'
 import { z } from 'zod'
+import { markCodeExecution } from './approval.ts'
 import {
   createSandboxQueue,
   resolveSandboxLimits,
@@ -134,5 +135,8 @@ export const createSandboxTools = (
   if (!sandbox) {
     return undefined
   }
-  return { [RUN_JS_TOOL]: createSandboxTool(sandbox === true ? {} : sandbox, deps) }
+  // It runs code: asked whenever the run acts on an MCP server's skill (approval.ts).
+  return {
+    [RUN_JS_TOOL]: markCodeExecution(createSandboxTool(sandbox === true ? {} : sandbox, deps)),
+  }
 }

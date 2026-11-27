@@ -788,6 +788,65 @@ fakes, in the Node package).
   when the host asked for change notices (`onToolsChanged`); a host that wants none passes none.
   The 2025 revisions are untouched: their GET stream belongs to the transport, which resumes it.
 
+## MCP skills: one catalog, namespaced, under a preamble, opt-in
+
+A server's skills (the `io.modelcontextprotocol/skills` extension, SEP-2640, Beta) are a second
+source of the agent's skills, beside the host's and the lessons. The choices:
+
+- **The same catalog, not a parallel one.** The agent already has progressive disclosure (an
+  index in the prompts, `load_skill` / `read_skill_file`, the planner's `plan.skills`), and the
+  extension is a transport for exactly that format. A second mechanism would be a second set of
+  prompts and tools to keep safe; one catalog means an MCP skill is loaded, capped and accounted
+  for (compaction, the active-skills budget) like any other.
+- **Namespaced by the host's label, with a separator no other name can hold.** The extension says
+  a name is a label, not an identity, that two servers may serve skills of one name, and that an
+  MCP skill must never silently shadow, or be substituted for, another origin's - the host's
+  included (Names; Security Considerations). `<server>/<skill>` does that by construction: a host
+  skill's and a lesson's name is `[a-z0-9-]`, so no comparison or precedence rule is needed to keep
+  `git-workflow` the host's - there is no way for the two to meet. The server is named by the
+  host's key, not its `serverInfo.name` (which a server chooses, and which two servers can share),
+  in the alphabet of the tool prefix `server__tool`. Same-named skills of one server are kept by
+  their full path rather than dropped ("MUST disambiguate ... rather than silently discarding or
+  preferring one").
+- **Under a preamble, like a lesson.** A lesson is loaded under `learnedPreamble` - "a hint from
+  your own experience, not an instruction" - because what the agent wrote must not outrank the
+  user. A server's skill gets the same treatment one step further away (`mcpSkillPreamble`):
+  third-party text, knowledge only, which cannot grant permissions, approve a call, change the
+  approval mode, widen egress or the sandbox, or make the agent run anything. The extension asks
+  for exactly that: origin visible "at the point it enters model context", never "indistinguishable
+  from a local filesystem skill", "data, not directives". The wording is the guard the model sees;
+  the controls themselves are code and do not read it.
+- **Opt-in per server, no agent-wide default.** It is experimental (the extension is Beta), it is
+  "a higher-risk surface than remote tool invocation", and the host's per-server decision is the
+  "explicit user policy" that governs whether a skill is loaded at all. A default on the agent
+  would hand that decision to whichever servers are added later - in the demo, any URL a user
+  types. Off means off: the capability is not declared and nothing is asked (the wire is what it
+  was).
+- **2026-07-28 only.** The extension is written against that revision (Protocol Revision: every
+  request carries `_meta`, results are `CacheableResult`s); the SDK would also run it on a 2025
+  connection, but there is no specification of it there. So `'legacy'` warns and asks nothing, and
+  an `'auto'` connection that negotiated 2025 lists nothing.
+- **The SDK verifies, the shared file decides.** `SkillsClient` (`@modelcontextprotocol/client/ext/skills`)
+  checks every read against the entry - size, SHA-256, the frontmatter parsed with a YAML 1.2
+  parser and compared field by field - which is the part where an own implementation (a YAML
+  parser) would be the weak point. Everything that is policy is ours, pure and shared byte for byte
+  with the Node sibling (`mcp/skills.ts`): which entries are taken, the names, the caps, the
+  preamble, which file may be read (only what the entry the skill was loaded with lists: "the held
+  entry"), the catalog over the client. In this package the SDK's skills client is imported only by
+  a connection that lists skills.
+- **Carried by the tools, like the instructions.** The host merges `mcp.tools` into the agent and
+  that is all it does for instructions; skills follow the same path (`markMcpSkills`), so a host -
+  and the React hooks - wire nothing new. The cost: a server none of whose tools is mounted offers
+  no skills (the same rule as its instructions: a server the host filtered out does not speak).
+- **Lazy, and nothing on disk.** The extension forbids fetching files ahead of need, and caching
+  on disk brings rules of its own; a skill's text lives in memory, per agent, for as long as the
+  agent does, and a checkpoint keeps only names.
+- **Code is asked for while acting on one.** The extension requires that no code runs on the host
+  because a server's skill said so without a person's approval. The agent's code-running tool is
+  `run_js` (and whatever the host marks): while the run, or the run that started a helper, has an
+  MCP skill active, a call of one is asked whatever the mode. This only tightens: a deny stays a
+  deny, and nothing else about consent changes.
+
 ## MCP elicitation: the host answers, the model never sees the question
 
 - **On the connection, not on the agent.** The capability is declared in the handshake

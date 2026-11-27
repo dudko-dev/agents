@@ -19,7 +19,8 @@ import { checkLimits, resolveLimits } from './limits.ts'
 import { createInitialPlan, filterPlanSkills, planStepCap } from './planner.ts'
 import { renderTrace, renderTraceSteps } from './prompts.ts'
 import { decideNextAction, decideWithDecisionModel, type ReplanDecision } from './replanner.ts'
-import { activateSkill } from './skills.ts'
+import { isMcpSkillName } from './mcp-skills.ts'
+import { activateSkill, isMcpSkill, isMcpSkillLoaded, prepareMcpSkills } from './skills.ts'
 import { synthesizeAnswer } from './synthesizer.ts'
 import {
   createStepWrites,
@@ -368,6 +369,26 @@ const runAgentLoopInner = async (
   const activate = (name: string, by: 'plan' | 'tool'): void => {
     activateSkill(ctx.skills ?? [], name, by, state, proxiedCtx.emit)
   }
+  // An MCP server's skill is read (and verified) before it is activated: the planner's picks
+  // here, and a resumed run's active ones below. One that cannot be read is left out.
+  const warnSkill = (message: string): void =>
+    proxiedCtx.emit({ type: 'log', level: 'warn', message })
+  const activatePlanned = async (names: readonly string[] | undefined): Promise<void> => {
+    if (!names?.length) {
+      return
+    }
+    await prepareMcpSkills(ctx.skills ?? [], names, warnSkill, signal)
+    for (const name of names) {
+      activate(name, 'plan')
+    }
+  }
+  if (state.activeSkills.some(isMcpSkillName)) {
+    await prepareMcpSkills(ctx.skills ?? [], state.activeSkills, warnSkill, signal)
+    state.activeSkills = state.activeSkills.filter((name) => {
+      const skill = ctx.skills?.find((s) => s.name === name)
+      return !skill || !isMcpSkill(skill) || isMcpSkillLoaded(skill)
+    })
+  }
 
   // Persistence facade. Hooks may be async; we await so a slow store
   // back-pressures the run. Write-hook failures are logged but never
@@ -566,9 +587,7 @@ const runAgentLoopInner = async (
       }
     }
     proxiedCtx.emit({ type: 'plan.created', plan })
-    for (const name of plan.skills ?? []) {
-      activate(name, 'plan')
-    }
+    await activatePlanned(plan.skills)
   }
 
   const trace: IStepResult[] = resumed ? [...resumed.trace] : []
@@ -960,9 +979,7 @@ const runAgentLoopInner = async (
       }
       currentPlan = reviseInto(proxiedCtx, decision.newPlan)
       proxiedCtx.emit({ type: 'plan.revised', plan: currentPlan, reason: decision.reason })
-      for (const name of currentPlan.skills ?? []) {
-        activate(name, 'plan')
-      }
+      await activatePlanned(currentPlan.skills)
       stepIndex = 0
       await persistCheckpoint()
       continue

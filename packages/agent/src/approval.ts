@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { runContext } from './context.ts'
+import type { IRunState } from './internal.ts'
+import { isMcpSkillName } from './mcp-skills.ts'
 import type {
   EventHandler,
   IToolApprovalConfig,
@@ -51,6 +53,19 @@ export const markReadOnly = <T extends object>(tool: T, readOnly = true): T => {
 export const isReadOnlyTool = (tool: unknown): boolean =>
   Boolean(tool) && typeof tool === 'object' && (tool as { readOnly?: unknown }).readOnly === true
 
+// Code-execution metadata on a tool object: the call runs code (the sandbox's run_js has it; a
+// host marks its own with markCodeExecution). While a run acts on skills an MCP server served,
+// such a call is always asked (decideToolPermission).
+export const markCodeExecution = <T extends object>(tool: T, codeExecution = true): T => {
+  ;(tool as { codeExecution?: boolean }).codeExecution = codeExecution
+  return tool
+}
+
+export const isCodeExecutionTool = (tool: unknown): boolean =>
+  Boolean(tool) &&
+  typeof tool === 'object' &&
+  (tool as { codeExecution?: unknown }).codeExecution === true
+
 const globCache = new Map<string, RegExp>()
 const globToRegExp = (glob: string): RegExp => {
   let re = globCache.get(glob)
@@ -99,11 +114,15 @@ export interface IToolDecisionInput {
   remembered?: ReadonlySet<string>
   // Built-in tools (load_skill, read_skill_file, find_tools) are always allowed.
   builtIn?: boolean
+  // The tool runs code (isCodeExecutionTool).
+  codeExecution?: boolean
+  // The run (or a run above it) acts on skills an MCP server served: their names.
+  mcpSkills?: readonly string[]
 }
 
 export interface IToolDecision {
   permission: ToolPermission
-  source: 'builtin' | 'remembered' | 'rule' | 'mode'
+  source: 'builtin' | 'remembered' | 'rule' | 'mode' | 'mcp-skill'
   // The matched rule pattern (source 'rule').
   rule?: string
 }
@@ -112,11 +131,23 @@ export interface IToolDecision {
  * Decide one call. Pure. Order: built-in -> remembered "always allow" ->
  * most specific rule -> mode default (autopilot: allow; read-only: allow if
  * readOnly else deny; ask-writes: allow if readOnly else ask; ask-all: ask).
+ * Then one rule that only ever tightens: a call that runs code while the run acts on an MCP
+ * server's skill is asked when it would have been allowed - by the mode, a rule or an "always
+ * allow" alike (the Skills extension: no code runs here on a server's skill without a person's
+ * approval). A deny stays a deny.
  */
 export const decideToolPermission = (input: IToolDecisionInput): IToolDecision => {
   if (input.builtIn) {
     return { permission: 'allow', source: 'builtin' }
   }
+  const decision = decideByPolicy(input)
+  if (decision.permission === 'allow' && input.codeExecution && input.mcpSkills?.length) {
+    return { permission: 'ask', source: 'mcp-skill' }
+  }
+  return decision
+}
+
+const decideByPolicy = (input: IToolDecisionInput): IToolDecision => {
   if (input.remembered?.has(input.name)) {
     return { permission: 'allow', source: 'remembered' }
   }
@@ -139,7 +170,24 @@ export const decideToolPermission = (input: IToolDecisionInput): IToolDecision =
 export interface IApprovalGateOptions {
   readOnly: boolean
   builtIn?: boolean
+  // The tool runs code (isCodeExecutionTool): asked while the run acts on an MCP server's skill.
+  codeExecution?: boolean
   signal?: AbortSignal
+}
+
+// The MCP skills the run of this call acts on - its own and those of every run above it (a
+// helper the model started works for its caller's skill too). Skill names with a "/" are MCP
+// skills: a host skill's or a lesson's name cannot hold one.
+const mcpSkillsActing = (state: IRunState | undefined): string[] => {
+  const names: string[] = []
+  for (let s = state; s; s = s.spawn?.parent) {
+    for (const name of s.activeSkills) {
+      if (isMcpSkillName(name) && !names.includes(name)) {
+        names.push(name)
+      }
+    }
+  }
+  return names
 }
 
 export interface IApprovalController {
@@ -258,6 +306,8 @@ export const createApprovalController = (
   const remembered = new Set<string>()
 
   const gate = async (name: string, input: unknown, opts: IApprovalGateOptions): Promise<void> => {
+    const store = runContext.getStore()
+    const mcpSkills = opts.codeExecution && !opts.builtIn ? mcpSkillsActing(store?.state) : []
     const decision = decideToolPermission({
       name,
       readOnly: opts.readOnly,
@@ -265,11 +315,12 @@ export const createApprovalController = (
       rules: config?.rules,
       remembered,
       builtIn: opts.builtIn,
+      ...(opts.codeExecution ? { codeExecution: true } : {}),
+      ...(mcpSkills.length ? { mcpSkills } : {}),
     })
     if (decision.permission === 'allow') {
       return
     }
-    const store = runContext.getStore()
     const emit: EventHandler = store?.emit ?? deps.fallbackEmit ?? (() => {})
     const id = randomUUID()
     const deny = (reason: string, automatic: boolean): never => {
@@ -286,7 +337,12 @@ export const createApprovalController = (
     }
     const onRequest = config?.onRequest
     if (!onRequest) {
-      deny('no approval handler configured', true)
+      deny(
+        decision.source === 'mcp-skill'
+          ? "code runs only with a person's approval while the run acts on an MCP server's skill, and no approval handler is configured"
+          : 'no approval handler configured',
+        true,
+      )
       return
     }
     const shown = deps.sanitize ? await deps.sanitize(name, input) : input
@@ -303,6 +359,7 @@ export const createApprovalController = (
       readOnly: opts.readOnly,
       ...(step ? { step } : {}),
       ...(subagent ? { subagent } : {}),
+      ...(decision.source === 'mcp-skill' ? { mcpSkills } : {}),
     })
     const request: IToolApprovalRequest = {
       id,
@@ -312,6 +369,7 @@ export const createApprovalController = (
       ...(step ? { step } : {}),
       ...(store?.runId ? { runId: store.runId } : {}),
       ...(subagent ? { subagent } : {}),
+      ...(decision.source === 'mcp-skill' ? { mcpSkills } : {}),
     }
     let raw: ToolApprovalDecision
     // The host's own signal: aborted when the question ends without its answer (the bound, a
@@ -350,6 +408,8 @@ export const createApprovalController = (
       resume?.()
     }
     const d = normalizeDecision(raw)
+    // An "always allow" given to a call asked because of an MCP skill is remembered as usual; it
+    // does not lift the rule above, which asks again next time.
     if (d.approved && d.remember) {
       remembered.add(name)
     }
