@@ -610,6 +610,14 @@ on test data" writes a file and claims an output; with it the run is a visible t
   that can be helped: Node always uses a `worker_threads` worker, the browser a Web
   Worker the host supplies, and `terminate()` is the hard stop. One worker and one wasm
   instance per run: no state survives, a killed run cannot poison the next.
+- **Why the clock starts with the program.** `timeoutMs` bounds the guest. The engine's
+  own start before it (the runtime, the host functions, the bootstrap that builds the
+  guest's console and timers) is our code, the same for every run, and runs nothing the
+  guest wrote. When it counted, a short limit on a busy machine was spent before the
+  program began: the interrupt landed in the bootstrap and a legitimate run failed with
+  "the sandbox runtime failed to start". The start has a bound of its own instead - a
+  worker that has not said `started` within 20 s is given up and terminated - and
+  `durationMs` still reports the whole run, start included.
 - **Why the host supplies the browser worker.** A `new Worker(new URL(...))` inside this
   package would be followed by every bundler into every host build - with an import of an
   optional peer that most hosts have not installed. The pattern is the subagent's: the

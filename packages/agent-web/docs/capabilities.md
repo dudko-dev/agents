@@ -2020,11 +2020,13 @@ and nothing of the page — no `window`, `document`, `fetch`, `XMLHttpRequest`,
   for this mode so the bundler resolves the peer; the default is a runtime import (an
   import map, or Node).
 
-**Limits** (`default / at most`): `timeoutMs` 5000 / 60000 — time waiting for a file
-operation, a consent prompt included, does not count; `memoryLimitBytes` 32 MiB /
-256 MiB — the hard maximum of the guest's WebAssembly memory, the engine's own 16 MiB
-included; `maxOutputChars` 8000 / 100000 — `stdout` and `result` together, `truncated`
-says when it was cut; `maxCodeChars` 100000 / 1000000. Nothing is shared between runs,
+**Limits** (`default / at most`): `timeoutMs` 5000 / 60000 — counted from the program's
+first instruction: starting the worker and the engine does not count (with a worker, a
+start that never finishes is given up after 20 s), and neither does time waiting for a
+file operation, a consent prompt included; `memoryLimitBytes` 32 MiB / 256 MiB — the
+hard maximum of the guest's WebAssembly memory, the engine's own 16 MiB included;
+`maxOutputChars` 8000 / 100000 — `stdout` and `result` together, `truncated` says when
+it was cut; `maxCodeChars` 100000 / 1000000. Nothing is shared between runs,
 and at most four run at once.
 
 **Files.** When the agent has the file tools (`createFileTools(vfs)`) and `files` is not

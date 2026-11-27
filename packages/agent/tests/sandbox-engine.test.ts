@@ -21,6 +21,7 @@ import {
   type ISandboxRequest,
   type SandboxHostCall,
 } from '../src/sandbox-engine.ts'
+import { slowStart } from './helpers/sandbox-slow-start.ts'
 
 // The engine on THIS thread (no worker): what is tested here is what stops the guest by itself -
 // the interrupt handler, the memory limit, the absence of any host object. The hard stop (a
@@ -392,6 +393,32 @@ test('engine: time spent waiting for the host is not the guest time - guest time
   assert.equal(spinning.error?.name, 'TimeoutError')
 })
 
+test('guard timeout: the clock starts with the program - a slow engine start is not the guest time', async () => {
+  // The engine's start takes 300 ms (a busy machine); the limit is 100 ms.
+  const slow = slowStart(lib, 300)
+  const limits = resolveSandboxLimits({ timeoutMs: 100 })
+  const quick = await runGuest(slow, { code: 'console.log("ran"); 6 * 7', limits })
+  assert.deepEqual(
+    { ok: quick.ok, stdout: quick.stdout, result: quick.result, error: quick.error },
+    { ok: true, stdout: 'ran\n', result: 42, error: undefined },
+    'a 300 ms start inside a 100 ms limit is not a timeout',
+  )
+  // And from the program's first instruction the limit holds as before.
+  const began = Date.now()
+  let programAt = 0
+  const loop = await runGuest(
+    slow,
+    { code: 'console.log("going"); while (true) {}', limits },
+    { onStart: () => (programAt = Date.now()) },
+  )
+  const ranFor = Date.now() - programAt
+  assert.ok(programAt - began >= 300, 'the start was slow')
+  assert.equal(loop.error?.name, 'TimeoutError')
+  assert.match(loop.error?.message ?? '', /stopped after 100 ms/)
+  assert.equal(loop.stdout, 'going\n')
+  assert.ok(ranFor >= 90 && ranFor < 2000, `stopped ${ranFor} ms after the program started`)
+})
+
 test('engine: two runs share nothing', async () => {
   const [a, b] = await Promise.all([
     run(
@@ -582,6 +609,31 @@ test('guard timeout (hard): a worker that does not answer is terminated at timeo
   assert.match(r.error?.message ?? '', /killed after 300 ms/)
   assert.equal(w.state.killed, true)
   assert.ok(took >= 380 && took < 1500, `killed at the deadline, took ${took} ms`)
+})
+
+test('guard timeout (hard): the kill is counted from "started" - a slow start is bounded by startupMs instead', async () => {
+  const w = fakeWorker()
+  // A start longer than timeoutMs + grace, then a run that finishes at once.
+  w.child.listen(() =>
+    setTimeout(() => {
+      w.child.post({ type: 'started' })
+      w.child.post({ type: 'done', result: { ok: true, stdout: '', result: 'ran' } })
+    }, 600),
+  )
+  const r = await runInWorker(w.parent, request('1'), { graceMs: 100 })
+  assert.equal(r.ok, true, JSON.stringify(r.error))
+  assert.equal(r.result, 'ran')
+
+  // A start that never ends is still given up, by its own bound.
+  const stuck = fakeWorker()
+  stuck.child.listen(() => {})
+  const started = Date.now()
+  await assert.rejects(
+    runInWorker(stuck.parent, request('1'), { startupMs: 600, graceMs: 100 }),
+    (e: Error) => e instanceof SandboxUnavailableError && /did not start/.test(e.message),
+  )
+  assert.ok(Date.now() - started >= 590, 'not at timeoutMs + grace')
+  assert.equal(stuck.state.killed, true)
 })
 
 test('worker protocol: a worker that never starts, dies, or lacks the peer', async () => {

@@ -536,7 +536,9 @@ What stops it:
 
 - **Time.** The engine's interrupt handler ends JavaScript that loops, and the guest
   cannot catch that. With `sandbox.worker` the worker is terminated at `timeoutMs` + 1 s
-  whatever the guest is doing.
+  whatever the guest is doing. The clock starts with the program's first instruction:
+  the engine's own start before it is the same code for every run and runs nothing of the
+  guest's, and a worker that never gets that far is terminated after 20 s.
 - **Memory.** The guest's WebAssembly memory has a hard maximum (`memoryLimitBytes`);
   QuickJS's own accounting is not relied on. Recursion ends in the engine's stack check.
 - **Output.** `stdout` and `result` are cut in the engine and again on the agent's side,

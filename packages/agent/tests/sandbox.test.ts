@@ -107,8 +107,27 @@ test('guard concurrency: runs share nothing, and a run after a killed one works'
   const after = await call(tool, '[typeof globalThis.mark, 1 + 1]')
   assert.deepEqual(after.result, ['undefined', 2])
   const afterKill = await run(UNINTERRUPTIBLE, { timeoutMs: 100 })
-  assert.match(afterKill.error?.message ?? '', /killed/)
+  assert.equal(afterKill.error?.name, 'TimeoutError')
+  assert.match(afterKill.error?.message ?? '', /killed after 100 ms/)
   assert.equal((await call(tool, '"alive"')).result, 'alive')
+})
+
+test('guard timeout: a slow start (a busy machine) is not the guest time - and the kill still comes', async () => {
+  // A 100 ms limit used to cover the engine's start as well: on a busy machine that start
+  // alone outlasted it and the run failed with "the sandbox runtime failed to start".
+  const slow = createSandboxTool(
+    { timeoutMs: 100 },
+    { workerUrl: new URL('./fixtures/sandbox-slow-start-worker.ts', import.meta.url) },
+  )
+  const quick = await call(slow, 'console.log("ran"); 6 * 7')
+  assert.deepEqual(
+    { ok: quick.ok, stdout: quick.stdout, result: quick.result, error: quick.error },
+    { ok: true, stdout: 'ran\n', result: 42, error: undefined },
+  )
+  assert.ok(quick.durationMs >= 400, 'the start is in the run duration, not in the limit')
+  const killed = await call(slow, UNINTERRUPTIBLE)
+  assert.equal(killed.error?.name, 'TimeoutError')
+  assert.match(killed.error?.message ?? '', /killed after 100 ms/)
 })
 
 test('guard concurrency: more than four runs queue instead of starting more workers at once', async () => {
