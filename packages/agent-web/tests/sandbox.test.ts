@@ -491,6 +491,22 @@ test('guard files: the guest gets what the file tools grant - no more', async ()
   )
   assert.match(String(denied.out.result), /denied/)
   assert.equal(await vfs.read('/denied.txt'), undefined)
+  assert.equal(
+    denied.events.some((e) => e.type === 'file.written'),
+    false,
+    'a refused write is not reported',
+  )
+  // A write that happened is reported to the run, as fs_write's is.
+  const wrote = await js('await fs.writeFile("/out/made.txt", "hello"); 1', true, {
+    tools: createFileTools(vfs),
+  })
+  const written = wrote.events.filter((e) => e.type === 'file.written')
+  assert.equal(written.length, 1)
+  assert.deepEqual(
+    { path: written[0].path, mediaType: written[0].mediaType, bytes: written[0].bytes },
+    { path: '/out/made.txt', mediaType: 'text/plain', bytes: 5 },
+  )
+  assert.equal(typeof written[0].step?.id, 'string')
   // A rule that denies fs_read hides the workspace from import and fs alike.
   const blind = await js(
     'let e; try { await fs.readFile("/notes.txt") } catch (x) { e = x.message } let m; try { require("./lib/math.js") } catch (x) { m = x.message } [e, m]',

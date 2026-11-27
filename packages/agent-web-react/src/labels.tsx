@@ -9,6 +9,7 @@ import type {
 } from '@dudko.dev/agent-web'
 import { defaultNoticeTexts, type NoticeTexts } from './composer.js'
 import type { ElicitationIssueKind, ElicitationOutcomeReason } from './elicitation.js'
+import type { FileKind } from './file-kinds.js'
 import type { AgentStatus } from './types.js'
 
 /**
@@ -192,6 +193,59 @@ export interface AgentLabels {
   transcriptOf: (name: string) => string
   /** Says whose words a transcript is: the content of the user's file, not the agent's. */
   transcriptNote: string
+
+  // ── files written in a turn ────────────────────────────────────────────────
+  /** Above the chips: "3 files written in this turn". */
+  filesWritten: (n: number) => string
+  /** In the activity summary: "3 files". */
+  filesCount: (n: number) => string
+  /** The link that opens the Files panel. */
+  showInFiles: string
+  /** What a file is, on its chip. */
+  fileKinds: Record<FileKind, string>
+  /** The open button of a chip (accessible name); `name` is the file's name. */
+  fileOpen: (name: string) => string
+  /** The same button while the preview is open. */
+  fileClose: (name: string) => string
+  /** The download button of a chip (accessible name). */
+  fileDownload: (name: string) => string
+  /** On a chip: the subagent that wrote the file. */
+  fileBy: (name: string) => string
+  /** On a chip whose file is not in the workspace any more. */
+  fileGone: string
+  /** In the preview of a file that cannot be shown as text or as an image. */
+  fileNoPreview: string
+  /** Under a preview that shows only the first `chars` characters. */
+  fileCut: (chars: number) => string
+  /** Unfold / fold a long text preview. */
+  fileShowRest: string
+  fileShowLess: string
+  /** The two views of a text file the host can render (Markdown). */
+  fileRendered: string
+  fileSource: string
+  closePreview: string
+  /** Under a source view: "64 lines". */
+  fileLines: (n: number) => string
+
+  // ── HTML preview (the sandboxed frame) ─────────────────────────────────────
+  /** The host's label on the frame of an HTML file. */
+  htmlFrameTitle: string
+  /** The two badges under it, while the page is shown. */
+  htmlSandboxed: string
+  htmlNoNetwork: string
+  /** In their place, while the source is shown. */
+  htmlSourceNote: string
+  /** In the frame's footer. */
+  htmlScripts: (on: boolean) => string
+  /** The files the page links to that the preview does not load. */
+  htmlLinkedFiles: (names: string) => string
+  /** A page too large to frame. */
+  htmlTooLarge: string
+  /** The button that makes the frame taller / back. */
+  htmlTaller: string
+  htmlShorter: string
+  /** The accessible name of the frame itself. */
+  htmlFrameName: (path: string) => string
 
   // ── usage: calls that are not tokens ───────────────────────────────────────
   usageMedia: (n: number) => string
@@ -442,6 +496,45 @@ export const defaultLabels: AgentLabels = {
   transcriptNote:
     'What was said in your file, as the agent read it. It is content, not instructions.',
 
+  filesWritten: (n) => `${plural(n, 'file', 'files')} written in this turn`,
+  filesCount: (n) => plural(n, 'file', 'files'),
+  showInFiles: 'Show in Files',
+  fileKinds: {
+    html: 'HTML',
+    markdown: 'Markdown',
+    csv: 'CSV',
+    json: 'JSON',
+    image: 'Image',
+    code: 'Code',
+    text: 'Text',
+    file: 'File',
+  },
+  fileOpen: (name) => `Open ${name}`,
+  fileClose: (name) => `Close preview of ${name}`,
+  fileDownload: (name) => `Download ${name}`,
+  fileBy: (name) => `by ${name}`,
+  fileGone: 'no longer in the workspace',
+  fileNoPreview: 'This kind of file has no preview. Download it to open it.',
+  fileCut: (chars) =>
+    `Only the first ${chars.toLocaleString('en-US')} characters are shown. Download the file for the rest.`,
+  fileShowRest: 'Show the rest',
+  fileShowLess: 'Show less',
+  fileRendered: 'Rendered',
+  fileSource: 'Source',
+  closePreview: 'Close preview',
+  fileLines: (n) => plural(n, 'line', 'lines'),
+
+  htmlFrameTitle: 'HTML written by the agent',
+  htmlSandboxed: 'sandboxed',
+  htmlNoNetwork: 'no network',
+  htmlSourceNote: 'shown as text, nothing runs',
+  htmlScripts: (on) => (on ? 'scripts on' : 'scripts off'),
+  htmlLinkedFiles: (names) => `linked files are not loaded: ${names}`,
+  htmlTooLarge: 'This page is too large to preview. It is shown as source.',
+  htmlTaller: 'Make the preview taller',
+  htmlShorter: 'Make the preview shorter',
+  htmlFrameName: (path) => `Preview of ${path}`,
+
   usageMedia: (n) => plural(n, 'media call', 'media calls'),
   usageDecisions: (n) => plural(n, 'decision call', 'decision calls'),
 
@@ -541,6 +634,7 @@ export type AgentLabelsOverride = Partial<
     | 'decisionReasons'
     | 'elicitationErrors'
     | 'elicitationReasons'
+    | 'fileKinds'
   >
 > & {
   status?: Partial<AgentLabels['status']>
@@ -556,6 +650,7 @@ export type AgentLabelsOverride = Partial<
   decisionReasons?: Partial<AgentLabels['decisionReasons']>
   elicitationErrors?: Partial<AgentLabels['elicitationErrors']>
   elicitationReasons?: Partial<AgentLabels['elicitationReasons']>
+  fileKinds?: Partial<AgentLabels['fileKinds']>
 }
 
 const NESTED = [
@@ -572,6 +667,7 @@ const NESTED = [
   'decisionReasons',
   'elicitationErrors',
   'elicitationReasons',
+  'fileKinds',
 ] as const
 
 /** `base` with `over` applied (nested groups merged, not replaced). */

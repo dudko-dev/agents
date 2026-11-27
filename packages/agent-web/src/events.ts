@@ -144,6 +144,15 @@ type AgentEventBody =
       step?: IPlanStep
     }
   /**
+   * A file tool (`createFileTools`: `fs_write`) or the sandbox's `fs.writeFile` wrote a file to
+   * the virtual file system during the run: `path` is where, `mediaType` its MIME type, `bytes`
+   * its size. The content is never in an event - read it with `vfs.read(path)`. Emitted once per
+   * successful write; a write that was refused or failed emits nothing.
+   */
+  | { type: 'file.written'; path: string; mediaType: string; bytes: number; step?: IPlanStep }
+  /** A file tool (`fs_delete`) deleted a file that existed. */
+  | { type: 'file.deleted'; path: string; step?: IPlanStep }
+  /**
    * An audio file was transcribed: one the user attached to the run ('attachment') or one the
    * model asked about ('tool'). `text` is what the model reads of it (cleaned and capped).
    */

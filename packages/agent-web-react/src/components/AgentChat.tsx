@@ -106,6 +106,16 @@ export interface AgentChatProps {
    * the transcripts of audio files, folded (default true). The bytes are read from `files`.
    */
   showMedia?: boolean
+  /**
+   * The files an answer wrote to the workspace (`files`), as chips under it: name, kind, size,
+   * open (an inline preview - an `.html` file in a sandboxed frame) and download (default true).
+   */
+  showFileChips?: boolean
+  /**
+   * How an `.html` file is previewed: sandboxed, no network, scripts off by default;
+   * `{ scripts: true }` lets its inline scripts run; `false` shows HTML as source only.
+   */
+  htmlPreview?: MessageListProps['htmlPreview']
   /** A stop button on each running subagent (default true). */
   stoppableSubagents?: boolean
   /** Conversation total in the header (default true). */
@@ -168,6 +178,10 @@ export interface AgentChatProps {
   renderSubagent?: RenderSubagent
   /** A generated image / audio file. */
   renderMedia?: MessageListProps['renderMedia']
+  /** A file chip of an answer. */
+  renderFile?: MessageListProps['renderFile']
+  /** A written text file rendered your way (Markdown); `undefined` = shown as source. */
+  renderFileContent?: MessageListProps['renderFileContent']
   renderApproval?: ToolApprovalPromptProps['renderApproval']
   /** A server's question (gets the built-in card as `fallback`, and `answer`). */
   renderElicitation?: ElicitationPromptProps['renderElicitation']
@@ -230,6 +244,8 @@ const AgentChatInner = ({
   showSearchResults = true,
   showSubagents = true,
   showMedia = true,
+  showFileChips = true,
+  htmlPreview,
   stoppableSubagents = true,
   showTotalUsage = true,
   showStatus = true,
@@ -252,6 +268,8 @@ const AgentChatInner = ({
   renderToolCall,
   renderSubagent,
   renderMedia,
+  renderFile,
+  renderFileContent,
   renderApproval,
   slots = {},
   components = {},
@@ -303,6 +321,11 @@ const AgentChatInner = ({
   const toggleFiles = () => {
     setFilesOpen((o) => !o)
     if (narrow && !filesOpen) setHistoryOpen(false)
+  }
+
+  const showFiles = () => {
+    setFilesOpen(true)
+    if (narrow) setHistoryOpen(false)
   }
 
   // Follow the transcript while the user is at the bottom; leave them be when
@@ -480,7 +503,12 @@ const AgentChatInner = ({
             showSearchResults={showSearchResults}
             showSubagents={showSubagents}
             showMedia={showMedia}
+            showFileChips={showFileChips}
             files={files}
+            htmlPreview={htmlPreview}
+            onShowFiles={files ? showFiles : undefined}
+            renderFile={renderFile}
+            renderFileContent={renderFileContent}
             renderMedia={renderMedia}
             renderSubagent={renderSubagent}
             onStopSubagent={stoppableSubagents ? agent.stopSubagent : undefined}

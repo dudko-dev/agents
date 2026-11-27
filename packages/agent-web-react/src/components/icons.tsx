@@ -186,3 +186,57 @@ export const ExternalIcon = ({ size, className }: IconProps) => (
     <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
   </svg>
 )
+
+export const CodeIcon = ({ size, className }: IconProps) => (
+  <svg {...base(size)} className={className}>
+    <path d="m8 7-5 5 5 5M16 7l5 5-5 5" />
+  </svg>
+)
+
+export const FileTextIcon = ({ size, className }: IconProps) => (
+  <svg {...base(size)} className={className}>
+    <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z" />
+    <path d="M14 3v6h6M8 13h8M8 17h6" />
+  </svg>
+)
+
+export const TableIcon = ({ size, className }: IconProps) => (
+  <svg {...base(size)} className={className}>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <path d="M3 10h18M3 15h18M9 4v16M15 4v16" />
+  </svg>
+)
+
+export const ImageIcon = ({ size, className }: IconProps) => (
+  <svg {...base(size)} className={className}>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <circle cx="9" cy="10" r="1.6" />
+    <path d="m4 18 5.5-5 4 3.5 2.5-2 4 3.5" />
+  </svg>
+)
+
+export const ChevronUpIcon = ({ size, className }: IconProps) => (
+  <svg {...base(size)} className={className}>
+    <path d="m6 15 6-6 6 6" />
+  </svg>
+)
+
+export const LockIcon = ({ size, className }: IconProps) => (
+  <svg {...base(size)} className={className}>
+    <rect x="5" y="11" width="14" height="9" rx="2" />
+    <path d="M8 11V8a4 4 0 0 1 8 0v3" />
+  </svg>
+)
+
+export const NoNetworkIcon = ({ size, className }: IconProps) => (
+  <svg {...base(size)} className={className}>
+    <circle cx="12" cy="12" r="9" />
+    <path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18M4 4l16 16" />
+  </svg>
+)
+
+export const ExpandIcon = ({ size, className }: IconProps) => (
+  <svg {...base(size)} className={className}>
+    <path d="M8 3H4v4M16 3h4v4M8 21H4v-4M16 21h4v-4" />
+  </svg>
+)
