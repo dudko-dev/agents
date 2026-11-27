@@ -480,6 +480,44 @@ test('subagents are folded from their own nested events', () => {
   assert.equal(s.subagents[1].error, 'timed out')
 })
 
+test("seq / attempt (the order of a run's events across resumes) change nothing the reducer folds", () => {
+  const inner = { id: 'c1', description: 'Search' }
+  const run: AgentEvent[] = [
+    { type: 'run.start', goal: 'x', runId: 'r1' },
+    { type: 'plan.created', plan: { thought: 't', steps: [step] } },
+    { type: 'step.start', step, index: 1, total: 1 },
+    { type: 'subagent.start', id: 'sa1', name: 'analyst', task: 'look' },
+    {
+      type: 'subagent.event',
+      id: 'sa1',
+      name: 'analyst',
+      event: { type: 'step.tool-call', step: inner, name: 'engine', input: {} },
+    },
+    { type: 'step.tool-call', step, name: 'add_note', input: { text: 'hi' } },
+    { type: 'step.tool-result', step, name: 'add_note', output: { id: 1 }, ok: true },
+    {
+      type: 'usage',
+      phase: 'execute',
+      usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+    },
+    { type: 'final', text: 'Done.' },
+  ]
+  // As the core sends them: numbered, the envelope in the parent run, the child event in its own.
+  const numbered = run.map((e, i): AgentEvent => {
+    const n = { ...e, seq: i + 1, attempt: 2 } as AgentEvent
+    return n.type === 'subagent.event'
+      ? ({ ...n, event: { ...n.event, seq: 7, attempt: 1 } } as AgentEvent)
+      : n
+  })
+  const fold = (events: AgentEvent[]): AgentUiState =>
+    events.reduce((s, e) => event(s, e), createInitialAgentState())
+  const plain = fold(run)
+  const withOrder = fold(numbered)
+  // The raw log keeps what arrived; everything folded from it is the same.
+  assert.deepEqual({ ...withOrder, events: [] }, { ...plain, events: [] })
+  assert.equal(withOrder.events.at(-1)?.seq, run.length)
+})
+
 test('skills, discovered tools, compactions and budget stops are recorded per run', () => {
   let s = event(createInitialAgentState(), { type: 'run.start', goal: 'x' })
   s = event(s, { type: 'skill.activated', name: 'tone', by: 'plan' })

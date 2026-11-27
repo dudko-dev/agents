@@ -8,6 +8,8 @@ import { connectMcpServers, filterTools } from './mcp.ts'
 import { collectMcpInstructions, renderMcpInstructions } from './mcp-shared.ts'
 import { buildModelFromStage, resolveStage } from './provider.ts'
 import { runAgentLoop } from './runner.ts'
+import { resolveRunLease } from './run-lease.ts'
+import { checkSharedLimits, stageModel } from './shared-limits.ts'
 import { createLearning } from './learning.ts'
 import { MODEL_TIERS, resolveEscalation } from './tiers.ts'
 import { createSandboxTools, RUN_JS_TOOL } from './sandbox.ts'
@@ -115,6 +117,9 @@ export interface IAgent {
   reconnect: () => Promise<void>
   close: (options?: ICloseOptions) => Promise<void>
   activeRuns: () => number
+  // With config.runLease: who this agent is to the lease (runLease.owner, or a random id made at
+  // createAgent). Undefined without a lease.
+  readonly leaseOwner?: string
 }
 
 const LEVEL_RANK: Record<LogLevel, number> = {
@@ -156,6 +161,10 @@ export const createAgent = async (
   // Validated up front: a bad skill is a configuration error, not something
   // to discover mid-run.
   const skills = validateSkills(config.skills)
+  // The scale-out hooks, checked before anything connects: a lease or a limiter that cannot work
+  // is a configuration error.
+  const lease = resolveRunLease(config.runLease)
+  checkSharedLimits(config.sharedLimits)
   // The request shows the input AFTER inputSanitizer (idempotent by
   // contract); a throwing sanitizer redacts rather than leaks.
   const sanitizeForApproval = async (name: string, input: unknown): Promise<unknown> => {
@@ -554,6 +563,7 @@ export const createAgent = async (
     approval,
     ...(mcpSkillConsent ? { mcpSkillConsent } : {}),
     ...(media ? { media } : {}),
+    ...(lease ? { lease } : {}),
   }
   // Only between runs (here, a refresh, a reconnect): a run keeps the text it started with.
   const syncMcpInstructions = (text: string): void => {
@@ -728,19 +738,23 @@ export const createAgent = async (
     listLearnedSkills: () => (learning ? learning.learned().map((s) => ({ ...s })) : []),
     forgetSkill: async (name: string) => (learning ? learning.forget(name) : false),
     compact: async (options: ICompactOptions): Promise<ICompactResult> => {
-      const r = await compactHistory(options.history, ctx.synthesizerModel, {
-        thresholdTokens: compaction.thresholdTokens,
-        keepRecentTurns: compaction.keepRecentTurns,
-        summaryMaxTokens: compactionMaxTokens(config, compaction.summaryMaxTokens),
-        maxInputTokens: Math.floor(compaction.contextWindowTokens * 0.6),
-        force: options.force,
-        signal: options.signal,
-        timeoutMs: config.llmTimeoutMs,
-        onUsage: (usage) => {
-          accumulateUsage(spent, usage)
-          emit({ type: 'usage', phase: 'compact', usage })
+      const r = await compactHistory(
+        options.history,
+        stageModel(ctx, 'compaction', ctx.synthesizerModel),
+        {
+          thresholdTokens: compaction.thresholdTokens,
+          keepRecentTurns: compaction.keepRecentTurns,
+          summaryMaxTokens: compactionMaxTokens(config, compaction.summaryMaxTokens),
+          maxInputTokens: Math.floor(compaction.contextWindowTokens * 0.6),
+          force: options.force,
+          signal: options.signal,
+          timeoutMs: config.llmTimeoutMs,
+          onUsage: (usage) => {
+            accumulateUsage(spent, usage)
+            emit({ type: 'usage', phase: 'compact', usage })
+          },
         },
-      })
+      )
       if (r.compacted) {
         emit({
           type: 'context.compacted',
@@ -870,5 +884,6 @@ export const createAgent = async (
       }
     },
     activeRuns: () => activeRuns,
+    ...(lease ? { leaseOwner: lease.owner } : {}),
   }
 }

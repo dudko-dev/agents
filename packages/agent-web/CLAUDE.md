@@ -52,8 +52,12 @@ behind every decision.
 - `src/tools/` — `define`, `prompted` (catalog + dispatch), `mode`, `types`.
 - `src/agent/` — `schemas`, `planner`/`executor`/`replanner`/`synthesizer`,
   `runner` (createAgent), `loop-types`, `control` (RunControl: mid-run messages,
-  stopping one subagent), `persistence` (run checkpoints / resume), `internal` (per-run
-  state and prompt plumbing the stages share; not public).
+  stopping one subagent), `persistence` (run checkpoints / resume; `recordResume` puts a
+  resume's `attempt` on record - `onRunResume`, else `onStepComplete` - BEFORE any of its events,
+  and is not best-effort: a throw refuses the resume), `internal` (per-run
+  state and prompt plumbing the stages share; not public). Every event of a run is numbered in
+  ONE place (`emit` in `runCore`: `seq` from 1 per attempt, `attempt` +1 per resume) - the Node
+  sibling's names and rules (`tests/event-order.test.ts` in both packages).
 - `src/memory/` — `store`, `sessions` (IndexedDBStore), `runs` (IndexedDBRunStore /
   MemoryRunStore), `compress` (compaction + `estimateTokens`).
 - `src/tools/approval.ts` (consent gate), `search.ts` (find_tools / large

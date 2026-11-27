@@ -3,7 +3,8 @@
 //
 // Wire it into createAgent via `persistence: makeSqlitePersistence('./runs.db')`.
 // On every run: a row is written at start, updated after each step, and
-// finalized on completion. Schema is created lazily on first use.
+// finalized on completion; a resume updates it with its attempt before it
+// starts. Schema is created lazily on first use.
 
 import { DatabaseSync } from 'node:sqlite'
 import type {
@@ -44,19 +45,25 @@ export const makeSqlitePersistence = (filePath: string): ISqlitePersistence => {
       iterations INTEGER NOT NULL,
       revisions INTEGER NOT NULL,
       result_text TEXT,
-      error TEXT
+      error TEXT,
+      attempt INTEGER
     );
     CREATE INDEX IF NOT EXISTS agent_runs_started_at_idx
       ON agent_runs (started_at DESC);
   `)
 
+  // A database made before the attempt column existed gets it (the error says it is there).
+  try {
+    db.exec('ALTER TABLE agent_runs ADD COLUMN attempt INTEGER;')
+  } catch {}
+
   // Prepared once: hot path is the per-step UPSERT during a long run.
   const upsert = db.prepare(`
     INSERT INTO agent_runs
       (run_id, status, started_at, completed_at, input, history, plan, trace, usage,
-       step_index, iterations, revisions, result_text, error)
+       step_index, iterations, revisions, result_text, error, attempt)
     VALUES
-      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(run_id) DO UPDATE SET
       status = excluded.status,
       completed_at = excluded.completed_at,
@@ -68,7 +75,8 @@ export const makeSqlitePersistence = (filePath: string): ISqlitePersistence => {
       iterations = excluded.iterations,
       revisions = excluded.revisions,
       result_text = excluded.result_text,
-      error = excluded.error
+      error = excluded.error,
+      attempt = excluded.attempt
   `)
 
   const select = db.prepare(`SELECT * FROM agent_runs WHERE run_id = ?`)
@@ -89,6 +97,7 @@ export const makeSqlitePersistence = (filePath: string): ISqlitePersistence => {
       s.revisions,
       s.text ?? null,
       s.error ?? null,
+      s.attempt ?? null,
     )
   }
 
@@ -109,6 +118,7 @@ export const makeSqlitePersistence = (filePath: string): ISqlitePersistence => {
     revisions: number
     result_text: string | null
     error: string | null
+    attempt: number | null
   }
 
   const read = (runId: string): IRunSnapshot | null => {
@@ -131,6 +141,7 @@ export const makeSqlitePersistence = (filePath: string): ISqlitePersistence => {
       revisions: row.revisions,
       text: row.result_text ?? undefined,
       error: row.error ?? undefined,
+      attempt: row.attempt ?? undefined,
     }
   }
 
@@ -138,6 +149,8 @@ export const makeSqlitePersistence = (filePath: string): ISqlitePersistence => {
     onRunStart: (snapshot) => write(snapshot),
     onStepComplete: (snapshot) => write(snapshot),
     onRunComplete: (snapshot) => write(snapshot),
+    // A resume's attempt, on record before the resumed run emits anything (event order).
+    onRunResume: (snapshot) => write(snapshot),
     loadRun: (runId) => read(runId),
     close: () => db.close(),
   }

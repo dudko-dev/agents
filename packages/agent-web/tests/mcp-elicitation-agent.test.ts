@@ -234,11 +234,16 @@ for (const era of ['legacy', 'modern'] as Era[]) {
         assert.equal(requested.step?.description, 'Step s1')
         assert.equal(requested.message, 'Fill in the profile')
         assert.equal(requested.requestedSchema?.properties.name.title, 'Name')
+        // seq / attempt: its place in the run's events (a number of every event of a run).
+        assert.equal(answered.attempt, 1)
+        assert.equal(typeof answered.seq, 'number')
         assert.deepEqual(
-          { ...answered, id: '' },
+          { ...answered, id: '', seq: 0, attempt: 0 },
           {
             type: 'mcp.elicitation-answered',
             id: '',
+            seq: 0,
+            attempt: 0,
             server: 'wx',
             tool: 'wx__elicit_form',
             action: 'accept',

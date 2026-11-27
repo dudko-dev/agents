@@ -21,6 +21,7 @@ import {
   type PipelineResult,
 } from './pipeline-engine.ts'
 import { buildModelFromStage, resolveStage } from './provider.ts'
+import { limitedModel } from './shared-limits.ts'
 import { generateStructured } from './structured.ts'
 import type {
   AgentEvent,
@@ -84,13 +85,17 @@ const pickRoute = async (
   node: PipelineNode,
   text: string,
   signal: AbortSignal,
+  emit: (event: AgentEvent) => void,
 ): Promise<{ route?: string; usage: IUsage }> => {
   const { config } = entry
   entry.router ??= await buildModelFromStage(
     config.clientName,
     resolveStage(config, config.planner, config.plannerModel, 'planner'),
   )
-  const model = entry.router
+  // config.sharedLimits of the node's agent: the route call is a language-model call too.
+  const model = limitedModel(entry.router, 'route', config.sharedLimits, (message) =>
+    emit({ type: 'log', level: 'warn', message }),
+  )
   const labels = (node.routes ?? []).map((r) => r.label)
   const schema = z.object({
     route: z.enum(labels as [string, ...string[]]).describe('The label of the chosen route'),
@@ -179,7 +184,7 @@ export const createPipeline = (
     const quick = await pickRouteWithDecisionModel(entry, node, result.text, ctx.signal, ctx.emit)
     const picked = quick?.route
       ? quick
-      : await pickRoute(entry, node, result.text, ctx.signal).then((slow) => ({
+      : await pickRoute(entry, node, result.text, ctx.signal, ctx.emit).then((slow) => ({
           ...slow,
           usage: quick ? addUsage(quick.usage, slow.usage) : slow.usage,
         }))

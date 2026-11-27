@@ -9,6 +9,7 @@ import {
 import type { IAgentInternalContext } from './internal.ts'
 import { PlanSchema, TieredPlanSchema, catalogModeFor, effectiveToolStrategy } from './planner.ts'
 import { buildReplannerUserPrompt, composeReplannerSystem } from './prompts.ts'
+import { stageModel } from './shared-limits.ts'
 import { generateStructured } from './structured.ts'
 import { ATTR, withSpan } from './tracing.ts'
 import type { IPlan, IPlanStep, IStepResult, IUsage } from './types.ts'
@@ -72,7 +73,7 @@ export const decideNextAction = async (
           }),
         )
         const r = await generateStructured({
-          model: ctx.plannerModel,
+          model: stageModel(ctx, 'replanner', ctx.plannerModel),
           schema: ctx.tiers ? TieredDecisionSchema : DecisionSchema,
           ...call,
           prompt: buildReplannerUserPrompt(

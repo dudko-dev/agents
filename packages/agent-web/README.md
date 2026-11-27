@@ -809,7 +809,9 @@ tools — a helper can only have less than the run that starts it, and its spend
 that run's limits. Give `persistence` a store
 (`new IndexedDBRunStore()`) and a run interrupted by a reload or a crash resumes from its
 last checkpoint with `run('', { resumeFromRunId })` — the planner does not run again and
-no finished step is repeated. `createRunControl()` steers a run that is going: `send()`
+no finished step is repeated; every event of a run carries `seq` and `attempt` (one more
+per resume, recorded by `onRunResume` before the resumed run emits anything), so
+`(attempt, seq)` orders a run's events across reloads. `createRunControl()` steers a run that is going: `send()`
 puts a message in front of the model at the next boundary (the replanner re-checks the plan
 against it), `stopSubagent(id)` stops one subagent. `egress` (off by default) gives the model one safe `web_fetch` tool with allow / deny lists. `search` (off by default) adds `web_search` over a function of yours (any search API — recipes for Tavily, Brave and SearXNG are in the docs) or the built-in Google Search through Gemini grounding, which needs only a Gemini key and spends its tokens — the key stays in the credential store. `sandbox` (off by default) gives the model `run_js`: the code it wrote runs in QuickJS-in-WebAssembly inside a Web Worker that is killed at the deadline, so "I ran it" is a tool call you can see. `media` (off by default) mounts `generate_image`, `generate_speech` and `transcribe_audio` — each only when you configure its model — writes what they make into the virtual file system instead of the context, and turns attached audio into text for a model that cannot listen. `learning` (off by default) lets the agent write down what it figured out as skills of its own — in memory, or in the file system across sessions. Details, defaults and events:
 **[docs/capabilities.md](docs/capabilities.md)**.
@@ -906,7 +908,7 @@ Loading a definition someone else wrote: [docs/security.md](docs/security.md#pip
 | `describeState` | — | serialize world state into prompt context |
 | `memory` | — | `ContextStore` (`IndexedDBStore` / `MemoryStore`); recent turns are read back into the planner prompt |
 | `sessionId` | — | names the stored conversation in `memory`, and the bucket `agent.sessionUsage()` counts into |
-| `persistence` | — | checkpoint runs (`IndexedDBRunStore` / `MemoryRunStore`) so `run(goal, { resumeFromRunId })` continues after a reload — see [Resuming](docs/capabilities.md#resuming-an-interrupted-run) |
+| `persistence` | — | checkpoint runs (`IndexedDBRunStore` / `MemoryRunStore`) so `run(goal, { resumeFromRunId })` continues after a reload; hooks `onRunStart` / `onStepComplete` / `onRunComplete` / `onRunResume` (a resume's new `attempt`, before any event) / `loadRun` — see [Resuming](docs/capabilities.md#resuming-an-interrupted-run) |
 | `maxIterations` / `maxStepsPerTask` / `maxRevisions` | 8 / 4 / 2 | loop caps |
 | `chatTimeoutMs` | 120000 | per-call watchdog; for the executor, the whole step (its tool calls included). Stopped while a tool call waits for a person (an approval, an MCP question): the step goes on with the time it had left - see [Tool consent](docs/capabilities.md#tool-consent-and-autopilot) |
 | `temperature` | provider default | sampling temperature for every stage |

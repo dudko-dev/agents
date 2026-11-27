@@ -55,6 +55,8 @@ import { ATTR, withSpan } from './tracing.ts'
 import { attachRunFiles } from './media.ts'
 import { accumulateUsage, clipText, combineSignals, isAuthError, normalizeUsage } from './utils.ts'
 import { createWaitClock } from './wait-clock.ts'
+import { holdRunLease, type IHeldRunLease } from './run-lease.ts'
+import { stageModel } from './shared-limits.ts'
 
 // The default ('failure') replan trigger fires when:
 //   - the executor explicitly signalled a blocker (via the [BLOCKER] sentinel,
@@ -213,7 +215,71 @@ export const resolveResume = async (
       `Run "${options.resumeFromRunId}" has no saved plan (status="${snapshot.status}"); cannot resume`,
     )
   }
+  // The attempt numbers the run's events across crashes: one the store mangled could make two
+  // attempts share a number, and the order of the run's events would be ambiguous.
+  if (
+    snapshot.attempt !== undefined &&
+    !(Number.isSafeInteger(snapshot.attempt) && snapshot.attempt >= 1)
+  ) {
+    throw new Error(
+      `Run "${options.resumeFromRunId}" has an invalid attempt (${JSON.stringify(snapshot.attempt)}); it must be a positive integer`,
+    )
+  }
   return snapshot
+}
+
+// The attempt a resume of `snapshot` runs as: one more than the attempt that wrote it (a
+// snapshot written before attempts were recorded was the first).
+export const resumeAttemptOf = (snapshot: IRunSnapshot): number => (snapshot.attempt ?? 1) + 1
+
+// A resume starts: its attempt goes on record BEFORE any of its events, so a crash before its
+// first checkpoint still leaves the next resume a higher number. onRunResume, else onStepComplete.
+// Not fail-open, unlike the other writes: an attempt that is not on record would be reused.
+const recordResume = async (
+  ctx: IAgentInternalContext,
+  resumed: IRunSnapshot,
+  attempt: number,
+  held: IHeldRunLease | undefined,
+  warn: (message: string) => void,
+): Promise<void> => {
+  const persistence = ctx.config.persistence
+  const hook = persistence?.onRunResume
+    ? ('onRunResume' as const)
+    : persistence?.onStepComplete
+      ? ('onStepComplete' as const)
+      : undefined
+  if (!persistence || !hook) {
+    warn(
+      `[resume] persistence has neither onRunResume nor onStepComplete: attempt ${attempt} of run ${resumed.runId} is not on record until the run ends`,
+    )
+    return
+  }
+  if (held?.lost) {
+    throw held.lost
+  }
+  const { error: _error, completedAt: _completedAt, text: _text, ...rest } = resumed
+  void [_error, _completedAt, _text]
+  try {
+    await persistence[hook]?.({
+      ...rest,
+      status: 'executing',
+      attempt,
+      ...(held ? { leaseOwner: held.owner } : {}),
+    })
+  } catch (err) {
+    throw new Error(
+      `[resume] persistence.${hook} threw while recording attempt ${attempt} of run ${resumed.runId}; the resume was refused: ${asError(err).message}`,
+      { cause: err },
+    )
+  }
+}
+
+// What the inner loop is handed by runAgentLoop: the event sink (runId, seq, attempt), the
+// attempt and the lease the run holds.
+interface IRunFrame {
+  dispatch: (event: AgentEvent) => void
+  attempt: number
+  held?: IHeldRunLease
 }
 
 export const runAgentLoop = async (
@@ -222,53 +288,115 @@ export const runAgentLoop = async (
 ): Promise<IAgentRunResult> => {
   // Before anything is spent: a hand-made object in place of createRunControl() is refused.
   const port = portOf(options.control)
-  const resumed = await resolveResume(ctx, options)
-  const runId = resumed?.runId ?? randomUUID()
-  // Belt-and-braces: resolveResume already validates resumed.runId, but the
-  // fresh-run path also lands here. randomUUID() is always safe; the assert
-  // is a no-op under that path and a hard guard against any future caller
-  // that supplies a runId by other means.
-  assertSafeRunId(runId, 'runId')
-  const startedAt = resumed?.startedAt ?? Date.now()
-  const sandboxDir = resolveSandboxDir(ctx, runId)
-  return runContext.run(
-    { runId, startedAt, sandboxDir, ...(port ? { control: port } : {}) },
-    async () => {
-      return withSpan(
-        'agent.run',
-        {
-          [ATTR.RUN_ID]: runId,
-          [ATTR.PROVIDER]: ctx.config.providerType,
-          [ATTR.MODEL]: ctx.config.model,
-        },
-        async (span) => {
-          try {
-            const result = await runAgentLoopInner(ctx, options, resumed, port)
-            // The run is over: what it never showed the model goes back to the host.
-            if (port) {
-              result.undelivered = port.detach()
+  // A resume keeps its id. randomUUID() is always safe; the assert is a hard guard against any
+  // future caller that supplies a runId by other means.
+  const runId = options.resumeFromRunId || randomUUID()
+  assertSafeRunId(runId, options.resumeFromRunId ? 'options.resumeFromRunId' : 'runId')
+  // config.runLease: taken before anything of the run happens - its snapshot is read under it.
+  // A refusal throws here: nothing ran, nothing was written.
+  const held = ctx.lease ? await holdRunLease(ctx.lease, runId) : undefined
+  let warnOutside = (message: string): void => ctx.emit({ type: 'log', level: 'warn', message })
+  try {
+    const resumed = await resolveResume(ctx, options)
+    const attempt = resumed ? resumeAttemptOf(resumed) : 1
+    // Every event of the run, numbered: (attempt, seq) is their total order across crashes.
+    let seq = 0
+    const onEvent = options.onEvent ?? (() => {})
+    const dispatch = (event: AgentEvent): void => {
+      const tagged: AgentEvent = { ...event, runId, seq: ++seq, attempt }
+      try {
+        onEvent(tagged)
+      } catch {}
+      try {
+        ctx.emit(tagged)
+      } catch {}
+    }
+    warnOutside = (message) => dispatch({ type: 'log', level: 'warn', message })
+    held?.onLost((err, detail) =>
+      dispatch({
+        type: 'lease.lost',
+        owner: err.owner,
+        reason: err.reason,
+        ...(detail ? { error: detail } : {}),
+      }),
+    )
+    if (resumed) {
+      await recordResume(ctx, resumed, attempt, held, warnOutside)
+    }
+    const startedAt = resumed?.startedAt ?? Date.now()
+    const sandboxDir = resolveSandboxDir(ctx, runId)
+    // A run started inside another run (a helper, an in-process subagent) is spent for that
+    // run's root, and under its sharedLimits when its own agent has none.
+    const outer = runContext.getStore()
+    const rootRunId = outer?.rootRunId ?? outer?.runId ?? runId
+    const sharedLimits = ctx.config.sharedLimits ?? outer?.sharedLimits
+    // A lost lease stops the run at once, its tools included.
+    const runOptions: IAgentRunOptions = held
+      ? { ...options, signal: combineSignals([options.signal, held.signal]) }
+      : options
+    const result = await runContext.run(
+      {
+        runId,
+        startedAt,
+        sandboxDir,
+        rootRunId,
+        ...(sharedLimits ? { sharedLimits } : {}),
+        ...(port ? { control: port } : {}),
+      },
+      async () => {
+        return withSpan(
+          'agent.run',
+          {
+            [ATTR.RUN_ID]: runId,
+            [ATTR.PROVIDER]: ctx.config.providerType,
+            [ATTR.MODEL]: ctx.config.model,
+          },
+          async (span) => {
+            try {
+              const result = await runAgentLoopInner(ctx, runOptions, resumed, port, {
+                dispatch,
+                attempt,
+                ...(held ? { held } : {}),
+              })
+              // The run is over: what it never showed the model goes back to the host.
+              if (port) {
+                result.undelivered = port.detach()
+              }
+              span.setAttribute(ATTR.ITERATIONS, result.iterations)
+              span.setAttribute(ATTR.USAGE_TOTAL_TOKENS, result.usage.totalTokens)
+              span.setAttribute(ATTR.USAGE_INPUT_TOKENS, result.usage.inputTokens)
+              span.setAttribute(ATTR.USAGE_OUTPUT_TOKENS, result.usage.outputTokens)
+              return result
+            } finally {
+              // A run that threw cannot return `undelivered`; detaching here makes control.send
+              // refuse from now on and leaves the leftovers readable through control.pending().
+              port?.detach()
+              // Best-effort cleanup. If the run never wrote anything, rm with
+              // force:true is a no-op; if it did, we drop the whole subtree. The
+              // catch is intentional - we'd rather leak a temp dir than throw on
+              // teardown and mask the real run result.
+              if (!ctx.config.keepSandbox) {
+                await rm(sandboxDir, { recursive: true, force: true }).catch(() => {})
+              }
             }
-            span.setAttribute(ATTR.ITERATIONS, result.iterations)
-            span.setAttribute(ATTR.USAGE_TOTAL_TOKENS, result.usage.totalTokens)
-            span.setAttribute(ATTR.USAGE_INPUT_TOKENS, result.usage.inputTokens)
-            span.setAttribute(ATTR.USAGE_OUTPUT_TOKENS, result.usage.outputTokens)
-            return result
-          } finally {
-            // A run that threw cannot return `undelivered`; detaching here makes control.send
-            // refuse from now on and leaves the leftovers readable through control.pending().
-            port?.detach()
-            // Best-effort cleanup. If the run never wrote anything, rm with
-            // force:true is a no-op; if it did, we drop the whole subtree. The
-            // catch is intentional - we'd rather leak a temp dir than throw on
-            // teardown and mask the real run result.
-            if (!ctx.config.keepSandbox) {
-              await rm(sandboxDir, { recursive: true, force: true }).catch(() => {})
-            }
-          }
-        },
-      )
-    },
-  )
+          },
+        )
+      },
+    )
+    // Lost at the very end, after the last await of the run: it still does not count as done here.
+    if (held?.lost) {
+      throw held.lost
+    }
+    return result
+  } catch (err) {
+    // Whatever the abort looked like on its way out, a lost lease is what ended the run.
+    if (held?.lost) {
+      throw held.lost
+    }
+    throw err
+  } finally {
+    await held?.release(warnOutside)
+  }
 }
 
 // The run's effective tool strategy: 'auto' resolved against the live
@@ -283,6 +411,7 @@ const runAgentLoopInner = async (
   options: IAgentRunOptions,
   resumed: IRunSnapshot | undefined,
   port: RunControlPort | undefined,
+  frame: IRunFrame,
 ): Promise<IAgentRunResult> => {
   const { signal } = options
   // On resume the saved input wins so the resumed run prompts the planner /
@@ -296,7 +425,7 @@ const runAgentLoopInner = async (
     : options.history
       ? [...options.history]
       : undefined
-  const onEvent = options.onEvent ?? (() => {})
+  const { dispatch, attempt, held } = frame
   const compaction = resolveCompaction(ctx.config.compaction)
   const limits = resolveLimits(ctx.config)
   const maxToolCalls = ctx.config.maxToolCalls
@@ -336,13 +465,9 @@ const runAgentLoopInner = async (
         accumulateUsage(totalUsage, event.usage)
         ctx.onUsage?.(event.usage)
       }
-      const tagged = { ...event, runId: runContext.getStore()?.runId }
-      try {
-        onEvent(tagged)
-      } catch {}
-      try {
-        ctx.emit(tagged)
-      } catch {}
+      // Tagged with this run's id and numbered (seq / attempt) - also when a subagent's event
+      // is forwarded from inside the child's own run context.
+      dispatch(event)
     },
   }
   const store = runContext.getStore()
@@ -411,6 +536,11 @@ const runAgentLoopInner = async (
     if (!fn) {
       return
     }
+    // config.runLease: once the lease is lost, nothing more is written - terminal or not. Another
+    // worker may own the run now, and this snapshot would overwrite its state.
+    if (held?.lost) {
+      return
+    }
     try {
       await fn(snapshot)
     } catch (err) {
@@ -448,7 +578,7 @@ const runAgentLoopInner = async (
   // back as result.compactedHistory.
   let compactedHistory: IConversationTurn[] | undefined
   if (!resumed && history?.length && compaction.auto) {
-    const r = await compactHistory(history, ctx.synthesizerModel, {
+    const r = await compactHistory(history, stageModel(ctx, 'compaction', ctx.synthesizerModel), {
       thresholdTokens: compaction.thresholdTokens,
       overheadTokens: await promptOverhead(),
       maxInputTokens: summaryInputTokens,
@@ -493,7 +623,7 @@ const runAgentLoopInner = async (
     const r = await summarizeTrace(
       trace.slice(from, upTo),
       state.traceSummary,
-      ctx.synthesizerModel,
+      stageModel(ctx, 'compaction', ctx.synthesizerModel),
       {
         summaryMaxTokens: compactionMaxTokens(ctx.config, compaction.summaryMaxTokens),
         maxInputTokens: summaryInputTokens,
@@ -578,6 +708,8 @@ const runAgentLoopInner = async (
           revisions: 0,
           error: (err as Error).message,
           completedAt: Date.now(),
+          attempt,
+          ...(held ? { leaseOwner: held.owner } : {}),
         })
         throw err
       }
@@ -635,6 +767,8 @@ const runAgentLoopInner = async (
     ...(state.userUpdates.length ? { userUpdates: state.userUpdates.map((u) => ({ ...u })) } : {}),
     ...(state.escalations ? { escalations: state.escalations } : {}),
     ...(state.subagentsSpawned ? { subagentsSpawned: state.subagentsSpawned } : {}),
+    attempt,
+    ...(held ? { leaseOwner: held.owner } : {}),
     ...extra,
   })
 

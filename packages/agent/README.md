@@ -96,7 +96,7 @@ await agent.close()
 
 ### Streaming events
 
-Pass an event handler as the second argument to `createAgent`, or per run via `onEvent`. Every event carries the `runId` of its run, so a handler shared by concurrent runs can tell them apart. The full union is [`AgentEvent`](./src/types.ts); this is the whole list, by stage.
+Pass an event handler as the second argument to `createAgent`, or per run via `onEvent`. Every event carries the `runId` of its run, so a handler shared by concurrent runs can tell them apart, and `seq` / `attempt`, its place in the run: `attempt` is 1 for a fresh run and one more for every [resume](#resume-after-crash), `seq` counts the events of one attempt from 1. Ordered by `(attempt, seq)`, the events of a run are a total order, across crashes and resumes (see [Running on many workers](#running-on-many-workers-scale-out-hooks)). The full union is [`AgentEvent`](./src/types.ts); this is the whole list, by stage.
 
 **The loop**
 
@@ -146,8 +146,9 @@ Pass an event handler as the second argument to `createAgent`, or per run via `o
 
 | Event | When |
 | --- | --- |
-| `subagent.start` / `subagent.event` / `subagent.complete` / `subagent.error` | A subagent's lifecycle and its forwarded child events - a static one (`createSubagentTool`) or a helper the model started (`subagents.dynamic`, `dynamic: true`). `start` carries `parentId` and `depth`, `error` carries `stopped` when the user stopped it. See [the subagent tree](#the-subagent-tree-from-the-events). |
+| `subagent.start` / `subagent.event` / `subagent.complete` / `subagent.error` | A subagent's lifecycle and its forwarded child events - a static one (`createSubagentTool`, local or [remote](#remote-subagents-isolation-remote)) or a helper the model started (`subagents.dynamic`, `dynamic: true`). `start` carries `parentId` and `depth`, `error` carries `stopped` when the user stopped it. A `subagent.event` envelope is numbered (`seq`) in the parent run; the child event inside keeps its own `runId` / `seq` / `attempt`. See [the subagent tree](#the-subagent-tree-from-the-events). |
 | `message.queued` / `message.delivered` | A `RunControl.send()` message is waiting for a boundary / the model has seen it (`at: 'round' \| 'step' \| 'final'`). See [Steering a run](#steering-a-run-that-is-already-going). |
+| `lease.lost` | With [`runLease`](#running-on-many-workers-scale-out-hooks): a renew answered false (`reason: 'refused'`), threw (`'error'`, the message in `error`) or did not answer before the lease ran out (`'expired'`); `owner`. The run is aborted at once and persists nothing more; it rejects with `RunLeaseError` (`lost: true`). |
 
 **Pipelines**
 
@@ -232,9 +233,68 @@ Caveats:
 - **Plan changes.** The saved `currentPlan` (post any revise) is what gets used on resume — the planner is not re-invoked.
 - **Caps inherit.** `iterations`, `revisions`, usage, the tool-call count (`toolCallCount`) and the escalation count (`escalations`) carry over, so per-run caps still apply across the boundary; so do the active skills (`activeSkills`) and the trace summary (`traceSummary` / `traceSummaryUpTo`).
 - **Terminal status.** Resuming a run with `status: 'complete'` throws — re-read the saved `text` directly instead.
-- **Event semantics.** On resume the runner re-emits a `plan.created` event so consumers attaching mid-resume see the canonical plan; consumers that store every event will observe `plan.created` twice for the same `runId`. `onRunStart` is **not** re-fired (the original run already emitted it) — code that counts run starts must use `runId` for de-duplication. `onStepComplete` only fires for steps the resumed run actually executes; pre-resume steps are already in the loaded `trace`.
+- **Event semantics.** On resume the runner re-emits a `plan.created` event so consumers attaching mid-resume see the canonical plan; consumers that store every event will observe `plan.created` twice for the same `runId`. `onRunStart` is **not** re-fired (the original run already emitted it) — code that counts run starts must use `runId` for de-duplication. Instead, a resume writes `onRunResume` (the loaded snapshot with the new `attempt`, status `'executing'`) **before** it emits anything - or, without that hook, the same write to `onStepComplete`. Unlike the other write hooks a failure there refuses the resume (see [Running on many workers](#running-on-many-workers-scale-out-hooks)). Otherwise `onStepComplete` only fires for steps the resumed run actually executes; pre-resume steps are already in the loaded `trace`.
+- **Attempts.** Every snapshot carries the `attempt` that wrote it (1 for the run as first started; a snapshot written before the field existed reads as 1); a resume runs as the next one, and its events say so. A snapshot whose `attempt` is not a positive integer is not resumed.
 - **Inputs are locked to the snapshot.** Both `options.input` and `options.history` passed to `agent.run({ resumeFromRunId })` are **silently ignored** in favor of the values stored at the original run start. This keeps the resumed prompt deterministic against the saved trace; pass an empty input (`input: ''`) to make the override explicit.
 - **runId hygiene.** Persisted `runId`s end up in filesystem paths (`<sandboxRoot>/<runId>/`) and are validated against `^[a-zA-Z0-9_-]{1,128}$`. A persistence adapter that returns a snapshot whose `runId` differs from the requested one, or that contains path-unsafe characters, is rejected.
+
+### Running on many workers (scale-out hooks)
+
+One agent process is one worker. To run many - a queue of runs, workers that crash, a run that one worker started and another finishes - the package gives three small **optional** hooks; the broker, the store and the deployment are yours. Without them nothing changes: no timer, no wrapper around the models, the same requests on the wire (the golden fixtures pin it).
+
+**Event order.** Every event of a run carries `seq` and `attempt` (see [Streaming events](#streaming-events)). A client that orders by `(attempt, seq)` gets one total order of the run's events, however often its workers died. A resume puts its attempt on record **before** its first event (`persistence.onRunResume`, else `onStepComplete`), so a crash at any point - even before the resumed run's first checkpoint - never lets two attempts share a number. Delivery is **at-least-once**: the step a crash interrupted runs again under the next attempt, so its events (and its tool calls: see "Idempotency" above) come again, with the new attempt's numbers. A consumer that deduplicates keeps the last attempt's copy of a step.
+
+**`runLease`: one worker at a time owns a run.** The host's lease, anything with an atomic "take it if nobody holds it" (Redis `SET NX PX`, a database row, etcd):
+
+```ts
+import { createAgent, RunLeaseError } from '@dudko.dev/agent'
+
+const agent = await createAgent({
+  ...config,
+  persistence,
+  runLease: {
+    acquire: (runId, { owner, ttlMs }) => store.takeIfFree(runId, owner, ttlMs), // true = held
+    renew: (runId, { owner, ttlMs }) => store.extendIfMine(runId, owner, ttlMs), // false = lost
+    release: (runId, { owner }) => store.dropIfMine(runId, owner),
+    ttlMs: 30_000, // default; renewed every ttlMs / 3
+    // owner: 'worker-7', // default: a random id per agent - agent.leaseOwner
+  },
+})
+```
+
+- **Acquire.** Before a run - fresh or resumed - does anything (a resume even before it reads its snapshot). `false` or a throw ends the run there: it rejects with `RunLeaseError` (`lost: false`), no model was called, no event was emitted, nothing was persisted.
+- **Renew.** Every `ttlMs / 3` while the run goes. `false`, a throw, or no answer before the lease would run out (`ttlMs` after the last answer that kept it) means the lease is **lost**, and the reading is strict: the run is aborted at once (its tools' signals too), **no further snapshot is written**, terminal or not - another worker may own the run by now, and a late write would corrupt its state - one `lease.lost` event says so, and the run rejects with `RunLeaseError` (`lost: true`, `reason: 'refused' | 'error' | 'expired'`). A lost lease is not released: it is not this worker's any more.
+- **Release.** When the run ends, every way (success, failure, stop, a resume that could not load); a failed release is only logged.
+- The timers never keep a process alive and stop on every way out. Subagents and the helpers the model starts run under their parent's lease: never one of their own (a `runLease` in a subagent's config is dropped). With a lease every snapshot carries `leaseOwner`, so a store can refuse a write from anyone but the owner (fencing) - the TTL alone cannot rule out a paused worker writing late.
+- `ttlMs` must be 1000 ms to 2^31 - 1 ms, the owner 1-256 characters, all three methods functions - `createAgent` throws otherwise.
+
+**`sharedLimits`: limits shared by every worker.** A provider's rate limit or a tenant's budget lives in the host's store; the agent asks before every language-model call and says what each used:
+
+```ts
+const agent = await createAgent({
+  ...config,
+  sharedLimits: {
+    // Wait (a rate limit) or throw (a refusal: a budget). `signal`: the call was given up.
+    beforeModelCall: async (call, { signal }) => {
+      await bucket.take(call.stage, { signal })
+      if (await budget.spent(call.runId)) throw new Error('budget spent')
+    },
+    // Not awaited; a throw is only logged.
+    afterModelCall: (call, usage, { ok }) => budget.add(call.runId, usage.totalTokens),
+  },
+})
+```
+
+- `call` is `{ runId?, stage, provider?, modelId, estimatedInputTokens?, maxOutputTokens? }`. `stage` is `'planner' | 'executor' | 'replanner' | 'synthesizer' | 'compaction' | 'route'`; `runId` is the run the **host** started (a helper's, a subagent's calls carry it: they are spent for it) and is absent for a call outside a run (`agent.compact()`, a pipeline's route call); `estimatedInputTokens` is the prompt and the tool definitions, estimated like compaction does (errs high).
+- **Every** language-model call goes through it: the four stages, the compaction summaries (and `agent.compact()`), a pipeline's route call, escalated tiers, the helpers the model starts, and subagents - an in-process one under its own config's `sharedLimits` or else the calling run's, a worker one through the calling run's (asked over the worker protocol: functions cannot cross). A remote subagent's calls are the host's business. A test counts the calls per stage against the requests the model endpoint saw.
+- **Not** through it: the [media models](#media-images-speech-and-transcription), the [Google search grounding call](#the-google-provider-google-search-through-gemini-grounding) and [decision models](#decision-models) - none is a language-model call of a stage, and each has its own `usage` phase. When the decision model is not confident, the ordinary replanner / route call that follows is a language-model call and is asked about.
+- **A wait** counts against the call's own timeout (`llmTimeoutMs`, the step's limit) like a slow answer: it is not a person waiting, so the run's clock is not stopped. A call given up while `beforeModelCall` still decides is not sent; if the hook lets it through later, `afterModelCall` is told it ended (`ok: false`, zero usage), so a host counting slots gets every one back.
+- **A refusal** fails that call with `ModelCallRefusedError` (exported; `isModelCallRefused(err)` reads it anywhere down a `cause` chain), which is **never retried** - not by the package's retry, not by the AI SDK's, not on a stronger tier - even when its cause looks retryable (a 429). The stage then fails as it fails on any error: a refused **planner** call falls back to the one-step "answer directly" plan; a refused **executor** call fails the step and with it the run (`error` of phase `'execute'`, the snapshot `failed`), without escalation; a refused **replanner** call degrades to `continue` (`replan.decision.failed`, see [When the replanner fails](#when-the-replanner-fails)); a refused **synthesizer** call fails the run; a refused **compaction** call leaves the history / trace as it was (the next call carries the full context); a refused **route** call is no route. Inside a helper or a subagent the same rules apply to its run, and its failure is the tool call's.
+- `afterModelCall(call, usage, { ok })`: once per call `beforeModelCall` let through, when it ends - finished, failed or cancelled.
+
+**Remote subagents** (`createSubagentTool({ isolation: 'remote', dispatch })`) send a child to another worker: see [Remote subagents](#remote-subagents-isolation-remote).
+
+[`examples/scale-out-memory.ts`](./examples/scale-out-memory.ts) has in-memory reference implementations of both hooks - a lease map with a TTL and a token bucket with a per-run budget - to show the wiring and the contract without a broker (single process only; the same logic in a shared store is the multi-worker version).
 
 ### OpenTelemetry
 
@@ -859,7 +919,7 @@ const researcher = createSubagentTool({
   name: 'researcher',
   description: 'Research a self-contained question and report the findings',
   config: { ...childConfig }, // a full IAgentConfig for the child
-  isolation: 'worker', // default; or 'in-process'
+  isolation: 'worker', // default; or 'in-process' / 'remote' (below)
   tools: { lookup }, // host tools for the child
   maxConcurrent: 4, // parallel calls beyond this queue
   timeoutMs: 120_000,
@@ -876,6 +936,35 @@ const agent = await createAgent({ ...config, tools: { researcher } })
 Several calls in one model step run in parallel (bounded by `maxConcurrent`). The parent's abort aborts the child. `timeoutMs` does not count the time a person takes to answer the child's questions (an approval, an MCP elicitation) or the calling run's: while one waits, the subagent's limit and the calling step's `llmTimeoutMs` are stopped, and a worker child whose proxied host tool call is in flight stops its own step limit too. The child's usage is emitted on the parent as `usage` with `phase: 'subagent'` as it happens, so it counts against the parent's limits. Parent events: `subagent.start`, `subagent.event` (each child event, long strings clipped), `subagent.complete` (`text`, `usage`), `subagent.error`.
 
 The worker entry ships as `dist/subagent-worker.js` and is resolved next to the bundle, from the ESM and the CJS build alike.
+
+A subagent runs under its parent's [lease](#running-on-many-workers-scale-out-hooks) (a `runLease` in its config is dropped) and its model calls go through the parent run's [`sharedLimits`](#running-on-many-workers-scale-out-hooks) unless its own config has one (a worker child's are asked over the worker protocol).
+
+### Remote subagents (`isolation: 'remote'`)
+
+The child runs wherever your `dispatch` sends it - another worker, another machine, a queue. No config crosses: you decide the child's config over there.
+
+```ts
+const researcher = createSubagentTool({
+  name: 'researcher',
+  description: 'Research a self-contained question',
+  isolation: 'remote',
+  dispatch: async (task, { signal, emit }) => {
+    // task: { id, name, profile?, input, parentRunId?, rootRunId?, depth }
+    const job = await queue.submit({ input: task.input, profile: task.profile, signal })
+    for await (const event of job.events()) emit(event) // forwarded as subagent.event
+    return { text: job.answer, usage: job.usage } // usage: charged once, here
+  },
+  profiles: { deep: { description: 'A thorough look' } }, // names only: dispatch decides
+  timeoutMs: 120_000,
+})
+```
+
+- `task` is the child's input (what the parent model wrote) and who it is for: the subagent's `id` (the one its `subagent.*` events carry), the tool's `name`, the `profile` the parent model chose, the calling run (`parentRunId`), the run the host started (`rootRunId`) and the `depth`.
+- `emit` forwards the remote child's events into the parent's stream as the same `subagent.event` envelopes a local child produces. They are **untrusted**: each must be a plain object with a well-formed `type`, at most 64 000 characters as JSON, at most 10 000 per call (`REMOTE_SUBAGENT_LIMITS`); long strings are clipped like a local child's; anything else is dropped, with one warning; an `emit` after `dispatch` settled is ignored. Forwarded `…-requested` / `…-resolved` waits stop the caller's clock as a local child's do.
+- **Usage is charged once**, from what `dispatch` resolves with (a `usage` event of phase `'subagent'`; a forwarded `usage` event is shown, never charged). Every count is clamped to a non-negative number (a remote child cannot hand budget back). A `dispatch` that throws an error with a `usage` field is charged that.
+- The answer must be `{ text: string }` (clipped to `outputMaxChars`); anything else fails the tool call.
+- A stop of the parent (the run, the step, `stopSubagent`, `timeoutMs`) aborts `signal`, and the tool call does not wait for a `dispatch` that ignores it.
+- `config`, `tools` and a profile's `config` make no sense here and are refused when the tool is made, as is `dispatch` on a local isolation. A remote child's tool approvals and questions are the host's business: they are not bridged to the parent's gate.
 
 ### Profiles: other models, params and context per call
 
@@ -1537,7 +1626,9 @@ Consent is the host's job ([tool approval](#tool-approval-and-autopilot)) — th
 | `systemPrompt` | Appended to the planner, executor, replanner, and synthesizer system prompts so the same domain context (persona, language, tone) reaches every stage. |
 | `failOnNoTools` | When `true`, `createAgent` throws if every configured MCP server failed to connect (otherwise the agent starts with zero tools and emits an `error`-level log). Default `false`. |
 | `maxConcurrentRuns` | Hard cap on concurrent `agent.run()` calls. When reached, further calls reject synchronously. Default: unlimited. Intentionally a throw, not a queue — back-pressure belongs on the caller. |
-| `persistence` | Optional `IPersistence` facade. Receives `IRunSnapshot` at run start, at every iteration boundary, and at run completion. Implementing the optional `loadRun(runId)` enables resume via `agent.run({ resumeFromRunId })`. See [`examples/persistence-sqlite.ts`](./examples/persistence-sqlite.ts) for a `node:sqlite`-backed adapter. |
+| `persistence` | Optional `IPersistence` facade. Receives `IRunSnapshot` at run start, at every iteration boundary, and at run completion, and `onRunResume` when a resume starts (the new `attempt`, before any event; else that write goes to `onStepComplete`). Implementing the optional `loadRun(runId)` enables resume via `agent.run({ resumeFromRunId })`. See [`examples/persistence-sqlite.ts`](./examples/persistence-sqlite.ts) for a `node:sqlite`-backed adapter. |
+| `runLease` | Off by default. `{ acquire, renew, release, ttlMs?, owner? }`: one worker at a time owns a run - acquired before it starts, renewed every `ttlMs / 3` (default `30000`), released at the end; a lost lease aborts the run and stops every persistence write (`RunLeaseError`, `lease.lost`). `agent.leaseOwner`. See [Running on many workers](#running-on-many-workers-scale-out-hooks). |
+| `sharedLimits` | Off by default. `{ beforeModelCall(call, { signal }), afterModelCall?(call, usage, { ok }) }`: asked before every language-model call (wait = a rate limit, throw = a refusal, `ModelCallRefusedError`, never retried) and told its usage. Not for media, search grounding or decision models. See [Running on many workers](#running-on-many-workers-scale-out-hooks). |
 | `logLevel` | `'none' \| 'error' \| 'warn' \| 'info' \| 'debug'` |
 
 ### Picking models per stage
@@ -1676,6 +1767,7 @@ interface IAgent {
   reconnect(): Promise<void>
   close(options?: { waitForRuns?: boolean; timeoutMs?: number }): Promise<void>
   activeRuns(): number
+  readonly leaseOwner?: string // with runLease: who this agent is to the lease
 }
 ```
 
@@ -1688,7 +1780,8 @@ Top-level exports beyond `createAgent`:
 - `getCurrentRunId(): string | undefined` — read the active run's id from any code reachable from `agent.run()` (planner, executor, MCP `execute`, retry sleeps, …). Useful for correlating logs/metrics across concurrent runs on a single agent instance.
 - `getCurrentRunSandbox(): string | undefined` — absolute path to the active run's sandbox directory. Native tools that need to spill binary output should write into this path so files are auto-cleaned when the run completes (set `keepSandbox: true` to retain).
 - `redactHeaders(headers)` — small helper for masking `Authorization`, `X-Api-Key`, `Cookie`, etc. when logging request headers (e.g. inside an `outputSanitizer` or your own MCP transport wrapper).
-- `createSubagentTool(options)` — [subagents](#subagents-worker_threads).
+- `createSubagentTool(options)` — [subagents](#subagents-worker_threads); `REMOTE_SUBAGENT_LIMITS` — what a [remote](#remote-subagents-isolation-remote) child may send back.
+- `RunLeaseError`, `RUN_LEASE_DEFAULT_TTL_MS`, `ModelCallRefusedError`, `isModelCallRefused(err)` — [the scale-out hooks](#running-on-many-workers-scale-out-hooks) (`runLease`, `sharedLimits`).
 - `SPAWN_SUBAGENT_TOOL`, `SPAWN_INPUT_SCHEMA`, `SUBAGENT_DEFAULTS`, `SUBAGENT_MAX_DEPTH_LIMIT`, `resolveDynamicSubagents(subagents)`, `SubagentSpawnError`, `adoptSubagentEvent(event, parentId)` — [dynamic subagents](#dynamic-subagents-helpers-the-model-starts-itself): the tool's name and input, the defaults, the validated settings, the refusal a model reads, and the rule that places a forwarded `subagent.start` in the tree.
 - `createPipeline(definition, options)`, `nodeResolver(registries)`, `validatePipeline(definition)`, `normalizePipeline(definition)`, `testPipelineCondition(when, output)`, `renderPipelineNodeInput(input)`, `PIPELINE_LIMITS`, `PipelineNodeError`, `PipelineValidationError` — [pipelines](#pipelines).
 - `resolveThinking(setting)`, `mergeProviderOptions(...layers)` — [thinking](#thinking-reasoning).
