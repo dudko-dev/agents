@@ -68,6 +68,13 @@ export interface McpConnectOptions {
    * the hook's `protocol`.
    */
   protocol?: McpProtocolMode
+  /**
+   * EXPERIMENTAL (the MCP Skills extension is Beta): load the skills the server serves into the
+   * agent's skills catalog, as `<server>/<skill>` - they come with `tools`, so nothing else is
+   * wired. Needs `protocol: 'auto'` or `'modern'`. Third-party text: the core loads it as
+   * knowledge only, never policy. Left out, nothing is passed (off).
+   */
+  skills?: boolean
 }
 
 export interface UseMcpOptions {
@@ -269,6 +276,8 @@ interface OAuthRecord {
   clientMetadataUrl?: string
   /** The protocol revisions the connection was asked for, kept across the redirect. */
   protocol?: McpProtocolMode
+  /** `skills: true` was asked for, kept across the redirect. */
+  skills?: boolean
   /** When the redirect was started, so a stale record can't claim a callback. */
   startedAt?: number
 }
@@ -593,6 +602,7 @@ export const useMcp = (options: UseMcpOptions = {}): UseMcpReturn => {
             clientName: providerOptions.clientName,
             clientMetadataUrl: providerOptions.clientMetadataUrl,
             ...(opts.protocol ? { protocol: opts.protocol } : {}),
+            ...(opts.skills ? { skills: true } : {}),
             startedAt: Date.now(),
           }
           // Throws on a clientMetadataUrl the core refuses (not https, or a bare
@@ -615,6 +625,7 @@ export const useMcp = (options: UseMcpOptions = {}): UseMcpReturn => {
               authProvider,
               // Only when asked for: without it the connection is built as it always was.
               ...(opts.protocol ? { protocol: opts.protocol } : {}),
+              ...(opts.skills ? { skills: true } : {}),
             },
           },
           {
@@ -775,6 +786,7 @@ export const useMcp = (options: UseMcpOptions = {}): UseMcpReturn => {
             clientMetadataUrl: pending.clientMetadataUrl,
           },
           ...(pending.protocol ? { protocol: pending.protocol } : {}),
+          ...(pending.skills === true ? { skills: true } : {}),
         })
       } catch (err) {
         writeRecord(PENDING_KEY, undefined)

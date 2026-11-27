@@ -488,7 +488,9 @@ test('skills, discovered tools, compactions and budget stops are recorded per ru
   s = event(s, { type: 'tools.discovered', query: 'q2', names: ['a__c', 'a__d'] })
   s = event(s, { type: 'context.compacted', scope: 'trace', beforeTokens: 900, afterTokens: 200 })
   s = event(s, { type: 'budget.exceeded', kind: 'total', tokens: 1200, cap: 1000 })
-  assert.deepEqual(s.skills, ['tone'])
+  // A skill an MCP server serves (`skills: true`) is named `<server>/<skill>`: the name says whose.
+  s = event(s, { type: 'skill.activated', name: 'docs/pdf-processing', by: 'tool', server: 'docs' })
+  assert.deepEqual(s.skills, ['tone', 'docs/pdf-processing'])
   assert.deepEqual(s.discoveredTools, ['a__b', 'a__c', 'a__d'])
   assert.deepEqual(s.compactions, [{ scope: 'trace', beforeTokens: 900, afterTokens: 200 }])
   assert.deepEqual(s.budget, { kind: 'total', tokens: 1200, cap: 1000 })

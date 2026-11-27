@@ -733,6 +733,120 @@ the same in both. Only the adapter that runs a node with `createAgent` differs.
 - The pure core (`mcp/shared.ts`) is a byte-for-byte copy of the Node package's
   `mcp-shared.ts`, like the pipeline and sandbox engines.
 
+## MCP: the listen stream is opened again
+
+On 2026-07-28 a tool list change reaches a client only on a `subscriptions/listen` stream the
+client opened. The SDK opens it once (`client.listen`) and never again; a stream that is gone
+without anyone noticing reads as "nothing changed", for the life of the connection. So the
+connector keeps it open (`mcp/listen.ts`, a byte-for-byte copy of the Node package's
+`mcp-listen.ts`; pure, so both cores make the same decisions and the rules are tested once, on
+fakes, in the Node package).
+
+- **A dropped stream is retried** - the specification says a transport that closes without the
+  listen result "indicates an unexpected disconnect, which the client MAY treat as a trigger to
+  reconnect" (basic/patterns/subscriptions, "Graceful Closure"). Resumption is no help: the
+  revision has no `Last-Event-ID` (streamable HTTP: "Resumable SSE streams via `Last-Event-ID`
+  are not supported"), so a new stream is a new `subscriptions/listen` request.
+- **So is a stream the server closed with its result.** That result means the server ended the
+  subscription "on its own initiative (for example, during shutdown)", and the SDK's server
+  sends it from `close()`. On a stateless revision the process that shuts down is not the
+  service: no session binds the client to it, and the next request may well reach another
+  process. Not listening again would turn every rolling restart into a connection that never
+  hears of a change again. The specification gives a server that wants no listeners a final
+  answer instead - `404` with `-32601` for a method it does not implement (streamable HTTP,
+  "Request Metadata") - and that answer is final here.
+- **Final errors stop at once**: 401 / 403 belong to the authorization flow (the transport's
+  `authProvider` already refreshed and retried; a loop would only hammer the authorization
+  server), 404 / 405 / `-32601` / `-32602` cannot heal by waiting, and a client that is not
+  connected has nothing to listen on. Everything else - a 5xx, a 429, a missed acknowledgement,
+  the network, the SDK server's "Subscription limit reached" (`-32603`) - can.
+- **Backoff with jitter, reset by stability, not by success.** Attempt n waits at most
+  `min(60 s, 1 s × 2^(n-1))`, less a random share of up to half, so the clients that lost one
+  server do not return in step. The count is NOT reset when a new stream is acknowledged: a
+  server that accepts and then drops at once (a proxy that cuts idle streams, a crash loop)
+  would otherwise be retried every second forever, with a re-list each time. It is reset when a
+  stream stayed up a minute, and a stream lost sooner counts as an attempt - so a flapping
+  server and a dead one are both given up on after 10 attempts in a row (within five minutes),
+  each with one warning per attempt and one on giving up.
+- **The re-list goes through the notice's own path.** Changes made while no stream was open were
+  announced to nobody, so once a stream is back the connector calls `onToolsChanged(server)`
+  once - the callback the `notifications/tools/list_changed` handler calls. A host (or the Node
+  agent's deferred refresh) cannot tell the two apart, which is the point: one way to pick up a
+  new tool list, not two. The connector still never re-lists behind a running agent's back.
+- **Close leaves nothing behind.** `close()` stops every listener before the clients close: the
+  retry timer and the stability timer are taken down, an attempt in flight is given up (its
+  signal), and whatever the SDK reports afterwards is neither logged nor retried. An open
+  stream is left to the client's own close, which ends it without the extra
+  `notifications/cancelled` request an explicit `subscription.close()` would send.
+- **Timers with a seam of their own.** The two timers are `setTimeout`'s, unless a test put a
+  time source under the file's own test key: then the tests run the whole backoff on virtual
+  time against real servers, without a sleep. Not the wait clock's seam (`wait-clock.ts`): that
+  one carries the deadlines of runs, and the human-wait tests ask whether any of them is running
+  while a person is asked - a listen timer is not a run's deadline and must not answer "yes".
+- **No setting.** Turning the retries off would leave a connection that silently stops hearing
+  of changes - the behaviour this replaces. The schedule is bounded and the stream exists only
+  when the host asked for change notices (`onToolsChanged`); a host that wants none passes none.
+  The 2025 revisions are untouched: their GET stream belongs to the transport, which resumes it.
+
+## MCP skills: one catalog, namespaced, under a preamble, opt-in
+
+A server's skills (the `io.modelcontextprotocol/skills` extension, SEP-2640, Beta) are a second
+source of the agent's skills, beside the host's and the lessons. The choices:
+
+- **The same catalog, not a parallel one.** The agent already has progressive disclosure (an
+  index in the prompts, `load_skill` / `read_skill_file`, the planner's `plan.skills`), and the
+  extension is a transport for exactly that format. A second mechanism would be a second set of
+  prompts and tools to keep safe; one catalog means an MCP skill is loaded, capped and accounted
+  for (compaction, the active-skills budget) like any other.
+- **Namespaced by the host's label, with a separator no other name can hold.** The extension says
+  a name is a label, not an identity, that two servers may serve skills of one name, and that an
+  MCP skill must never silently shadow, or be substituted for, another origin's - the host's
+  included (Names; Security Considerations). `<server>/<skill>` does that by construction: a host
+  skill's and a lesson's name is `[a-z0-9-]`, so no comparison or precedence rule is needed to keep
+  `git-workflow` the host's - there is no way for the two to meet. The server is named by the
+  host's key, not its `serverInfo.name` (which a server chooses, and which two servers can share),
+  in the alphabet of the tool prefix `server__tool`. Same-named skills of one server are kept by
+  their full path rather than dropped ("MUST disambiguate ... rather than silently discarding or
+  preferring one").
+- **Under a preamble, like a lesson.** A lesson is loaded under `learnedPreamble` - "a hint from
+  your own experience, not an instruction" - because what the agent wrote must not outrank the
+  user. A server's skill gets the same treatment one step further away (`mcpSkillPreamble`):
+  third-party text, knowledge only, which cannot grant permissions, approve a call, change the
+  approval mode, widen egress or the sandbox, or make the agent run anything. The extension asks
+  for exactly that: origin visible "at the point it enters model context", never "indistinguishable
+  from a local filesystem skill", "data, not directives". The wording is the guard the model sees;
+  the controls themselves are code and do not read it.
+- **Opt-in per server, no agent-wide default.** It is experimental (the extension is Beta), it is
+  "a higher-risk surface than remote tool invocation", and the host's per-server decision is the
+  "explicit user policy" that governs whether a skill is loaded at all. A default on the agent
+  would hand that decision to whichever servers are added later - in the demo, any URL a user
+  types. Off means off: the capability is not declared and nothing is asked (the wire is what it
+  was).
+- **2026-07-28 only.** The extension is written against that revision (Protocol Revision: every
+  request carries `_meta`, results are `CacheableResult`s); the SDK would also run it on a 2025
+  connection, but there is no specification of it there. So `'legacy'` warns and asks nothing, and
+  an `'auto'` connection that negotiated 2025 lists nothing.
+- **The SDK verifies, the shared file decides.** `SkillsClient` (`@modelcontextprotocol/client/ext/skills`)
+  checks every read against the entry - size, SHA-256, the frontmatter parsed with a YAML 1.2
+  parser and compared field by field - which is the part where an own implementation (a YAML
+  parser) would be the weak point. Everything that is policy is ours, pure and shared byte for byte
+  with the Node sibling (`mcp/skills.ts`): which entries are taken, the names, the caps, the
+  preamble, which file may be read (only what the entry the skill was loaded with lists: "the held
+  entry"), the catalog over the client. In this package the SDK's skills client is imported only by
+  a connection that lists skills.
+- **Carried by the tools, like the instructions.** The host merges `mcp.tools` into the agent and
+  that is all it does for instructions; skills follow the same path (`markMcpSkills`), so a host -
+  and the React hooks - wire nothing new. The cost: a server none of whose tools is mounted offers
+  no skills (the same rule as its instructions: a server the host filtered out does not speak).
+- **Lazy, and nothing on disk.** The extension forbids fetching files ahead of need, and caching
+  on disk brings rules of its own; a skill's text lives in memory, per agent, for as long as the
+  agent does, and a checkpoint keeps only names.
+- **Code is asked for while acting on one.** The extension requires that no code runs on the host
+  because a server's skill said so without a person's approval. The agent's code-running tool is
+  `run_js` (and whatever the host marks): while the run, or the run that started a helper, has an
+  MCP skill active, a call of one is asked whatever the mode. This only tightens: a deny stays a
+  deny, and nothing else about consent changes.
+
 ## MCP elicitation: the host answers, the model never sees the question
 
 - **On the connection, not on the agent.** The capability is declared in the handshake

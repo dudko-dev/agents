@@ -471,6 +471,7 @@ Options:
 | `connect({ url, name, headers })` | the endpoint, the tool prefix (`"<name>__<tool>"`, default `mcp`), static headers |
 | `connect({ oauth })` | `true`, or `{ redirectUrl, scope, clientName, clientMetadataUrl }` (`McpOAuthOptions`) - each overrides the hook-level value for this server |
 | `connect({ protocol })` | the MCP protocol revisions this connection may use: `'legacy'` (the 2025 revisions), `'auto'` (2026-07-28 when the server offers it, the 2025 ones otherwise) or `'modern'` (2026-07-28 only). Left out, nothing is passed and the core speaks the 2025 revisions, exactly as before. Kept across the OAuth redirect. See [the protocol revision](#the-protocol-revision) |
+| `connect({ skills })` | **experimental**: load the skills the server serves (the MCP Skills extension) into the agent's skills catalog, as `<server>/<skill>`. They come with `tools` - nothing else to wire. Needs `protocol: 'auto'` or `'modern'`. Off (left out) by default. Kept across the OAuth redirect. See [MCP skills](#mcp-skills-experimental) |
 
 **`clientMetadataUrl` (CIMD).** Instead of registering itself with every authorization server, an
 app can publish one JSON document that describes it and use that document's URL as its
@@ -526,7 +527,8 @@ const config = { model, tools: { ...myTools, ...mcp.tools } } // "<name>__<tool>
 `useMcpServers` takes the options of `useMcp` (`clientName`, `clientMetadataUrl`, `onLog`,
 `elicitation`) plus `persist`, `storageKey`, `autoConnect` and `connectTimeoutMs`, and returns
 `{ servers, tools, catalog, protocols, connectedCount, pendingElicitations, answerElicitation, … }`.
-A server may be added with its own `protocol` (`add({ name, url, protocol: 'auto' })`), which is
+A server may be added with its own `protocol` (`add({ name, url, protocol: 'auto' })`) and
+`skills: true` ([MCP skills](#mcp-skills-experimental); `servers[i].skills`), both
 remembered with the list; `servers[i].protocolMode` is what it was added with and
 `servers[i].protocol` (`{ version, era }`) what was negotiated while it is connected - `protocols`
 lists them for every connected server. A server added with
@@ -543,6 +545,27 @@ are read to the end; tools a server marks read-only skip the "ask before
 changes" prompt. With hundreds of tools the core switches to **tool search**
 (a compact catalogue + `find_tools`) above `toolSearchThreshold` — see the
 core's [capabilities doc](https://github.com/dudko-dev/agents/blob/main/packages/agent-web/docs/capabilities.md).
+
+### MCP skills (experimental)
+
+```tsx
+await mcp.add({ name: 'docs', url, protocol: 'auto', skills: true })
+// the agent's catalog now has docs/<skill> entries; mcp.servers[0].skills === true
+```
+
+A server may serve **skills** (the `io.modelcontextprotocol/skills` extension, Beta): instruction
+files the agent can load. With `skills: true` (on `connect`, or per server on `add`, remembered
+with the list) the core declares the extension and puts the server's skills into the agent's
+catalog next to your own skills and the agent's lessons, named `<server>/<skill>` - so a server
+can never take the name of one of yours, nor of another server's skill. Nothing else is wired: the
+skills come with the server's `tools`, like its instructions. The run's skills
+(`message.skills`, the `skill.activated` event, which carries `server` for these) show that
+name, so a UI says whose skill it is. The text is third-party: the core loads it on demand,
+verified against the server's digests, under a preamble that says it is knowledge only - it cannot
+approve a call, change the approval mode, open the web or run code (while the agent acts on one, a
+tool that runs code is always asked). Needs the 2026-07-28 revision. The core's
+[README](https://github.com/dudko-dev/agents/blob/main/packages/agent-web/README.md) ("MCP
+skills") has the rules.
 
 ### The protocol revision
 

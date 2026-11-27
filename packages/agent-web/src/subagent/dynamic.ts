@@ -70,6 +70,11 @@ export interface SpawnSeed {
   sandboxNotes?: SpawnSandboxNotes
   /** The caller's count of questions MCP servers asked the user: one number for the tree. */
   elicitations?: { count: number }
+  /**
+   * The skills of MCP servers the caller's run acts on (its own callers' included): a helper's
+   * call of a tool that runs code is asked while there is one, as the caller's would be.
+   */
+  mcpSkills?: () => string[]
 }
 
 const seeds = new WeakMap<object, SpawnSeed>()
@@ -286,6 +291,7 @@ export const createDynamicSubagentTool = (deps: DynamicSubagentDeps): AgentTool 
           ...(runCtx.control ? { control: runCtx.control } : {}),
           ...(sandboxNotes && tools.run_js ? { sandboxNotes } : {}),
           ...(runCtx.elicitations ? { elicitations: runCtx.elicitations } : {}),
+          ...(runCtx.mcpSkills ? { mcpSkills: runCtx.mcpSkills } : {}),
         })
 
         parentSignal?.addEventListener('abort', onParentAbort, { once: true })

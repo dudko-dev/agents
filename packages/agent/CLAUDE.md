@@ -165,8 +165,8 @@
     same suite runs each mode against the `legacy` / `dual` / `modern` test servers. On a modern
     connection: `Mcp-Method` / `Mcp-Name` are set by the transport from the message (so
     `client.request` is enough; `Mcp-Param-*` is `callTool`'s own and is not sent), tool list
-    changes need `client.listen` (opened at connect when `onToolsChanged` is given; never opened
-    again), `inputRequired.autoFulfill` is off and an `input_required` answer is a `McpToolError`
+    changes need `client.listen` (opened at connect when `onToolsChanged` is given, and opened
+    again by `mcp-listen.ts` when it ends), `inputRequired.autoFulfill` is off and an `input_required` answer is a `McpToolError`
     unless `onElicitation` is set (then `mcp-elicitation.ts` answers it), a stdio probe runs on a sibling process and is bounded by
     `MCP_STDIO_PROBE_TIMEOUT_MS`. The negotiated revision is in `IConnectedMcp.protocols`. Same
     names and rules in the browser sibling: change both. `mcp.ts` deliberately
@@ -179,6 +179,49 @@
     `redirectUrl`). OAuth guards on this boundary - the `iss` check, the refusal of a callback
     without discovery state, the issuer stamp surviving the store, the scope policy - each have a
     test in `tests/mcp-connect.test.ts` and need a mutation check.
+  - `mcp-listen.ts` (pure, no imports): the 2026-07-28 `subscriptions/listen` stream kept open
+    (`createMcpListenSupervisor`, used by `listenForToolChanges` in `mcp.ts`). A stream that ends
+    while the connection is open - dropped, or closed by the server with its result - is opened
+    again with exponential backoff and jitter (`mcpListenRetryDelay`: 1 s doubled up to 60 s, less
+    up to half), the count reset only by a stream that stayed up `MCP_LISTEN_STABLE_MS`, given up
+    after `MCP_LISTEN_MAX_ATTEMPTS` in a row; final at once on 401 / 403 / 404 / 405 / -32601 /
+    -32602 (`mcpListenFinalReason`). Once a stream is back it calls the SAME `onToolsChanged` the
+    notice calls (the agent re-lists as after a notice). `close()` stops every listener BEFORE the
+    clients close (and so does every failed-connect path). Its timers (`setTimeout`) have a test
+    seam of their OWN (`Symbol.for('@dudko.dev/agent:mcp-listen-test-time')`, driven by
+    `tests/helpers/listen-time.ts`, the same file in both packages) - never the wait clock's: the
+    agent always passes `onToolsChanged`, and a listen timer on that seam made the human-wait
+    tests see a run deadline running while a person was asked. A COPY of the browser sibling's
+    `src/mcp/listen.ts`, byte for byte: change both (`tests/mcp-listen.test.ts` compares them and
+    tests every rule on fakes; `tests/mcp-protocol.test.ts` drives it against the test server's
+    `listenFaults` / `dropListenStreams` / `closeListenStreams` on virtual time, and a child
+    process, `tests/fixtures/mcp-listen-exit.ts`, proves close leaves no timer). Every rule needs
+    a mutation check. No setting, by design (the browser's `docs/design.md` says why).
+  - `mcp-skills.ts` (pure, no imports; `skills: true` on a server, EXPERIMENTAL - the MCP Skills
+    extension `io.modelcontextprotocol/skills`, Beta, written against 2026-07-28): the rules on a
+    server's entries (`mcpSkillEntryRefusal`: URI last segment = frontmatter name, the naming
+    rules, `"dynamic"` declined, complete file list inside the skill, sha256 digests, the 512-file /
+    16 MiB limits), the catalog names (`assignMcpSkillNames`: `<server>/<skill>` by the HOST's
+    label - no host skill or lesson name can hold a "/", so nothing shadows anything), the caps
+    (`selectMcpSkills`, 32 per server / 64 in all; body / file / description caps), the preamble
+    (`mcpSkillPreamble`: knowledge, never policy), the file rule (`resolveMcpSkillFile`: only what
+    the LOADED entry lists, never a URI / absolute / `..`), the mark that carries a server's
+    skills on its tools (`markMcpSkills` / `collectMcpSkillSources`, like the instructions: a
+    server with no mounted tool offers none) and one server's catalog over the SDK's
+    `SkillsClient` (`createMcpSkillCatalog`: list, load SKILL.md, read a file against the held
+    entry - the SDK verifies size, digest and frontmatter). A COPY of the browser sibling's
+    `src/mcp/skills.ts`, byte for byte: change both (`tests/mcp-skills-shared.test.ts` compares
+    them and tests every rule). `mcp.ts` wires it (the extension declared only with `skills: true`
+    and a mode that may speak 2026-07-28; listed only on a 2026-07-28 connection; a change comes
+    as `notifications/resources/list_changed`, on the same listen stream, and goes the
+    `onToolsChanged` -> `refreshServer` path); `skills.ts` keeps an MCP skill's state per skill
+    object (`createMcpSkills`, `loadMcpSkill`, `prepareMcpSkills`; `skillPreamble`); `agent.ts`
+    syncs them into `skills` between runs; the runner reads a planner's pick before activating
+    it. While a run (or a run above it) acts on an MCP skill, a tool that runs code
+    (`markCodeExecution`: `run_js`) is ALWAYS asked (`decideToolPermission`, source
+    `'mcp-skill'`). OFF without `skills: true`: no capability, no request. Security boundary:
+    every guard has a test (`tests/mcp-skills*.test.ts`, the second over real sockets against the
+    test server's `skills` / `skillFaults`) and a mutation check.
   - `pipeline-engine.ts` + `pipeline.ts` (`createPipeline`: a graph of agents with conditions and
     loops, described in plain JSON). The engine (definition types, `validatePipeline`, the conditions
     with the non-backtracking `matches` matcher, the wave scheduler; pure, no imports) is a COPY of

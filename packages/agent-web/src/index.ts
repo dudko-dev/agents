@@ -177,9 +177,24 @@ export {
   renderActiveSkills,
   createSkillTools,
   learnedPreamble,
+  skillPreamble,
   SKILL_TOOL_NAMES,
 } from './skills.js'
-export type { Skill, SkillOrigin, LoadSkillOptions } from './skills.js'
+export type { Skill, SkillOrigin, McpSkillOrigin, LoadSkillOptions } from './skills.js'
+// MCP skills (`skills: true` on a server of `./mcp`, experimental): the extension's id, the
+// caps and the pure rules (no SDK behind them).
+export {
+  MCP_SKILLS_EXTENSION,
+  MCP_SKILL_BODY_MAX_CHARS,
+  MCP_SKILL_DESCRIPTION_MAX_CHARS,
+  MCP_SKILL_FILE_MAX_CHARS,
+  MCP_SKILL_MAX_RESOURCES,
+  MCP_SKILL_MAX_TOTAL_BYTES,
+  MCP_SKILLS_MAX_PER_SERVER,
+  MCP_SKILLS_MAX_TOTAL,
+  mcpSkillEntryRefusal,
+  mcpSkillPreamble,
+} from './mcp/skills.js'
 
 // ── Learning: the agent's notebook of lessons (skills it wrote itself) ───────
 export {
@@ -403,6 +418,8 @@ export {
   ToolDeniedError,
   markReadOnly,
   isReadOnlyTool,
+  markCodeExecution,
+  isCodeExecutionTool,
   matchRule,
   decideToolPermission,
   TOOL_APPROVAL_MODES,

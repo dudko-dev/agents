@@ -75,8 +75,10 @@ export {
   type ILocalMcpServer,
   type ILocalMcpServerOptions,
   type IMcpRequestRecord,
+  type ListenFault,
   type McpProtocol,
   type ProbeFault,
   type StructuredFault,
 } from './mcp-server.ts'
+export { SKILL_MARKERS, type ISkillFaults } from './mcp-skills.ts'
 export { parseCliArgs, startFromCli, type ICliArgs, type ICliServers } from './cli.ts'

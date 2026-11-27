@@ -83,6 +83,13 @@ export interface McpHttpServerConfig {
    * server's `Access-Control-Allow-Headers`.
    */
   protocol?: McpProtocolMode
+  /**
+   * EXPERIMENTAL: load the server's skills (the `io.modelcontextprotocol/skills` extension) into
+   * the agent's catalog, as `<server>/<skill>` (cores with MCP skills; an older one ignores the
+   * field). Needs `protocol: 'auto'` or `'modern'`. The hooks set it only for a server that was
+   * given `skills: true`.
+   */
+  skills?: boolean
 }
 
 /**

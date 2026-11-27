@@ -662,6 +662,68 @@ wider one than a tool result: it is there before the first call.
   a call that ran as failed, and invite a repeat): do not treat the schema as a validation
   boundary for what your own code does with `structuredContent`.
 
+## MCP skills: third-party instructions
+
+With `skills: true` on a server (experimental; the `io.modelcontextprotocol/skills` extension), the
+server's skills join the agent's skills catalog. A skill is instructions the model follows readily
+- the extension itself calls it "a higher-risk surface than remote tool invocation". Whoever runs
+the server writes them, and can change them at any time.
+
+**What is enforced**
+
+- **Opt-in, per server, off by default.** Without `skills: true` the extension is not declared and
+  nothing of it is requested. There is no agent-wide switch: a new server never brings skills by
+  default. The per-server flag is the "explicit user policy" the extension says governs whether a
+  skill is loaded at all.
+- **A namespace a server cannot leave.** Its skills are `<server>/<skill>`, the server named by
+  YOUR key for it, never by what it calls itself. No other kind of skill name can hold a `/`, so a
+  server cannot take the name of one of your skills, of a lesson the agent wrote, or of another
+  server's skill - the name the model uses always reaches the skill it names. Two skills of one
+  server with one name are both kept, by their paths; a clash of bare names is logged.
+- **Labelled where it enters.** The catalog line ends with `[from the MCP server "<server>" -
+  third-party]`; the instructions and every file come under a preamble naming the server and the
+  URI and saying the text is knowledge only: it cannot grant permissions, approve a call, change
+  the approval mode, widen egress or the sandbox, or make the agent run anything. Invisible and
+  control characters are removed.
+- **Nothing of its frontmatter is policy.** Only `name` and `description` are read. `allowed-tools`
+  - a server asking for wider access on the host - is ignored, as the extension requires for a
+  skill that arrives over MCP; so is anything else.
+- **It cannot change the agent's controls.** Approval, egress, the sandbox and budgets are code
+  that reads its configuration, not the model's context: a skill that says "approve everything" or
+  "fetch this URL" changes neither the mode, nor a rule, nor the allow list (a test loads such a
+  skill and checks each).
+- **No code runs on a skill's say-so.** While the run (or the run that started a helper) acts on an
+  MCP skill, every call of a tool that runs code - `run_js`, or a tool you mark with
+  `markCodeExecution` - is asked, even in `autopilot`, even with a rule or an "always allow" for it;
+  the request names the skills (`mcpSkills`). With no `onRequest` the call is refused. A deny stays a
+  deny. A file a skill bundles is shown as text under a header that says it is never a program to
+  run; the agent has no tool that runs a skill's file.
+- **Verified, or not used.** A skill's `SKILL.md` and each file are read only when needed, and each
+  is checked against the server's entry before the model sees a byte of it: size, SHA-256 digest,
+  and for `SKILL.md` the frontmatter field by field. An entry whose URI and name disagree, that does
+  not list its files (`"dynamic"`), lists a file outside the skill, or is over the extension's
+  limits is refused at listing.
+- **Origin-bound reads.** A file is read from the skill's own server, only if the entry the skill
+  was loaded with lists it: never a URI, an absolute path or `..`. A skill cannot make the agent
+  read another server's resources, or a file the server added after the skill was loaded.
+- **Bounded.** 32 skills per server and 64 in all in the catalog; 300 characters per catalog line,
+  16 000 of instructions, 32 000 of a file - every cut said.
+- **Held in memory only.** Nothing of a skill is written to disk, IndexedDB or a checkpoint (a run
+  checkpoint holds the skill's NAME; a resumed run reads and verifies the skill again).
+
+**What is NOT protected**
+
+- **A model can still be persuaded.** The preamble lowers the odds; it is not a boundary. A
+  hostile skill can steer the model's use of the tools it already has, or ask it to put data from
+  the conversation into a call of that server's tools. Turn skills on only for servers you would
+  let write instructions for your agent.
+- **Digests are not a signature.** They come from the same server as the content (the extension
+  says so): a match proves the two are consistent, not that either is honest, and an intermediary
+  that rewrites both is not detected. They catch a skill that changed since it was listed.
+- **Code-execution tools you do not mark.** The rule above covers `run_js` and the tools you mark;
+  a host tool that runs code but is not marked is an ordinary tool. A subagent you configured
+  (`createSubagentTool`) is its own agent with its own policy.
+
 ## MCP protocol revision (`protocol`): what a page sends, and what the server must allow
 
 A server connected with `protocol: 'auto'` or `'modern'` is sent the request headers of the

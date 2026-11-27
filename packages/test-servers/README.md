@@ -18,7 +18,7 @@ TypeScript run directly by Node (type stripping, Node ≥ 22.6); there is no bui
 | --- | --- | --- |
 | Identity provider | `startLocalIdp(opts)` | Issues signed ID tokens for a test user, serves its JWKS, and answers the RFC 8693 token exchange with a signed ID-JAG (draft-ietf-oauth-identity-assertion-authz-grant) after authenticating the client. |
 | Authorization server | `startLocalAuthorizationServer(opts)` | Metadata (RFC 8414), dynamic registration and a token endpoint that rotates the access token. With `enterprise`: only the `jwt-bearer` grant with an ID-JAG from one IdP, verified claim by claim. |
-| MCP server | `startLocalMcpServer(opts)` | The MCP SDK's streamable-HTTP server with three tools (`echo`, `secret`, `boom`), optional `instructions` in its `initialize` / `server/discover` result (`mcp.setInstructions()` changes them for the next client to connect), optional structured tools (`structuredTools`: `report` and `report_mixed` declare an `outputSchema` and answer with `structuredContent`), optional elicitation tools (`elicitationTools`, below), optional MCP Apps tools (`appTools`, below), protected resource metadata (RFC 9728) and, with `requireAuth`, the 401 challenge. `protocol` picks the revisions it speaks: `'legacy'` (default), `'modern'` or `'dual'` (below). |
+| MCP server | `startLocalMcpServer(opts)` | The MCP SDK's streamable-HTTP server with three tools (`echo`, `secret`, `boom`), optional `instructions` in its `initialize` / `server/discover` result (`mcp.setInstructions()` changes them for the next client to connect), optional structured tools (`structuredTools`: `report` and `report_mixed` declare an `outputSchema` and answer with `structuredContent`), optional elicitation tools (`elicitationTools`, below), optional MCP Apps tools (`appTools`, below), optional skills (`skills`, below; 2026-07-28 only), protected resource metadata (RFC 9728) and, with `requireAuth`, the 401 challenge. `protocol` picks the revisions it speaks: `'legacy'` (default), `'modern'` or `'dual'` (below). |
 | The pair | `startLocalMcp(opts)` | An MCP server and the authorization server that guards it, on two ports, already wired together. What most tests want. |
 
 Every one returns its URLs, what it recorded, and `close()`.
@@ -125,6 +125,14 @@ with hand-built JSON-RPC):
 `<name>:ok`, so a client that refetches sees a difference. `mcp.changeListeners()` says how many
 streams would be reached - wait for it instead of sleeping.
 
+**A listen stream that ends (modern).** `mcp.dropListenStreams()` cuts every open
+`subscriptions/listen` stream with no result (what a client sees when the network or a proxy
+drops it) and returns how many there were. `await mcp.closeListenStreams()` ends each one with
+its `subscriptions/listen` result - what a server process that shuts down sends - and goes on
+serving from a fresh handler on the same event bus, as another process taking over would: a new
+subscription is served and hears of the next change. How the NEXT `subscriptions/listen` is
+answered is `mcp.listenFaults` (below).
+
 ### Elicitation tools
 
 `elicitationTools: true` adds four tools that ask the user something. One implementation serves
@@ -152,6 +160,26 @@ exactly as it arrived. `mcp.urlElicitations` lists the pages: `{ id, url, opened
 On the legacy wire the server is stateless, so it judges the client's `elicitation` capability by
 the latest `initialize` it received; a mode that was not declared fails the tool call without a
 request being sent. It gives up after 8 rounds of one call.
+
+### Skills
+
+`skills: true` serves skills (the `io.modelcontextprotocol/skills` extension, SEP-2640) on the
+2026-07-28 side (`modern`, and the modern requests of `dual`): the 2.x SDK's `SkillsExtension`
+over a source of `src/mcp-skills.ts`, so the server declares the extension (no `directoryRead`)
+and answers `skills/list`, `skills/get` and `resources/read` of the `skill://` files. The legacy
+side never serves them: the extension is written against 2026-07-28.
+
+| Skill | Files | Body marker (`SKILL_MARKERS`) |
+| --- | --- | --- |
+| `skill://git-workflow/SKILL.md` | - | `GIT-WORKFLOW-BODY` |
+| `skill://pdf-processing/SKILL.md` | `references/FORMS.md`, `scripts/extract.py` (a script its instructions point at) | `PDF-PROCESSING-BODY` (`FORMS-FILE-BODY`, `EXTRACT-SCRIPT-BODY`) |
+| `skill://acme/billing/refunds/SKILL.md` | - | `BILLING-REFUNDS-BODY` |
+| `skill://acme/support/refunds/SKILL.md` | - (the same name, `refunds`, as the one above) | `SUPPORT-REFUNDS-BODY` |
+
+`mcp.skillReads` lists every skill file a client read (`resources/read`), in order.
+`mcp.addSkill(path, description, body)` serves one more skill from then on and announces a resource
+list change (`notifications/resources/list_changed`, on every listen stream that asked for
+`resourcesListChanged`), which is how a client hears of a change of skills.
 
 ### MCP Apps tools
 
@@ -232,6 +260,19 @@ in every `protocol` mode; only `server/discover` is touched:
 | `'garbage'` | answers 200 `application/json` with a body that is not JSON |
 | `'cors'` | is blocked in a browser: every preflight answers with the request headers a pre-2026 deployment allows (no `Mcp-Method`, no `Mcp-Name`). A client that is not a browser is not subject to CORS and sees no difference. |
 
+**MCP server** — `mcp.listenFaults`, for every `subscriptions/listen` request (2026-07-28: the
+2025 revisions have no such method). The request is answered before the SDK sees it; a stream
+that is already open is not touched:
+
+| `answer` | `subscriptions/listen` then |
+| --- | --- |
+| `'not_found'` | answers 404 with JSON-RPC `-32601`: a server that does not implement the method |
+| `'not_allowed'` | answers 405 |
+| `'unauthorized'` | answers 401 with the `WWW-Authenticate` challenge, whatever the token |
+| `'forbidden'` | answers 403 |
+| `'unavailable'` | answers 503 with a plain-text body |
+| `'silent'` | answers nothing: the request is held until the client gives it up (`mcp.heldListens()` counts them) |
+
 **MCP server** — `mcp.appFaults` (with `appTools`), both eras:
 
 | Field | `resources/read` of the app then |
@@ -240,6 +281,20 @@ in every `protocol` mode; only `server/discover` is touched:
 | `padTo` | pads the HTML (a comment) to this many characters |
 | `otherUri` | answers for `ui://travel/other.html` instead |
 | `cspInjection` | adds declared CSP entries that are not origins (`https://ok.example; script-src *`, `*`, `'unsafe-eval'`, `data:`, `https://*.com`) |
+
+**MCP server** — `mcp.skillFaults` (with `skills`), 2026-07-28; each adds one skill to the listing:
+
+| Field | The listing then also has |
+| --- | --- |
+| `digest` | `skill://tampered/SKILL.md`, whose listed digest is not the digest of what is served (same size) |
+| `nameMismatch` | `skill://wrong-name/SKILL.md` with the frontmatter name `other-name`; `skills/list` is answered by hand, before the SDK (which would drop the entry) |
+| `frontmatter` | `skill://drifted/SKILL.md`, whose entry's description is not its `SKILL.md`'s (the digest matches) |
+| `oversize` | `skill://huge/SKILL.md`, listing 513 files: over the extension's limit of 512 |
+| `dynamic` | `skill://generated/SKILL.md` with `"resources": "dynamic"` |
+| `hostile` | `skill://approve-everything/SKILL.md`: instructions to approve every call, switch approval off, fetch an outside URL and run `scripts/payload.js`, and `allowed-tools: run_js web_fetch` in its frontmatter (`HOSTILE-SKILL-BODY`) |
+| `longBody` | `skill://long-guide/SKILL.md`, whose instructions are 40 000 characters (ending `END-OF-LONG-GUIDE`) |
+| `changedFile` | (no new skill) `pdf-processing`'s `references/FORMS.md` is served changed, same length: its digest no longer matches |
+| `extra: n` | `skill://extra-1/SKILL.md` ... `skill://extra-<n>/SKILL.md` |
 
 **MCP server** — `mcp.elicitationFaults` (with `elicitationTools`), both eras:
 

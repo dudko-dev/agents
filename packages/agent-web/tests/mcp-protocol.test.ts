@@ -1,7 +1,9 @@
 import 'fake-indexeddb/auto'
 import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
 import { readFileSync } from 'node:fs'
-import test from 'node:test'
+import test, { type TestContext } from 'node:test'
+import { fileURLToPath } from 'node:url'
 import {
   REPORT_VALUE,
   startLocalMcp,
@@ -19,6 +21,7 @@ import {
   type McpProtocolMode,
 } from '../dist/mcp.js'
 import { captureMcpWire } from './helpers/mcp-wire.ts'
+import { useListenTime } from './helpers/listen-time.ts'
 
 // The connector on the 2.x SDK client, against REAL servers over real sockets
 // (`@dudko.dev/test-servers`: the 1.x server SDK behind `legacy`, the 2.x one
@@ -461,14 +464,15 @@ test('2026-07-28: a tool list change arrives over subscriptions/listen; refreshS
       await mcp.refreshServer('wx')
       assert.equal(await callTool(mcp.tools, 'wx__late'), 'late:ok')
 
-      // The stream is not opened again when it ends: that is said, once.
+      // The server going away ends the stream with its result: that is said, once, with
+      // when it is tried again (see the listen tests below).
       await server.close()
       await until(() => logs.some((l) => /tool list change stream ended/.test(l)), 'the warning')
-      assert.deepEqual(
-        logs.filter((l) => /tool list change stream ended/.test(l)),
-        [
-          'warn [mcp] wx: the tool list change stream ended (closed by the server); changes are not announced until the server is connected again',
-        ],
+      const ended = logs.filter((l) => /tool list change stream ended/.test(l))
+      assert.equal(ended.length, 1)
+      assert.match(
+        ended[0],
+        /^warn \[mcp\] wx: the tool list change stream ended \(closed by the server\); listening again in (0\.[5-9]|1\.0) s \(attempt 1 of 10\)$/,
       )
     } finally {
       await mcp.close()
@@ -545,6 +549,311 @@ test('2026-07-28: a server that does not advertise tools.listChanged is not aske
     ['info [mcp] wx: the server does not announce tool list changes'],
   )
   await mcp.close()
+})
+
+// ── 2026-07-28: the listen stream, kept open ───────────────────────────────
+//
+// The Node sibling's suite, on this connector: the stream ends (dropped, or closed by the server
+// with its result) and is opened again, with backoff, on VIRTUAL time - `useListenTime` puts the
+// connector's listen timers on a time the test moves (a seam of their own, not the wait clock's),
+// so no test sleeps for a delay. The sockets stay real. The rules themselves are unit-tested in the Node package
+// (`tests/mcp-listen.test.ts`, which also compares `src/mcp/listen.ts` with its copy).
+
+/** The connector's own lines about the stream (the transport may add one of its own per loss). */
+const RETRY = /^warn \[mcp\] wx: (.+); listening again in (\d+\.\d) s \(attempt (\d+) of 10\)$/
+const retriesIn = (logs: string[]): RegExpExecArray[] =>
+  logs.map((l) => RETRY.exec(l)).filter((m): m is RegExpExecArray => m !== null)
+
+/** A modern server and a connection that listens for its tool list changes, on virtual time. */
+const listening = async (t: TestContext, options: { protocol?: 'modern' | 'auto' } = {}) => {
+  // Closed first, whatever else the test's end hooks say (the seam's check may throw).
+  const opened: { close: () => Promise<void> }[] = []
+  t.after(async () => {
+    for (const one of opened.reverse()) await one.close()
+  })
+  const vt = useListenTime(t)
+  const server = await startLocalMcpServer({ protocol: 'modern' })
+  opened.push(server)
+  const logs: string[] = []
+  const changed: string[] = []
+  const mcp = await connectMcpHttp(
+    { wx: { url: server.url, protocol: options.protocol ?? 'modern' } },
+    {
+      onLog: (level, message) => logs.push(`${level} ${message}`),
+      onToolsChanged: (name) => changed.push(name),
+    },
+  )
+  opened.push(mcp)
+  const listens = (): number =>
+    server.requests.filter((r) => r.method === 'subscriptions/listen').length
+  return { vt, server, mcp, logs, changed, listens }
+}
+
+test('2026-07-28 listen: a dropped stream is opened again, and a change made meanwhile is picked up', async (t) => {
+  const s = await listening(t)
+  assert.equal(s.listens(), 1)
+  assert.equal(s.server.changeListeners(), 1)
+  assert.equal(s.vt.running, 1, 'the stability timer of the open stream, nothing else')
+
+  assert.equal(s.server.dropListenStreams(), 1)
+  await until(() => retriesIn(s.logs).length === 1, 'the drop to be seen')
+  const [drop] = retriesIn(s.logs)
+  assert.equal(drop[1], 'the tool list change stream ended (dropped)')
+  assert.equal(drop[3], '1')
+  assert.ok(Number(drop[2]) >= 0.5 && Number(drop[2]) <= 1, drop[0])
+  assert.equal(s.vt.running, 1, 'the retry; the stability timer went with the stream')
+  // While no stream is open, the server's tool list changes: the notice reaches nobody.
+  s.server.addTool('gap')
+  assert.equal(s.server.changeListeners(), 0)
+  assert.deepEqual(s.changed, [])
+
+  s.vt.tick(1_000)
+  await until(() => s.changed.length === 1, 'the re-subscribe to report the list changed')
+  assert.deepEqual(s.changed, ['wx'], "once, through the notice's own callback")
+  assert.equal(s.listens(), 2)
+  assert.equal(s.server.changeListeners(), 1)
+  assert.ok(
+    s.logs.includes(
+      'info [mcp] wx: listening for tool list changes again (attempt 1); the tool list is read again',
+    ),
+  )
+  assert.ok(!('wx__gap' in s.mcp.tools), 'nothing is re-listed behind the host')
+  await s.mcp.refreshServer('wx')
+  assert.equal(await callTool(s.mcp.tools, 'wx__gap'), 'gap:ok')
+
+  // The new stream carries notices as the first one did.
+  s.server.addTool('after')
+  await until(() => s.changed.length === 2, 'a notice on the new stream')
+  assert.equal(retriesIn(s.logs).length, 1, 'one warning for the one drop')
+  assert.ok(!s.logs.some((l) => /gave up|not tried again/.test(l)))
+})
+
+test('2026-07-28 listen: a stream the server closes with its result is opened again too (another process answers)', async (t) => {
+  const s = await listening(t, { protocol: 'auto' })
+  assert.equal(await s.server.closeListenStreams(), 1)
+  await until(() => retriesIn(s.logs).length === 1, 'the close to be seen')
+  assert.equal(retriesIn(s.logs)[0][1], 'the tool list change stream ended (closed by the server)')
+  s.server.addTool('gap')
+  s.vt.tick(1_000)
+  await until(() => s.changed.length === 1, 'the re-subscribe')
+  assert.equal(s.listens(), 2)
+  await s.mcp.refreshServer('wx')
+  assert.equal(await callTool(s.mcp.tools, 'wx__gap'), 'gap:ok')
+})
+
+test('2026-07-28 listen: failed attempts back off from 1 s to 60 s with jitter, then it gives up after 10, with nothing left pending', async (t) => {
+  const s = await listening(t)
+  s.server.listenFaults.answer = 'unavailable'
+  s.server.dropListenStreams()
+  for (let attempt = 1; attempt <= 10; attempt += 1) {
+    await until(() => retriesIn(s.logs).length === attempt, `attempt ${attempt} to be scheduled`)
+    const line = retriesIn(s.logs)[attempt - 1]
+    const full = Math.min(60_000, 1_000 * 2 ** (attempt - 1))
+    const delay = Number(line[2]) * 1_000
+    assert.equal(Number(line[3]), attempt)
+    assert.ok(delay >= full / 2 && delay <= full, `attempt ${attempt}: ${line[0]}`)
+    if (attempt > 1) {
+      assert.match(line[1], /^could not subscribe to tool list changes - .*upstream unavailable/)
+    }
+    assert.equal(s.vt.running, 1, 'one timer: the retry')
+    assert.equal(s.listens(), attempt)
+    s.vt.tick(full)
+  }
+  await until(() => s.logs.some((l) => /gave up after 10 attempts/.test(l)), 'giving up')
+  assert.equal(s.listens(), 11)
+  assert.equal(s.vt.running, 0, 'nothing pending once it gave up')
+  const ours = s.logs.filter((l) => /tool list change|subscribe to tool list/.test(l))
+  assert.equal(ours.length, 11, 'one line per loss or failure, and one to give up')
+  assert.equal(ours.filter((l) => /gave up/.test(l)).length, 1)
+  // Time passes: nothing more is tried.
+  s.vt.tick(3_600_000)
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  assert.equal(s.listens(), 11)
+  // refreshServer keeps working.
+  s.server.addTool('later')
+  await s.mcp.refreshServer('wx')
+  assert.equal(await callTool(s.mcp.tools, 'wx__later'), 'later:ok')
+})
+
+test('2026-07-28 listen: the backoff goes on through a stream lost at once, and starts over after one that stayed up', async (t) => {
+  const s = await listening(t)
+  s.server.dropListenStreams()
+  await until(() => retriesIn(s.logs).length === 1, 'the first drop')
+  s.vt.tick(1_000)
+  await until(() => s.changed.length === 1, 'the first re-subscribe')
+  // Lost again before it was stable: the next delay is the second one.
+  s.server.dropListenStreams()
+  await until(() => retriesIn(s.logs).length === 2, 'the second drop')
+  assert.equal(retriesIn(s.logs)[1][3], '2')
+  assert.ok(Number(retriesIn(s.logs)[1][2]) >= 1 && Number(retriesIn(s.logs)[1][2]) <= 2)
+  s.vt.tick(2_000)
+  await until(() => s.changed.length === 2, 'the second re-subscribe')
+  // This stream stays up a minute: the count starts over.
+  s.vt.tick(60_000)
+  s.server.dropListenStreams()
+  await until(() => retriesIn(s.logs).length === 3, 'the third drop')
+  assert.equal(retriesIn(s.logs)[2][3], '1')
+  assert.ok(Number(retriesIn(s.logs)[2][2]) <= 1)
+})
+
+test('2026-07-28 listen: 401 / 403 / 404 / 405 stop it at once, at a retry or at the connect', async (t) => {
+  const vt = useListenTime(t)
+  const cases = [
+    ['not_found', 'the server does not offer subscriptions/listen'],
+    ['not_allowed', 'the server does not offer subscriptions/listen'],
+    ['unauthorized', 'the server refused the authorization'],
+    ['forbidden', 'the server refused the authorization'],
+  ] as const
+  for (const [fault, reason] of cases) {
+    const server = await startLocalMcpServer({ protocol: 'modern' })
+    const logs: string[] = []
+    const mcp = await connectMcpHttp(
+      { wx: { url: server.url, protocol: 'modern' } },
+      { onLog: (level, message) => logs.push(`${level} ${message}`), onToolsChanged: () => {} },
+    )
+    try {
+      server.listenFaults.answer = fault
+      server.dropListenStreams()
+      await until(() => retriesIn(logs).length === 1, `${fault}: the drop`)
+      vt.tick(1_000)
+      await until(() => logs.some((l) => /not tried again/.test(l)), `${fault}: the refusal`)
+      const refused = logs.filter((l) => /not tried again/.test(l))
+      assert.equal(refused.length, 1, fault)
+      assert.ok(refused[0].startsWith('warn [mcp] wx: could not subscribe'), refused[0])
+      assert.ok(refused[0].endsWith(`; not tried again: ${reason}`), refused[0])
+      assert.equal(vt.running, 0, `${fault}: nothing pending`)
+      vt.tick(3_600_000)
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      assert.equal(server.requests.filter((r) => r.method === 'subscriptions/listen').length, 2)
+      // The tools still work.
+      assert.equal(await callTool(mcp.tools, 'wx__echo', { text: fault }), `echo:${fault}`)
+    } finally {
+      await mcp.close()
+      await server.close()
+    }
+  }
+  // Refused at the connect: the connection is made, nothing is retried.
+  const server = await startLocalMcpServer({ protocol: 'modern' })
+  server.listenFaults.answer = 'not_found'
+  const logs: string[] = []
+  const mcp = await connectMcpHttp(
+    { wx: { url: server.url, protocol: 'modern' } },
+    { onLog: (level, message) => logs.push(`${level} ${message}`), onToolsChanged: () => {} },
+  )
+  try {
+    assert.deepEqual(mcp.results, [{ name: 'wx', connected: true }])
+    assert.equal(logs.filter((l) => /not tried again/.test(l)).length, 1)
+    assert.equal(vt.running, 0)
+  } finally {
+    await mcp.close()
+    await server.close()
+  }
+})
+
+test('2026-07-28 listen: closing the connection takes down a pending retry and an attempt in flight', async (t) => {
+  const s = await listening(t)
+  // A retry pending.
+  s.server.dropListenStreams()
+  await until(() => retriesIn(s.logs).length === 1, 'the drop')
+  assert.equal(s.vt.running, 1)
+  const logged = s.logs.length
+  await s.mcp.close()
+  assert.equal(s.vt.running, 0, 'the retry timer is down')
+  s.vt.tick(3_600_000)
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  assert.equal(s.listens(), 1, 'never tried')
+  assert.deepEqual(
+    s.logs.slice(logged).filter((l) => /listen|subscribe|tool list/.test(l)),
+    [],
+  )
+
+  // An attempt in flight: the server holds it unanswered.
+  const server = await startLocalMcpServer({ protocol: 'modern' })
+  const logs: string[] = []
+  const mcp = await connectMcpHttp(
+    { wx: { url: server.url, protocol: 'modern' } },
+    { onLog: (level, message) => logs.push(`${level} ${message}`), onToolsChanged: () => {} },
+  )
+  try {
+    server.listenFaults.answer = 'silent'
+    server.dropListenStreams()
+    await until(() => retriesIn(logs).length === 1, 'the drop')
+    s.vt.tick(1_000)
+    await until(() => server.heldListens() === 1, 'the attempt to reach the server')
+    assert.equal(s.vt.running, 0, 'no timer while the attempt is in flight')
+    const before = logs.length
+    const started = Date.now()
+    await mcp.close()
+    // Well inside the 10 s the acknowledgement may take: the attempt was given up, not waited for.
+    assert.ok(Date.now() - started < 2_000, `close took ${Date.now() - started} ms`)
+    await until(() => server.heldListens() === 0, 'the held request to be given up')
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    assert.equal(s.vt.running, 0)
+    assert.deepEqual(
+      logs.slice(before).filter((l) => /listen|subscribe|tool list/.test(l)),
+      [],
+    )
+  } finally {
+    await mcp.close()
+    await server.close()
+  }
+})
+
+test('2026-07-28 listen: a process with a pending retry exits once the connection is closed', async () => {
+  // The child puts the connector's listen timers on a time whose timers are real ones of an HOUR:
+  // a timer that close() left behind would keep it alive that long.
+  const child = spawn(
+    process.execPath,
+    [
+      '--experimental-strip-types',
+      '--disable-warning=ExperimentalWarning',
+      fileURLToPath(new URL('./fixtures/mcp-listen-exit.ts', import.meta.url)),
+    ],
+    { stdio: ['ignore', 'pipe', 'pipe'] },
+  )
+  let out = ''
+  child.stdout.on('data', (chunk) => (out += String(chunk)))
+  child.stderr.on('data', (chunk) => (out += String(chunk)))
+  const code = await new Promise<number | null | 'hung'>((resolve) => {
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL')
+      resolve('hung')
+    }, 20_000)
+    child.on('exit', (exitCode) => {
+      clearTimeout(timer)
+      resolve(exitCode)
+    })
+  })
+  assert.equal(code, 0, out)
+  assert.match(out, /^pending: 1\nclosed: 0\n$/, out)
+})
+
+test('2025 revisions: no listen stream and no re-listen - the notice comes on the GET stream as before', async () => {
+  for (const [serverProtocol, protocol] of [
+    ['legacy', undefined],
+    ['legacy', 'auto'],
+    ['dual', undefined],
+  ] as const) {
+    const server = await startLocalMcpServer({ protocol: serverProtocol })
+    const changed: string[] = []
+    const mcp = await connectMcpHttp(
+      { wx: { url: server.url, ...(protocol ? { protocol } : {}) } },
+      { onToolsChanged: (name) => changed.push(name) },
+    )
+    try {
+      await until(() => server.changeListeners() === 1, 'the GET stream')
+      server.addTool('late')
+      await until(() => changed.length === 1, 'the notice')
+      assert.equal(server.dropListenStreams(), 0, 'there is no listen stream to drop')
+      assert.ok(
+        !server.requests.some((r) => r.method === 'subscriptions/listen'),
+        `${serverProtocol}/${protocol}: never asked`,
+      )
+    } finally {
+      await mcp.close()
+      await server.close()
+    }
+  }
 })
 
 // ── 2026-07-28: input_required ─────────────────────────────────────────────

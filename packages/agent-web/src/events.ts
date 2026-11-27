@@ -117,7 +117,8 @@ type AgentEventBody =
       afterTokens: number
     }
   /** A skill's instructions entered the context (picked by the planner, or loaded by a tool call). */
-  | { type: 'skill.activated'; name: string; by: 'plan' | 'tool' }
+  /** `server`: the MCP server the skill came from (a skill served with `skills: true`). */
+  | { type: 'skill.activated'; name: string; by: 'plan' | 'tool'; server?: string }
   /** The agent wrote a lesson down as a skill (`config.learning`). */
   | {
       type: 'skill.learned'
@@ -184,6 +185,8 @@ type AgentEventBody =
        * the tool's own name there and the app's `ui://` resource (see `ToolApprovalRequest.app`).
        */
       app?: ToolApprovalApp
+      /** See `ToolApprovalRequest.mcpSkills`. */
+      mcpSkills?: string[]
     }
   /** A consent decision: from the user, or `automatic` (policy denial). */
   | {

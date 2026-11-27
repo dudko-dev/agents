@@ -6,6 +6,7 @@ import { ToolBudgetError } from '../limits.js'
 import {
   decideToolPermission,
   gateToolCall,
+  isCodeExecutionTool,
   isReadOnlyTool,
   type ApprovalState,
 } from './approval.js'
@@ -62,6 +63,12 @@ export interface ToolRunContext {
    * something on the run's behalf (the consent gate, an MCP question) pauses it for the wait.
    */
   clock?: IWaitClock
+  /**
+   * Internal - the skills of MCP servers the run acts on, its callers' included: a call of a
+   * tool that runs code is asked while there is one (`decideToolPermission`). A helper the model
+   * starts inherits it.
+   */
+  mcpSkills?: () => string[]
 }
 
 /** Read the run context the agent passes to a tool's execute (undefined outside a run). */
@@ -142,6 +149,11 @@ export interface WrapToolsOptions {
   elicitations?: { count: number }
   /** The run's clock: the gate pauses it while a person decides; handed to tools too. */
   clock?: IWaitClock
+  /**
+   * The skills of MCP servers the run acts on (its callers' included): while there is one, a
+   * call of a tool that runs code (`isCodeExecutionTool`) is asked whatever the mode says.
+   */
+  mcpSkills?: () => string[]
 }
 
 const isAsyncIterable = (v: unknown): v is AsyncIterable<unknown> =>
@@ -177,7 +189,13 @@ const recording = (out: unknown, record: (value: unknown) => void): unknown => {
  */
 export const wrapToolsForRun = (tools: ToolSet, o: WrapToolsOptions): ToolSet => {
   const out: ToolSet = {}
-  const gate = (toolName: string, input: unknown, readOnly: boolean, signal?: AbortSignal) =>
+  const gate = (
+    toolName: string,
+    input: unknown,
+    readOnly: boolean,
+    signal?: AbortSignal,
+    codeExecution?: boolean,
+  ) =>
     gateToolCall(
       o.approval,
       {
@@ -186,6 +204,7 @@ export const wrapToolsForRun = (tools: ToolSet, o: WrapToolsOptions): ToolSet =>
         readOnly,
         step: o.step(),
         ...(o.subagent ? { subagent: o.subagent } : {}),
+        ...(codeExecution ? { codeExecution, mcpSkills: o.mcpSkills?.() ?? [] } : {}),
       },
       {
         requested: (req) =>
@@ -197,6 +216,7 @@ export const wrapToolsForRun = (tools: ToolSet, o: WrapToolsOptions): ToolSet =>
             readOnly: req.readOnly,
             step: req.step,
             ...(req.subagent ? { subagent: req.subagent } : {}),
+            ...(req.mcpSkills ? { mcpSkills: req.mcpSkills } : {}),
           }),
         resolved: (r) => o.emit({ type: 'tool.approval-resolved', ...r }),
         ...(o.clock ? { wait: o.clock.pause } : {}),
@@ -207,6 +227,7 @@ export const wrapToolsForRun = (tools: ToolSet, o: WrapToolsOptions): ToolSet =>
     const execute = (t as { execute?: (input: unknown, options: unknown) => unknown }).execute
     const builtin = o.builtins.has(name)
     const readOnly = builtin || isReadOnlyTool(t)
+    const codeExecution = !builtin && isCodeExecutionTool(t)
     const wrapped: Record<string, unknown> = { ...t }
     if (o.maxToolOutputChars > 0) {
       wrapped.toModelOutput = limitModelOutput(t.toModelOutput, o.maxToolOutputChars)
@@ -234,6 +255,7 @@ export const wrapToolsForRun = (tools: ToolSet, o: WrapToolsOptions): ToolSet =>
             ...(o.subagent ? { subagent: o.subagent } : {}),
             ...(o.elicitations ? { elicitations: o.elicitations } : {}),
             ...(o.clock ? { clock: o.clock } : {}),
+            ...(o.mcpSkills ? { mcpSkills: o.mcpSkills } : {}),
           }
           return execute.call(t, input, { ...(options as object), agentRun })
         }
@@ -246,6 +268,7 @@ export const wrapToolsForRun = (tools: ToolSet, o: WrapToolsOptions): ToolSet =>
           mode: o.approval.mode,
           rules: o.approval.config.rules,
           remembered: o.approval.remembered,
+          ...(codeExecution ? { codeExecution, mcpSkills: o.mcpSkills?.() ?? [] } : {}),
         })
         if (permission === 'allow') return run()
         return gate(
@@ -253,6 +276,7 @@ export const wrapToolsForRun = (tools: ToolSet, o: WrapToolsOptions): ToolSet =>
           input,
           readOnly,
           (options as { abortSignal?: AbortSignal } | undefined)?.abortSignal,
+          codeExecution,
         ).then(run)
       }
     }

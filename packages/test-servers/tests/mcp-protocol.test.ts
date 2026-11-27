@@ -13,6 +13,7 @@ import {
   legacy,
   modern,
   MODERN,
+  modernRequest,
   modernStream,
   openStream,
   until,
@@ -479,6 +480,109 @@ test('modern: subscriptions/listen acknowledges first, then delivers only what w
     })
     assert.equal(await prompts.next(), undefined, 'and then the stream ends')
     await closing
+  } finally {
+    await mcp.close()
+  }
+})
+
+test('modern: listenFaults answer subscriptions/listen in its place, one way at a time', async () => {
+  const mcp = await startLocalMcpServer({ protocol: 'modern' })
+  const filter = { notifications: { toolsListChanged: true } }
+  try {
+    mcp.listenFaults.answer = 'not_found'
+    const notFound = await modern(mcp.url, 'subscriptions/listen', filter, { id: 'nf' })
+    assert.equal(notFound.status, 404)
+    assert.deepEqual(notFound.body, {
+      jsonrpc: '2.0',
+      id: 'nf',
+      error: { code: -32601, message: 'Method not found: subscriptions/listen' },
+    })
+    mcp.listenFaults.answer = 'not_allowed'
+    assert.equal((await modern(mcp.url, 'subscriptions/listen', filter)).status, 405)
+    mcp.listenFaults.answer = 'unauthorized'
+    const unauthorized = await modern(mcp.url, 'subscriptions/listen', filter)
+    assert.equal(unauthorized.status, 401)
+    assert.match(String(unauthorized.headers.get('www-authenticate')), /^Bearer resource_metadata=/)
+    mcp.listenFaults.answer = 'forbidden'
+    assert.equal((await modern(mcp.url, 'subscriptions/listen', filter)).status, 403)
+    mcp.listenFaults.answer = 'unavailable'
+    const unavailable = await modern(mcp.url, 'subscriptions/listen', filter)
+    assert.equal(unavailable.status, 503)
+    assert.equal(unavailable.text, 'upstream unavailable')
+    // Only that method: everything else is served as ever.
+    assert.equal((await modern(mcp.url, 'tools/list')).status, 200)
+    assert.equal(mcp.changeListeners(), 0)
+
+    // `silent`: the request is held, with no answer, until the client gives it up.
+    mcp.listenFaults.answer = 'silent'
+    const abort = new AbortController()
+    const pending = fetch(mcp.url, {
+      method: 'POST',
+      ...modernRequest('subscriptions/listen', filter),
+      signal: abort.signal,
+    }).then(
+      () => 'answered',
+      () => 'given up',
+    )
+    await until(() => mcp.heldListens() === 1, 'the request to be held')
+    abort.abort()
+    assert.equal(await pending, 'given up')
+    await until(() => mcp.heldListens() === 0, 'the held request to be let go')
+
+    // Switched off, the SDK serves it again.
+    mcp.listenFaults.answer = undefined
+    const stream = await modernStream(mcp.url, 'subscriptions/listen', filter)
+    assert.equal((await stream.next()).method, 'notifications/subscriptions/acknowledged')
+    assert.equal(mcp.changeListeners(), 1)
+    stream.close()
+    await until(() => mcp.changeListeners() === 0, 'the closed subscription to be dropped')
+  } finally {
+    await mcp.close()
+  }
+})
+
+test('modern: dropListenStreams cuts a stream with no result; closeListenStreams ends it with one and serves on', async () => {
+  const mcp = await startLocalMcpServer({ protocol: 'modern' })
+  const filter = { notifications: { toolsListChanged: true } }
+  try {
+    const dropped = await modernStream(mcp.url, 'subscriptions/listen', filter, { id: 'a' })
+    assert.equal((await dropped.next()).method, 'notifications/subscriptions/acknowledged')
+    assert.equal(mcp.changeListeners(), 1)
+    assert.equal(mcp.dropListenStreams(), 1)
+    // The connection is cut: no result, and not a clean end of the stream either.
+    await assert.rejects(dropped.next())
+    await until(() => mcp.changeListeners() === 0, 'the dropped subscription to be gone')
+
+    const closed = await modernStream(mcp.url, 'subscriptions/listen', filter, { id: 'b' })
+    assert.equal((await closed.next()).method, 'notifications/subscriptions/acknowledged')
+    assert.equal(await mcp.closeListenStreams(), 1)
+    assert.deepEqual(await closed.next(), {
+      jsonrpc: '2.0',
+      id: 'b',
+      result: {
+        resultType: 'complete',
+        _meta: { 'io.modelcontextprotocol/subscriptionId': 'b', ...SERVER_INFO },
+      },
+    })
+    assert.equal(await closed.next(), undefined, 'and then the stream ends')
+    assert.equal(mcp.changeListeners(), 0)
+
+    // Another handler took over, on the same event bus: a new subscription is served
+    // and told of a change, and the list has it.
+    const next = await modernStream(mcp.url, 'subscriptions/listen', filter, { id: 'c' })
+    assert.equal((await next.next()).method, 'notifications/subscriptions/acknowledged')
+    mcp.addTool('later')
+    assert.deepEqual(await next.next(), {
+      jsonrpc: '2.0',
+      method: 'notifications/tools/list_changed',
+      params: { _meta: { 'io.modelcontextprotocol/subscriptionId': 'c' } },
+    })
+    const names = (await modern(mcp.url, 'tools/list')).body.result.tools.map(
+      (tool: { name: string }) => tool.name,
+    )
+    assert.deepEqual(names, ['echo', 'secret', 'boom', 'later'])
+    next.close()
+    await until(() => mcp.changeListeners() === 0, 'the closed subscription to be dropped')
   } finally {
     await mcp.close()
   }

@@ -1,5 +1,6 @@
 import { jsonSchema, tool, type Tool, type ToolSet } from 'ai'
 import { normalizePath } from '../files/vfs.js'
+import { markCodeExecution } from '../tools/approval.js'
 import { toolRunContextOf } from '../tools/wrap.js'
 import {
   createSandboxQueue,
@@ -240,7 +241,8 @@ export const createSandbox = (
     execute,
   })
   return {
-    tools: { [RUN_JS_TOOL]: runJs },
+    // It runs code: asked whenever the run acts on an MCP server's skill (tools/approval.ts).
+    tools: { [RUN_JS_TOOL]: markCodeExecution(runJs) },
     notes: {
       planner: SANDBOX_PLANNER_NOTE,
       executor: sandboxPromptNote(Boolean(files)),
