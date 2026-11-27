@@ -197,7 +197,7 @@ function Custom() {
 | `plan` / `steps` | the live plan and per-step tool calls (with timing) |
 | `finalText` / `finalReasoning` | the streamed answer and its thoughts |
 | `usage` / `totalUsage` | tokens of this run / of the conversation, by kind - plus `mediaCalls` and `decisionCalls` (calls, not tokens) when the run made some |
-| `pendingApprovals`, `approve(id, { remember })`, `deny(id)` | tool consent (a request made by a helper the model started carries `subagent: { id, depth, name?, role? }`) |
+| `pendingApprovals`, `approve(id, { remember })`, `deny(id)` | tool consent (a request made by a helper the model started carries `subagent: { id, depth, name?, role? }`). A request the core stops waiting for - no decision within `toolApproval.timeoutMs` (default five minutes), the run stopped - is settled by the core and leaves the list; a late `approve` does nothing |
 | `approvalMode` / `setApprovalMode(mode)` | the autopilot switch, live |
 | `compact()` | summarise the stored transcript now |
 | `sessionId` / `loadChat(chat)` | the memory session; switch conversations |
@@ -211,7 +211,10 @@ function Custom() {
 
 **Options:** `deps` (rebuild the agent when these change — e.g. on a model
 switch), `onEvent` (tap the raw event stream), `autoStart`, `maxEvents`,
-`approvals` (route consent requests into the hook; default true).
+`approvals` (route consent requests into the hook; default true). The queue behind `approve` /
+`deny` is exported for a host that builds the core's agent itself: `createApprovalQueue()` gives
+`handler` (pass it as `toolApproval.onRequest`; a request whose `signal` aborts leaves the queue),
+`approve(id, { remember })`, `deny(id, reason)`, `settleAll(decision)` and `pending()`.
 
 > Keep `tools` and `describeState` referentially stable (`useMemo` /
 > `useCallback`); pass a changed `deps` array to rebuild the agent on a
@@ -573,7 +576,7 @@ import { useMcpServers } from '@dudko.dev/agent-web-react/mcp'
 import { AgentChat, useAgent } from '@dudko.dev/agent-web-react'
 
 const mcp = useMcpServers({ elicitation: { url: true } }) // or `true`: forms only
-const agent = useAgent({ model, tools: mcp.tools, chatTimeoutMs: 360_000 }, { deps: [mcp.tools] })
+const agent = useAgent({ model, tools: mcp.tools }, { deps: [mcp.tools] })
 
 <AgentChat
   controller={agent}
@@ -597,10 +600,11 @@ const agent = useAgent({ model, tools: mcp.tools, chatTimeoutMs: 360_000 }, { de
   waiting. A question also leaves the list, answered `cancel`, when the core stops waiting (its time
   ran out, the run stopped), when its server is disconnected or removed, and when the component
   that holds the hook unmounts.
-- **Time.** A question waits `timeoutMs`, and no longer than the step it belongs to
-  (`chatTimeoutMs`, default 120 000 in the core): give the agent of an MCP chat a step time that
-  leaves a person room to answer, as above. A question nobody answered is cancelled by the core and
-  its tool call fails; the prompt then says it was answered automatically, and why.
+- **Time.** A question waits `timeoutMs` (default 300 000: five minutes; `0` or `Infinity` = until
+  the run is stopped). The step it belongs to does not cut it short: the core stops the step's
+  clock (`chatTimeoutMs`) while a person is asked, and the step goes on with the time it had left
+  once the question is settled. A question nobody answered in time is cancelled by the core and its
+  tool call fails; the prompt then says it was answered automatically, and why.
 - **`<ElicitationPrompt>`** (main entry; it imports neither the SDK nor the core's `./mcp`) draws the
   question where the consent cards are, one at a time with a count: the host's own header (which
   server asks, during which tool), the server's message under a caption that says it is the

@@ -688,6 +688,21 @@ test('a setting that is not a usable number fails the connect, with or without a
     connectMcpHttp({}, { elicitation: { maxPerRun: 0 } }),
     /elicitation\.maxPerRun must be a number of at least 1/,
   )
+  for (const timeoutMs of [-1, Number.NaN]) {
+    await assert.rejects(
+      connectMcpHttp({}, { elicitation: { timeoutMs } }),
+      new RegExp(`elicitation\\.timeoutMs must be a number of at least 0 .*\\(got ${timeoutMs}\\)`),
+    )
+  }
+  // 0, Infinity and more than a timer holds are "no limit" (the shared file's tests, in the Node
+  // package, run the wait itself on mocked timers), not a configuration error.
+  for (const timeoutMs of [0, Infinity, 2 ** 31]) {
+    const mcp = await connectMcpHttp(
+      {},
+      { onElicitation: () => ({ action: 'decline' }), elicitation: { timeoutMs } },
+    )
+    await mcp.close()
+  }
 })
 
 test('outside a run a question is still answered, and emits nothing (there is no stream to emit to)', async () => {

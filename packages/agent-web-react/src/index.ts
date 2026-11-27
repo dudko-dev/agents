@@ -186,6 +186,8 @@ export { webSearchOf } from './components/format.js'
 export type { WebSearchResultView, WebSearchView } from './components/format.js'
 export { ToolApprovalPrompt } from './components/ToolApprovalPrompt.js'
 export type { ToolApprovalPromptProps } from './components/ToolApprovalPrompt.js'
+export { createApprovalQueue } from './approval-queue.js'
+export type { ApprovalQueue } from './approval-queue.js'
 export { ElicitationPrompt } from './components/ElicitationPrompt.js'
 export type { ElicitationPromptProps } from './components/ElicitationPrompt.js'
 export { ApprovalModeSwitch } from './components/ApprovalModeSwitch.js'
@@ -259,6 +261,7 @@ export type {
   CompactionConfig,
   CompactResult,
   ToolApprovalConfig,
+  ToolApprovalContext,
   ToolApprovalMode,
   ToolApprovalRequest,
   SubagentToolOptions,

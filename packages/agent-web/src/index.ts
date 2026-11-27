@@ -399,9 +399,11 @@ export {
   matchRule,
   decideToolPermission,
   TOOL_APPROVAL_MODES,
+  TOOL_APPROVAL_TIMEOUT_MS,
 } from './tools/approval.js'
 export type {
   ToolApprovalConfig,
+  ToolApprovalContext,
   ToolApprovalDecision,
   ToolApprovalMode,
   ToolApprovalRequest,

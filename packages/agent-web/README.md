@@ -340,12 +340,16 @@ pending.get(id)?.({ action: 'accept', content: { name: 'Ada' } })
   (`elicitation: { subagents: true }`): a helper the model started, and a
   subagent tool's child that was handed these tools, have their questions
   cancelled without the callback being called.
-- **Time.** A question waits `timeoutMs` (5 minutes) at most. The step it
+- **Time.** A question waits `timeoutMs` (5 minutes) at most; `0` or
+  `Infinity` removes that limit (the question waits until the run is stopped),
+  and so does a value above 2^31 - 1 ms (about 24.8 days, the longest delay a
+  timer holds). A negative number or `NaN` fails the connect. The step it
   belongs to does not run out of time meanwhile: `chatTimeoutMs` (default
   120 s) **is stopped while a question waits** - like the `timeoutMs` of a
   subagent the question holds up - and goes on with the time it had left. The
   same holds while a person decides a tool approval (whose own bound is
-  `toolApproval.timeoutMs`). Stopping the run ends a wait at once.
+  `toolApproval.timeoutMs`, also 5 minutes by default). Stopping the run ends a
+  wait at once.
 - **Events** inside a run: `mcp.elicitation-requested` and
   `mcp.elicitation-answered` (field names, never a value).
 
@@ -636,7 +640,10 @@ const agent = await createAgent({
   skills: [defineSkill({ name: 'triage', description: 'Triage a bug report', content: '…' })],
   toolApproval: {
     mode: 'ask-writes', // autopilot | ask-writes | ask-all | read-only
-    onRequest: async (req) => window.confirm(`Allow ${req.toolName}?`),
+    // `signal` aborts when the agent stops waiting (the bound, a stop): take your dialog down then
+    onRequest: async (req, { signal }) => askInADialog(`Allow ${req.toolName}?`, { signal }),
+    // no decision in 5 minutes (the default) -> deny; 0 or Infinity: wait until the run is stopped
+    timeoutMs: 300_000,
   },
 })
 agent.setToolApprovalMode('autopilot') // flip the switch at any time
@@ -729,7 +736,7 @@ Loading a definition someone else wrote: [docs/security.md](docs/security.md#pip
 | `availableTools` / `excludedTools` | — | whitelist / blacklist of tool names mounted from `tools` |
 | `toolMode` | `'auto'` | `native` \| `prompted` \| `auto` (cloud→native, local→prompted) |
 | `toolSelectionStrategy` | `'auto'` | `all` \| `plan-narrowed` \| `search` \| `auto` (search above `toolSearchThreshold`, 40, or once the definitions take ¼ of the window) |
-| `toolApproval` | autopilot | consent policy: `{ mode, rules, onRequest, timeoutMs }`; `agent.setToolApprovalMode()` |
+| `toolApproval` | autopilot | consent policy: `{ mode, rules, onRequest, timeoutMs }`; `agent.setToolApprovalMode()`. A question waits `timeoutMs` for a decision, then is denied: default 300000 (`TOOL_APPROVAL_TIMEOUT_MS`), `0` or `Infinity` = until the run is stopped (as is a value above 2^31 - 1, the most a timer holds); negative or `NaN` fails `createAgent`. `onRequest(req, { signal })`: the signal aborts when the question ends without an answer (`TimeoutError` for the bound, `AbortError` for a stop). See [Tool consent](docs/capabilities.md#tool-consent-and-autopilot) |
 | `skills` | — | SKILL.md bundles (`defineSkill` / `parseSkillMarkdown` / `loadSkillFromUrl`) |
 | `egress` | off | what the **model** may fetch (`web_fetch`): `true` = any public host over https, or `{ allow, deny, protocols, allowPrivateNetwork, fetch, ... }`; a browser can't pin DNS, so prefer an `allow` list — see [Egress](docs/capabilities.md#egress-what-the-model-may-fetch) |
 | `search` | off | the model may **search the web** (`web_search`: a short list of title / url / snippet): `{ engine: fn }` - a search engine of yours, any API - or `{ provider: 'google', credentialRef, model, baseURL, maxResults, allowPrivateNetwork, readOnly, fetch }` - Google Search through Gemini grounding: one extra `generateContent` call per search on a Gemini key (default model `gemini-2.5-flash-lite`), which **spends model tokens** (`usage` phase `'search'`) and returns **Google redirect links**, not the pages' URLs. No key ships with the library and none is written in the config (`credentialRef` names it in `credentials`); the request reaches only that API; with `egress`, results the model could not fetch are left out. Recipes for Tavily / Brave / SearXNG as an `engine`, the free-tier models and what the redirect links mean — see [Search](docs/capabilities.md#search-finding-the-page-to-fetch) |
