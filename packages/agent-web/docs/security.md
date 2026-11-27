@@ -383,6 +383,24 @@ the three exists only when the host configures its model.
 - An audio attachment given as an http(s) link is not downloaded or transcribed by the agent:
   it goes to the language model as before (the provider fetches it, or refuses).
 
+## Files the agent wrote: showing them is the host's boundary
+
+`fs_write` lets the model put any text into the virtual file system, an `.html` page with
+scripts included, and `file.written` tells the host where. The core never renders a file. A host
+that does must treat the content as **untrusted**: it was written by a model that may have read a
+hostile page, and it would run in the origin that holds the key vault.
+
+- Never navigate to it, never open it by a `blob:` / `data:` URL of your page, never set it as
+  markup. A `blob:` URL made by the page has the page's origin: opened outside a sandbox it reads
+  IndexedDB - the vault - like your own code.
+- Render it only in `<iframe sandbox>` **without** `allow-same-origin`, by `srcdoc`, under a
+  Content-Security-Policy with no network source, and keep in mind that a frame can always
+  navigate itself (a link, `location = …`, `<meta http-equiv=refresh>`) - which is a request with
+  whatever the page put in the URL. Only the embedding document's `frame-src` stops that.
+- `@dudko.dev/agent-web-react` ships this as `<SandboxedFrame>` and uses it for the HTML preview
+  of its file chips; the guards and their tests are in its README ("The HTML preview is a security
+  boundary").
+
 ## Decision models
 
 `decisionModel` (off by default) asks a small model closed questions: the replanner's continue /

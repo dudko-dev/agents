@@ -73,6 +73,11 @@ export interface ChatMessage {
   media?: MediaView[]
   /** Assistant turn: the audio the run transcribed (`config.media`); absent when none. */
   transcripts?: TranscriptView[]
+  /**
+   * Assistant turn: the files the run wrote to the workspace and did not delete again (the file
+   * tools and the sandbox; a subagent's are here too). Absent until the first one.
+   */
+  writtenFiles?: WrittenFileView[]
   /** Assistant turn ended with an error. */
   error?: boolean
 }
@@ -157,6 +162,25 @@ export interface MediaView {
   model: string
   /** The step whose tool call made it, when the event named one. */
   stepId?: string
+}
+
+/**
+ * A file the run wrote to the virtual file system (the core's `file.written` event: `fs_write`,
+ * or the sandbox's `fs.writeFile`). One entry per path however many times it was written; a
+ * `file.deleted` takes it away. The content is in the file system at `path` - never in the state.
+ */
+export interface WrittenFileView {
+  path: string
+  /** The MIME type the file system gave it. */
+  mediaType: string
+  /** Size after the last write. */
+  bytes: number
+  /** How many times the run wrote it. */
+  writes: number
+  /** The step whose tool call wrote it last, when the event named one (never a subagent's step). */
+  stepId?: string
+  /** The subagent that wrote it last; absent when the agent itself did. */
+  by?: { id: string; name: string; role?: string }
 }
 
 /**
@@ -407,6 +431,8 @@ export interface AgentUiState {
   media?: MediaView[]
   /** Audio transcribed in this run (`config.media`). Absent until the first one. */
   transcripts?: TranscriptView[]
+  /** Files written in this run and still there (`file.written` / `file.deleted`). Absent until the first one. */
+  writtenFiles?: WrittenFileView[]
   /**
    * Questions put to `config.decisionModel` before any step existed (a decision that follows a
    * step is on that step). Absent until the first one.

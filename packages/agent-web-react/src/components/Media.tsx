@@ -15,7 +15,8 @@ export const mediaFamilyOf = (mediaType: string): 'image' | 'audio' | undefined 
   return undefined
 }
 
-const bytesOf = (content: string, encoding: string): Uint8Array<ArrayBuffer> => {
+/** The bytes of a workspace file (its content is text, or base64). */
+export const bytesOf = (content: string, encoding: string): Uint8Array<ArrayBuffer> => {
   if (encoding !== 'base64') return new TextEncoder().encode(content)
   const binary = atob(content)
   const bytes = new Uint8Array(binary.length)
@@ -27,7 +28,7 @@ const bytesOf = (content: string, encoding: string): Uint8Array<ArrayBuffer> => 
  * An object URL of a workspace file, typed as `mediaType` (never as whatever the file says it
  * is), revoked when the file, the workspace or the component goes away.
  */
-const useFileUrl = (
+export const useFileUrl = (
   files: VirtualFileSystem | undefined,
   path: string,
   mediaType: string | undefined,

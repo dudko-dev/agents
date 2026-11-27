@@ -180,7 +180,17 @@ export const createSandbox = (
       request.modules = await collectModules(files, code, filename, approve, limits.maxCodeChars)
       request.hostOps = sandboxHostOps(files)
     }
-    const hostCall = files ? createFileHost(files, approve) : undefined
+    const hostCall = files
+      ? createFileHost(files, approve, (file) =>
+          agentRun?.emit({
+            type: 'file.written',
+            path: file.path,
+            mediaType: file.mimeType,
+            bytes: file.size,
+            ...(agentRun.step ? { step: agentRun.step } : {}),
+          }),
+        )
+      : undefined
     return queue(async () => {
       let worker: SandboxWorkerLike | undefined
       if (config.worker) {

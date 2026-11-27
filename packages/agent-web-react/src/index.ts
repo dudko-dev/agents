@@ -126,6 +126,33 @@ export type {
 } from './components/SubagentTree.js'
 export { GeneratedMedia, TranscriptBlock, mediaFamilyOf } from './components/Media.js'
 export type { GeneratedMediaProps, TranscriptBlockProps } from './components/Media.js'
+export { FileChip, FileChips, SourceView, FILE_PREVIEW_CHARS } from './components/FileChips.js'
+export type {
+  FileChipProps,
+  FileChipsProps,
+  HtmlPreviewOptions,
+  SourceViewProps,
+} from './components/FileChips.js'
+export {
+  SandboxedFrame,
+  clampFrameHeight,
+  FRAME_MAX_HEIGHT,
+  FRAME_MIN_HEIGHT,
+} from './components/SandboxedFrame.js'
+export type { SandboxedFrameProps } from './components/SandboxedFrame.js'
+export {
+  buildSandboxedDocument,
+  escapeAttribute,
+  linkedFilesOf,
+  sandboxedCsp,
+  sandboxTokens,
+  tokenizeHtml,
+  withCspFirst,
+  HTML_PREVIEW_MAX_CHARS,
+} from './html-preview.js'
+export type { SandboxedDocumentOptions, SourceToken } from './html-preview.js'
+export { fileKindOf, fileNameOf } from './file-kinds.js'
+export type { FileKind } from './file-kinds.js'
 export { webSearchOf } from './components/format.js'
 export type { WebSearchResultView, WebSearchView } from './components/format.js'
 export { ToolApprovalPrompt } from './components/ToolApprovalPrompt.js'

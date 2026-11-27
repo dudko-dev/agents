@@ -363,6 +363,9 @@ export const App = () => {
     files: settings.filesPanel ? workspace : undefined,
     // Answers are Markdown — render them (any renderer plugs in here).
     renderContent: (m) => (m.role === 'assistant' ? <Markdown text={m.content} /> : m.content),
+    // A Markdown file the agent wrote is rendered the same way in its chip's preview.
+    renderFileContent: (f, text) =>
+      /\.(md|markdown)$/i.test(f.path) ? <Markdown text={text} /> : undefined,
   }
   const composer = (placeholder: string): AgentChatProps['composer'] => ({
     placeholder: ru ? undefined : placeholder,

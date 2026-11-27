@@ -1,9 +1,10 @@
 import type { ReactNode } from 'react'
 import type { IUsage, VirtualFileSystem } from '@dudko.dev/agent-web'
 import { useLabels, type AgentLabels, type AgentLabelsOverride } from '../labels.js'
-import type { ChatAttachment, ChatMessage, MediaView } from '../types.js'
+import type { ChatAttachment, ChatMessage, MediaView, WrittenFileView } from '../types.js'
 import { formatDuration, formatTokens } from './format.js'
 import { BookIcon, BrainIcon, FileIcon, GlobeIcon, SpinnerIcon } from './icons.js'
+import { FileChips, type FileChipsProps } from './FileChips.js'
 import { GeneratedMedia, TranscriptBlock } from './Media.js'
 import { StepList, type RenderToolCall } from './StepList.js'
 import type { RenderSubagent } from './SubagentTree.js'
@@ -39,8 +40,21 @@ export interface MessageListProps {
    * transcripts of audio files, folded (default true). Needs `files` to show the bytes.
    */
   showMedia?: boolean
-  /** The workspace generated files are read from (the core's `VirtualFileSystem`). */
+  /**
+   * The files an answer wrote to the workspace, as chips under it - open (an inline preview;
+   * an `.html` file in a sandboxed frame) and download (default true). Needs `files`.
+   */
+  showFileChips?: boolean
+  /** The workspace generated and written files are read from (the core's `VirtualFileSystem`). */
   files?: VirtualFileSystem
+  /** How an `.html` file is previewed (see `FileChips`); `false` shows HTML as source only. */
+  htmlPreview?: FileChipsProps['htmlPreview']
+  /** Adds a "Show in Files" link above the chips. */
+  onShowFiles?: () => void
+  /** A file chip; `fallback` is the built-in one. */
+  renderFile?: (file: WrittenFileView, message: ChatMessage, fallback: ReactNode) => ReactNode
+  /** A text file rendered your way (Markdown through your renderer); `undefined` = as source. */
+  renderFileContent?: FileChipsProps['renderFileContent']
   /** A generated file; `fallback` is the built-in image / player / chip. */
   renderMedia?: (media: MediaView, message: ChatMessage, fallback: ReactNode) => ReactNode
   /** A node of the subagent tree (gets the built-in `<li>` as `fallback`). */
@@ -98,6 +112,7 @@ const activitySummary = (
   showToolCalls: boolean,
   showLearned: boolean,
   showTiers: boolean,
+  showFileChips: boolean,
   L: AgentLabels,
 ): string => {
   const steps = m.steps ?? []
@@ -109,6 +124,7 @@ const activitySummary = (
   if (m.skills?.length) parts.push(L.skillsUsed(m.skills.join(', ')))
   if (showLearned && m.learned?.length) parts.push(L.learnedNow(m.learned.join(', ')))
   if (showLearned && m.fetches?.length) parts.push(L.fetches(m.fetches.length))
+  if (showFileChips && m.writtenFiles?.length) parts.push(L.filesCount(m.writtenFiles.length))
   return parts.join(' · ')
 }
 
@@ -134,7 +150,12 @@ export const MessageList = ({
   showSearchResults = true,
   showSubagents = true,
   showMedia = true,
+  showFileChips = true,
   files,
+  htmlPreview,
+  onShowFiles,
+  renderFile,
+  renderFileContent,
   renderMedia,
   renderSubagent,
   onStopSubagent,
@@ -168,7 +189,7 @@ export const MessageList = ({
               {m.role === 'assistant' && hasActivity && (
                 <details className="awr-activity" open={m.pending || activityOpen}>
                   <summary className="awr-activity__summary">
-                    {activitySummary(m, showToolCalls, showLearned, showTiers, L)}
+                    {activitySummary(m, showToolCalls, showLearned, showTiers, showFileChips, L)}
                   </summary>
                   {m.pending && liveExtra}
                   <StepList
@@ -250,6 +271,17 @@ export const MessageList = ({
                     )
                   })}
                 </div>
+              ) : null}
+              {showFileChips && m.role === 'assistant' && m.writtenFiles?.length ? (
+                <FileChips
+                  written={m.writtenFiles}
+                  files={files}
+                  htmlPreview={htmlPreview}
+                  onShowFiles={onShowFiles}
+                  renderFile={renderFile ? (f, fallback) => renderFile(f, m, fallback) : undefined}
+                  renderFileContent={renderFileContent}
+                  labels={labels}
+                />
               ) : null}
               {m.attachments?.length ? (
                 <div className="awr-msg__attachments" aria-label={L.attachments}>

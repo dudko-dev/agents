@@ -174,7 +174,9 @@ behind every decision.
   compaction sized to it, tool search by definition size, the clear
   `ContextWindowExceededError`.
 - `src/files/` — `vfs` (VirtualFileSystem, IndexedDB `files` store) + `tools`
-  (createFileTools).
+  (createFileTools). `fs_write` / `fs_delete` (and the sandbox's `fs.writeFile`, `sandbox/index.ts`)
+  emit `file.written` / `file.deleted` through the tool's run context, AFTER the write succeeded:
+  it is how a UI knows the files of a turn. Browser only - the Node sibling has no VFS.
 - `src/mcp/` — optional HTTP connector (`./mcp` subpath): `http` (transport,
   mount, refresh) + `oauth` (OAuth 2.1 / DCR provider, vault-backed tokens) + `enterprise-oauth`
   (enterprise-managed authorization / ID-JAG: token exchange at the IdP, then the SDK's `jwt-bearer`

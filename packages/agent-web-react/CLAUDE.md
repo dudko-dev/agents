@@ -85,12 +85,25 @@ against its production build.
   the reducer, and a helper's consent request is lifted from them), `Media` (`GeneratedMedia`: a
   generated file read from the VFS into an object URL, only the core's media types, never SVG;
   `TranscriptBlock`),
+  `FileChips` (+ `FileChip`, `SourceView`: the files an answer wrote - `writtenFiles` in the
+  state, folded from the core's `file.written` / `file.deleted`; a file's text is always text
+  nodes), `SandboxedFrame` (untrusted HTML in host-drawn chrome; the next user is MCP Apps),
   `ContextMeter`, `Composer` (minimal), `PlanView`, `ModelLoadBar`,
   `UsageBadge`, `ApiKeyForm`, `icons`, `format`. Docs: `docs/chat.md`.
 - `apps/demo/src/components/McpPanel.tsx` (monorepo root) — the demo's "bring your own MCP" panel.
+- `src/html-preview.ts` — the sandboxed frame's security core as pure strings: `sandboxTokens`
+  (never `allow-same-origin`), `sandboxedCsp` (no network source), `withCspFirst`,
+  `buildSandboxedDocument` (the SHELL: the untrusted document is framed by a document of ours
+  whose `frame-src 'none'` is the only thing that stops a frame navigating itself), `tokenizeHtml`.
+  **Security boundary**: every guard has a `guard …` test in `tests/files.test.ts` AND in
+  `e2e/files.spec.ts` (a real browser, hostile pages, a counted endpoint), and a change needs a
+  mutation check. Never render a workspace file by `blob:` / `data:` URL or as markup.
+  `src/file-kinds.ts` — `fileKindOf` (only the core's image types are pictures; SVG is source).
 - `src/util.ts` — tiny shared helpers (`errMessage`).
 - `src/styles.css` — optional theme (light + dark).
 - `src/index.ts` — public surface (+ curated re-exports from the core).
+- `tests/files.test.ts` — files of a turn: the reducer, the chips, and every guard of the sandboxed
+  frame as a string check.
 - `tests/state.test.ts`, `tests/chat.test.ts` — `node --test` over the reducer,
   composer helpers, labels and the history store (imports from `dist`).
 - `tests/pipeline-state.test.ts` (the pipeline reducer against event sequences recorded from the
@@ -102,7 +115,7 @@ against its production build.
   server on loopback). `agent.spec.ts`, `steering.spec.ts`, `learning.spec.ts`: the agent end to end
   (a run, typing to it while it works, the notebook and the fetched pages) against a scripted Gemini
   endpoint (`gemini.ts`, routed by the stage markers; it can script tool calls and the notebook's
-  `save_skill`). `helpers.spec.ts`: helpers the model starts (`spawn_subagent`) - the tree, Stop on a
+  `save_skill`). `files.spec.ts`: files written in a turn - the chips in the demo, and the sandboxed HTML frame against hostile pages on a test-only page with scripts on (`fixtures/files-page.ts`). `helpers.spec.ts`: helpers the model starts (`spawn_subagent`) - the tree, Stop on a
   slow helper, a helper's consent prompt; a helper's calls are told from the run's by what they
   were given (a helper knows its task, never the user's goal). `pipeline.spec.ts`: the pipeline editor at `/pipeline/` - mouse, keyboard, a real
   run against the scripted endpoint, a reload, a phone (touch pan and pinch through CDP).

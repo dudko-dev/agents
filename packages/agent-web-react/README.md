@@ -545,6 +545,8 @@ use them standalone. The full guide: [docs/chat.md](docs/chat.md).
 | `<StepList>` / `<ToolCallRow>` | Execution steps / one tool call with its cost and images. With model tiers: the tier / model badge, the escalation line, the earlier attempt's calls (`showTiers`); a replanner failure as a warning (`showReplanFailed`); the decision model's note (`showDecisions`); the subagent tree under its step (`showSubagents`); a `web_search` call's results as plain text and safe links (`showSearchResults`). |
 | `<SubagentTree>` / `<SubagentRow>` | The run's subagents - static ones and the helpers the model started - as an indented tree: status, model, tokens, time and a Stop button per node (`onStop`, `showUsage`, `showTools`, `renderSubagent`). |
 | `<GeneratedMedia>` / `<TranscriptBlock>` | A file a media tool wrote, read from the workspace: an image inline or a native audio player (only the types the core generates; never SVG) / a folded "Transcript of …" block. `<MessageList files showMedia renderMedia>` places them in the answer. |
+| `<FileChips>` / `<FileChip>` | The files an answer wrote to the workspace (the core's `file.written` / `file.deleted`), as chips: name, kind, size, open, download; an inline preview (text with line numbers, a picture, your own rendering through `renderFileContent`), and an `.html` file in a sandboxed frame with Preview / Source. `<MessageList files showFileChips htmlPreview renderFile renderFileContent>` places them under the answer. |
+| `<SandboxedFrame>` / `<SourceView>` | Untrusted HTML inside chrome the host draws: `<iframe sandbox>` without `allow-same-origin`, by `srcdoc`, no network, fixed height (`html`, `scripts`, `title`, `label`, `actions`, `footer`, `height`) / a file's text with line numbers, never markup. See [the boundary](#the-html-preview-is-a-security-boundary). |
 | `<ToolApprovalPrompt>` | Consent cards (Allow once / Always / Deny); a helper's request says which helper asks (`showHelper`). |
 | `<ApprovalModeSwitch>` | Segmented consent-mode switch. |
 | `<ChatHistoryList>` | Saved chats (from `useChatHistory`). |
@@ -557,6 +559,31 @@ use them standalone. The full guide: [docs/chat.md](docs/chat.md).
 | `<ApiKeyForm>` | BYOK key entry that writes to the encrypted vault. |
 | `<Composer>` | The minimal textarea + send/stop (kept for existing apps). |
 | `<PipelineEditor>` and its parts | The pipeline editor - from `@dudko.dev/agent-web-react/pipeline`, styled by `pipeline.css`. See [Pipelines](#pipelines-an-editor-on-a-canvas). |
+
+### The HTML preview is a security boundary
+
+`<AgentChat files={vfs}>` shows the files an answer wrote as chips, and an `.html` one can be
+previewed. That page is **untrusted**: a model wrote it, possibly on the say-so of a page it read,
+and your origin holds the key vault. The preview therefore never puts the file into your document
+and never opens it by URL - `<SandboxedFrame>` draws it:
+
+| Guard | What it stops |
+| --- | --- |
+| `<iframe sandbox>` = `""` or `"allow-scripts"`, never `allow-same-origin` | reading your DOM, `localStorage`, cookies, IndexedDB (an opaque origin); no top navigation, popups, forms, modals, downloads |
+| `srcdoc`, never a `blob:` / `data:` URL | the same document opened outside the sandbox with your origin |
+| CSP with no network source (`default-src 'none'`, inline styles, `data:` / `blob:` images) | `fetch`, XHR, beacon, WebSocket, `<img src=https://…>`, external scripts and styles, forms |
+| the policy first in the document AND inherited from a shell document of ours | a page that brings its own `<meta>` policy, a `<base>`, or content before `<html>` |
+| the shell's `frame-src 'none'` | the frame navigating itself to the network (`location = …`, a link, `<meta http-equiv=refresh>`) |
+| the label, the switch and the footer drawn by the host, outside the frame; a fixed height; no message listened to | content imitating chat controls or resizing itself over them |
+| Source as text nodes | markup injection through the source view |
+
+Scripts are **off by default** (`htmlPreview={{ scripts: true }}` runs the page's inline scripts,
+still without an origin or a network; `htmlPreview={false}` shows HTML as source only). Limits of
+this version: files a page links to (`style.css`, `app.js`, images next to it) are not loaded, and
+the frame says so; a DNS prefetch is not a request the policy sees (it can carry only what the
+agent itself wrote into the page); the guards are verified in Chromium. Every guard has a test in
+`tests/files.test.ts` and, in a real browser, in `e2e/files.spec.ts`. Details:
+[docs/chat.md](docs/chat.md#the-html-preview-is-a-security-boundary).
 
 ### Build your own UI
 
@@ -625,6 +652,12 @@ challenge header be exposed;
   copy as code, the definition surviving a reload, the vault shared with the demo, and a phone:
   no sideways scroll, the inspector as a bottom sheet, one finger panning and two zooming the
   canvas while the page stays put.
+
+- files written in a turn ([`e2e/files.spec.ts`](e2e/files.spec.ts)): the chips under the answer
+  (one per file, none for a deleted one), the Markdown / CSV / HTML previews, the download, the
+  chips after a reload, a phone; and the sandboxed frame against hostile pages - with scripts on,
+  on a test-only page - which cannot read the host's DOM, storage or IndexedDB, reach a counted
+  local endpoint by any request or navigation, open a window, or pre-empt the policy.
 
 These cover what unit tests structurally cannot: effect ordering across a real
 render, a real navigation away and back, and IndexedDB.
