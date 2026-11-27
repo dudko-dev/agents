@@ -1,6 +1,6 @@
 # agents — instructions for Claude
 
-Monorepo (pnpm workspaces + Nx) of three published packages, one private test package and two
+Monorepo (pnpm workspaces + Nx) of three published packages, one private test package and three
 private apps:
 
 - `packages/agent` — `@dudko.dev/agent`, the Node / server agent.
@@ -21,6 +21,10 @@ private apps:
   Files for machines (`llms.txt`, `robots.txt`, the sitemap, the manifest) are never linked from the
   interface - no footer or menu entry: crawlers find them by their well-known paths. Check every
   page at phone width for sideways scroll before pushing.
+- `apps/worker` — the Cloudflare Worker of the site, for `/mcp/*` only: the public demo MCP server at
+  `/mcp/demo` (the demo's "Try the demo server"). Stateless, both protocol revisions, abuse limits
+  in code; bundled to `apps/worker/dist/index.js`. The demo's `vite dev` / `vite preview` serve the
+  same handler on Node (`apps/worker/src/node.ts`), which is what the browser tests talk to.
 
 **Each package has its own `CLAUDE.md`. Read it before changing that package** — layout, conventions
 and the reasons behind them live there. This file holds only what is shared.
@@ -38,7 +42,7 @@ pnpm nx <target> <project>   # e.g. pnpm nx test @dudko.dev/agent-web
 ```
 
 Projects: `@dudko.dev/agent`, `@dudko.dev/agent-web`, `@dudko.dev/agent-web-react`,
-`@dudko.dev/test-servers`, `demo`, `site`.
+`@dudko.dev/test-servers`, `demo`, `site`, `worker`.
 Targets come from each package's `scripts`: `typecheck`, `format:check`, `format`, `build`, `test`
 (and `test:e2e` in the React package; `@dudko.dev/test-servers` has no `build`).
 
@@ -91,7 +95,13 @@ tool. Do not infer success from "the change looks right".
   dependencies). Do not edit `release.yml` unless asked: npm's Trusted Publisher setting names
   that file and the `release` environment.
 - The site and the demo are built and deployed by Cloudflare (Workers Builds: `pnpm nx build site`,
-  then `wrangler.jsonc` publishes `apps/site/dist`), not by a workflow here.
+  then `wrangler.jsonc` publishes `apps/site/dist`), not by a workflow here. The site is static
+  assets, served without a script; there IS a Worker script (`main`: `apps/worker/dist/index.js`,
+  built by `pnpm nx build site` through `site`'s dev dependency on `worker`), and
+  `assets.run_worker_first: ["/mcp/*"]` runs it for those paths ONLY - every other path, the 404
+  page included, is answered by the assets exactly as before. Keep it that way: a path added to
+  `run_worker_first` is a path the static site no longer answers first
+  (`apps/worker/tests/worker.test.ts` pins the config). Keep `"previews": {}`.
 - `autoupdate.yml` (weekly): `.github/scripts/autoupdate.mjs` runs `pnpm update -r --latest`
   (except `typescript` and `@types/node`), patch-bumps and changelogs the published packages whose
   own `dependencies` changed, opens a PR, merges it when CI is green and dispatches the release.

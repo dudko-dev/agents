@@ -5,6 +5,7 @@ import test from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { DEMO_MCP_PATH } from '../src/demo-server.ts'
 import { handleRequest, type Env } from '../src/index.ts'
+import { DOCS_PATH } from '../src/tools.ts'
 import { modernRequest, read } from './wire.ts'
 
 // The Worker as Cloudflare runs it: which paths reach it (the root wrangler.jsonc), what it does
@@ -127,4 +128,20 @@ test('the Worker (the bundle wrangler deploys): the same', async () => {
   assert.ok(existsSync(bundle), `${config.main} is not built: run \`pnpm nx build worker\``)
   const mod = (await import(pathToFileURL(bundle).href)) as { default: { fetch: Handler } }
   await routes(mod.default.fetch)
+})
+
+test('open_docs links to a section of the docs that exists', () => {
+  // The site's pages are generated from the packages' Markdown (apps/site/scripts/sync-docs.mjs):
+  // /docs/browser/capabilities/ is packages/agent-web/docs/capabilities.md, and an anchor is its
+  // heading, slugged the way Starlight does (lower case, punctuation dropped, spaces to dashes).
+  const [path, anchor] = DOCS_PATH.split('#')
+  assert.equal(path, '/docs/browser/capabilities/')
+  const doc = readFileSync(resolve(repo, 'packages/agent-web/docs/capabilities.md'), 'utf8')
+  const slugs = [...doc.matchAll(/^#{1,6} (.+)$/gm)].map(([, heading]) =>
+    (heading as string)
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}\s-]/gu, '')
+      .replace(/\s/g, '-'),
+  )
+  assert.ok(slugs.includes(anchor as string), `no heading slugs to #${anchor}`)
 })

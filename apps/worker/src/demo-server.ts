@@ -21,7 +21,7 @@ import { registerDemoTools } from './tools.ts'
  * call, per request), a `subscriptions/listen` stream is refused (the lists never change, and a
  * stream would stay open), the answer is bounded, and a page of another origin is refused. No
  * input is logged: the SDK's error callbacks are silenced, and nothing here writes to the
- * console. Request rates are not limited here: that is a Cloudflare rule (see the README).
+ * console. Request rates are not limited here: that is a Cloudflare rule (see CLAUDE.md).
  */
 
 /** Where the Worker serves this server. */

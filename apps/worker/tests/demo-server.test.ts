@@ -386,6 +386,32 @@ test('limit: a body over the bound is refused 413, by its length or as it stream
     )
     assert.equal(streamed.status, 413)
     assert.ok(pulled * 4096 <= DEMO_LIMITS.requestBytes + 2 * 4096, `read ${pulled} chunks`)
+    // A declared length over the bound is refused before a byte is read.
+    let read0 = 0
+    // (No high-water mark: the stream is pulled only when somebody reads it.)
+    const unread = new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          read0 += 1
+          controller.enqueue(encoder.encode('{}'))
+          controller.close()
+        },
+      },
+      { highWaterMark: 0 },
+    )
+    const early = await server.fetch(
+      new Request(URL_ON_SITE, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'content-length': String(DEMO_LIMITS.requestBytes + 1),
+        },
+        body: unread,
+        duplex: 'half',
+      } as RequestInit),
+    )
+    assert.equal(early.status, 413)
+    assert.equal(read0, 0)
     // Just under the bound is served.
     const under = await read(
       await server.fetch(

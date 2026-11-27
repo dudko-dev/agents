@@ -101,12 +101,17 @@ test('a plain tool: the model calls roll_dice and is sent its structured result'
 
   await expect(answerBubble(page)).toHaveText('All done.', { timeout: 45_000 })
   expect(calls.find((c) => c.stage === 'executor')?.tools).toEqual(expect.arrayContaining(TOOLS))
-  const result = resultOf(calls, 'roll_dice')
-  expect(result).toMatch(/\\"sides\\":6/)
-  expect(result).toMatch(/\\"rolls\\":\[\d,\d,\d\]/)
+  // The core hands the model the server's structured content as it is.
+  const { content } = JSON.parse(resultOf(calls, 'roll_dice')) as {
+    content: { sides: number; rolls: number[]; total: number }
+  }
+  expect(content.sides).toBe(6)
+  expect(content.rolls).toHaveLength(3)
+  expect(content.rolls.every((roll) => roll >= 1 && roll <= 6)).toBe(true)
+  expect(content.total).toBe(content.rolls.reduce((a, b) => a + b, 0))
 })
 
-test('plan_trip: the server\'s form is shown, and the submitted answer reaches the server', async ({
+test("plan_trip: the server's form is shown, and the submitted answer reaches the server", async ({
   page,
 }) => {
   const calls = await mockGemini(page, callTool('plan_trip', { destination: 'Lisbon' }))
