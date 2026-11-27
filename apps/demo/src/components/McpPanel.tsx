@@ -40,6 +40,12 @@ const PROTOCOLS: [McpProtocolMode, string][] = [
   ['modern', 'Modern — 2026-07-28 only'],
 ]
 
+// The site's own demo MCP server (apps/worker): on this origin, so it works on a preview
+// deployment and under `vite dev` / `vite preview` too, and needs no CORS.
+const DEMO_SERVER_PATH = '/mcp/demo'
+const demoServerUrl = (): string | undefined =>
+  typeof location === 'undefined' ? undefined : `${location.origin}${DEMO_SERVER_PATH}`
+
 const nameFromUrl = (url: string): string => {
   try {
     const host = new URL(url).hostname.split('.').filter((p) => p !== 'www' && p !== 'mcp')[0]
@@ -77,6 +83,7 @@ export const McpPanel = ({
   useEffect(() => {
     if (mode === 'oauth') void check()
   }, [mode, check])
+  const demoUrl = demoServerUrl()
   const oauthUnavailable = mode === 'oauth' && mcp.oauthSupported === false
   const canAdd = url.trim().length > 0 && !oauthUnavailable
 
@@ -112,6 +119,25 @@ export const McpPanel = ({
       </div>
 
       {mcp.completingAuthorization && <p className="settings__note">Finishing authorization…</p>}
+
+      {demoUrl && !mcp.servers.some((s) => s.url === demoUrl) && (
+        <div className="mcp__try">
+          <button
+            type="button"
+            className="settings__btn"
+            onClick={() =>
+              void mcp.add({ name: 'demo', url: demoUrl, auth: 'none', protocol: 'auto' })
+            }
+          >
+            Try the demo server
+          </button>
+          <span>
+            No server of your own? This site runs a small one: tools that answer at once, and two
+            that ask you something in the middle of the call — a form (<code>plan_trip</code>) and
+            a link (<code>open_docs</code>).
+          </span>
+        </div>
+      )}
 
       <ul className="mcp__servers">
         {mcp.servers.map((s) => (

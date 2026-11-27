@@ -1,0 +1,34 @@
+{
+  "name": "worker",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "The Cloudflare Worker of agent.dudko.dev: the public demo MCP server at /mcp/demo. Every other path is the static site.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./demo-server": "./src/demo-server.ts",
+    "./node": "./src/node.ts"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --experimental-strip-types --disable-warning=ExperimentalWarning tests/*.test.ts",
+    "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\" \"scripts/*.mjs\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\" \"scripts/*.mjs\""
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.4.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@dudko.dev/agent-web": "workspace:*",
+    "@modelcontextprotocol/client": "^2.4.0",
+    "@types/node": "^22.9.0",
+    "esbuild": "^0.28.2",
+    "prettier": "^3.10.1",
+    "typescript": "^6.0.3"
+  },
+  "engines": {
+    "node": ">=22.6.0"
+  }
+}

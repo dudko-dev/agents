@@ -115,7 +115,9 @@ against its production build.
   `AppRequestPrompt` (MCP Apps, below),
   `ContextMeter`, `Composer` (minimal), `PlanView`, `ModelLoadBar`,
   `UsageBadge`, `ApiKeyForm`, `icons`, `format`. Docs: `docs/chat.md`.
-- `apps/demo/src/components/McpPanel.tsx` (monorepo root) — the demo's "bring your own MCP" panel.
+- `apps/demo/src/components/McpPanel.tsx` (monorepo root) — the demo's "bring your own MCP" panel,
+  and its "Try the demo server" (adds `${location.origin}/mcp/demo`, protocol `auto`: the site's
+  own MCP server, `apps/worker`).
 - `src/html-preview.ts` — the sandboxed frame's security core as pure strings: `sandboxTokens`
   (never `allow-same-origin`), `sandboxedCsp` (no network source), `withCspFirst`,
   `buildSandboxedDocument` (the SHELL: the untrusted document is framed by a document of ours
@@ -166,7 +168,11 @@ against its production build.
   `@dudko.dev/test-servers` (its `elicit_*` tools, both protocol revisions): accept / decline /
   cancel reach the server, validation blocks Submit, a link opens only on the click, an expired
   question (the page clock) is reported as answered automatically, typed values are nowhere after
-  Submit. `agent.spec.ts`, `steering.spec.ts`, `learning.spec.ts`: the agent end to end
+  Submit. `demo-server.spec.ts`: "Try the demo server" - the site's own MCP server on the demo's
+  origin (`vite preview` mounts the Worker's handler, `apps/demo/vite.config.ts`): it connects on
+  2026-07-28, a plain tool's structured result reaches the model, `plan_trip`'s form is filled in
+  and the answer is in the retried call and in the server's result, `open_docs`'s link is declined.
+  `agent.spec.ts`, `steering.spec.ts`, `learning.spec.ts`: the agent end to end
   (a run, typing to it while it works, the notebook and the fetched pages) against a scripted Gemini
   endpoint (`gemini.ts`, routed by the stage markers; it can script tool calls and the notebook's
   `save_skill`). `apps.spec.ts`: MCP Apps - the app in the demo's MCP tab, its consent prompts
