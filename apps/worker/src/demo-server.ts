@@ -32,7 +32,10 @@ export const DEMO_SERVER_INFO = { name: 'agent-dudko-dev-demo', version: '1.0.0'
 export const DEMO_LIMITS = {
   /** The largest request body read, in bytes. A tools/call with a form's answer is under 2 KiB. */
   requestBytes: 32 * 1024,
-  /** The largest answer sent, in bytes. tools/list is about 5 KiB. */
+  /**
+   * The largest answer sent, in bytes. tools/list is about 10 KiB, the trip board's document
+   * (`resources/read`) about 25 KiB.
+   */
   responseBytes: 64 * 1024,
   /** Array elements plus object members one tools/call's `arguments` may have (the SDK's check). */
   toolInputElements: 64,
@@ -44,6 +47,10 @@ export const DEMO_INSTRUCTIONS = [
   'echo, current_time and roll_dice answer at once (roll_dice with structured content).',
   'plan_trip and open_docs ask the USER something during the call - a form, a link - and work on',
   'the 2026-07-28 protocol revision only. Let the user answer: never fill in a trip yourself.',
+  'trip_board plans a trip day by day and comes with an MCP App, a board the user works with in',
+  'hosts that show apps; pass it what the user said (or what plan_trip returned). reshuffle_day',
+  "and book_trip are that app's own tools: a model has no use for them, and book_trip is a demo",
+  'that books nothing.',
 ].join(' ')
 
 const JSON_HEADERS = { 'content-type': 'application/json' }
@@ -118,8 +125,9 @@ const buildServer = (ctx: McpRequestContext): McpServer => {
   const origin = ctx.requestInfo ? new URL(ctx.requestInfo.url).origin : 'https://agent.dudko.dev'
   const server = new McpServer(DEMO_SERVER_INFO, {
     instructions: DEMO_INSTRUCTIONS,
-    // The tool list never changes: a client has no reason to open a stream for changes.
-    capabilities: { tools: { listChanged: false } },
+    // The lists never change: a client has no reason to open a stream for changes. (The trip
+    // board's resource is what makes the server one with resources.)
+    capabilities: { tools: { listChanged: false }, resources: { listChanged: false } },
     maxToolInputElements: DEMO_LIMITS.toolInputElements,
     // The same validator on Node (tests, the demo's dev server) as on workerd.
     jsonSchemaValidator: new CfWorkerJsonSchemaValidator(),

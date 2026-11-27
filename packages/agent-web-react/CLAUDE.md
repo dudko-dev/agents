@@ -175,6 +175,10 @@ against its production build.
   origin (`vite preview` mounts the Worker's handler, `apps/demo/vite.config.ts`): it connects on
   2026-07-28, a plain tool's structured result reaches the model, `plan_trip`'s form is filled in
   and the answer is in the retried call and in the server's result, `open_docs`'s link is declined.
+  `demo-server-app.spec.ts`: the same server's MCP App (`trip_board`'s board, `apps/worker`) in the
+  demo - the model is never offered its two app-only tools, the board renders and grows, its
+  read-only app tool runs without a prompt, its `book_trip` waits for consent (Deny sends nothing,
+  Allow once sends one call), its link and message prompts, the phone sheet without sideways scroll.
   `agent.spec.ts`, `steering.spec.ts`, `learning.spec.ts`: the agent end to end
   (a run, typing to it while it works, the notebook and the fetched pages) against a scripted Gemini
   endpoint (`gemini.ts`, routed by the stage markers; it can script tool calls and the notebook's

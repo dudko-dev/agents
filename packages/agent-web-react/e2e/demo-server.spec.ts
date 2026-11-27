@@ -11,12 +11,15 @@ import { mockGemini, plan, type GeminiCall, type GeminiReply } from './gemini.ts
  * the model is sent next is computed by the server from the user's answer.
  */
 
+// The model's tools: the server's two app-only tools (`reshuffle_day`, `book_trip`) are not
+// among them (see demo-server-app.spec.ts).
 const TOOLS = [
   'demo__echo',
   'demo__current_time',
   'demo__roll_dice',
   'demo__plan_trip',
   'demo__open_docs',
+  'demo__trip_board',
 ]
 
 const decision = (): GeminiReply => ({
@@ -54,7 +57,7 @@ const openWithKey = async (page: Page) => {
 
 const tryDemo = async (page: Page) => {
   await page.getByRole('button', { name: 'Try the demo server' }).click()
-  await expect(page.locator('.mcp__server-status')).toContainText('Connected — 5 tool(s)')
+  await expect(page.locator('.mcp__server-status')).toContainText('Connected — 6 tool(s)')
   await expect(page.getByRole('button', { name: 'Send' })).toBeVisible()
 }
 
@@ -79,7 +82,7 @@ test('"Try the demo server" connects the site\'s own server on this origin, with
   await expect(page.locator('.mcp__protocol')).toContainText('asked for: auto')
   await page.getByText('Tools', { exact: true }).click()
   await expect(page.locator('.mcp__tool code')).toHaveText(TOOLS)
-  await expect(page.locator('.mcp__ro')).toHaveCount(5)
+  await expect(page.locator('.mcp__ro')).toHaveCount(6)
   // The server's instructions are shown as its own words.
   await page.getByText('Instructions sent by this server').click()
   await expect(page.locator('.mcp__instructions-text')).toContainText('A demo MCP server')
@@ -87,7 +90,7 @@ test('"Try the demo server" connects the site\'s own server on this origin, with
   await expect(page.getByRole('button', { name: 'Try the demo server' })).toHaveCount(0)
   await page.reload()
   await page.getByRole('tab', { name: 'MCP servers' }).click()
-  await expect(page.locator('.mcp__server-status')).toContainText('Connected — 5 tool(s)')
+  await expect(page.locator('.mcp__server-status')).toContainText('Connected — 6 tool(s)')
   await expect(page.getByRole('button', { name: 'Try the demo server' })).toHaveCount(0)
 })
 

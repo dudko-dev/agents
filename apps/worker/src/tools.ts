@@ -9,6 +9,7 @@ import {
   type ServerContext,
 } from '@modelcontextprotocol/server'
 import { z } from 'zod'
+import { BUDGETS, registerTripBoard, TRIP_BOARD_TOOLS } from './trip-board.ts'
 
 /**
  * The tools of the demo MCP server. Each is cheap, keeps nothing and reaches nothing: no storage,
@@ -32,12 +33,17 @@ export interface DemoToolContext {
   origin: string
 }
 
+/**
+ * Every tool, in the order `tools/list` names them. A host that speaks MCP Apps mounts all but
+ * `APP_ONLY_TOOLS` (`trip-board.ts`) for its model.
+ */
 export const DEMO_TOOL_NAMES = [
   'echo',
   'current_time',
   'roll_dice',
   'plan_trip',
   'open_docs',
+  ...TRIP_BOARD_TOOLS,
 ] as const
 
 /** The page `open_docs` links to: the section of the docs about the feature it shows. */
@@ -87,8 +93,6 @@ const cannotAsk = (tool: string, mode: 'form' | 'url'): CallToolResult =>
   )
 
 // ── plan_trip: a form ───────────────────────────────────────────────────────
-
-const BUDGETS = ['shoestring', 'comfortable', 'luxury'] as const
 
 /**
  * The form `plan_trip` asks for, as it goes on the wire: the flat subset a form may use
@@ -319,17 +323,18 @@ const registerPlainTools = (server: McpServer): void => {
 /**
  * Register every tool of the demo server on a fresh instance (one per request).
  *
- * MCP Apps (a tool that comes with a UI) are added here too, and take two registrations: the UI
- * as a resource - `server.registerResource(name, 'ui://demo/<name>.html', { mimeType:
- * 'text/html;profile=mcp-app' }, read)`, its HTML a constant in this project (no outbound fetch)
- * - and the tool, with `_meta: { ui: { resourceUri: 'ui://demo/<name>.html' } }` in its config so
- * a host knows which UI to render with its result. Registering a resource makes the server
- * advertise the `resources` capability; keep `listChanged` off there as for tools (see
- * `demo-server.ts`: nothing here ever changes). Add the tool's name to `DEMO_TOOL_NAMES` and
- * its own test to `tests/demo-server.test.ts`.
+ * An MCP App (a tool that comes with a UI) takes two registrations: the UI as a resource -
+ * `server.registerResource(name, 'ui://demo/<name>.html', { mimeType: 'text/html;profile=mcp-app'
+ * }, read)`, its HTML a constant in this project (no outbound fetch) - and the tool, with `_meta:
+ * { ui: { resourceUri: 'ui://demo/<name>.html' } }` in its config so a host knows which UI to
+ * render with its result. `trip-board.ts` is the one there is: follow it. Registering a resource
+ * makes the server advertise the `resources` capability, with `listChanged` off as for tools (see
+ * `demo-server.ts`: nothing here ever changes). Add the tool's name to `DEMO_TOOL_NAMES` and its
+ * own test to `tests/demo-server.test.ts`.
  */
 export const registerDemoTools = (server: McpServer, ctx: DemoToolContext): void => {
   registerPlainTools(server)
   registerPlanTrip(server, ctx)
   registerOpenDocs(server, ctx)
+  registerTripBoard(server, ctx)
 }
