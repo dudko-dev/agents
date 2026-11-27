@@ -823,9 +823,18 @@ section on MCP Apps (`ui/open-link`) and to put the plan in the message box (`ui
 reports its height as days open and close. Everything is computed from the inputs: the same trip,
 the same plan and the same code.
 
+On 2026-07-28 it also serves two [skills](#mcp-skills-experimental) (it declares
+`io.modelcontextprotocol/skills`; on the 2025 revisions it does not). `skill://demo/trip-planning/SKILL.md`
+says how to plan a trip with its tools (ask for what is missing, `plan_trip` for a form,
+`trip_board` for the days) and bundles `references/checklist.md`, a list of papers and things to
+pack; `skill://demo/dice-games/SKILL.md` has the rules of Pig and Yacht-lite, played with
+`roll_dice`. Static entries (no `"dynamic"`), each skill a few KiB, the sizes and digests computed
+from the bytes it serves. With `skills: true` they are `demo/trip-planning` and `demo/dice-games`
+in the agent's catalog (in the demo: "Try it with its skills").
+
 ```ts
 const mcp = await connectMcpHttp(
-  { demo: { url: 'https://agent.dudko.dev/mcp/demo', protocol: 'auto' } },
+  { demo: { url: 'https://agent.dudko.dev/mcp/demo', protocol: 'auto', skills: true } },
   { onElicitation: askTheUser, elicitation: { url: true }, apps: true },
 )
 ```

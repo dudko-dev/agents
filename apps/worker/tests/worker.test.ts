@@ -5,6 +5,7 @@ import test from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { DEMO_MCP_PATH } from '../src/demo-server.ts'
 import { handleRequest, type Env } from '../src/index.ts'
+import { DEMO_SKILL_URIS } from '../src/skills.ts'
 import { DEMO_TOOL_NAMES, DOCS_PATH } from '../src/tools.ts'
 import { APP_DOCS_PATH } from '../src/trip-board.ts'
 import { modernRequest, read } from './wire.ts'
@@ -111,6 +112,12 @@ const routes = async (fetch: Handler): Promise<void> => {
   const mcp = await read(await fetch(modernRequest('tools/list'), env))
   assert.equal(mcp.status, 200)
   assert.equal(mcp.message.result.tools.length, DEMO_TOOL_NAMES.length)
+  // The skills' entries are built where they are served (sha256 by WebCrypto): in the bundle too.
+  const skills = await read(await fetch(modernRequest('skills/list'), env))
+  assert.deepEqual(
+    skills.message.result.skills.map((s: { uri: string }) => s.uri),
+    DEMO_SKILL_URIS,
+  )
   // Any other path the Worker sees is the assets' answer: the site's own 404 page.
   for (const path of ['/mcp/other', '/mcp/demo/', '/']) {
     const res = await fetch(new Request(`https://agent.dudko.dev${path}`), env)
