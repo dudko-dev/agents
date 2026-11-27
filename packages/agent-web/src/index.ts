@@ -473,6 +473,12 @@ export type {
 
 // ── Events ───────────────────────────────────────────────────────────────────
 export type { AgentEvent, AgentEventHandler, ReplanMode, Phase, UsagePhase } from './events.js'
+// The types of the two `mcp.elicitation-*` events (the connector itself is the `./mcp` entry).
+export type {
+  McpElicitationFieldSchema,
+  McpElicitationReason,
+  McpElicitationSchema,
+} from './mcp/elicitation.js'
 
 // ── Logging ──────────────────────────────────────────────────────────────────
 export { createLogger } from './logger.js'

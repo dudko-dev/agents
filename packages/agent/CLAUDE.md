@@ -118,6 +118,32 @@
     check). The section goes to the planner and the executor only, and `ctx.mcpInstructions` is
     replaced only between runs (prompt caching). A result that breaks its tool's `outputSchema`
     is passed on with a note, never thrown (`outputSchemaViolation` in `mcp.ts`).
+  - `mcp-elicitation.ts` (pure, no imports; `config.onElicitation` / `config.elicitation`): MCP
+    elicitation - a server asks the USER for input during a tool call and the host's callback
+    answers. The limits, what a request must be before the host sees it (third-party text
+    cleaned and capped, the form restricted to the flat subset of the specification, a link only
+    https or loopback http), what an answer must be before the server sees it (checked against
+    the form, no field that was not asked for), the one function that asks
+    (`answerMcpElicitation`: helpers refused unless `elicitation.subagents`, caps per tool call
+    and per run, timeout, abort, a failed handler = cancel) and the session that drives a tool
+    call in both revisions (`createMcpElicitationSession`: 2025 = the `elicitation/create`
+    request handler, calls to that server ONE AT A TIME because the request does not name its
+    call, the call's own 60 s clock stopped while a question waits; 2026-07-28 = `input_required`
+    answered and the same call sent again with `inputResponses` + `requestState`, never after an
+    automatic answer). A COPY of the browser sibling's `src/mcp/elicitation.ts`, byte for byte:
+    change both (`tests/mcp-elicitation-shared.test.ts` compares them and tests every guard).
+    `mcp.ts` only wires it: the session per server (made before the client: the capability is in
+    the handshake), `allowInputRequired` per call, the run context (emit, step, run id, the
+    helper mark from `state.spawn`, the per-run counter kept on the ROOT run's state). OFF
+    without `onElicitation`: no capability, the same `client.request` call as ever -
+    `tests/mcp-elicitation.test.ts` compares the wire with
+    `tests/fixtures/mcp-wire-without-protocol.json`. A consent boundary: the answer must never
+    reach the model's context, an event, a log, a span or a snapshot
+    (`tests/mcp-elicitation-integration.test.ts` looks for it in each); every guard has a test
+    and needs a mutation check. One test takes over a minute and runs only with
+    `MCP_ELICITATION_SLOW=1` (the SDK's 60 s request timeout is out of the way while a question
+    waits). The REPL's side is `cli/elicit.ts` (`AGENT_MCP_ELICITATION`; pure but for the `ask`
+    it is given; `tests/cli-elicit.test.ts`).
   - The MCP client is the official 2.x SDK, `@modelcontextprotocol/client` (stdio from its
     `/stdio` subpath, the JSON Schema validator from `/validators/ajv`); `@modelcontextprotocol/sdk`
     1.x is gone from this package (the test servers keep it, for their `legacy` mode).
@@ -133,7 +159,7 @@
     `client.request` is enough; `Mcp-Param-*` is `callTool`'s own and is not sent), tool list
     changes need `client.listen` (opened at connect when `onToolsChanged` is given; never opened
     again), `inputRequired.autoFulfill` is off and an `input_required` answer is a `McpToolError`
-    (elicitation is not implemented), a stdio probe runs on a sibling process and is bounded by
+    unless `onElicitation` is set (then `mcp-elicitation.ts` answers it), a stdio probe runs on a sibling process and is bounded by
     `MCP_STDIO_PROBE_TIMEOUT_MS`. The negotiated revision is in `IConnectedMcp.protocols`. Same
     names and rules in the browser sibling: change both. `mcp.ts` deliberately
     does NOT use the typed verbs: `tools/list` goes page by page through `client.request`

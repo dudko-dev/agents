@@ -723,6 +723,52 @@ the same in both. Only the adapter that runs a node with `createAgent` differs.
 - The pure core (`mcp/shared.ts`) is a byte-for-byte copy of the Node package's
   `mcp-shared.ts`, like the pipeline and sandbox engines.
 
+## MCP elicitation: the host answers, the model never sees the question
+
+- **On the connection, not on the agent.** The capability is declared in the handshake
+  (`initialize`, or every request's `_meta` on 2026-07-28), and in this package the host makes
+  the connection before the agent exists. So `onElicitation` / `elicitation` are options of
+  `connectMcpHttp`. (The Node sibling owns its connections, so there they are fields of the
+  agent's config: the same names, the same request, the same events.)
+- **Manual mode, not the SDK's auto-fulfilment.** The 2.x SDK can answer `input_required`
+  itself through a registered `elicitation/create` handler and retry the call. It is not used:
+  its loop has one cap (rounds), puts all the questions of a round to the handler at once, and
+  has no notion of which tool call, run or helper asks. The connector keeps `inputRequired.autoFulfill: false`, asks for the
+  `input_required` result (`allowInputRequired`) and drives the rounds itself, so the same
+  guards - caps per call and per run, the helper rule, "nothing is sent again after an answer
+  nobody decided" - hold in both revisions. The request handler is registered only for the
+  2025 revisions, where the SDK needs one.
+- **One at a time on the 2025 revisions.** An `elicitation/create` request carries nothing that
+  ties it to the tool call it belongs to (the SDK's context has the request's own id, no
+  relation). Guessing would put a question under the wrong tool, count it against the wrong
+  call and - worse - let a helper's question pass as the run's. So calls to a server with
+  elicitation on run one at a time on such a connection: the call in flight is the one that
+  asks. The cost is parallelism towards that one server; the option is opt-in.
+- **Run context read structurally.** The `./mcp` entry does not import the core. A tool reads
+  what the agent passes it as `options.agentRun` (the event sink, the step, the run id, the
+  per-run counter, the helper mark) by shape; a subagent tool marks the calls of the tools it
+  hands its child (`options.subagentCall`). Outside a run a question is still answered - a host
+  calling a tool directly is the host deciding - and nothing is emitted.
+- **A flat form, checked twice.** The request is normalised to the specification's subset
+  before a host sees it (so a UI renders a closed set of field types), and the answer is
+  validated against that same normalised form before it is sent (so a UI bug cannot send a
+  server something it did not ask for).
+- **Automatic answers fail the call.** When nobody decided, the server is told `cancel` (or
+  `decline`) and the tool call is reported to the model as failed with the reason - even on the
+  2025 revisions, where the server then returns a perfectly good "the user cancelled" result,
+  which is discarded. A result that says "cancelled" would read as the user's choice; it was
+  not. A server that asks again after that has its call aborted.
+- **The step's limit stays the step's limit.** A question does not pause `chatTimeoutMs`: the
+  step ends, and says why (`step-timeout`). Pausing it would need a timer the tools can hold,
+  for one feature; tool approval has the same rule today. What is paused is the MCP SDK's
+  60-second request timeout on the 2025 revisions, where it would otherwise end every form
+  that takes longer than a minute to fill in.
+- **Events beside approval's.** `mcp.elicitation-requested` / `mcp.elicitation-answered`, in the
+  shape of `tool.approval-requested` / `tool.approval-resolved`: an id to correlate, the step,
+  the helper. No value in either.
+- The pure core (`mcp/elicitation.ts`) is a byte-for-byte copy of the Node package's
+  `mcp-elicitation.ts`.
+
 ## Secrets
 
 API keys are encrypted at rest with a **non-extractable AES-GCM `CryptoKey`**

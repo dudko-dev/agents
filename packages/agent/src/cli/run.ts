@@ -8,6 +8,7 @@ import type {
   IRunFile,
   IToolApprovalRequest,
   IUsage,
+  McpElicitationResult,
   RunControl,
   ThinkingSetting,
   ToolApprovalDecision,
@@ -16,6 +17,7 @@ import type {
 import { createAgent, createRunControl, loadSkillsFromDir } from '../index.ts'
 import { isSummaryTurn, resolveCompaction } from '../compaction.ts'
 import { loadConfig, skillsDirFromEnv } from './config.ts'
+import { answerElicitationAtPrompt, parseElicitationMode } from './elicit.ts'
 import { describeSubagents, parseLiveLine, resolveSubagent, shortId } from './live.ts'
 
 const HISTORY_LIMIT = 16
@@ -203,6 +205,15 @@ export const runRepl = async (): Promise<void> => {
           `  ?? find_tools "${event.query}" -> ${event.names.length ? event.names.join(', ') : '(nothing)'}`,
         )
         break
+      case 'mcp.elicitation-answered':
+        // What was answered at the prompt is visible there; show what nobody decided.
+        if (event.automatic) {
+          endLine()
+          console.log(
+            `  !! ${event.tool}: the server's question was answered "${event.action}" automatically (${event.reason ?? 'no reason'})`,
+          )
+        }
+        break
       case 'tool.approval-resolved':
         // Prompted decisions are visible at the prompt; show the automatic ones.
         if (event.automatic && !event.approved) {
@@ -381,6 +392,24 @@ export const runRepl = async (): Promise<void> => {
     return next
   }
   config.toolApproval = { ...config.toolApproval, onRequest: askApproval }
+
+  // MCP elicitation (AGENT_MCP_ELICITATION): a server's question to the user is put at this
+  // prompt, in the same queue as the approval questions. Off by default: without the callback
+  // the agent declares no capability and a server cannot ask.
+  if (parseElicitationMode(process.env.AGENT_MCP_ELICITATION) !== 'off') {
+    config.onElicitation = (request, ctx) => {
+      const ask = (): Promise<McpElicitationResult> => {
+        endLine()
+        // ctx.signal ends the question when the run stops or its time runs out.
+        return answerElicitationAtPrompt(request, (prompt) =>
+          rl.question(prompt, { signal: ctx.signal }),
+        )
+      }
+      const next = approvalQueue.then(ask, ask)
+      approvalQueue = next.catch(() => {})
+      return next
+    }
+  }
 
   const agent = await createAgent(config, onEvent)
   // /autopilot toggles back to the last non-autopilot mode.

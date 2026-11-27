@@ -219,6 +219,224 @@ test('consent requests are tracked until resolved; policy denials are recorded t
   assert.equal(s.approvals[1].stepId, 's1')
 })
 
+// ── MCP elicitation: a server's question to the user ──────────────────────
+
+const FORM = {
+  type: 'object' as const,
+  properties: { name: { type: 'string' as const, title: 'Name' } },
+  required: ['name'],
+}
+
+test('elicitation: a question is pending until answered, and the view never holds an answer', () => {
+  let s = event(createInitialAgentState(), { type: 'run.start', goal: 'x' })
+  assert.equal('elicitations' in s, false, 'absent until a server asks')
+  s = event(s, { type: 'step.start', step, index: 1, total: 1 })
+  s = event(s, {
+    type: 'mcp.elicitation-requested',
+    id: 'e1',
+    server: 'wx',
+    tool: 'wx__elicit_form',
+    mode: 'form',
+    message: 'Who is it?',
+    requestedSchema: FORM,
+    step,
+  })
+  assert.deepEqual(s.elicitations, [
+    {
+      id: 'e1',
+      server: 'wx',
+      tool: 'wx__elicit_form',
+      mode: 'form',
+      message: 'Who is it?',
+      requestedSchema: FORM,
+      stepId: 's1',
+      status: 'pending',
+    },
+  ])
+  // The same request twice (a replayed event) is one question.
+  s = event(s, {
+    type: 'mcp.elicitation-requested',
+    id: 'e1',
+    server: 'wx',
+    tool: 'wx__elicit_form',
+    mode: 'form',
+    message: 'Who is it?',
+  })
+  assert.equal(s.elicitations?.length, 1)
+  s = event(s, {
+    type: 'mcp.elicitation-answered',
+    id: 'e1',
+    server: 'wx',
+    tool: 'wx__elicit_form',
+    action: 'accept',
+    automatic: false,
+    fields: ['name'],
+  })
+  assert.deepEqual(
+    [s.elicitations?.[0].status, s.elicitations?.[0].automatic, s.elicitations?.[0].fields],
+    ['accepted', false, ['name']],
+  )
+  // Per-run view only: the transcript (which a chat history saves) holds none of it.
+  assert.equal(JSON.stringify(s.messages).includes('Who is it?'), false)
+  s = event(s, { type: 'final', text: 'done' })
+  assert.equal(JSON.stringify(s.messages).includes('Who is it?'), false)
+  // The next run starts clean.
+  s = event(s, { type: 'run.start', goal: 'y' })
+  assert.equal('elicitations' in s, false)
+})
+
+test('elicitation: URL mode keeps the link; decline and cancel have their own status', () => {
+  let s = event(createInitialAgentState(), { type: 'run.start', goal: 'x' })
+  for (const [id, action] of [
+    ['e1', 'decline'],
+    ['e2', 'cancel'],
+  ] as const) {
+    s = event(s, {
+      type: 'mcp.elicitation-requested',
+      id,
+      server: 'wx',
+      tool: 'wx__elicit_url',
+      mode: 'url',
+      message: 'Open the page',
+      url: 'https://example.test/elicit/1',
+    })
+    s = event(s, {
+      type: 'mcp.elicitation-answered',
+      id,
+      server: 'wx',
+      tool: 'wx__elicit_url',
+      action,
+      automatic: false,
+    })
+  }
+  assert.deepEqual(
+    s.elicitations?.map((e) => [e.mode, e.url, e.status]),
+    [
+      ['url', 'https://example.test/elicit/1', 'declined'],
+      ['url', 'https://example.test/elicit/1', 'cancelled'],
+    ],
+  )
+})
+
+test('elicitation: a question refused before it could be shown is recorded, with the reason', () => {
+  let s = event(createInitialAgentState(), { type: 'run.start', goal: 'x' })
+  s = event(s, { type: 'step.start', step, index: 1, total: 1 })
+  s = event(s, {
+    type: 'mcp.elicitation-answered',
+    id: 'e9',
+    server: 'wx',
+    tool: 'wx__elicit_form',
+    action: 'decline',
+    automatic: true,
+    reason: 'unsupported-schema',
+  })
+  assert.deepEqual(s.elicitations, [
+    {
+      id: 'e9',
+      server: 'wx',
+      tool: 'wx__elicit_form',
+      message: '',
+      stepId: 's1',
+      status: 'declined',
+      automatic: true,
+      reason: 'unsupported-schema',
+    },
+  ])
+})
+
+test('elicitation: stopping a run cancels whatever was still waiting for an answer', () => {
+  let s = event(createInitialAgentState(), { type: 'run.start', goal: 'x' })
+  s = event(s, {
+    type: 'mcp.elicitation-requested',
+    id: 'e1',
+    server: 'wx',
+    tool: 't',
+    mode: 'form',
+    message: 'm',
+  })
+  s = event(s, { type: 'stopped' })
+  assert.deepEqual(
+    [s.elicitations?.[0].status, s.elicitations?.[0].automatic, s.elicitations?.[0].reason],
+    ['cancelled', true, 'stopped'],
+  )
+})
+
+test("elicitation: a subagent's question surfaces on the run, tied to the step that delegated", () => {
+  let s = event(createInitialAgentState(), { type: 'run.start', goal: 'x' })
+  s = event(s, { type: 'step.start', step, index: 1, total: 1 })
+  s = event(s, {
+    type: 'subagent.start',
+    id: 'H',
+    name: 'helper',
+    task: 'fill it in',
+    depth: 1,
+    dynamic: true,
+    role: 'a form filler',
+  })
+  const wrap = (inner: AgentEvent): AgentEvent => ({
+    type: 'subagent.event',
+    id: 'H',
+    name: 'helper',
+    event: inner,
+  })
+  s = event(
+    s,
+    wrap({
+      type: 'mcp.elicitation-requested',
+      id: 'e1',
+      server: 'wx',
+      tool: 'wx__elicit_form',
+      mode: 'form',
+      message: 'Who is it?',
+      requestedSchema: FORM,
+      // The helper's own step: means nothing to the run.
+      step: { id: 'inner-step', description: 'x' },
+      subagent: { id: 'H', depth: 1 },
+    }),
+  )
+  assert.deepEqual(s.elicitations?.[0].subagent, {
+    id: 'H',
+    depth: 1,
+    name: 'helper',
+    role: 'a form filler',
+  })
+  assert.equal(s.elicitations?.[0].stepId, 's1')
+  assert.equal(s.elicitations?.[0].status, 'pending')
+  s = event(
+    s,
+    wrap({
+      type: 'mcp.elicitation-answered',
+      id: 'e1',
+      server: 'wx',
+      tool: 'wx__elicit_form',
+      action: 'accept',
+      automatic: false,
+      fields: ['name'],
+    }),
+  )
+  assert.equal(s.elicitations?.[0].status, 'accepted')
+  // A helper that was not allowed to ask: the refusal is recorded, nothing was pending.
+  s = event(
+    s,
+    wrap({
+      type: 'mcp.elicitation-answered',
+      id: 'e2',
+      server: 'wx',
+      tool: 'wx__elicit_form',
+      action: 'cancel',
+      automatic: true,
+      reason: 'subagent',
+    }),
+  )
+  assert.deepEqual(
+    s.elicitations?.map((e) => [e.id, e.status, e.reason ?? null]),
+    [
+      ['e1', 'accepted', null],
+      ['e2', 'cancelled', 'subagent'],
+    ],
+  )
+})
+
 test('stopping a run denies whatever was still waiting for consent', () => {
   let s = event(createInitialAgentState(), { type: 'run.start', goal: 'x' })
   s = event(s, { type: 'tool.approval-requested', id: 'a1', name: 't', input: {}, readOnly: false })

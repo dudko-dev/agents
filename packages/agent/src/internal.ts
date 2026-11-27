@@ -74,6 +74,9 @@ export interface IRunState {
   subagentsSpawned?: number
   // Set once the run starts a helper, and from the start on a helper's own run.
   spawn?: ISpawnScope
+  // Questions MCP servers asked the user in this run (`onElicitation`), its helpers' calls
+  // included: counted on the state of the run the host started (elicitation.maxPerRun).
+  elicitations?: { count: number }
 }
 
 // The executor models by tier, when config.executorTiers is on. `standard` is always there (it

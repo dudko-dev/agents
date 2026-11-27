@@ -47,6 +47,7 @@ export {
 } from './authorization-server.ts'
 export {
   ELICIT_FORM_SCHEMA,
+  ELICIT_HUGE_FIELDS,
   validFormContent,
   type ElicitationRequest,
   type IElicitationFaults,

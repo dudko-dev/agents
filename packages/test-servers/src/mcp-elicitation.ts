@@ -108,6 +108,20 @@ export interface IElicitationFaults {
    * given, it still fails verification, and the retry is refused.
    */
   tamperState?: boolean
+  /**
+   * Ask every form with a schema a form may not have: `'nested'` (a field that
+   * is itself an object - outside the flat subset the specification allows),
+   * `'huge'` (`ELICIT_HUGE_FIELDS` string fields: each one allowed, the form
+   * as a whole more than a client should show). A client must refuse it.
+   */
+  formSchema?: 'nested' | 'huge'
+  /**
+   * Leave the user's answers out of the tool results: a result then says only
+   * `{ tool, action }`. For tests that look for an answer where it must not be
+   * (the model's context, events, logs): nothing but the client could have
+   * put it there.
+   */
+  quietResult?: boolean
 }
 
 /** An elicitation tool: its listing and its step function. */
@@ -164,6 +178,28 @@ export const ELICIT_FORM_SCHEMA = {
   },
   required: ['name', 'email'],
 } satisfies Record<string, unknown>
+
+/** How many fields the `formSchema: 'huge'` fault asks for. */
+export const ELICIT_HUGE_FIELDS = 51
+
+const NESTED_SCHEMA = {
+  type: 'object',
+  properties: {
+    address: {
+      type: 'object',
+      title: 'Address',
+      properties: { street: { type: 'string' }, city: { type: 'string' } },
+    },
+  },
+  required: ['address'],
+}
+
+const HUGE_SCHEMA = {
+  type: 'object',
+  properties: Object.fromEntries(
+    Array.from({ length: ELICIT_HUGE_FIELDS }, (_, i) => [`field_${i + 1}`, { type: 'string' }]),
+  ),
+}
 
 const NAME_SCHEMA = {
   type: 'object',
@@ -599,8 +635,28 @@ export const createElicitation = (opts: IElicitationOptions): IElicitation => {
       outcome = await tool.step(round)
     }
     if (!('result' in outcome)) {
+      if (faults.formSchema && outcome.ask) {
+        const requestedSchema = faults.formSchema === 'nested' ? NESTED_SCHEMA : HUGE_SCHEMA
+        outcome = {
+          ...outcome,
+          ask: Object.fromEntries(
+            Object.entries(outcome.ask).map(([key, request]) => [
+              key,
+              request.mode === 'form' ? { ...request, requestedSchema } : request,
+            ]),
+          ),
+        }
+      }
       record.asked = outcome.ask
       record.issuedState = outcome.state
+    } else if (faults.quietResult && !outcome.result.isError) {
+      const first = outcome.result.content[0]
+      try {
+        const said = JSON.parse(first?.type === 'text' ? first.text : '') as Record<string, unknown>
+        outcome = text(JSON.stringify({ tool: said.tool, action: said.action }))
+      } catch {
+        // Not one of the JSON answers: left as it is.
+      }
     }
     return outcome
   }

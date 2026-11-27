@@ -312,7 +312,13 @@ export const createAgent = async (
       config.outputSanitizer,
       (server) => onToolsChanged?.(server),
       config.inputSanitizer,
-      { connectTimeoutMs: config.mcpConnectTimeoutMs },
+      {
+        connectTimeoutMs: config.mcpConnectTimeoutMs,
+        // Only with a callback: without one no capability is declared at all.
+        ...(config.onElicitation ? { onElicitation: config.onElicitation } : {}),
+        ...(config.elicitation ? { elicitation: config.elicitation } : {}),
+        emit,
+      },
     )
     const f = filterTools(c.tools, c.catalog, config.availableTools, config.excludedTools, log)
     let merged: ReturnType<typeof mergeNativeTools>

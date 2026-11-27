@@ -260,10 +260,10 @@ On 2026-07-28: there is no session (`mcp-session-id`), no GET stream and no
   advertises `tools.listChanged`. If that stream ends it is **not opened
   again**: a `warn` line says so, and changes are not announced until you
   connect again. `refreshServer(name)` always works.
-- **`input_required` is not supported.** A tool that asks the user something
-  (elicitation), or asks for the call to be sent again with a state, fails with
-  `MCP tool "x" did not finish: the server asked for more input …`; the call
-  is not repeated.
+- **`input_required` needs `onElicitation`.** Without it, a tool that asks the
+  user something (elicitation), or asks for the call to be sent again with a
+  state, fails with `MCP tool "x" did not finish: the server asked for more
+  input …`; the call is not repeated. With it, see [Elicitation](#elicitation-a-server-asks-the-user).
 
 Pass several servers at once — they connect concurrently, each with its own
 deadline (`connectTimeoutMs`, default 30 s), every page of a paginated
@@ -293,6 +293,62 @@ followed for up to 100 pages (a repeated cursor ends the walk; past the cap a
 agent built from them picks up a server's new tool list (react to it via the
 `onToolsChanged` option) without being rebuilt. Filtering is plain object work:
 delete the keys you don't want before merging.
+
+### Elicitation: a server asks the user
+
+A tool may need something only the user has - a name to confirm, a choice, a
+page to visit - and ask for it **in the middle of the call**. Off until you give
+the connection a callback:
+
+```ts
+const pending = new Map<string, (r: McpElicitationResult) => void>()
+
+const mcp = await connectMcpHttp(servers, {
+  // The HOST decides, never the model. `request` is the SERVER's text: show it as such.
+  onElicitation: (request, { signal }) =>
+    new Promise((resolve) => {
+      pending.set(request.id, resolve) // your UI resolves it: accept / decline / cancel
+      signal.addEventListener('abort', () => pending.delete(request.id)) // no longer wanted
+    }),
+  elicitation: { timeoutMs: 300_000, maxPerToolCall: 5, maxPerRun: 20 }, // the defaults
+})
+// later, from the form the user filled in:
+pending.get(id)?.({ action: 'accept', content: { name: 'Ada' } })
+```
+
+- **Off = nothing changes.** Without `onElicitation` no capability is declared, a
+  server cannot ask, and every request is byte for byte what it was (no new
+  request header either: a server's CORS list needs nothing for this).
+- **The request** (`McpElicitationRequest`): `id`, `server`, `tool` (the call
+  that asks), `mode: 'form' | 'url'`, `message`, and `requestedSchema` (a flat
+  form: strings, numbers, booleans, selects) or `url`. All of it is third-party
+  text, cleaned and capped; none of it reaches a prompt. A form that is not flat,
+  or too large, is declined without the callback being called.
+- **The answer** is checked against the form before it is sent (types, limits,
+  required fields, no field the form did not ask for) and goes **only to the
+  server that asked**: not into the model's context, an event, a log or a run
+  checkpoint.
+- **URL mode** is opt-in (`elicitation: { url: true }`). The link is only handed
+  to your callback: this package never fetches it and never calls
+  `window.open`. Only `https:` (or loopback `http:`) links get that far. Open it
+  from a user gesture, in a new tab, showing the host name first.
+- **Nobody decided = the call fails.** A callback that throws or does not answer
+  within `timeoutMs`, an answer that does not fit, a cap: the question is
+  cancelled, the tool call fails with one sentence that says why, and nothing is
+  retried.
+- **Subagents do not ask** unless the connection says so
+  (`elicitation: { subagents: true }`): a helper the model started, and a
+  subagent tool's child that was handed these tools, have their questions
+  cancelled without the callback being called.
+- **Time.** A question waits `timeoutMs` (5 minutes) at most, **and no longer
+  than the step it belongs to**: `chatTimeoutMs` (default 120 s) ends the step
+  and the question with it (`mcp.elicitation-answered`, `reason: 'step-timeout'`,
+  and a warning). Raise `chatTimeoutMs` on an agent whose servers may ask.
+- **Events** inside a run: `mcp.elicitation-requested` and
+  `mcp.elicitation-answered` (field names, never a value).
+
+The whole of it, with every guard: [docs/capabilities.md](docs/capabilities.md#mcp-elicitation-a-server-asks-the-user)
+and [docs/security.md](docs/security.md#mcp-elicitation-a-server-asks-the-user-in-the-middle-of-a-tool-call).
 
 ### OAuth 2.1 + Dynamic Client Registration
 

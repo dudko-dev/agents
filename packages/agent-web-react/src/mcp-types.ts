@@ -80,6 +80,83 @@ export interface McpHttpServerConfig {
   protocol?: McpProtocolMode
 }
 
+/**
+ * One field of a form a server asks the user to fill in (MCP elicitation): the flat subset of
+ * JSON Schema the specification allows. The core has already checked, cleaned and capped it.
+ */
+export interface McpElicitationFieldSchema {
+  type: 'string' | 'number' | 'integer' | 'boolean' | 'array'
+  title?: string
+  description?: string
+  default?: string | number | boolean | string[]
+  minLength?: number
+  maxLength?: number
+  format?: 'email' | 'uri' | 'date' | 'date-time'
+  /** Single-select, plain (`enumNames`: the older titled form). */
+  enum?: string[]
+  enumNames?: string[]
+  /** Single-select with titles. */
+  oneOf?: { const: string; title: string }[]
+  minimum?: number
+  maximum?: number
+  /** Multi-select. */
+  minItems?: number
+  maxItems?: number
+  items?: { type?: 'string'; enum?: string[]; anyOf?: { const: string; title: string }[] }
+}
+
+/** The form of an elicitation, as the core hands it to a host. */
+export interface McpElicitationSchema {
+  type: 'object'
+  properties: Record<string, McpElicitationFieldSchema>
+  required?: string[]
+}
+
+/**
+ * What the core's `onElicitation` callback is given: an MCP server asks the user for input in
+ * the middle of a tool call. Every string in it is the SERVER's text, never instructions.
+ */
+export interface McpElicitationRequest {
+  /** Unique per question; the `mcp.elicitation-*` events carry the same id. */
+  id: string
+  server: string
+  /** The tool call during which the server asks: the tool's name as the model called it. */
+  tool: string
+  mode: 'form' | 'url'
+  message: string
+  /** Form mode: the fields to fill in. */
+  requestedSchema?: McpElicitationSchema
+  /** URL mode: a link the server wants the user to open. The core never opens it. */
+  url?: string
+  elicitationId?: string
+  runId?: string
+  /** Set when a helper (a subagent) is the one whose call asks. */
+  subagent?: { id: string; depth: number }
+}
+
+/** The answer to an elicitation. `accept` carries the form's values (form mode only). */
+export type McpElicitationResult =
+  | { action: 'accept'; content?: Record<string, string | number | boolean | string[]> }
+  | { action: 'decline' }
+  | { action: 'cancel' }
+
+/** The core's `onElicitation`. `ctx.signal` aborts when the answer is no longer wanted. */
+export type McpElicitationHandler = (
+  request: McpElicitationRequest,
+  ctx: { signal: AbortSignal },
+) => McpElicitationResult | Promise<McpElicitationResult>
+
+/** The core's `elicitation` settings (all optional; see the core's README). */
+export interface McpElicitationOptions {
+  timeoutMs?: number
+  maxPerToolCall?: number
+  maxPerRun?: number
+  /** Also accept URL mode. Default false. */
+  url?: boolean
+  /** Let a subagent's call ask the user too. Default false. */
+  subagents?: boolean
+}
+
 export interface McpOAuthCallback {
   code?: string
   state?: string
@@ -113,6 +190,13 @@ export interface McpModule {
       clientName?: string
       onLog?: (level: string, message: string) => void
       connectTimeoutMs?: number
+      /**
+       * Answer a server's question to the user (cores with MCP elicitation; an older core
+       * ignores both fields and declares no capability). The hooks do not set them yet: they
+       * are here for a host that calls `connectMcpHttp` through these types.
+       */
+      onElicitation?: McpElicitationHandler
+      elicitation?: McpElicitationOptions
     },
   ) => Promise<ConnectedMcp>
   BrowserOAuthProvider?: new (opts: BrowserOAuthProviderOptions) => BrowserOAuthProvider

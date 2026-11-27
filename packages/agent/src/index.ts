@@ -20,6 +20,22 @@ export {
   type McpServerInstructions,
   type McpServerProtocol,
 } from './mcp-shared.ts'
+export {
+  MCP_ELICITATION_MAX_PER_RUN,
+  MCP_ELICITATION_MAX_PER_TOOL_CALL,
+  MCP_ELICITATION_TIMEOUT_MS,
+  normalizeMcpElicitationSchema,
+  validateMcpElicitationContent,
+  type McpElicitationContent,
+  type McpElicitationContext,
+  type McpElicitationFieldSchema,
+  type McpElicitationHandler,
+  type McpElicitationOptions,
+  type McpElicitationReason,
+  type McpElicitationRequest,
+  type McpElicitationResult,
+  type McpElicitationSchema,
+} from './mcp-elicitation.ts'
 export type { INodeOAuthProviderOptions, IOAuthRequestOptions, IOAuthStore } from './mcp-oauth.ts'
 export {
   createEnterpriseOAuthProvider,

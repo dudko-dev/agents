@@ -691,6 +691,9 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
         control: port ?? seed?.control,
         ...(spawnRun ? { spawn: spawnRun } : {}),
         ...(seed ? { subagent: seed.subagent } : {}),
+        // One count of the questions asked of the user per run the HOST started: a helper
+        // counts on its caller's.
+        elicitations: seed?.elicitations ?? { count: 0 },
         runId,
         fetched,
         stepWrites: () => stepWrites,
