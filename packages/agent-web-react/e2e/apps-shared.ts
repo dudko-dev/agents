@@ -128,8 +128,16 @@ export const openWithApp = async (
   await expect(app.locator('body')).toHaveAttribute('data-result', 'yes', { timeout: 15_000 })
   await expect(app.locator('.f')).toHaveCount(3)
   // The app reports its height once it has drawn the result, and the frame (and the transcript
-  // around it) moves: a click in that moment can land on whatever moved under it. Wait for the
-  // frame to keep still.
+  // around it) moves: a click in that moment can land on whatever moved under it.
+  await settled(page)
+  return { calls, answer, frame, app }
+}
+
+/**
+ * Wait for the app's frame to keep still. Whenever the app's content grows it reports its height,
+ * the frame grows and the transcript scrolls: a click in that moment lands where the button was.
+ */
+export const settled = async (page: Page) => {
   const outer = outerOf(page)
   let last = ''
   await expect
@@ -144,7 +152,6 @@ export const openWithApp = async (
       { intervals: [150], timeout: 10_000 },
     )
     .toBe(true)
-  return { calls, answer, frame, app }
 }
 
 /** Run the app's probes and read their verdicts. */

@@ -66,9 +66,13 @@ const recordSent = (page: Page): ISent[] => {
 const callsOf = (sent: ISent[], tool: string) =>
   sent.filter((s) => s.method === 'tools/call' && s.name === tool)
 
-/** The app's own document: the outer frame (the host's shell) and the app inside it. */
+/**
+ * The app's own document. The demo runs apps on an origin of their own: the outer frame (the
+ * host's shell), the sandbox page in it (`#proxy`, the other loopback name in these tests), the
+ * app inside that.
+ */
 const appOf = (page: Page): FrameLocator =>
-  page.frameLocator(`iframe[title="${APP_TITLE}"]`).frameLocator('#app')
+  page.frameLocator(`iframe[title="${APP_TITLE}"]`).frameLocator('#proxy').frameLocator('#app')
 
 /** Wait until the frame keeps still: it moves while the app reports its height. */
 const settled = async (frame: Locator) => {
@@ -153,9 +157,9 @@ test('the model calls trip_board and never sees the app’s own tools; the board
   )
   // The host told it the demo's theme.
   await expect(app.locator('html')).toHaveAttribute('data-theme', 'dark')
-  // Sandboxed, in the host's chrome.
-  await expect(outer).toHaveAttribute('sandbox', 'allow-scripts')
-  await expect(frame.locator('.awr-frame__head')).toContainText('sandboxed')
+  // Sandboxed on an origin of its own, in the host's chrome.
+  await expect(outer).toHaveAttribute('sandbox', 'allow-scripts allow-same-origin')
+  await expect(frame.locator('.awr-frame__badges')).toHaveText('sandboxed on its own origin')
   // Opening every day makes the content taller: the app says so, and the host's frame follows.
   const before = (await outer.boundingBox())?.height ?? 0
   await app.getByRole('button', { name: 'Open all days' }).click()

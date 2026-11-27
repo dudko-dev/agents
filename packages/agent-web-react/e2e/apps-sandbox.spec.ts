@@ -7,6 +7,7 @@ import {
   outerOf,
   runProbes,
   sandboxOrigin,
+  settled,
   status,
   type ICounted,
 } from './apps-shared.ts'
@@ -316,6 +317,9 @@ test('fallback: the sandbox page unreachable, the app runs in the opaque frame -
   expect(undeclared.hits).toEqual([])
   // Its requests reach the user as before.
   await app.locator('.f').first().getByRole('button', { name: 'Select' }).click()
+  // The fare appears and the frame grows: book once it keeps still.
+  await expect(app.getByRole('button', { name: 'Book this flight' })).toBeVisible()
+  await settled(page)
   await app.getByRole('button', { name: 'Book this flight' }).click()
   const card = page.locator('.awr-approval--app')
   await expect(card).toContainText('The app “travel” wants to run')

@@ -13,6 +13,7 @@ import {
   openWithApp as open,
   runProbes,
   script,
+  settled,
   status,
   type AppMode,
   type ICounted,
@@ -108,6 +109,9 @@ test('a tool call the app asks for waits for consent labelled as the app’s: Al
   const { app } = await openWithApp(page)
   // The demo's agent runs on autopilot: the app still may not write without asking.
   await app.locator('.f').first().getByRole('button', { name: 'Select' }).click()
+  // The fare appears and the frame grows: book once it keeps still.
+  await expect(app.getByRole('button', { name: 'Book this flight' })).toBeVisible()
+  await settled(page)
   await app.getByRole('button', { name: 'Book this flight' }).click()
   const card = page.locator('.awr-approval--app')
   await expect(card).toContainText('The app “travel” wants to run')
@@ -323,6 +327,9 @@ for (const protocol of ['legacy', 'dual'] as const) {
     const { app } = await openWithApp(page, withQuestion)
     // The app asks for a tool call and a link; both wait.
     await app.locator('.f').first().getByRole('button', { name: 'Select' }).click()
+    // The fare appears and the frame grows: book once it keeps still.
+    await expect(app.getByRole('button', { name: 'Book this flight' })).toBeVisible()
+    await settled(page)
     await app.getByRole('button', { name: 'Book this flight' }).click()
     await expect(page.locator('.awr-approval--app')).toHaveCount(1)
     await app.getByRole('button', { name: 'Airline site' }).click()
