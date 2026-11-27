@@ -49,7 +49,13 @@ export {
   type McpElicitationResult,
   type McpElicitationSchema,
 } from './mcp-elicitation.ts'
-export type { INodeOAuthProviderOptions, IOAuthRequestOptions, IOAuthStore } from './mcp-oauth.ts'
+export type {
+  INodeOAuthProviderOptions,
+  IOAuthRequestOptions,
+  IOAuthStore,
+  McpOAuthRegistration,
+  McpOAuthRegistrationKind,
+} from './mcp-oauth.ts'
 export {
   createEnterpriseOAuthProvider,
   ENTERPRISE_MANAGED_AUTHORIZATION_EXTENSION,

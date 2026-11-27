@@ -469,7 +469,7 @@ Options:
 | `useMcp({ onLog })` | connector log lines |
 | `useMcp({ elicitation })` | let a server ask the user something in the middle of a tool call: `true`, or the core's settings `{ url, timeoutMs, maxPerToolCall, maxPerRun, subagents }`. Off by default - see [MCP elicitation](#mcp-elicitation--a-server-asks-the-user) |
 | `connect({ url, name, headers })` | the endpoint, the tool prefix (`"<name>__<tool>"`, default `mcp`), static headers |
-| `connect({ oauth })` | `true`, or `{ redirectUrl, scope, clientName, clientMetadataUrl }` (`McpOAuthOptions`) - each overrides the hook-level value for this server |
+| `connect({ oauth })` | `true`, or `{ redirectUrl, scope, clientName, clientMetadataUrl, registration }` (`McpOAuthOptions`) - each overrides the hook-level value for this server; `registration` is below |
 | `connect({ protocol })` | the MCP protocol revisions this connection may use: `'legacy'` (the 2025 revisions), `'auto'` (2026-07-28 when the server offers it, the 2025 ones otherwise) or `'modern'` (2026-07-28 only). Left out, nothing is passed and the core speaks the 2025 revisions, exactly as before. Kept across the OAuth redirect. See [the protocol revision](#the-protocol-revision) |
 | `connect({ skills })` | **experimental**: load the skills the server serves (the MCP Skills extension) into the agent's skills catalog, as `<server>/<skill>`. They come with `tools` - nothing else to wire. Needs `protocol: 'auto'` or `'modern'`. Off (left out) by default. Kept across the OAuth redirect. See [MCP skills](#mcp-skills-experimental) |
 
@@ -497,6 +497,30 @@ with the rest of the server's OAuth details across the redirect and reloads. The
 [README](https://github.com/dudko-dev/agents/blob/main/packages/agent-web/README.md) and
 [security notes](https://github.com/dudko-dev/agents/blob/main/packages/agent-web/docs/security.md)
 say what the document must contain.
+
+**`oauth.registration`: CIMD, DCR, or whichever the server supports.** Per server, `'auto'` (the
+default - the document where the server supports it, dynamic registration elsewhere), `'cimd'` (the
+document only) or `'dcr'` (dynamic registration only, even with a `clientMetadataUrl`), handed to
+the core's provider of the same name:
+
+```tsx
+await mcp.connect({ url, oauth: { registration: 'cimd' } }) // with useMcp({ clientMetadataUrl })
+mcp.oauthRegistration // 'cimd' | 'dcr', once connected: which way was taken
+```
+
+Under `'cimd'` a server whose authorization server does not support documents ends in
+`status: 'error'` with the core's reason - `… does not support client ID metadata documents (CIMD),
+which this connection requires (registration: 'cimd') - nothing was sent to its registration
+endpoint` - and is never offered for authorization; `'cimd'` with no `clientMetadataUrl` fails the
+same way before any request. A client stored for the server under the other kind is not reused:
+the core forgets it and its tokens, and the user signs in again. The setting is kept across the
+redirect (and, in `useMcpServers`, with the server list); `oauthRegistration` (`useMcp`) /
+`servers[i].oauthRegistration` (`useMcpServers`) is `'cimd'` or `'dcr'` while the server is
+connected with OAuth, read from the core's `registrationKind()`. A core older than the option
+would ignore it and register the old way, so the hooks refuse `'cimd'` / `'dcr'` there
+(`status: 'error'`); `'auto'` and no value work with any core. The helpers the hooks use are
+exported from `./mcp`: `newMcpOAuthProvider`, `mcpOAuthRecordOf` / `mcpOAuthOptionsOfRecord` (what
+the redirect record keeps) and `mcpOAuthRegistrationOf`.
 
 Two notes:
 
@@ -532,12 +556,15 @@ A server may be added with its own `protocol` (`add({ name, url, protocol: 'auto
 remembered with the list; `servers[i].protocolMode` is what it was added with and
 `servers[i].protocol` (`{ version, era }`) what was negotiated while it is connected - `protocols`
 lists them for every connected server. A server added with
-`auth: 'oauth'` may carry its own `oauth: { redirectUrl, scope, clientName, clientMetadataUrl }`,
-which wins over the hook-level values and is remembered with the list:
+`auth: 'oauth'` may carry its own `oauth: { redirectUrl, scope, clientName, clientMetadataUrl, registration }`,
+which wins over the hook-level values and is remembered with the list; `servers[i].oauthRegistration`
+says which way its client was registered once it is connected:
 
 ```tsx
 const mcp = useMcpServers({ clientMetadataUrl: 'https://my-app.example/oauth/client.json' })
 await mcp.add({ name: 'docs', url, auth: 'oauth' }) // CIMD where the server supports it, DCR elsewhere
+await mcp.add({ name: 'crm', url: crmUrl, auth: 'oauth', oauth: { registration: 'cimd' } }) // CIMD or nothing
+mcp.servers[0].oauthRegistration // 'cimd' | 'dcr'
 ```
 
 Servers connect in parallel, each with its own deadline; paginated tool lists

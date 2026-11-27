@@ -28,15 +28,62 @@ const openMcpPanel = async (page: Page) => {
   await expect(page.getByPlaceholder('https://your-server.example/mcp')).toBeVisible()
 }
 
-const addServer = async (page: Page, url: string, auth?: 'OAuth') => {
+const addServer = async (page: Page, url: string, auth?: 'OAuth', registration?: string) => {
   await page.getByPlaceholder('https://your-server.example/mcp').fill(url)
   // The name is the tool prefix: "mcp" keeps the tool called mcp__echo.
   await page.getByLabel('Name (tool prefix)').fill('mcp')
   if (auth) await page.getByRole('radio', { name: auth, exact: true }).check()
+  if (registration) await registrationSelect(page).selectOption({ label: registration })
   await page.getByRole('button', { name: 'Add server' }).click()
 }
 
+const registrationSelect = (page: Page) => page.getByLabel('Client registration')
+
 const status = (page: Page) => page.locator('.mcp__server-status')
+
+test('OAuth: the client registration select is under the OAuth choice; off agent.dudko.dev CIMD only is disabled', async ({
+  page,
+}) => {
+  await openMcpPanel(page)
+  await expect(registrationSelect(page)).toHaveCount(0)
+  await page.getByRole('radio', { name: 'OAuth', exact: true }).check()
+
+  const select = registrationSelect(page)
+  await expect(select).toBeVisible()
+  await expect(select).toHaveValue('auto')
+  const options = select.locator('option')
+  await expect(options).toHaveText(['Auto (CIMD or DCR)', 'CIMD only', 'DCR only'])
+  // The demo's client ID metadata document names agent.dudko.dev's pages only: on any other
+  // origin (this one is loopback) it cannot be used, and the note says why.
+  await expect(options.nth(1)).toBeDisabled()
+  await expect(options.nth(0)).toBeEnabled()
+  await expect(options.nth(2)).toBeEnabled()
+  await expect(page.getByText('so here Auto means DCR')).toBeVisible()
+
+  await page.getByRole('radio', { name: 'No auth', exact: true }).check()
+  await expect(registrationSelect(page)).toHaveCount(0)
+})
+
+test('OAuth: "DCR only" registers, signs in, and the card says OAuth · DCR', async ({ page }) => {
+  await openMcpPanel(page)
+  await addServer(page, servers.mcpUrl, 'OAuth', 'DCR only')
+  await expect(status(page)).toContainText('Authorization required')
+  expect(servers.registrations()).toBe(1)
+  await page.getByRole('button', { name: /Authorize/ }).click()
+
+  await expect(status(page)).toContainText('Connected', { timeout: 15_000 })
+  await expect(page.locator('.mcp__protocol')).toContainText('OAuth · DCR')
+  expect(servers.registrations()).toBe(1)
+
+  // Remembered with the server: a reload reconnects the same client, and says so again.
+  await page.reload()
+  await page.getByRole('tab', { name: 'MCP servers' }).click()
+  await expect(status(page)).toContainText('Connected', { timeout: 15_000 })
+  await expect(page.locator('.mcp__protocol')).toContainText('OAuth · DCR')
+  expect(servers.registrations()).toBe(1)
+  const stored = await page.evaluate(() => localStorage.getItem('agent-web-react:mcp-servers'))
+  expect(JSON.parse(stored ?? '[]')[0]?.oauth).toEqual({ registration: 'dcr' })
+})
 
 test('connects to a server that needs no auth and lists its tools', async ({ page }) => {
   await openMcpPanel(page)
@@ -62,6 +109,9 @@ test('OAuth: authorize, come back, and end up connected', async ({ page }) => {
   await expect(status(page)).toContainText('Connected', { timeout: 15_000 })
   await expect(page.locator('.mcp__tool code')).toHaveText(['mcp__echo'])
   expect(servers.registrations()).toBe(1)
+  // Auto, on an origin that cannot use the demo's document: a dynamic registration, and the
+  // card says which way was taken.
+  await expect(page.locator('.mcp__protocol')).toContainText('OAuth · DCR')
 
   // The single-use code must not survive in the address bar, or a reload
   // replays a spent authorization.

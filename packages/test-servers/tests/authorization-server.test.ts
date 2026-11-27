@@ -101,6 +101,14 @@ test('authorization server: the optional metadata flags are advertised when aske
     const meta = (await getJson(`${as.issuer}/.well-known/oauth-authorization-server`)).body
     assert.equal(meta.client_id_metadata_document_supported, true)
     assert.equal(meta.authorization_response_iss_parameter_supported, true)
+
+    // A server that changes its mind: the next metadata request says so.
+    as.advertised.clientIdMetadataDocument = false
+    const after = (await getJson(`${as.issuer}/.well-known/oauth-authorization-server`)).body
+    assert.equal('client_id_metadata_document_supported' in after, false)
+    as.advertised.clientIdMetadataDocument = true
+    const again = (await getJson(`${as.issuer}/.well-known/oauth-authorization-server`)).body
+    assert.equal(again.client_id_metadata_document_supported, true)
   } finally {
     await as.close()
   }

@@ -452,9 +452,10 @@ and [docs/security.md](docs/security.md#mcp-apps-a-servers-html-with-scripts).
 
 A server behind OAuth needs more than a header: access tokens expire mid-run.
 Pass an `authProvider` and the MCP SDK discovers the authorization server
-(RFC 9728), registers this app dynamically (RFC 7591 — no client_id to
-pre-provision), runs PKCE, and **refreshes the access token on any 401 and
-retries the request**.
+(RFC 9728), registers this app — dynamically (RFC 7591) or by its client ID
+metadata document (CIMD), automatically or one of them only (`registration`):
+no client_id to pre-provision — runs PKCE, and **refreshes the access token on
+any 401 and retries the request**.
 
 ```ts
 import { BrowserOAuthProvider, connectMcpHttp, finishMcpOAuth, readOAuthCallback }
@@ -497,6 +498,25 @@ on `provider.authorizationUrl` and the app decides when to use it.
   before, and a registration already in storage wins over both. The URL must be
   https with a path (anything else throws in the constructor), and the document
   must list the same `redirect_uris` as `redirectUrl`.
+- **`registration`: how the client is registered** — `'auto'` (the default),
+  `'cimd'` or `'dcr'`; the Node package has the same option.
+
+  | value | the client | an authorization server without CIMD support |
+  |---|---|---|
+  | `'auto'` | the document where the server advertises `client_id_metadata_document_supported` (and `clientMetadataUrl` is set), a dynamic registration elsewhere; a stored client is used as it is | dynamic registration |
+  | `'cimd'` | the document only; needs `clientMetadataUrl` (the constructor throws without one) | **refused before anything is sent to its registration endpoint**: the connect fails with `… does not support client ID metadata documents (CIMD), which this connection requires (registration: 'cimd') - nothing was sent to its registration endpoint`, and what discovery found is dropped, so the next attempt reads the server's metadata again |
+  | `'dcr'` | a dynamic registration only, even with a `clientMetadataUrl` (the provider's `clientMetadataUrl` is then `undefined`: the SDK never sees the URL) | dynamic registration |
+
+  `await provider.registrationKind()` says how the stored client was made —
+  `'cimd'`, `'dcr'` (also a client you saved yourself), or `undefined` when
+  there is none this provider would use; `provider.registration` is the
+  setting. Under `'cimd'` / `'dcr'` **a stored client of the other kind is not
+  reused**: it is forgotten together with the tokens issued to it (a token
+  belongs to its client) before either is read, and the user signs in again.
+  The kind is stamped on the stored record when it is saved, so a later change
+  of `clientMetadataUrl` does not make an old document client look like a
+  dynamic one; a record saved before the stamp existed is CIMD when its
+  `client_id` is the document configured now.
 - **Registration** describes a public PKCE client. `application_type` follows
   the redirect URL: `'web'` for an https page, `'native'` for a loopback one
   (local development). Change any field through `clientMetadata`.

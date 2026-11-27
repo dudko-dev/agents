@@ -117,6 +117,11 @@ export interface ILocalAuthorizationServer {
   faults: { refuseGrant?: { error: string; description: string }; echoRequest?: boolean }
   /** Every client ID metadata document URL the authorization server fetched. */
   cimdFetches: string[]
+  /**
+   * Mutable: what the metadata advertises from now on (starts from the options),
+   * for a server that changes its mind between two attempts.
+   */
+  advertised: { clientIdMetadataDocument: boolean }
   close: () => Promise<void>
 }
 
@@ -135,6 +140,7 @@ export const startLocalAuthorizationServer = async (
   }
   let registrations = 0
   let issued = 0
+  const advertised = { clientIdMetadataDocument: opts.clientIdMetadataDocument === true }
 
   const server = createServer((req, res) => {
     void (async () => {
@@ -166,7 +172,9 @@ export const startLocalAuthorizationServer = async (
                 ],
               }
             : {}),
-          ...(opts.clientIdMetadataDocument ? { client_id_metadata_document_supported: true } : {}),
+          ...(advertised.clientIdMetadataDocument
+            ? { client_id_metadata_document_supported: true }
+            : {}),
           ...(opts.issParameter ? { authorization_response_iss_parameter_supported: true } : {}),
         })
         return
@@ -371,6 +379,7 @@ export const startLocalAuthorizationServer = async (
     tokenRequests: () => tokenRequests,
     faults,
     cimdFetches,
+    advertised,
     close: () => closeServer(server),
   }
   return handle

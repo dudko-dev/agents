@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type {
   McpAuthMode,
+  McpOAuthRegistration,
   McpProtocolMode,
   UseMcpServersReturn,
 } from '@dudko.dev/agent-web-react/mcp'
@@ -41,6 +42,14 @@ const PROTOCOLS: [McpProtocolMode, string][] = [
   ['modern', 'Modern — 2026-07-28 only'],
 ]
 
+// How the demo's OAuth client is registered with a server's authorization server. CIMD needs the
+// demo's client ID metadata document, which only agent.dudko.dev can use (oauth-client.ts).
+const REGISTRATIONS: [McpOAuthRegistration, string][] = [
+  ['auto', 'Auto (CIMD or DCR)'],
+  ['cimd', 'CIMD only'],
+  ['dcr', 'DCR only'],
+]
+
 // The site's own demo MCP server (apps/worker): on this origin, so it works on a preview
 // deployment and under `vite dev` / `vite preview` too, and needs no CORS.
 const DEMO_SERVER_PATH = '/mcp/demo'
@@ -58,8 +67,8 @@ const nameFromUrl = (url: string): string => {
 
 /**
  * Connect the demo to ANY NUMBER of remote MCP servers — each with no auth, a
- * bearer token, or the full OAuth 2.1 + dynamic-registration flow — and watch
- * their tools merge into one agent.
+ * bearer token, or the full OAuth 2.1 flow (its client ID metadata document or a
+ * dynamic registration) — and watch their tools merge into one agent.
  */
 export const McpPanel = ({
   mcp,
@@ -75,6 +84,7 @@ export const McpPanel = ({
   const [name, setName] = useState('')
   const [mode, setMode] = useState<McpAuthMode>('none')
   const [protocol, setProtocol] = useState<McpProtocolMode>('auto')
+  const [registration, setRegistration] = useState<McpOAuthRegistration>('auto')
   const [skills, setSkills] = useState(false)
   const [token, setToken] = useState('')
   const [tokens, setTokens] = useState<Record<string, string>>({})
@@ -98,6 +108,8 @@ export const McpPanel = ({
       url: url.trim(),
       auth: mode,
       token: mode === 'bearer' ? token.trim() : undefined,
+      // 'auto' is the core's default: nothing is passed for it.
+      ...(mode === 'oauth' && registration !== 'auto' ? { oauth: { registration } } : {}),
       protocol,
       // Experimental: only when ticked (and never on the 2025 revisions - the core says so).
       ...(skills ? { skills: true } : {}),
@@ -203,6 +215,14 @@ export const McpPanel = ({
                 >
                   MCP {s.protocol.version}
                 </span>
+                {s.oauthRegistration && (
+                  <span
+                    className="mcp__badge mcp__badge--muted"
+                    title="How the demo is registered with this server's authorization server: its client ID metadata document (CIMD) or a dynamic registration (DCR)"
+                  >
+                    OAuth · {s.oauthRegistration.toUpperCase()}
+                  </span>
+                )}
                 {s.protocolMode && <span>asked for: {s.protocolMode}</span>}
                 {s.skills && (
                   <span
@@ -306,20 +326,36 @@ export const McpPanel = ({
         </div>
 
         {mode === 'oauth' && (
-          <p className="settings__note">
-            {cimdUrl ? (
-              <>
-                The demo signs in as <code>{cimdUrl}</code>, its client ID metadata document (CIMD),
-                where the server’s authorization server accepts one; otherwise it registers itself
-                (DCR).
-              </>
-            ) : (
-              <>
-                The demo registers itself (DCR). Its client ID metadata document (CIMD) is used on
-                agent.dudko.dev only: it names that site’s pages as the redirect addresses.
-              </>
-            )}
-          </p>
+          <>
+            <label className="settings__field">
+              <span className="settings__label">Client registration</span>
+              <select
+                className="mcp__input"
+                value={registration}
+                onChange={(e) => setRegistration(e.target.value as McpOAuthRegistration)}
+              >
+                {REGISTRATIONS.map(([value, label]) => (
+                  <option key={value} value={value} disabled={value === 'cimd' && !cimdUrl}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <p className="settings__note">
+              {cimdUrl ? (
+                <>
+                  Auto uses CIMD where the server’s authorization server supports it, else DCR.
+                  CIMD: the demo signs in as <code>{cimdUrl}</code> and registers nothing. DCR: it
+                  registers itself.
+                </>
+              ) : (
+                <>
+                  CIMD works on agent.dudko.dev only - the demo’s document names that site’s pages
+                  as the redirect addresses - so here Auto means DCR.
+                </>
+              )}
+            </p>
+          </>
         )}
 
         <label className="settings__field">
@@ -371,9 +407,9 @@ export const McpPanel = ({
             </p>
           ) : (
             <p className="settings__note">
-              No client ID needed: the app registers itself with the server’s authorization server
-              (RFC 7591), runs PKCE, and refreshes the access token on its own. Tokens are stored
-              encrypted in IndexedDB.
+              No client ID to paste: the app signs in with its metadata document or registers itself
+              (RFC 7591), as chosen above, runs PKCE, and refreshes the access token on its own.
+              Tokens are stored encrypted in IndexedDB.
             </p>
           ))}
 

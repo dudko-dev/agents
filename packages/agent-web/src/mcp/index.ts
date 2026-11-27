@@ -77,6 +77,8 @@ export {
 export type {
   BrowserOAuthProviderOptions,
   McpOAuthCallback,
+  McpOAuthRegistration,
+  McpOAuthRegistrationKind,
   McpOAuthRequestOptions,
   McpOAuthStorage,
 } from './oauth.js'

@@ -11,8 +11,9 @@ import { IndexedDBVault, type VaultOptions } from '../secrets/vault.js'
 
 /**
  * Browser-side OAuth 2.1 for remote MCP servers: Dynamic Client Registration
- * (RFC 7591) or a client ID metadata document (CIMD), PKCE authorization-code
- * flow, refresh-token rotation, and the `iss` check on the way back (RFC 9207).
+ * (RFC 7591) or a client ID metadata document (CIMD) - automatically or one of
+ * them only (`registration`) - PKCE authorization-code flow, refresh-token
+ * rotation, and the `iss` check on the way back (RFC 9207).
  *
  * The heavy lifting lives in the MCP SDK — `auth()` discovers the protected
  * resource (RFC 9728), registers the client if we have no client_id yet,
@@ -75,6 +76,27 @@ export class MemoryOAuthStorage implements McpOAuthStorage {
   }
 }
 
+/**
+ * How the OAuth client is registered with a server's authorization server
+ * (`BrowserOAuthProviderOptions.registration`):
+ *
+ * - `'auto'` (the default): by the client ID metadata document (CIMD) when the
+ *   authorization server advertises `client_id_metadata_document_supported` and
+ *   a `clientMetadataUrl` is set, by dynamic client registration (DCR, RFC 7591)
+ *   otherwise. A client already in storage is used as it is.
+ * - `'cimd'`: by the metadata document only. Needs `clientMetadataUrl`. An
+ *   authorization server that does not advertise support is refused before
+ *   anything is sent to its registration endpoint.
+ * - `'dcr'`: by dynamic registration only, even with a `clientMetadataUrl` set:
+ *   the SDK is never shown the URL.
+ *
+ * The Node package has the same option, with the same names; change both.
+ */
+export type McpOAuthRegistration = 'auto' | 'cimd' | 'dcr'
+
+/** How a stored client was registered: see {@link BrowserOAuthProvider.registrationKind}. */
+export type McpOAuthRegistrationKind = 'cimd' | 'dcr'
+
 export interface BrowserOAuthProviderOptions {
   /** The MCP endpoint this provider authorizes against (the resource server). */
   serverUrl: string
@@ -96,9 +118,20 @@ export interface BrowserOAuthProviderOptions {
    * this URL is used as the `client_id` and no dynamic registration is made;
    * otherwise registration runs as before. A registration already in storage
    * wins over both. Must be https with a non-root path, and the document served
-   * there must list the same `redirect_uris` as `redirectUrl`.
+   * there must list the same `redirect_uris` as `redirectUrl`. With
+   * `registration: 'dcr'` it is never used as the `client_id`.
    */
   clientMetadataUrl?: string
+  /**
+   * How the client is registered: `'auto'` (default; as described for
+   * `clientMetadataUrl`), `'cimd'` (the metadata document only: needs
+   * `clientMetadataUrl`, and an authorization server without support is refused
+   * before any registration request) or `'dcr'` (dynamic registration only).
+   * A stored client of the other kind is not reused: it is forgotten, with the
+   * tokens issued to it, and the user signs in again. See
+   * {@link McpOAuthRegistration}.
+   */
+  registration?: McpOAuthRegistration
   /** Defaults to the encrypted IndexedDB vault. */
   storage?: McpOAuthStorage
   /** Treat an access token as expired this many seconds early. Default 30. */
@@ -162,6 +195,38 @@ const assertClientMetadataUrl = (url: string, label = 'MCP OAuth'): void => {
     `${label}: clientMetadataUrl requires https and a non-root path - refusing "${url}"`,
   )
 }
+
+const REGISTRATIONS: readonly McpOAuthRegistration[] = ['auto', 'cimd', 'dcr']
+
+/**
+ * `registration` is checked when the provider is built: an unknown value would
+ * otherwise read as "auto", and `'cimd'` without a document has nothing to sign
+ * in with. The Node package carries the same function; change both.
+ */
+const resolveRegistration = (
+  registration: unknown,
+  clientMetadataUrl: string | undefined,
+  label = 'MCP OAuth',
+): McpOAuthRegistration => {
+  if (registration === undefined) return 'auto'
+  if (!REGISTRATIONS.includes(registration as McpOAuthRegistration)) {
+    throw new Error(
+      `${label}: registration must be 'auto', 'cimd' or 'dcr' - refusing "${String(registration)}"`,
+    )
+  }
+  if (registration === 'cimd' && clientMetadataUrl === undefined) {
+    throw new Error(
+      `${label}: registration 'cimd' needs a clientMetadataUrl - the client ID metadata document to sign in with`,
+    )
+  }
+  return registration as McpOAuthRegistration
+}
+
+// How a client was registered is stamped on its stored record under this key,
+// when it is saved (the URL it was registered under is known then, and may be
+// configured differently later), and taken off again before the record reaches
+// the SDK: nothing of it is ever sent.
+const KIND_KEY = 'x-agent-registration'
 
 /**
  * RFC 9207: is the `iss` parameter of an authorization response the
@@ -248,8 +313,11 @@ export class BrowserOAuthProvider implements OAuthClientProvider {
   private readonly _redirectUrl: string
   private readonly _clientMetadata: OAuthClientMetadata
   private readonly _clientMetadataUrl?: string
+  private readonly _registration: McpOAuthRegistration
   private readonly skewMs: number
   private readonly onRedirect?: (url: URL) => void | Promise<void>
+  /** Once per provider: a stored client of the other kind is forgotten (see `settle`). */
+  private settled?: Promise<void>
 
   constructor(opts: BrowserOAuthProviderOptions) {
     assertSecureOAuthUrl(opts.serverUrl)
@@ -257,6 +325,7 @@ export class BrowserOAuthProvider implements OAuthClientProvider {
       assertClientMetadataUrl(opts.clientMetadataUrl)
       this._clientMetadataUrl = opts.clientMetadataUrl
     }
+    this._registration = resolveRegistration(opts.registration, opts.clientMetadataUrl)
     this.serverUrl = opts.serverUrl
     this.storage = opts.storage ?? new VaultOAuthStorage()
     this.ns = namespaceFor(opts.serverUrl)
@@ -286,9 +355,18 @@ export class BrowserOAuthProvider implements OAuthClientProvider {
     return this._clientMetadata
   }
 
-  /** The client ID metadata document URL (CIMD), when one was configured. */
+  /**
+   * The client ID metadata document URL (CIMD), when one was configured - and
+   * not with `registration: 'dcr'`: the SDK uses this getter to decide, so a
+   * URL it cannot see is a URL it never uses as the `client_id`.
+   */
   get clientMetadataUrl(): string | undefined {
-    return this._clientMetadataUrl
+    return this._registration === 'dcr' ? undefined : this._clientMetadataUrl
+  }
+
+  /** How this provider registers its client: `'auto'`, `'cimd'` or `'dcr'`. */
+  get registration(): McpOAuthRegistration {
+    return this._registration
   }
 
   private key(suffix: string): string {
@@ -327,15 +405,122 @@ export class BrowserOAuthProvider implements OAuthClientProvider {
     return expected !== undefined && returned !== undefined && expected === returned
   }
 
+  /** The stored client, without our stamp, and how it was registered. */
+  private async readClient(): Promise<
+    { info: OAuthClientInformationMixed; kind: McpOAuthRegistrationKind } | undefined
+  > {
+    const stored = await this.readJSON<Record<string, unknown>>('client')
+    if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return undefined
+    const info: Record<string, unknown> = { ...stored }
+    const stamp = info[KIND_KEY]
+    delete info[KIND_KEY]
+    // A record saved before the stamp existed: CIMD when its client_id is the
+    // document configured now.
+    const kind = stamp === 'cimd' || stamp === 'dcr' ? stamp : this.kindOf(info.client_id)
+    return { info: info as unknown as OAuthClientInformationMixed, kind }
+  }
+
+  private kindOf(clientId: unknown): McpOAuthRegistrationKind {
+    return this._clientMetadataUrl !== undefined && clientId === this._clientMetadataUrl
+      ? 'cimd'
+      : 'dcr'
+  }
+
+  /**
+   * May this provider use the stored client? Under `'auto'` any; under `'cimd'`
+   * only the configured document itself; under `'dcr'` only one that was not
+   * registered by a document.
+   */
+  private fits(client: { info: OAuthClientInformationMixed; kind: McpOAuthRegistrationKind }) {
+    if (this._registration === 'cimd') {
+      return client.kind === 'cimd' && client.info.client_id === this._clientMetadataUrl
+    }
+    if (this._registration === 'dcr') return client.kind === 'dcr'
+    return true
+  }
+
+  /** The client and the tokens issued to it go together: a token belongs to a client. */
+  private async forgetClient(): Promise<void> {
+    await Promise.all(['client', 'tokens'].map((t) => this.storage.delete(this.key(t))))
+  }
+
+  /**
+   * Under `'cimd'` / `'dcr'`, before the first read of the client or a token: a
+   * stored client of the other kind (registered under another setting) is
+   * forgotten with its tokens, so the setting is never served by the old
+   * client - not even by its access token, which the transport would otherwise
+   * keep sending until it expires. Once per provider (its setting is fixed); a
+   * failure is not remembered.
+   */
+  private settle(): Promise<void> {
+    if (this._registration === 'auto') return Promise.resolve()
+    this.settled ??= (async () => {
+      const client = await this.readClient()
+      if (client && !this.fits(client)) await this.forgetClient()
+    })().catch((err: unknown) => {
+      this.settled = undefined
+      throw err
+    })
+    return this.settled
+  }
+
+  /**
+   * `'cimd'` with no usable client: the SDK is about to choose between the
+   * document and a dynamic registration, by the authorization server metadata
+   * it has just saved (`saveDiscoveryState` comes first). Without support it
+   * would register - so it is stopped HERE, before any request is made, and
+   * what discovery found is forgotten, so the next attempt reads the server's
+   * metadata again (a server that starts supporting CIMD is noticed).
+   */
+  private async assertCimdSupported(): Promise<void> {
+    const discovery = await this.discoveryState()
+    const metadata = discovery?.authorizationServerMetadata as
+      { issuer?: unknown; client_id_metadata_document_supported?: unknown } | undefined
+    // Only a literal `true` is a promise, as the SDK reads it.
+    if (metadata?.client_id_metadata_document_supported === true) return
+    await this.storage.delete(this.key('discovery')).catch(() => {})
+    const server =
+      typeof metadata?.issuer === 'string' ? metadata.issuer : discovery?.authorizationServerUrl
+    throw new Error(
+      server
+        ? `MCP OAuth: the authorization server ${server} of ${this.serverUrl} does not support client ID metadata documents (CIMD), which this connection requires (registration: 'cimd') - nothing was sent to its registration endpoint`
+        : `MCP OAuth: no record of the authorization server of ${this.serverUrl}, so its support for client ID metadata documents (CIMD), which this connection requires (registration: 'cimd'), cannot be confirmed - nothing was registered`,
+    )
+  }
+
   async clientInformation(): Promise<OAuthClientInformationMixed | undefined> {
-    return this.readJSON<OAuthClientInformationMixed>('client')
+    await this.settle()
+    const client = await this.readClient()
+    if (client && this.fits(client)) return client.info
+    // Written by a provider with another setting since this one settled.
+    if (client) await this.forgetClient()
+    if (this._registration === 'cimd') await this.assertCimdSupported()
+    return undefined
   }
 
   async saveClientInformation(info: OAuthClientInformationMixed): Promise<void> {
-    await this.storage.set(this.key('client'), JSON.stringify(info))
+    // Whatever arrived under our key (a registration response is the server's
+    // text) is replaced by what this provider knows: a client whose ID is the
+    // configured document is CIMD, any other was registered dynamically.
+    const record: Record<string, unknown> = { ...info }
+    record[KIND_KEY] = this.kindOf(info.client_id)
+    await this.storage.set(this.key('client'), JSON.stringify(record))
+  }
+
+  /**
+   * How the stored client was registered: `'cimd'` (its `client_id` is the
+   * client ID metadata document), `'dcr'` (registered dynamically - or saved by
+   * the host), or undefined when there is none this provider would use. Read it
+   * after a sign-in to show the user which way was taken.
+   */
+  async registrationKind(): Promise<McpOAuthRegistrationKind | undefined> {
+    await this.settle()
+    const client = await this.readClient()
+    return client && this.fits(client) ? client.kind : undefined
   }
 
   async tokens(): Promise<OAuthTokens | undefined> {
+    await this.settle()
     return (await this.readJSON<StoredTokens>('tokens'))?.tokens
   }
 
@@ -405,6 +590,7 @@ export class BrowserOAuthProvider implements OAuthClientProvider {
 
   /** True when there is no access token, or it expires within the skew window. */
   async isAccessTokenExpired(): Promise<boolean> {
+    await this.settle()
     const stored = await this.readJSON<StoredTokens>('tokens')
     if (!stored?.tokens?.access_token) return true
     // No expires_in means the AS didn't say; assume it is still good and let a
