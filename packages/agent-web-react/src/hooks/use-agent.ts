@@ -6,13 +6,16 @@ import {
   type IUsage,
   type Agent,
   type AgentEventHandler,
+  type AppToolCallRequest,
   type BrowserAgentConfig,
   type CompactResult,
   type RunControl,
   type RunFile,
   type RunResult,
+  type ToolApprovalContext,
   type ToolApprovalDecision,
   type ToolApprovalMode,
+  type ToolApprovalRequest,
 } from '@dudko.dev/agent-web'
 import { createApprovalQueue } from '../approval-queue.js'
 import { agentStateReducer, createInitialAgentState, lessonsOf } from '../state.js'
@@ -111,6 +114,14 @@ export interface UseAgentReturn extends AgentUiState {
   approvalMode: ToolApprovalMode
   /** Switch the consent policy live — the "autopilot" toggle. */
   setApprovalMode: (mode: ToolApprovalMode) => void
+  /**
+   * Ask the agent's consent gate about a tool call an MCP App wants to make (the core's
+   * `Agent.approveAppToolCall`: the same rules and modes, never silent for a write, "always
+   * allow" kept apart from the model's). The request joins `pendingApprovals` with `app` set,
+   * and waits across runs - a run ending or `stop()` does not answer it; `signal` does (the
+   * app's frame going away). Resolves when the call may go; throws when it may not.
+   */
+  approveAppToolCall: (call: AppToolCallRequest, signal?: AbortSignal) => Promise<void>
   /** Summarise the stored transcript now (needs `config.memory`). */
   compact: () => Promise<CompactResult | undefined>
   /** The memory session runs use (config.sessionId until switched). */
@@ -160,13 +171,20 @@ export const useAgent = (
   optionsRef.current = options
 
   // Consent requests waiting for approve()/deny(), by request id. One the core stops waiting
-  // for (its timeoutMs ran out, the run stopped) leaves the queue by its signal.
+  // for (its timeoutMs ran out, the run stopped) leaves its queue by its signal. An MCP App's are
+  // kept in a queue of their own: they are not the run's, so a run ending (or stopped) does not
+  // answer them.
   const [approvals] = useState(createApprovalQueue)
+  const [appApprovals] = useState(createApprovalQueue)
   const settleAll = useCallback(
     (decision: ToolApprovalDecision) => approvals.settleAll(decision),
     [approvals],
   )
-  const uiOnRequest = approvals.handler
+  const uiOnRequest = useCallback(
+    (req: ToolApprovalRequest, ctx?: ToolApprovalContext) =>
+      (req.app ? appApprovals : approvals).handler(req, ctx),
+    [approvals, appApprovals],
+  )
 
   // The memory session runs go to; a chat-history switch changes it.
   const [sessionId, setSessionId] = useState(config.sessionId ?? 'default')
@@ -251,8 +269,9 @@ export const useAgent = (
     () => () => {
       abortRef.current?.abort()
       settleAll({ approved: false, reason: 'the view was closed' })
+      appApprovals.settleAll({ approved: false, reason: 'the view was closed' })
     },
-    [settleAll],
+    [settleAll, appApprovals],
   )
 
   // `run` calls itself (the follow-up of a run), so it is reached through a ref.
@@ -372,18 +391,49 @@ export const useAgent = (
     )
   }, [])
 
+  // The waiting request with this id - the run's or an app's.
   const approve = useCallback(
     (id: string, opts?: ApproveOptions) => {
-      approvals.approve(id, { remember: opts?.remember })
+      if (!approvals.approve(id, { remember: opts?.remember })) {
+        appApprovals.approve(id, { remember: opts?.remember })
+      }
     },
-    [approvals],
+    [approvals, appApprovals],
   )
 
   const deny = useCallback(
     (id: string, reason?: string) => {
-      approvals.deny(id, reason)
+      if (!approvals.deny(id, reason)) appApprovals.deny(id, reason)
     },
-    [approvals],
+    [approvals, appApprovals],
+  )
+
+  const approveAppToolCall = useCallback(
+    async (call: AppToolCallRequest, signal?: AbortSignal): Promise<void> => {
+      const agent = agentRef.current
+      if (!agent) throw new Error('The agent is not ready')
+      // An older core has no gate for apps: refuse rather than let the call through.
+      if (typeof agent.approveAppToolCall !== 'function') {
+        throw new Error('This version of @dudko.dev/agent-web cannot ask about an app’s calls')
+      }
+      await agent.approveAppToolCall(
+        call,
+        (event) => {
+          // Decided (or given up on): nothing waits on the answer any more. The queue drops a
+          // request whose signal aborted; this also covers a core that sends no signal.
+          if (event.type === 'tool.approval-resolved')
+            appApprovals.deny(event.id, 'no longer asked')
+          dispatch({
+            type: 'event',
+            event,
+            maxEvents: optionsRef.current.maxEvents,
+            at: Date.now(),
+          })
+        },
+        signal,
+      )
+    },
+    [],
   )
 
   const compact = useCallback(async (): Promise<CompactResult | undefined> => {
@@ -425,6 +475,7 @@ export const useAgent = (
     deny,
     approvalMode,
     setApprovalMode,
+    approveAppToolCall,
     compact,
     sessionId,
     loadChat,

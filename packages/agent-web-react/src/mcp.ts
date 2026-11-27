@@ -16,6 +16,7 @@ export {
   claimOAuthCallback,
   describeMcpResult,
   isUnauthorizedError,
+  mcpAppsRouter,
   mcpInstructionsOf,
   mcpOAuthProviderOptions,
   mcpProtocolOf,

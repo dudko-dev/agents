@@ -356,6 +356,63 @@ pending.get(id)?.({ action: 'accept', content: { name: 'Ada' } })
 The whole of it, with every guard: [docs/capabilities.md](docs/capabilities.md#mcp-elicitation-a-server-asks-the-user)
 and [docs/security.md](docs/security.md#mcp-elicitation-a-server-asks-the-user-in-the-middle-of-a-tool-call).
 
+### MCP Apps: a server's own interface for a tool
+
+With [MCP Apps](https://github.com/modelcontextprotocol/ext-apps) (the stable extension
+`io.modelcontextprotocol/ui`, revision 2026-01-26) a tool declares an HTML app
+(`_meta.ui.resourceUri: 'ui://…'`) that shows its result - a flight list, a chart, a form. This
+package is the host's data side: it reads the declaration, tells the run when such a tool
+returned, reads the app from its server, and makes the calls the app asks for. **Drawing** the
+app is the UI's job: the React package's `<AgentChat mcpApps>` does it in a sandboxed frame.
+Off until you ask:
+
+```ts
+const mcp = await connectMcpHttp(servers, { apps: true })
+const agent = await createAgent({ model, tools: mcp.tools })
+
+agent.run(goal, {
+  onEvent: async (e) => {
+    if (e.type !== 'mcp.app') return
+    // e.server, e.tool / e.toolName, e.resourceUri, e.input, e.result: what the app is shown
+    const app = await mcp.apps!.readUiResource(e.server, e.resourceUri) // { html, csp, permissions, … }
+    // ... frame app.html with a policy built from app.csp (connectDomains / resourceDomains only)
+  },
+})
+
+// The app asks to call a tool of ITS server: consent first, then the call.
+const tool = mcp.apps!.appTool('travel', 'flights.book') // undefined: not one an app may call
+await agent.approveAppToolCall({ tool: tool!.key, toolName: 'flights.book', server: 'travel',
+  resourceUri, input: args, readOnly: tool!.readOnly }) // throws ToolDeniedError when refused
+const result = await mcp.apps!.callAppTool('travel', 'flights.book', args)
+```
+
+- **Off = nothing changes.** Without `apps` no extension is declared, `_meta` is not read, every
+  tool is mounted as before and the wire is byte for byte what it was. On, the only difference on
+  the wire is the extension in the handshake (`capabilities.extensions`).
+- **The HTML never reaches the model**: it is in no tool result, event, log or checkpoint. The
+  model's tool result is what it would be without apps. `mcp.app` carries the call's arguments
+  and the result for the app (`content`, `structuredContent`, `isError`, `_meta`; left out above
+  `MCP_APP_MAX_RESULT_CHARS`, 512 000).
+- **An app is read only from the server that declared it**, and only a `ui://` URI that a tool of
+  THAT server declares in its current listing - nothing is asked of a server otherwise; checked
+  (the exact URI, the MIME type `text/html;profile=mcp-app`, at most 2 000 000 characters, `text`
+  or base64 `blob`) and cached per connection; a refused read is not kept. Its declared CSP is
+  cleaned to origins (`https://host`, `wss://…`, `https://*.example.com`, loopback `http`): a
+  keyword, a scheme, a path, `*` or a `;` never gets through. The permissions it asks for
+  (camera, microphone, …) are reported, never granted here. Each read logs the policy (`onLog`).
+- **Who may call what** (`_meta.ui.visibility`): a tool for its app only (`['app']`) is not
+  mounted for the model; `appTool` / `callAppTool` refuse a tool whose visibility leaves out
+  `'app'`, or that the server does not list - before anything is sent.
+- **Consent for an app's calls** - `agent.approveAppToolCall` - is the agent's own gate
+  (`toolApproval`: its rules, handler and timeout) with two differences: under `'autopilot'` a
+  write still asks (read-only tools run, as in `'ask-writes'`), and "always allow" given to an app
+  is remembered for apps only. The request carries `app: { server, tool, resourceUri }`.
+  `callAppTool` itself does not ask: call it after the consent.
+
+Everything else an app may ask for - opening a link, putting a message in the chat - is the UI's to
+ask the user about. The whole of it: [docs/capabilities.md](docs/capabilities.md#mcp-apps-a-servers-interface-for-a-tool)
+and [docs/security.md](docs/security.md#mcp-apps-a-servers-html-with-scripts).
+
 ### OAuth 2.1 + Dynamic Client Registration
 
 A server behind OAuth needs more than a header: access tokens expire mid-run.

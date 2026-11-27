@@ -16,6 +16,17 @@ import {
 import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/client/validators/cf-worker'
 import { dynamicTool, jsonSchema, type ToolSet } from 'ai'
 import {
+  describeMcpAppPolicy,
+  MCP_APP_MIME_TYPE,
+  MCP_APPS_EXTENSION,
+  mcpAppResourceOf,
+  mcpAppToolMeta,
+  mcpAppToolResultOf,
+  type McpAppResource,
+  type McpAppToolResult,
+  type McpAppVisibility,
+} from './apps.js'
+import {
   createMcpElicitationSession,
   resolveMcpElicitationOptions,
   type McpElicitationCallInfo,
@@ -105,6 +116,11 @@ export interface McpCatalogEntry {
   server: string
   /** The server marked the tool read-only (`annotations.readOnlyHint`). */
   readOnly?: boolean
+  /**
+   * With `apps: true`: the MCP App (`ui://…`) the tool declares. Its results then come with an
+   * `mcp.app` event, and the host can show the app (`ConnectedMcp.apps`).
+   */
+  app?: string
 }
 
 export interface McpServerResult {
@@ -148,6 +164,55 @@ export interface ConnectedMcp {
    */
   refreshServer: (name: string) => Promise<void>
   close: () => Promise<void>
+  /**
+   * MCP Apps, present only on a connection made with `apps: true`: read an app's HTML and make
+   * the tool calls an app asks for. See {@link McpAppsConnection}.
+   */
+  apps?: McpAppsConnection
+}
+
+/** A tool of a server as an app of that server sees it (see `McpAppsConnection.appTool`). */
+export interface McpAppTool {
+  /** The server's own name for the tool. */
+  name: string
+  /**
+   * The name the agent's consent rules match: the key the tool is mounted under, or the key it
+   * would have (`server__tool`) when it is for apps only and not mounted.
+   */
+  key: string
+  description: string
+  inputSchema: unknown
+  /** `annotations.readOnlyHint`: the consent gate lets it through in 'ask-writes'. */
+  readOnly: boolean
+  visibility: McpAppVisibility[]
+  /** The app it declares, if any. */
+  resourceUri?: string
+}
+
+/**
+ * The host's side of MCP Apps for one connection (`apps: true`). Every call names the server:
+ * an app may read and call only what its own server declared.
+ *
+ * - `readUiResource` reads an app's document with `resources/read` - only a `ui://` URI that a
+ *   tool of THAT server declares in its current listing, from that server and nowhere else;
+ *   checked (MIME type, size, URI) and cached per connection.
+ * - `appTool` is a server's tool an app may call: listed, with `visibility` including `'app'`.
+ * - `callAppTool` sends that tool call and returns the raw result for the app. It does NOT ask
+ *   the user: a host calls it only after its consent, e.g. `Agent.approveAppToolCall`.
+ */
+export interface McpAppsConnection {
+  readUiResource: (
+    server: string,
+    uri: string,
+    options?: { signal?: AbortSignal },
+  ) => Promise<McpAppResource>
+  appTool: (server: string, name: string) => McpAppTool | undefined
+  callAppTool: (
+    server: string,
+    name: string,
+    args: Record<string, unknown>,
+    options?: { signal?: AbortSignal },
+  ) => Promise<McpAppToolResult>
 }
 
 export interface ConnectMcpOptions {
@@ -198,6 +263,17 @@ export interface ConnectMcpOptions {
    * default false: its question is cancelled without the callback being called).
    */
   elicitation?: McpElicitationOptions
+  /**
+   * MCP Apps (the `io.modelcontextprotocol/ui` extension): declare the extension in the
+   * handshake, read each tool's `_meta.ui` (its `ui://` app and its `visibility`), emit an
+   * `mcp.app` event in a run when such a tool returns, and give the host `ConnectedMcp.apps` to
+   * read the app and make the calls it asks for. A tool whose `visibility` leaves out `'model'`
+   * is then not mounted (it is for its app only). The app's HTML never reaches the model.
+   *
+   * Off by default: nothing is declared, `_meta` is not read, every tool is mounted as before and
+   * the wire is unchanged.
+   */
+  apps?: boolean
 }
 
 /**
@@ -355,6 +431,7 @@ interface McpToolDescriptor {
   inputSchema: unknown
   outputSchema?: unknown
   annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean; title?: string }
+  _meta?: unknown
 }
 
 /** The longest compile error repeated in a refusal (the SDK clips at the same length). */
@@ -852,16 +929,26 @@ const connectAndList = async (
   // Without `protocol` (or with 'legacy') nothing is added here: the client is
   // built with exactly the options it always had.
   const negotiation = mcpVersionNegotiation(mode)
+  const apps = opts.apps === true
   const clientOptions: ClientOptions | undefined =
-    enterprise || negotiation || elicitation
+    enterprise || negotiation || elicitation || apps
       ? {
           // An extension is opt-in: it is declared only by the client that uses
           // it. So is elicitation: without `onElicitation` no capability is
-          // declared, and a server cannot ask.
-          ...(enterprise || elicitation
+          // declared, and a server cannot ask. MCP Apps: only with `apps`.
+          ...(enterprise || elicitation || apps
             ? {
                 capabilities: {
-                  ...(enterprise ? { extensions: { [enterprise.extension]: {} } } : {}),
+                  ...(enterprise || apps
+                    ? {
+                        extensions: {
+                          ...(enterprise ? { [enterprise.extension]: {} } : {}),
+                          ...(apps
+                            ? { [MCP_APPS_EXTENSION]: { mimeTypes: [MCP_APP_MIME_TYPE] } }
+                            : {}),
+                        },
+                      }
+                    : {}),
                   ...(elicitation ? { elicitation: elicitation.capability } : {}),
                 },
               }
@@ -979,6 +1066,102 @@ export const connectMcpHttp = async (
   // server name → the tool keys it currently owns, so a refresh can remove
   // exactly its own entries.
   const mountedKeys = new Map<string, string[]>()
+  // MCP Apps (`apps: true`): per server, the tools as an app sees them (every listed tool, by
+  // its own name) and the app documents read so far (by URI; a failed read is not kept).
+  const appsOn = opts.apps === true
+  const appToolsOf = new Map<string, Map<string, McpAppTool>>()
+  const appResources = new Map<string, Map<string, Promise<McpAppResource>>>()
+  let appEventSeq = 0
+
+  /**
+   * One `tools/call` to a server, for the model or for an app: through the elicitation session
+   * when the connection has one (on the 2025 revisions the session runs a server's calls one at
+   * a time - an app's call too, or a question could be put to the wrong call), else the plain
+   * request. A request that fails throws: there is no result.
+   */
+  const requestToolCall = async (
+    name: string,
+    client: Client,
+    key: string,
+    toolName: string,
+    args: Record<string, unknown>,
+    options: ToolCallOptions | undefined,
+  ): Promise<CallToolResult> => {
+    const elicitation = elicitationSessionOf(name)
+    try {
+      if (elicitation) {
+        // The server may ask the user something during this call
+        // (`onElicitation`). The session answers - on the 2025 revisions
+        // a request of the server's own, on 2026-07-28 an
+        // `input_required` result followed by the same call sent again
+        // with the answers and the server's state - and keeps the caps;
+        // see elicitation.ts.
+        const call = options
+        const run = call?.agentRun
+        const signal = call?.abortSignal ?? run?.signal
+        const emit = run?.emit as ((event: unknown) => void) | undefined
+        const step = run?.step
+        // A call made by a helper says so: the agent marks its own
+        // helpers' calls, a subagent tool the calls of its host tools.
+        const helper = run?.subagent ?? call?.subagentCall
+        // One count per run the host started: a subagent tool's child counts on the
+        // run that delegated to it.
+        const counter = call?.subagentCall?.elicitations ?? run?.elicitations
+        // While the user is asked, the step's time limit does not run: the clock of the run
+        // the call belongs to (or of the run that delegated it, from a worker's host tool).
+        // An app's call made outside a run has no clock, and nothing to pause.
+        const pause = run?.clock?.pause ?? call?.subagentCall?.pause
+        const era = client.getProtocolEra() ?? 'legacy'
+        const info: McpElicitationCallInfo = {
+          tool: key,
+          toolName,
+          ...(signal ? { signal } : {}),
+          ...(emit
+            ? {
+                emit: (event: McpElicitationEvent) =>
+                  emit(
+                    event.type === 'mcp.elicitation-requested' && step ? { ...event, step } : event,
+                  ),
+              }
+            : {}),
+          ...(run?.runId ? { runId: run.runId } : {}),
+          ...(helper ? { subagent: { id: helper.id, depth: helper.depth } } : {}),
+          ...(counter ? { run: counter } : {}),
+          ...(pause ? { pause } : {}),
+        }
+        return await elicitation.call(
+          era,
+          info,
+          (leg) =>
+            client.request(
+              {
+                method: 'tools/call',
+                params: { name: toolName, arguments: args, ...leg.retry },
+              },
+              {
+                ...(leg.signal ? { signal: leg.signal } : {}),
+                ...(leg.ownTimeout ? { timeout: MAX_TIMER_MS } : {}),
+                // Hand an `input_required` result back instead of failing
+                // on it: the session answers it.
+                ...(era === 'modern' ? { allowInputRequired: true } : {}),
+              },
+            ) as Promise<CallToolResult>,
+        )
+      }
+      return await client.request(
+        { method: 'tools/call', params: { name: toolName, arguments: args } },
+        options?.abortSignal ? { signal: options.abortSignal } : undefined,
+      )
+    } catch (err) {
+      // 2026-07-28: the server answered `input_required` (it wants the
+      // user asked something, or the call sent again with a state). Not
+      // supported here, and the call is not repeated.
+      if (isSdkError(err, SdkErrorCode.UnsupportedResultType)) {
+        throw new Error(mcpInputRequiredMessage(toolName))
+      }
+      throw err
+    }
+  }
 
   const mountTools = (name: string, client: Client, listed: McpToolDescriptor[]): void => {
     const prefix = `${sanitizeName(name)}__`
@@ -996,6 +1179,7 @@ export const connectMcpHttp = async (
       if (catalog[i].server === name) catalog.splice(i, 1)
     }
     const keys: string[] = []
+    const appTools = new Map<string, McpAppTool>()
     // The SDK's own validator, the one its browser build uses by default
     // (@cfworker/json-schema: no code generation, so it runs under a CSP without
     // 'unsafe-eval'; dialect by `$schema`). One per mount, compiled lazily.
@@ -1004,6 +1188,29 @@ export const connectMcpHttp = async (
     let mounted = 0
     for (const t of listed) {
       const prefixed = prefix + sanitizeName(t.name)
+      // MCP Apps: only read with `apps` on. A tool for its app only is not the model's.
+      const ui = appsOn ? mcpAppToolMeta(t) : undefined
+      if (ui?.refusedUri !== undefined) {
+        log(
+          'warn',
+          `[mcp] ${name}: tool "${t.name}" declares an app that is not a ui:// URI (${ui.refusedUri}); ignored`,
+        )
+      }
+      if (ui && !ui.visibility.includes('model')) {
+        if (ui.visibility.includes('app')) {
+          appTools.set(t.name, {
+            name: t.name,
+            key: prefixed,
+            description: t.description ?? '',
+            inputSchema: t.inputSchema,
+            readOnly: t.annotations?.readOnlyHint === true,
+            visibility: ui.visibility,
+            ...(ui.resourceUri ? { resourceUri: ui.resourceUri } : {}),
+          })
+        }
+        log('info', `[mcp] ${name}: tool "${t.name}" is for its app only; not mounted`)
+        continue
+      }
       if (prefixed.length > MAX_TOOL_NAME_LEN) {
         log(
           'warn',
@@ -1021,6 +1228,18 @@ export const connectMcpHttp = async (
       }
       const description = t.description ?? ''
       const readOnly = t.annotations?.readOnlyHint === true
+      const appUri = ui?.resourceUri
+      if (ui?.visibility.includes('app')) {
+        appTools.set(t.name, {
+          name: t.name,
+          key,
+          description,
+          inputSchema: t.inputSchema,
+          readOnly,
+          visibility: ui.visibility,
+          ...(appUri ? { resourceUri: appUri } : {}),
+        })
+      }
       // Compiled on the first call, as the SDK does, and once per mount.
       let outputValidator: JsonSchemaValidator<unknown> | undefined
       const outputValidatorOf = (): JsonSchemaValidator<unknown> | undefined => {
@@ -1057,89 +1276,34 @@ export const connectMcpHttp = async (
           // (so a server's CORS list needs none of them for this client). A
           // request that fails (transport, protocol, abort) throws here: there
           // is no result, and the throw is recorded as a failed call.
-          let res: CallToolResult
-          const elicitation = elicitationSessionOf(name)
-          try {
-            if (elicitation) {
-              // The server may ask the user something during this call
-              // (`onElicitation`). The session answers - on the 2025 revisions
-              // a request of the server's own, on 2026-07-28 an
-              // `input_required` result followed by the same call sent again
-              // with the answers and the server's state - and keeps the caps;
-              // see elicitation.ts.
-              const call = options as ToolCallOptions | undefined
-              const run = call?.agentRun
-              const signal = call?.abortSignal ?? run?.signal
-              const emit = run?.emit as ((event: unknown) => void) | undefined
-              const step = run?.step
-              // A call made by a helper says so: the agent marks its own
-              // helpers' calls, a subagent tool the calls of its host tools.
-              const helper = run?.subagent ?? call?.subagentCall
-              // One count per run the host started: a subagent tool's child counts on the
-              // run that delegated to it.
-              const counter = call?.subagentCall?.elicitations ?? run?.elicitations
-              // While the user is asked, the step's time limit does not run: the clock of the run
-              // the call belongs to (or of the run that delegated it, from a worker's host tool).
-              const pause = run?.clock?.pause ?? call?.subagentCall?.pause
-              const era = client.getProtocolEra() ?? 'legacy'
-              const info: McpElicitationCallInfo = {
+          const res = await requestToolCall(
+            name,
+            client,
+            key,
+            t.name,
+            (args ?? {}) as Record<string, unknown>,
+            options as ToolCallOptions | undefined,
+          )
+          // MCP Apps: the app of this tool can show the result. Told to the run (a UI is
+          // listening there), with the call's arguments and the result the app is given -
+          // never the app itself, which the host reads with `apps.readUiResource`.
+          if (appUri) {
+            const run = (options as ToolCallOptions | undefined)?.agentRun
+            const emit = run?.emit as ((event: unknown) => void) | undefined
+            if (emit) {
+              const result = mcpAppToolResultOf(res)
+              emit({
+                type: 'mcp.app',
+                id: `mcp-app-${Date.now().toString(36)}-${(appEventSeq += 1)}`,
+                server: name,
                 tool: key,
                 toolName: t.name,
-                ...(signal ? { signal } : {}),
-                ...(emit
-                  ? {
-                      emit: (event: McpElicitationEvent) =>
-                        emit(
-                          event.type === 'mcp.elicitation-requested' && step
-                            ? { ...event, step }
-                            : event,
-                        ),
-                    }
-                  : {}),
-                ...(run?.runId ? { runId: run.runId } : {}),
-                ...(helper ? { subagent: { id: helper.id, depth: helper.depth } } : {}),
-                ...(counter ? { run: counter } : {}),
-                ...(pause ? { pause } : {}),
-              }
-              res = await elicitation.call(
-                era,
-                info,
-                (leg) =>
-                  client.request(
-                    {
-                      method: 'tools/call',
-                      params: {
-                        name: t.name,
-                        arguments: (args ?? {}) as Record<string, unknown>,
-                        ...leg.retry,
-                      },
-                    },
-                    {
-                      ...(leg.signal ? { signal: leg.signal } : {}),
-                      ...(leg.ownTimeout ? { timeout: MAX_TIMER_MS } : {}),
-                      // Hand an `input_required` result back instead of failing
-                      // on it: the session answers it.
-                      ...(era === 'modern' ? { allowInputRequired: true } : {}),
-                    },
-                  ) as Promise<CallToolResult>,
-              )
-            } else {
-              res = await client.request(
-                {
-                  method: 'tools/call',
-                  params: { name: t.name, arguments: (args ?? {}) as Record<string, unknown> },
-                },
-                options?.abortSignal ? { signal: options.abortSignal } : undefined,
-              )
+                resourceUri: appUri,
+                input: (args ?? {}) as Record<string, unknown>,
+                ...(result ? { result } : {}),
+                ...(run?.step ? { step: run.step } : {}),
+              })
             }
-          } catch (err) {
-            // 2026-07-28: the server answered `input_required` (it wants the
-            // user asked something, or the call sent again with a state). Not
-            // supported here, and the call is not repeated.
-            if (isSdkError(err, SdkErrorCode.UnsupportedResultType)) {
-              throw new Error(mcpInputRequiredMessage(t.name))
-            }
-            throw err
           }
           // A result arrived. When it does not follow the tool's outputSchema
           // (no structuredContent, or one that does not match) it is passed on
@@ -1178,11 +1342,22 @@ export const connectMcpHttp = async (
       // Which server the tool came from, and that server's instructions: the
       // agent shows the notes of the servers whose tools it actually mounts.
       markMcpTool(tools[key], name, instructionsOf.get(name))
-      catalog.push({ name: key, description, server: name, ...(readOnly ? { readOnly } : {}) })
+      catalog.push({
+        name: key,
+        description,
+        server: name,
+        ...(readOnly ? { readOnly } : {}),
+        ...(appUri ? { app: appUri } : {}),
+      })
       keys.push(key)
       mounted += 1
     }
     mountedKeys.set(name, keys)
+    if (appsOn) {
+      appToolsOf.set(name, appTools)
+      // A new listing may declare other apps: what was read for the old one is read again.
+      appResources.delete(name)
+    }
     log('info', `[mcp] ${name}: ${mounted} tools mounted`)
   }
 
@@ -1216,6 +1391,90 @@ export const connectMcpHttp = async (
     results.push({ name: server.name, connected: true })
   }
 
+  const connectedClient = (server: string): Client => {
+    const client = clients.get(server)
+    if (!client) throw new Error(`MCP server "${server}" is not connected`)
+    return client
+  }
+
+  const apps: McpAppsConnection | undefined = appsOn
+    ? {
+        readUiResource: (server, uri, readOptions) => {
+          let client: Client
+          try {
+            client = connectedClient(server)
+          } catch (err) {
+            return Promise.reject(err)
+          }
+          // Only an app a tool of THIS server declares: an app cannot be pointed at another
+          // server's resources, nor at a resource its server did not tie to a tool.
+          const declared = [...(appToolsOf.get(server)?.values() ?? [])].some(
+            (t) => t.resourceUri === uri,
+          )
+          if (!declared) {
+            return Promise.reject(
+              new Error(`no tool of MCP server "${server}" declares the app ${uri}`),
+            )
+          }
+          let cache = appResources.get(server)
+          if (!cache) {
+            cache = new Map()
+            appResources.set(server, cache)
+          }
+          const cached = cache.get(uri)
+          if (cached) return cached
+          const reading = client
+            .request(
+              { method: 'resources/read', params: { uri } },
+              readOptions?.signal ? { signal: readOptions.signal } : undefined,
+            )
+            .then((result) => {
+              const resource = mcpAppResourceOf(server, uri, result)
+              // The audit trail the specification asks a host for: what the app may reach.
+              log('info', `[mcp] ${server}: app ${uri} - ${describeMcpAppPolicy(resource)}`)
+              return resource
+            })
+          // A failed read is not kept: the next one asks again.
+          reading.catch(() => {
+            if (appResources.get(server)?.get(uri) === reading) cache.delete(uri)
+          })
+          cache.set(uri, reading)
+          return reading
+        },
+        appTool: (server, toolName) => {
+          const tool = appToolsOf.get(server)?.get(toolName)
+          return tool ? { ...tool, visibility: [...tool.visibility] } : undefined
+        },
+        callAppTool: async (server, toolName, args, callOptions) => {
+          const client = connectedClient(server)
+          const tool = appToolsOf.get(server)?.get(toolName)
+          // The specification: a call from an app to a tool whose visibility leaves out
+          // 'app' (or that its server does not list) is refused, and never reaches the server.
+          if (!tool) {
+            throw new Error(`MCP server "${server}" has no tool "${toolName}" that an app may call`)
+          }
+          if (typeof args !== 'object' || args === null || Array.isArray(args)) {
+            throw new Error(`the arguments of "${toolName}" must be an object`)
+          }
+          log('info', `[mcp] ${server}: an app called ${toolName}`)
+          const res = await requestToolCall(
+            server,
+            client,
+            tool.key,
+            toolName,
+            args,
+            callOptions?.signal ? { abortSignal: callOptions.signal } : undefined,
+          )
+          return (
+            mcpAppToolResultOf(res) ?? {
+              content: [{ type: 'text', text: 'The result was too large to hand to the app.' }],
+              isError: true,
+            }
+          )
+        },
+      }
+    : undefined
+
   return {
     tools,
     catalog,
@@ -1229,7 +1488,9 @@ export const connectMcpHttp = async (
     },
     close: async () => {
       closing = true
+      appResources.clear()
       await Promise.allSettled([...clients.values()].map((c) => c.close()))
     },
+    ...(apps ? { apps } : {}),
   }
 }

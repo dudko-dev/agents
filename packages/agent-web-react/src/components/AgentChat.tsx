@@ -1,10 +1,19 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ComponentType, CSSProperties, ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import type { VirtualFileSystem } from '@dudko.dev/agent-web'
 import { ChatHistoryStore } from '../chat-history.js'
 import { useOptionalAgentContext } from '../context.js'
 import type { UseAgentReturn } from '../hooks/use-agent.js'
 import { useChatHistory, type UseChatHistoryReturn } from '../hooks/use-chat-history.js'
+import {
+  useMcpAppHost,
+  type AppRequestView,
+  type McpAppsConnectionLike,
+} from '../hooks/use-mcp-app-host.js'
+import type { AppView, ChatMessage } from '../types.js'
+import { AppRequestPrompt } from './AppRequestPrompt.js'
+import { McpAppFrame, McpAppLine } from './McpAppFrame.js'
 import { AgentLabelsProvider, useLabels, type AgentLabelsOverride } from '../labels.js'
 import { AgentComposer, type AgentComposerProps } from './AgentComposer.js'
 import { ChatHistoryList, type ChatHistoryListProps } from './ChatHistoryList.js'
@@ -195,6 +204,48 @@ export interface AgentChatProps {
   className?: string
   /** Inline styles on the root — handy for sizing (e.g. `{ height: 520 }`). */
   style?: CSSProperties
+
+  // ── MCP Apps ───────────────────────────────────────────────────────────────
+  /**
+   * MCP Apps: the connection that reads an app and makes the calls it asks for -
+   * `useMcpServers({ apps: true }).apps` (or `useMcp`'s, or the core's `ConnectedMcp.apps`).
+   * With it, an answer whose tool call came with an app shows the app in a sandboxed frame under
+   * the answer, and everything the app asks for - a tool call, a link, a message - is put to the
+   * user here, labelled as the app's. Without it no app is drawn.
+   */
+  mcpApps?: McpAppsConnectionLike
+  /** Draw MCP Apps (default true; needs `mcpApps`). */
+  showApps?: boolean
+  /** Start every app folded to one line (default false). */
+  appsCollapsed?: boolean
+  /**
+   * Where an app opened "in panel" goes: `'auto'` (default) - beside the chat when it is wide,
+   * a bottom sheet when it is narrow (`narrowWidth`); `'sheet'` - always the sheet; an element -
+   * rendered into it (a column of your page); `false` - no panel.
+   */
+  appPanel?: 'auto' | 'sheet' | HTMLElement | null | false
+  /** Told when an app goes into the panel (`app`) or leaves it (`undefined`). */
+  onAppPanel?: (app: AppView | undefined) => void
+  /** An app yourself: `fallback` is the built-in frame. */
+  renderApp?: (app: AppView, message: ChatMessage, fallback: ReactNode) => ReactNode
+  /** A link / message an app asks for, yourself: `fallback` is the built-in card. */
+  renderAppRequest?: (request: AppRequestView, fallback: ReactNode) => ReactNode
+}
+
+/** Follows the OS colour scheme (for `theme="auto"`): what an app is told. */
+const usePrefersDark = (): boolean => {
+  const query = '(prefers-color-scheme: dark)'
+  const [dark, setDark] = useState(
+    () => typeof matchMedia === 'function' && matchMedia(query).matches,
+  )
+  useEffect(() => {
+    if (typeof matchMedia !== 'function') return
+    const mq = matchMedia(query)
+    const on = () => setDark(mq.matches)
+    mq.addEventListener?.('change', on)
+    return () => mq.removeEventListener?.('change', on)
+  }, [])
+  return dark
 }
 
 const isHistoryHook = (h: AgentChatProps['history']): h is UseChatHistoryReturn =>
@@ -277,6 +328,13 @@ const AgentChatInner = ({
   classNames = {},
   className,
   style,
+  mcpApps,
+  showApps = true,
+  appsCollapsed = false,
+  appPanel = 'auto',
+  onAppPanel,
+  renderApp,
+  renderAppRequest,
 }: AgentChatProps) => {
   const ctx = useOptionalAgentContext()
   const agent = controller ?? ctx
@@ -343,6 +401,62 @@ const AgentChatInner = ({
     agent.pendingApprovals,
     elicitations,
   ])
+
+  // MCP Apps: the host (reads, consent), the theme they are told, the one in the panel.
+  const appHost = useMcpAppHost({
+    connection: mcpApps,
+    approve: agent.approveAppToolCall,
+    approvals: agent.pendingApprovals,
+  })
+  const prefersDark = usePrefersDark()
+  const appTheme: 'light' | 'dark' = theme === 'auto' ? (prefersDark ? 'dark' : 'light') : theme
+  const [panelApp, setPanelAppState] = useState<AppView | undefined>()
+  const setPanelApp = (app: AppView | undefined) => {
+    setPanelAppState(app)
+    onAppPanel?.(app)
+  }
+  const appsOn = showApps && Boolean(mcpApps)
+  const panelAllowed = appPanel !== false && appPanel !== null
+  const panelTarget = typeof appPanel === 'object' && appPanel ? appPanel : undefined
+  const asSheet = !panelTarget && (appPanel === 'sheet' || Boolean(narrow))
+  // An app whose message is gone (a new chat, a reset) leaves the panel.
+  useEffect(() => {
+    if (panelApp && !agent.messages.some((m) => m.apps?.some((a) => a.id === panelApp.id))) {
+      setPanelAppState(undefined)
+      onAppPanel?.(undefined)
+    }
+  }, [agent.messages, panelApp, onAppPanel])
+  const drawApp = (app: AppView, message: ChatMessage): ReactNode => {
+    const built =
+      panelApp?.id === app.id ? (
+        <McpAppLine
+          app={app}
+          note={L.appInPanel}
+          action={L.appBringBack}
+          onAction={() => setPanelApp(undefined)}
+        />
+      ) : (
+        <McpAppFrame
+          app={app}
+          host={appHost}
+          theme={appTheme}
+          defaultCollapsed={appsCollapsed}
+          onOpenPanel={panelAllowed ? () => setPanelApp(app) : undefined}
+        />
+      )
+    return renderApp ? renderApp(app, message, built) : built
+  }
+  const appPanelNode =
+    appsOn && panelApp ? (
+      <McpAppFrame
+        key={panelApp.id}
+        app={panelApp}
+        host={appHost}
+        theme={appTheme}
+        variant="panel"
+        onClosePanel={() => setPanelApp(undefined)}
+      />
+    ) : null
 
   const [compacting, setCompacting] = useState(false)
   const compact = () => {
@@ -518,6 +632,8 @@ const AgentChatInner = ({
             renderMessage={renderMessage}
             renderAttachment={renderAttachment}
             renderToolCall={renderToolCall}
+            showApps={appsOn}
+            renderApp={appsOn ? drawApp : undefined}
           />
           <Approvals
             approvals={agent.pendingApprovals}
@@ -525,6 +641,15 @@ const AgentChatInner = ({
             onDeny={agent.deny}
             renderApproval={renderApproval}
           />
+          {/* Asked of the user, in this order: tool calls (the agent's and an app's), what an
+              app asks besides (a link, a message), then a server's questions. */}
+          {appsOn && (
+            <AppRequestPrompt
+              requests={appHost.requests}
+              onAnswer={appHost.answer}
+              renderRequest={renderAppRequest}
+            />
+          )}
           {showElicitation && elicitations && onElicitationAnswer && (
             <Elicitations
               elicitations={elicitations}
@@ -562,12 +687,41 @@ const AgentChatInner = ({
               showApprovalMode={showApprovalMode}
               files={files}
               dropZone={rootRef}
+              {...(appHost.draft ? { draft: appHost.draft } : {})}
               {...(placeholder ? { placeholder } : {})}
               {...composer}
             />
           )}
         </div>
       </div>
+
+      {appPanelNode &&
+        (panelTarget ? (
+          // Outside the chat: the theme tokens come with it.
+          createPortal(
+            <div
+              className="awr-theme awr-apppanel"
+              data-awr-theme={theme === 'auto' ? undefined : theme}
+            >
+              {appPanelNode}
+            </div>,
+            panelTarget,
+          )
+        ) : asSheet ? (
+          <>
+            <div className="awr-sheet__scrim" onClick={() => setPanelApp(undefined)} />
+            <aside
+              className="awr-chat__appsheet"
+              role="dialog"
+              aria-label={L.appFrom(panelApp!.server)}
+            >
+              <div className="awr-sheet__grab" />
+              {appPanelNode}
+            </aside>
+          </>
+        ) : (
+          <aside className="awr-chat__apppanel">{appPanelNode}</aside>
+        ))}
 
       {files && filesOpen && (
         <aside className={cx('awr-chat__files', classNames.files)}>

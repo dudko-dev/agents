@@ -53,6 +53,7 @@ function Assistant() {
 - [Subagents and helpers: the tree](#subagents-and-helpers-the-tree)
 - [Generated media and transcripts](#generated-media-and-transcripts)
 - [Files written in a turn: chips, previews, the HTML frame](#files-written-in-a-turn-chips-previews-the-html-frame)
+- [MCP Apps: a server's interface in the chat](#mcp-apps-a-servers-interface-in-the-chat)
 - [The decision model's note](#the-decision-models-note)
 - [Web search results](#web-search-results)
 - [The agent's notebook, and what it fetched](#the-agents-notebook-and-what-it-fetched)
@@ -437,6 +438,140 @@ Labels: `filesWritten`, `filesCount`, `showInFiles`, `fileKinds`, `fileOpen`, `f
 `htmlNoNetwork`, `htmlSourceNote`, `htmlScripts`, `htmlLinkedFiles`, `htmlTooLarge`, `htmlTaller`,
 `htmlShorter`, `htmlFrameName`.
 
+## MCP Apps: a server's interface in the chat
+
+With [MCP Apps](https://github.com/modelcontextprotocol/ext-apps) (the stable extension
+`io.modelcontextprotocol/ui`) a tool of an MCP server declares an HTML app that shows its result -
+a list of flights to pick from, a chart, a form. The chat draws it **under the answer**, in a
+sandboxed frame, and everything the app asks the host to do goes through the user.
+
+```tsx
+import { useMcpServers } from '@dudko.dev/agent-web-react/mcp'
+
+const mcp = useMcpServers({ apps: true }) // declares the extension, reads the tools' apps
+const agent = useAgent({ model, tools: mcp.tools }, { deps: [mcp.tools] })
+
+<AgentChat controller={agent} mcpApps={mcp.apps} />
+```
+
+What the user sees:
+
+- **The app, in host-drawn chrome.** "App from server “travel” · sandboxed" and the controls - open
+  in panel, and a menu with Reload, Open in panel, Hide and a note on what the app cannot reach -
+  are in your page, outside the frame. The app's tool call in the activity is tagged **app** and
+  the summary counts it ("1 step · 1 tool call · 1 app"). Under the frame, a line lists what the
+  app ran ("The app ran flights.refresh · flights.book (refused)").
+- **Folded.** Hide leaves one line ("App from server “travel” · hidden" and **Show**).
+  `appsCollapsed` starts every app folded.
+- **In a panel.** On a wide chat the app moves beside it; on a narrow one (under `narrowWidth`) it
+  is a bottom sheet; `appPanel={element}` renders it into a column of your page. The answer then
+  says "open in the panel" with **Bring back**. Moving an app starts it again (a new frame).
+- **What the app asks for, as the app's.** In the chat's consent area, beside the agent's own
+  requests:
+  - a **tool call** - "The app “travel” wants to run `flights.book`", its arguments, "Asked by
+    the app, not by the agent. This tool changes data on the server “travel”." - **Allow once**,
+    **Always allow**, **Deny**. It is the agent's own consent gate (`useAgent().approveAppToolCall`,
+    the core's `approveAppToolCall`): the same rules and modes, except that an app never writes
+    silently - under autopilot its writes still ask - and "Always allow" given to an app is the
+    app's alone. Read-only tools of its server run without a prompt. Denied, the app gets an
+    error. While a request waits the frame says "waiting for you";
+  - a **link** - "The app “travel” wants to open a link. Open it?" with the address, its **host
+    highlighted**, and "Opens in a new tab, outside this chat." It opens only on **Open** (in a new
+    tab, without an opener or a referrer); **Cancel** is an error for the app. Only `http(s)` links
+    without credentials get that far;
+  - a **message** - "The app “travel” wants to put a message in your message box", the text
+    quoted. **Put in the message box** adds it to the message field as a draft: nothing is sent
+    until the user sends it, and they can change it first. **Discard** is an error for the app.
+
+  One question per app at a time; an app cannot pile prompts up. The consent area keeps one
+  order: tool calls (the agent's and the apps'), then what apps ask besides (links, messages),
+  then the servers' [questions](#questions-from-mcp-servers-elicitation). An app's prompt does not
+  stop the run's step clock: the run is not waiting for it. A question the server asks during an
+  app's tool call (with `elicitation` on) is shown like any other. With `elicitation` on, a server
+  on the 2025 revisions gets its calls one at a time (its question does not say which call it is
+  about): an app's call the user allowed waits while a question of that server is open, and the
+  app gets its answer once the question is settled; on 2026-07-28 it goes at once.
+
+```ts
+message.apps // AppView[] | undefined - { id, server, tool, toolName, resourceUri, input, result?, stepId?, by? }
+agent.apps // the same, for the current run
+step.toolCalls[i].app // the AppView id the call came with
+approval.app // { server, tool, resourceUri } - an app asks, not the agent
+```
+
+| Prop (`<AgentChat>`) | Default | |
+| --- | --- | --- |
+| `mcpApps` | - | the connection: `useMcpServers({ apps: true }).apps` (or `useMcp`'s, or the core's `ConnectedMcp.apps`). Without it no app is drawn |
+| `showApps` | `true` | draw the apps (chat / message list) |
+| `appsCollapsed` | `false` | start every app folded to one line |
+| `appPanel` | `'auto'` | where "Open in panel" goes: `'auto'` (beside a wide chat, a sheet on a narrow one), `'sheet'`, an element of your page, or `false` (no panel) |
+| `onAppPanel` | - | told when an app goes into the panel (`app`) or leaves it (`undefined`) |
+| `renderApp(app, message, fallback)` | - | draw an app yourself |
+| `renderAppRequest(request, fallback)` | - | draw a link / message request yourself |
+
+The parts on their own: `<McpAppFrame app host variant? theme? defaultCollapsed? onOpenPanel?
+onClosePanel? showCalls?>`, `<McpAppLine app note action onAction>`, `<AppRequestPrompt requests
+onAnswer renderRequest?>`, `useMcpAppHost({ connection, approve, approvals })` (what `<AgentChat>`
+uses: `read`, `callTool`, `openLink`, `message`, `requests`, `answer`, `draft`, `isWaiting`),
+and `<AgentComposer draft={{ id, text }}>` (an accepted message, appended once per `id`, never
+sent). `<MessageList renderApp showApps>` draws `message.apps`.
+
+### An app is a security boundary
+
+An app is third-party HTML **with scripts**, written by the server's author - not by the agent, and
+not by you. Every line below is a guard with a test (`tests/apps.test.ts`; in a real browser against
+a hostile app, `e2e/apps.spec.ts`):
+
+- **Opaque origin.** `<iframe sandbox="allow-scripts">`, never `allow-same-origin`, no navigation,
+  popup, form, modal or download token, no `allow` attribute: the app cannot read your DOM,
+  `localStorage`, `sessionStorage`, cookies or IndexedDB (the key vault), cannot navigate your tab,
+  cannot open windows, and gets no camera, microphone, location or clipboard - whatever it asked
+  for. By `srcdoc`, never by a URL of your origin.
+- **Network only where its resource declared it.** The policy is built from the resource's
+  metadata and nothing else: `connectDomains` for `fetch` / XHR / WebSocket, `resourceDomains` for
+  scripts, styles, images, fonts, media. Nothing declared, nothing reached. Each origin is checked
+  again here (`mcpAppOrigin`): a keyword, a scheme, a path, `*` or a `;` that would add a directive
+  is dropped. Nested frames, workers, plugins, forms and `<base>` are refused whatever was declared.
+- **No self-navigation, a policy it cannot pre-empt.** The app is framed by a shell document of
+  ours: its policy is first in the app's own document AND inherited from the shell, and the shell's
+  `frame-src 'none'` stops the app navigating itself (each navigation would be a request).
+- **Messages from that frame only, through a relay of ours.** The shell relays between the app and
+  your page by window, never the reserved `ui/notifications/sandbox-*` messages. Your page accepts
+  only messages whose `event.source` is the frame it drew: an app writing to `window.top` directly
+  is ignored.
+- **An allow-list on the bridge.** `ui/initialize`, `ping`, `tools/call`, `ui/open-link`,
+  `ui/message`, `ui/request-display-mode` (it stays inline); size-changed and initialized
+  notifications. Everything else is "method not found" - no resource reads, no model context, no
+  downloads, no sampling. Nothing but `ping` before `ui/initialize`; the tool's input and result are
+  sent once, after the app says it is initialized. Parameters are checked before the host sees
+  them; at most `MCP_APP_MAX_IN_FLIGHT` (3) requests of an app wait at once.
+- **Consent for everything that acts** - tool calls through the agent's gate, links on the user's
+  click, messages as a draft - labelled as the app's. A tool of another server, or one whose
+  `visibility` leaves out `'app'`, is refused before anyone is asked.
+- **The host draws the chrome; the host decides the height.** The label, the controls, the menu and
+  every prompt are outside the frame - an app can paint a fake "Allow" inside its box, never on
+  yours. Its size is its wish, clamped to 120 - 800 px.
+
+What it does **not** do, in this version:
+
+- **The specification's dedicated origin.** The 2026-01-26 revision asks a web host for a sandbox
+  proxy on another origin with `allow-same-origin`; a library in your page has no second origin,
+  and `allow-same-origin` on a `srcdoc` frame would be YOUR origin. So the app has an opaque
+  origin: no storage, no cookies, and its requests carry `Origin: null` (its APIs must allow it).
+- **WebRTC** is not governed by `connect-src` in Chromium: an app could reach a STUN server it
+  names - with what it has (the tool's input and result, what the user typed into it), never
+  anything of your page. Its CPU and memory are not limited.
+- `ui/update-model-context`, `resources/read` for the app, `ui/download-file`, sampling,
+  fullscreen / picture-in-picture, the host's style variables. A teardown is announced to the app
+  but not waited for.
+
+Labels: `appFrom`, `appSandboxed`, `appWaiting`, `appTag`, `appsCount`, `appLoading`, `appFailed`,
+`appUnavailable`, `appHidden`, `appShow`, `appMenu`, `appReload`, `appOpenPanel`, `appHide`,
+`appServedBy`, `appInPanel`, `appBringBack`, `appClosePanel`, `appPanelNote`, `appFrameName`,
+`appRan`, `appRefused`, `approvalLeadApp`, `approvalFromApp`, `appLinkLead`, `appLinkNote`,
+`appLinkOpen`, `appCancel`, `appMessageLead`, `appMessageNote`, `appMessageAccept`,
+`appMessageDiscard`.
+
 ## The decision model's note
 
 With `decisionModel` in the agent's config a small model answers the replanner's continue / finish.
@@ -712,9 +847,11 @@ tokens inside an element with class `awr-theme`.
 | `lessonsOf` | the agent's own skills (`agent.listLearnedSkills()`) as `LessonView[]` - what the hook seeds the notebook with |
 | `useVirtualFiles` | a live listing of a `VirtualFileSystem` + upload / remove / read |
 | `useSpeechToText` | Web Speech API: `{ supported, listening, interim, start, stop, toggle }` |
-| `useMcp` / `useMcpServers` | one or several MCP servers, merged tools — import from `@dudko.dev/agent-web-react/mcp`. `instructions` (on `useMcp`, and on each of `useMcpServers().servers`) is what the server told the agent in its handshake - third-party text that goes into the agent's prompt: show it to the user as the server's words. `protocol` (`useMcp`) / `servers[i].protocol` and `protocols` (`useMcpServers`) are the negotiated MCP revisions; a server is connected with `protocol: 'legacy' \| 'auto' \| 'modern'` (`connect` / `add`). `pendingElicitations` / `answerElicitation` are the servers' [questions to the user](#questions-from-mcp-servers-elicitation). Options: `clientName`, `clientMetadataUrl` (a client ID metadata document, CIMD, used as the OAuth `client_id` where the authorization server supports it; per server through `oauth.clientMetadataUrl`), `onLog`, `elicitation` (`true` or the core's settings; off by default) — see the README |
+| `useMcp` / `useMcpServers` | one or several MCP servers, merged tools — import from `@dudko.dev/agent-web-react/mcp`. With `apps: true` they declare MCP Apps and return `apps` for `<AgentChat mcpApps>`. `instructions` (on `useMcp`, and on each of `useMcpServers().servers`) is what the server told the agent in its handshake - third-party text that goes into the agent's prompt: show it to the user as the server's words. `protocol` (`useMcp`) / `servers[i].protocol` and `protocols` (`useMcpServers`) are the negotiated MCP revisions; a server is connected with `protocol: 'legacy' \| 'auto' \| 'modern'` (`connect` / `add`). `pendingElicitations` / `answerElicitation` are the servers' [questions to the user](#questions-from-mcp-servers-elicitation). Options: `clientName`, `clientMetadataUrl` (a client ID metadata document, CIMD, used as the OAuth `client_id` where the authorization server supports it; per server through `oauth.clientMetadataUrl`), `onLog`, `elicitation` (`true` or the core's settings; off by default), `apps` (off by default) — see the README |
 | `elicitationFields`, `elicitationInitialDraft`, `elicitationFormAnswer`, `elicitationLink`, `formatCountdown` | the elicitation prompt's pure logic ([above](#questions-from-mcp-servers-elicitation)) |
 | `mcpOAuthProviderOptions` | the options the MCP hooks hand the core's OAuth provider for one server (pure; same subpath) |
+| `useMcpAppHost` | MCP Apps: reads an app from its server, puts its tool calls through the agent's gate, holds its link / message requests ([above](#mcp-apps-a-servers-interface-in-the-chat)). `mcpAppsRouter` (`./mcp`) is the stable `apps` the MCP hooks return |
+| `McpAppBridge`, `buildMcpAppDocument`, `mcpAppCsp`, `appLinkOf`, `appMessageTextOf`, `clampAppHeight` | the frame's security core, pure: the bridge without a DOM, the shell, the policy, the link and message checks |
 | `agentStateReducer` | the pure event → UI reducer |
 | `subagentTree` | `agent.subagents` (flat) as nested `SubagentNode[]` |
 | `webSearchOf`, `mediaFamilyOf`, `decisionNote` | a `web_search` result as a view, the family a generated file may be shown as, the decision model's sentence |
@@ -784,5 +921,13 @@ component or `<AgentLabelsProvider>`); whatever you leave out falls back to `def
   `stopped` / `cap-per-call` / `cap-per-run` / `unsupported-schema` / `unsupported-mode` /
   `insecure-url` / `invalid-request` / `subagent` / `handler-error` / `invalid-answer` /
   `after-failure` / `no-tool-call`)*, `elicitationDismiss`.
+- **MCP Apps:** `appFrom` *(fn: server)*, `appSandboxed`, `appWaiting`, `appTag`, `appsCount`
+  *(fn: n)*, `appLoading`, `appFailed` *(fn: reason)*, `appUnavailable` *(fn: server)*, `appHidden`,
+  `appShow`, `appMenu`, `appReload`, `appOpenPanel`, `appHide`, `appServedBy` *(fn: server, uri)*,
+  `appInPanel`, `appBringBack`, `appClosePanel`, `appPanelNote` *(fn: server)*, `appFrameName`
+  *(fn: server)*, `appRan` *(fn: names)*, `appRefused`, `approvalLeadApp` *(fn: server)*,
+  `approvalFromApp` *(fn: server, readOnly)*, `appLinkLead` *(fn: server)*, `appLinkNote`,
+  `appLinkOpen`, `appCancel`, `appMessageLead` *(fn: server)*, `appMessageNote`,
+  `appMessageAccept`, `appMessageDiscard`.
 
 `tests/chat.test.ts` fails if a key is added to `AgentLabels` and not listed here.

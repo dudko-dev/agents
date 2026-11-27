@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { AgentToolSet } from '@dudko.dev/agent-web'
+import type { McpAppsConnectionLike } from './use-mcp-app-host.js'
 import {
   createElicitationQueue,
   elicitationConnectOptions,
@@ -81,6 +82,12 @@ export interface UseMcpOptions {
   /** Called with connector log lines — handy while debugging a server. */
   onLog?: (level: string, message: string) => void
   /**
+   * MCP Apps: declare the extension and read the tools' apps (default false). The hook then
+   * returns `apps` - pass it to `<AgentChat mcpApps>` - and a tool's results come with an app.
+   * A tool for its app only is then not in `tools`. Needs a core with MCP Apps.
+   */
+  apps?: boolean
+  /**
    * MCP elicitation: let a server ask the USER for input in the middle of a tool call - a
    * form, or (with `url: true`) a link to open. Off by default, and then nothing is passed to
    * the core: no capability is declared and the wire is what it was. `true` turns it on with
@@ -90,6 +97,30 @@ export interface UseMcpOptions {
    * `answerElicitation`. Read when a server connects: changing it takes a reconnect.
    */
   elicitation?: boolean | McpElicitationOptions
+}
+
+/**
+ * A stable `McpAppsConnectionLike` for the hooks: each call reaches the connection the server is
+ * on NOW (or says it is not connected), so it can be handed to `<AgentChat>` once.
+ */
+export const mcpAppsRouter = (
+  connectionOf: (server: string) => ConnectedMcp | undefined,
+): McpAppsConnectionLike => {
+  const appsOf = (server: string) => connectionOf(server)?.apps
+  const notConnected = (server: string) => new Error(`the server “${server}” is not connected`)
+  return {
+    readUiResource: (server, uri, options) => {
+      const apps = appsOf(server)
+      return apps ? apps.readUiResource(server, uri, options) : Promise.reject(notConnected(server))
+    },
+    appTool: (server, name) => appsOf(server)?.appTool(server, name),
+    callAppTool: (server, name, args, options) => {
+      const apps = appsOf(server)
+      return apps
+        ? apps.callAppTool(server, name, args, options)
+        : Promise.reject(notConnected(server))
+    },
+  }
 }
 
 /** What both MCP hooks return for elicitation. */
@@ -144,6 +175,8 @@ export interface UseMcpReturn extends McpElicitationControls {
   forgetAuthorization: () => Promise<void>
   /** Load the optional subpath and report whether it can do OAuth. */
   checkOAuthSupport: () => Promise<boolean>
+  /** MCP Apps of the connected server (with `apps: true`): pass it to `<AgentChat mcpApps>`. */
+  apps?: McpAppsConnectionLike
 }
 
 /**
@@ -587,6 +620,7 @@ export const useMcp = (options: UseMcpOptions = {}): UseMcpReturn => {
           {
             clientName: optionsRef.current.clientName,
             onLog: optionsRef.current.onLog,
+            ...(optionsRef.current.apps ? { apps: true } : {}),
             // Off: neither key is passed, so the core declares no capability.
             ...elicitationConnectOptions(optionsRef.current.elicitation, elicitation.handler),
           },
@@ -761,7 +795,14 @@ export const useMcp = (options: UseMcpOptions = {}): UseMcpReturn => {
     [closeConnection],
   )
 
+  const appsOn = options.apps === true
+  const apps = useMemo(
+    () => (appsOn ? mcpAppsRouter(() => connectionRef.current) : undefined),
+    [appsOn],
+  )
+
   return {
+    apps,
     status,
     tools,
     catalog,

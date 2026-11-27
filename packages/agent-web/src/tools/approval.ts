@@ -35,6 +35,22 @@ export interface ToolApprovalRequest {
    * run itself: the helper's id (as in its `subagent.start` event) and its depth.
    */
   subagent?: { id: string; depth: number }
+  /**
+   * Set when the call comes from an MCP App (`Agent.approveAppToolCall`), not from the model:
+   * a UI says so ("The app “travel” wants to run …"). `toolName` above is then the name the
+   * agent's rules match (`server__tool`), `app.tool` the server's own name for it.
+   */
+  app?: ToolApprovalApp
+}
+
+/** Who asks when an MCP App asks (see `ToolApprovalRequest.app`). */
+export interface ToolApprovalApp {
+  /** The MCP server the app came from (its tools are the only ones it may call). */
+  server: string
+  /** The tool's own name on that server. */
+  tool: string
+  /** The app's `ui://` resource. */
+  resourceUri: string
 }
 
 /** What the gate hands `onRequest` beside the request. */
@@ -229,6 +245,7 @@ export const gateToolCall = async (
     readOnly: boolean
     step?: IPlanStep
     subagent?: { id: string; depth: number }
+    app?: ToolApprovalApp
   },
   events: ApprovalEvents,
   signal?: AbortSignal,

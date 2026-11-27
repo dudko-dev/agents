@@ -37,7 +37,34 @@ export type {
   McpServerResult,
   ConnectedMcp,
   ConnectMcpOptions,
+  McpAppsConnection,
+  McpAppTool,
 } from './http.js'
+export {
+  MCP_APP_DEFAULT_VISIBILITY,
+  MCP_APP_MAX_DOMAINS,
+  MCP_APP_MAX_HTML_CHARS,
+  MCP_APP_MAX_RESULT_CHARS,
+  MCP_APP_MIME_TYPE,
+  MCP_APPS_EXTENSION,
+  McpAppResourceError,
+  isMcpAppMimeType,
+  isMcpAppUri,
+  mcpAppCspOf,
+  mcpAppOrigin,
+  mcpAppPermissionsOf,
+  mcpAppResourceOf,
+  mcpAppToolMeta,
+  mcpAppToolResultOf,
+} from './apps.js'
+export type {
+  McpAppCsp,
+  McpAppPermissions,
+  McpAppResource,
+  McpAppToolMeta,
+  McpAppToolResult,
+  McpAppVisibility,
+} from './apps.js'
 export {
   BrowserOAuthProvider,
   MemoryOAuthStorage,

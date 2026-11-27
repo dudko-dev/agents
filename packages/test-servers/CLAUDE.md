@@ -59,6 +59,9 @@ published**, never a runtime dependency of anything.
   (2026-07-28), `dual` routes between the two with the SDK's `isLegacyRequest`. The tools are
   declared once (`plainTools`) and registered with both SDKs. Probe faults (`protocolFaults`), the
   request log and the tool-list-change trigger live here.
+- `src/mcp-app.ts` — the MCP Apps "travel" app (`travelAppHtml`: the extension's JSON-RPC by
+  hand, and the hostile probes the React e2e reads) and its tools' data. `appTools` mounts the
+  `flights.*` tools and the `ui://` resources in both eras; `appFaults` breaks the resource.
 - `src/mcp-elicitation.ts` — the `elicit_*` tools as step functions (ask or finish), the signed
   `requestState`, the URL-mode pages and `elicitationFaults`. It knows no transport: the modern
   driver (an `input_required` result) and the legacy one (real `elicitation/create` requests on the

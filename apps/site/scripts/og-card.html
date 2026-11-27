@@ -1,0 +1,175 @@
+<!doctype html>
+<!--
+  The social card (og:image) of agent.dudko.dev, 1200×630. Rendered by scripts/og-cards.mjs, which
+  fills in the text and, for a page card, the crop of the page itself.
+
+  Two layouts, one look:
+  - "home" (the site's card, /og.png): the logo, the promise in two lines, what it is, the address.
+  - "page" (/og/demo.png, /og/pipeline.png): the logo and the address, the page's name and one
+    line, and below them a strip of the real page, cut off by the card's edges like a window.
+
+  Colours come from the site's tokens; the type is Inter (and DejaVu Sans Mono for the address),
+  which is what the first card was drawn in. Open this file in a browser to see the "home" card.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="../src/styles/tokens.css" />
+    <style>
+      html,
+      body {
+        margin: 0;
+      }
+      body {
+        width: 1200px;
+        height: 630px;
+        overflow: hidden;
+        position: relative;
+        background: var(--c-bg);
+        color: var(--c-text);
+        font-family: Inter, var(--font-sans);
+        -webkit-font-smoothing: antialiased;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 26px;
+        font-size: 64px;
+        letter-spacing: -0.02em;
+        line-height: 1;
+      }
+      .brand div {
+        position: relative;
+        top: 1px;
+      }
+      .brand__mark {
+        width: 112px;
+        height: 112px;
+        display: block;
+      }
+      .brand b {
+        font-weight: 700;
+      }
+      .brand span {
+        color: var(--c-text-muted);
+        font-weight: 400;
+        letter-spacing: -0.01em;
+        word-spacing: -2px;
+      }
+      .url {
+        font-family: 'DejaVu Sans Mono', Menlo, var(--font-mono);
+        font-size: 26px;
+        color: var(--c-accent);
+      }
+
+      /* home: the site's card */
+      .home {
+        position: absolute;
+        inset: 0;
+        padding: 121px 96px 0;
+      }
+      .home h1 {
+        margin: 30px 0 0;
+        font-size: 52px;
+        font-weight: 700;
+        line-height: 60px;
+        letter-spacing: -0.02em;
+        max-width: 900px;
+      }
+      .home p {
+        margin: 30px 0 0;
+        font-size: 30px;
+        color: var(--c-text-muted);
+      }
+      .home .url {
+        margin-top: 30px;
+      }
+
+      /* page: a page's card */
+      .page {
+        position: absolute;
+        inset: 0;
+      }
+      .page__head {
+        position: absolute;
+        left: 96px;
+        right: 96px;
+        top: 38px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+      .page .brand {
+        gap: 16px;
+        font-size: 36px;
+      }
+      .page .brand__mark {
+        width: 64px;
+        height: 64px;
+      }
+      .page h1 {
+        position: absolute;
+        left: 96px;
+        top: 120px;
+        margin: 0;
+        font-size: 76px;
+        font-weight: 700;
+        line-height: 1;
+        letter-spacing: -0.02em;
+      }
+      .page p {
+        position: absolute;
+        left: 96px;
+        right: 96px;
+        top: 212px;
+        margin: 0;
+        font-size: 34px;
+        line-height: 1.25;
+        color: var(--c-text-muted);
+      }
+      .shot {
+        position: absolute;
+        left: 72px;
+        top: 286px;
+        right: -24px;
+        bottom: -24px;
+        overflow: hidden;
+        border: 1px solid var(--c-border-strong);
+        border-radius: var(--radius-lg);
+        background: var(--c-bg);
+        box-shadow: var(--shadow-lift);
+      }
+      .shot img {
+        display: block;
+      }
+
+      [hidden] {
+        display: none !important;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="home" id="home">
+      <div class="brand">
+        <img class="brand__mark" src="../src/assets/mark.svg" alt="" />
+        <div><b>agents </b><span>· dudko.dev</span></div>
+      </div>
+      <h1>Agents that plan, use your tools and answer. In Node and in the browser.</h1>
+      <p>Open-source TypeScript · MCP tools · React bindings</p>
+      <div class="url">agent.dudko.dev</div>
+    </div>
+
+    <div class="page" id="page" hidden>
+      <div class="page__head">
+        <div class="brand">
+          <img class="brand__mark" src="../src/assets/mark.svg" alt="" />
+          <div><b>agents </b><span>· dudko.dev</span></div>
+        </div>
+        <div class="url" id="page-url"></div>
+      </div>
+      <h1 id="page-title"></h1>
+      <p id="page-line"></p>
+      <div class="shot"><img id="page-shot" alt="" /></div>
+    </div>
+  </body>
+</html>

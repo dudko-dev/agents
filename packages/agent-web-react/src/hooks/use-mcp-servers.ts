@@ -9,11 +9,13 @@ import type {
   McpProtocolMode,
   McpServerProtocol,
 } from '../mcp-types.js'
+import type { McpAppsConnectionLike } from './use-mcp-app-host.js'
 import {
   claimOAuthCallback,
   defaultRedirectUrl,
   describeMcpResult,
   loadMcp,
+  mcpAppsRouter,
   mcpInstructionsOf,
   mcpOAuthProviderOptions,
   mcpProtocolOf,
@@ -115,6 +117,11 @@ export interface UseMcpServersReturn extends McpElicitationControls {
   authorize: (name: string) => void
   /** Drop a server's stored OAuth tokens and registration. */
   forgetAuthorization: (name: string) => Promise<void>
+  /**
+   * MCP Apps of every connected server (with `apps: true`): pass it to `<AgentChat mcpApps>`.
+   * Each call goes to the server it names, on the connection it has now.
+   */
+  apps?: McpAppsConnectionLike
 }
 
 interface StoredServer {
@@ -309,6 +316,7 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
             clientName: optionsRef.current.clientName,
             onLog: optionsRef.current.onLog,
             connectTimeoutMs: optionsRef.current.connectTimeoutMs,
+            ...(optionsRef.current.apps ? { apps: true } : {}),
             // Off: neither key is passed, so the core declares no capability.
             ...elicitationConnectOptions(optionsRef.current.elicitation, elicitation.handler),
           },
@@ -555,6 +563,12 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
     [servers],
   )
 
+  const appsOn = options.apps === true
+  const apps = useMemo(
+    () => (appsOn ? mcpAppsRouter((server) => liveRef.current.get(server)?.connection) : undefined),
+    [appsOn],
+  )
+
   const protocols = useMemo<McpServerProtocol[]>(
     () =>
       servers.flatMap((s) =>
@@ -564,6 +578,7 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
   )
 
   return {
+    apps,
     servers,
     tools,
     catalog,

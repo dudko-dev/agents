@@ -837,6 +837,48 @@ form is ordinary, and the step used to end under them (the elicitation answered 
   run anyway. A negative number or `NaN` is a configuration error at `createAgent` (or the
   connect, for an elicitation), never a silent "no bound".
 
+## MCP Apps: the host reads, the browser draws
+
+- **Two halves.** The core is the data side of a host - the extension in the handshake, the
+  tools' `_meta.ui` at list time, the `mcp.app` event, `readUiResource` / `appTool` /
+  `callAppTool` on the connection, and the consent gate (`agent.approveAppToolCall`). The frame,
+  the `postMessage` bridge and every prompt the user sees are the React package's: the core has
+  no DOM, and a host without React can draw apps with the same core API.
+- **On the connection, like elicitation.** The extension is declared in the handshake, so `apps`
+  is an option of `connectMcpHttp`, off by default. Off, nothing is read and the wire is the
+  recorded fixture's; on, the only wire difference is the extension.
+- **The event carries data, never the app.** `mcp.app` has the call's input and the result for
+  the app - so a saved conversation can show the app again - and the UI reads the HTML from the
+  server when it draws. Putting the HTML in the event would put third-party code in every event
+  log, every saved chat and every checkpoint, and near the model.
+- **Read only what a tool of that server declares.** A UI could be tricked (or a host careless)
+  into reading `ui://` URIs a server never tied to a tool, or another server's; the connection
+  answers only for URIs in the server's current listing. The cache is per connection and
+  dropped when the server's tools are listed again.
+- **Consent is the agent's gate, not a second one.** An app's call goes through the same
+  `toolApproval` - rules, handler, timeout - so a host has one policy and one prompt. Two
+  differences, both towards asking more: `'autopilot'` is the model's licence, not the app's
+  (writes ask), and an app's "always allow" is kept apart (the user trusted the agent, or the
+  app, not both). `callAppTool` does not ask by itself: it is the host's capability, like a
+  tool's `execute`.
+- **An app's call is not the step's.** Its consent and any question its server asks during it
+  wait outside the run's clock (see [Time a person takes](#time-a-person-takes-is-not-a-steps-time)):
+  the app's prompt may come while no run goes, and when one does, the step it would pause is
+  not waiting for that person. Its bounds are the gate's own `toolApproval.timeoutMs` and the
+  question's `elicitation.timeoutMs`.
+- **No `@modelcontextprotocol/ext-apps` dependency.** Its host helper (`AppBridge`) is built on
+  the SDK's `Protocol` with zod schemas and console logging, peers `@modelcontextprotocol/client`,
+  `core` and `zod`, and assumes a sandbox proxy on another origin. The host side we need is an
+  allow-list of a few methods: the bridge and the frame's policy are one file of the React package
+  (`src/mcp-app.ts`), the guards on the server's declarations one file here (`mcp/apps.ts`, pure,
+  no imports). Both follow the package's
+  types (`spec.types.ts`) and wire (`ui/initialize` → `ui/notifications/initialized` →
+  `tool-input` / `tool-result`), and the test server's app speaks it by hand.
+- **Node: nothing yet.** The Node agent renders nothing, and an app's requests come from a browser:
+  a server-side host would need the bridge in the page and a round trip for every app call. The
+  names (`apps`, `mcp.app`, `readUiResource`, `appTool`, `callAppTool`, `approveAppToolCall`) are
+  kept for when it does.
+
 ## Secrets
 
 API keys are encrypted at rest with a **non-extractable AES-GCM `CryptoKey`**

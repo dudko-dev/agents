@@ -19,6 +19,7 @@ import {
 } from './format.js'
 import {
   AlertIcon,
+  AppIcon,
   ArrowUpIcon,
   BrainIcon,
   CheckIcon,
@@ -98,6 +99,11 @@ export const ToolCallRow = ({
         )}
         {showTiers && call.attempt !== undefined && (
           <span className="awr-tool__tag">{L.attemptTag(call.attempt)}</span>
+        )}
+        {call.app && (
+          <span className="awr-tool__tag awr-tool__tag--app" data-app={call.app}>
+            <AppIcon size={10} /> {L.appTag}
+          </span>
         )}
         {showUsage && cost && (
           <span className="awr-tool__cost" title={L.toolCostTitle}>

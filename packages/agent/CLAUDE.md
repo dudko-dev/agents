@@ -121,6 +121,10 @@
     check). The section goes to the planner and the executor only, and `ctx.mcpInstructions` is
     replaced only between runs (prompt caching). A result that breaks its tool's `outputSchema`
     is passed on with a note, never thrown (`outputSchemaViolation` in `mcp.ts`).
+  - MCP Apps (`io.modelcontextprotocol/ui`) are NOT here, deliberately: the browser sibling has
+    them (`apps` on its connection, `mcp.app`, `approveAppToolCall`) and its React package draws
+    them; this package renders nothing (README, "MCP Apps: not in this package"). If they are
+    added, keep the browser's names, its "off = the recorded wire" test and its guards.
   - `mcp-elicitation.ts` (pure, no imports; `config.onElicitation` / `config.elicitation`): MCP
     elicitation - a server asks the USER for input during a tool call and the host's callback
     answers. The limits, what a request must be before the host sees it (third-party text

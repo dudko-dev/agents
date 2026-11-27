@@ -64,7 +64,7 @@ export const PAGES = [
     'packages/agent-web-react/docs/pipeline.md',
     'react/pipeline',
     'Pipeline editor',
-    'A canvas editor for graphs of agents: the PipelineEditor component, the usePipeline hook and its pure reducer, the generic canvas, the editing helpers and every label.',
+    'A canvas editor for graphs of agents: the PipelineEditor component, the usePipeline hook and its pure reducer, the canvas, the editing helpers and every label.',
   ],
 ].map(([source, route, title, description]) => ({ source, route, title, description }))
 
