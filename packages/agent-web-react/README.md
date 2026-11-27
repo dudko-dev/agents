@@ -537,7 +537,8 @@ Two notes:
   OAuth `registration` choice this package's chat and hooks use, on top of model
   tiers, dynamic subagents, media and decision models, pipelines, the learning
   notebook, the virtual file system, attachments, consent, tool search, subagents,
-  steering and context editing.
+  steering and context editing. `skills: { dynamic: true }` needs a core 0.0.42 or
+  later: an older one declines those skills.
 
 ## Several MCP servers — `useMcpServers`
 

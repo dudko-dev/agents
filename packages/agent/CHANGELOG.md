@@ -1,3 +1,10 @@
+# 0.0.50 / 2026-11-27
+
+### :tada: Enhancements
+- MCP skills: `read_skill_file` on a directory path (`.`, `templates/`) lists its direct children, for every kind of skill. An MCP skill is listed from the entry it was approved with; where the server declared `directoryRead`, `resources/directory/read` is asked only to see whether the skill changed there - what it lists beyond the entry is counted, never named, a file it no longer lists is marked `notServed`, and the server's skills are re-read before the next run
+- MCP skills: `"dynamic"` skills (no checksums from the server), opt-in per server with `skills: { dynamic: true }`. Before the user is asked, the agent reads a copy of the skill (its `SKILL.md`, and every file where the server can list them) within bounds (512 files, 16 MiB, 64 directories, depth 8; 64 MiB per agent), computes the checksums itself and binds the consent to them; the model reads only that copy, from memory. Off by default: such skills are declined as before
+- CLI: `MCP_SERVERS` takes `skills` (`true` or `{ "consent", "dynamic" }`, with `"protocol": "auto"` or `"modern"`) and `connectTimeoutMs` per server; before a server's skill reaches the model the REPL shows it - whose it is, its size, the first lines of what the model would read - and asks `[y]es / [n]o / [a]lways for this server`
+
 # 0.0.49 / 2026-11-27
 
 ### :tada: Enhancements
