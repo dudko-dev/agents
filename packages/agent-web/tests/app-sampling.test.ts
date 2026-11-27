@@ -8,6 +8,7 @@ import {
   APP_SAMPLING_MAX_SYSTEM_CHARS,
   APP_SAMPLING_MAX_TOKENS,
   APP_SAMPLING_PER_APP,
+  APP_SAMPLING_REASONING_TOKENS,
   APP_SAMPLING_PER_MINUTE,
   AppSamplingError,
   appSamplingRequestOf,
@@ -242,6 +243,7 @@ test('guard limiter: per app, per minute and in all; a refused request is not co
     maxRequestsPerMinute: APP_SAMPLING_PER_MINUTE,
     maxRequests: APP_SAMPLING_PER_APP,
     maxInputChars: APP_SAMPLING_MAX_INPUT_CHARS,
+    reasoningTokens: APP_SAMPLING_REASONING_TOKENS,
   })
   assert.equal(resolveAppSampling(false).enabled, false)
   assert.throws(() => resolveAppSampling({ maxTokens: 0 }), /maxTokens/)
@@ -414,4 +416,78 @@ test('agent: a model that was cut off by the cap says maxTokens', async () => {
   const agent = await createAgent({ model: cut.model, toolMode: 'native' })
   const answer = await agent.sampleForApp({ ...APP, params: params() }, { approve: () => true })
   assert.equal(answer.stopReason, 'maxTokens')
+})
+
+test('guard reasoning room: a model that reasons through the cap is asked once more with room, then always', async () => {
+  // Gemini 3 Flash thinks whatever it is told and its reasoning counts against the cap: 111 of an
+  // app's 120 tokens went to thinking and the answer was "(e.g.,". The app's maxTokens is for the
+  // answer - a model seen thinking gets reasoningTokens more.
+  let n = 0
+  const thinker = scriptedModel((info: CallInfo) => {
+    n++
+    const cap = Number(info.options.maxOutputTokens)
+    return cap <= 200
+      ? { text: '(e.g.,', cutOff: true, usage: { input: 50, output: cap, reasoning: cap - 5 } }
+      : { text: 'Try Taberna da Rua in Alfama.', usage: { input: 50, output: 600, reasoning: 570 } }
+  })
+  const agent = await createAgent({ model: thinker.model, toolMode: 'native' })
+  const charged: number[] = []
+  const onEvent = (e: { type: string; usage?: { totalTokens?: number } }) => {
+    if (e.type === 'usage') charged.push(e.usage?.totalTokens ?? 0)
+  }
+  const first = await agent.sampleForApp(
+    { ...APP, params: params({ maxTokens: 120 }) },
+    { approve: () => true, onEvent: onEvent as never },
+  )
+  assert.equal(first.content.text, 'Try Taberna da Rua in Alfama.')
+  assert.equal(first.stopReason, 'endTurn')
+  assert.deepEqual(
+    thinker.calls.map((c) => c.options.maxOutputTokens),
+    [120, 120 + APP_SAMPLING_REASONING_TOKENS],
+  )
+  // Both calls are charged: the cut one cost what it cost.
+  assert.equal(charged.length, 2)
+  // Seen thinking: the next request has the room from the start - one call.
+  await agent.sampleForApp({ ...APP, params: params({ maxTokens: 120 }) }, { approve: () => true })
+  assert.deepEqual(
+    thinker.calls.slice(2).map((c) => c.options.maxOutputTokens),
+    [120 + APP_SAMPLING_REASONING_TOKENS],
+  )
+  assert.equal(n, 3)
+})
+
+test('guard reasoning room: a model cut off WITHOUT reasoning is not asked again; reasoningTokens 0 never adds', async () => {
+  const plain = scriptedModel(() => ({ text: 'Long…', cutOff: true, usage: { output: 120 } }))
+  const agent = await createAgent({ model: plain.model, toolMode: 'native' })
+  const a = await agent.sampleForApp(
+    { ...APP, params: params({ maxTokens: 120 }) },
+    { approve: () => true },
+  )
+  assert.equal(a.stopReason, 'maxTokens')
+  assert.deepEqual(
+    plain.calls.map((c) => c.options.maxOutputTokens),
+    [120],
+  )
+
+  const thinker = scriptedModel(() => ({
+    text: '(e.g.,',
+    cutOff: true,
+    usage: { output: 120, reasoning: 115 },
+  }))
+  const off = await createAgent({
+    model: thinker.model,
+    toolMode: 'native',
+    appSampling: { reasoningTokens: 0 },
+  })
+  const b = await off.sampleForApp(
+    { ...APP, params: params({ maxTokens: 120 }) },
+    { approve: () => true },
+  )
+  assert.equal(b.stopReason, 'maxTokens')
+  assert.deepEqual(
+    thinker.calls.map((c) => c.options.maxOutputTokens),
+    [120],
+  )
+  assert.throws(() => resolveAppSampling({ reasoningTokens: -1 }), /reasoningTokens/)
+  assert.equal(resolveAppSampling({}).reasoningTokens, APP_SAMPLING_REASONING_TOKENS)
 })

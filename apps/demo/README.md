@@ -58,6 +58,13 @@ Three tabs, sharing one "Agent settings" panel:
   your OK in the chat (`book_trip`, a pretend booking that returns a code computed from the trip),
   and it asks to open the docs and to put the plan in your message box. It is connected with the
   protocol on "Auto": its questions need the 2026-07-28 revision (the board works on both).
+  It also serves two **skills** (the MCP Skills extension, experimental; 2026-07-28 only):
+  `demo/trip-planning` (how to plan a trip with `plan_trip` / `trip_board`, with a bundled
+  `references/checklist.md`) and `demo/dice-games` (Pig and Yacht-lite, every roll from
+  `roll_dice`). The button leaves them off; **Try it with its skills**, in the same block, adds the
+  server with "Load skills from this server" on - the agent then sees the two in its skills
+  catalog, reads one only when the planner picks it (or `load_skill` asks), checked against the
+  server's digests, and gets it as third-party knowledge.
   A server's **MCP Apps** are drawn in the chat, on an origin of their own: the sandbox page of
   `@dudko.dev/agent-web-react/mcp-app-sandbox` at `https://agent-demo-apps.dudko.workers.dev/sandbox/v1`
   (a second Worker, [`apps/app-sandbox`](../app-sandbox/); `src/app-sandbox.ts`). The frame says

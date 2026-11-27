@@ -877,9 +877,18 @@ section on MCP Apps (`ui/open-link`) and to put the plan in the message box (`ui
 reports its height as days open and close. Everything is computed from the inputs: the same trip,
 the same plan and the same code.
 
+On 2026-07-28 it also serves two [skills](#mcp-skills-experimental) (it declares
+`io.modelcontextprotocol/skills`; on the 2025 revisions it does not). `skill://demo/trip-planning/SKILL.md`
+says how to plan a trip with its tools (ask for what is missing, `plan_trip` for a form,
+`trip_board` for the days) and bundles `references/checklist.md`, a list of papers and things to
+pack; `skill://demo/dice-games/SKILL.md` has the rules of Pig and Yacht-lite, played with
+`roll_dice`. Static entries (no `"dynamic"`), each skill a few KiB, the sizes and digests computed
+from the bytes it serves. With `skills: true` they are `demo/trip-planning` and `demo/dice-games`
+in the agent's catalog (in the demo: "Try it with its skills").
+
 ```ts
 const mcp = await connectMcpHttp(
-  { demo: { url: 'https://agent.dudko.dev/mcp/demo', protocol: 'auto' } },
+  { demo: { url: 'https://agent.dudko.dev/mcp/demo', protocol: 'auto', skills: true } },
   { onElicitation: askTheUser, elicitation: { url: true }, apps: true },
 )
 ```
@@ -1024,9 +1033,14 @@ is told):
    answers `true` itself (the React package keeps that until a reload).
 5. **The model**: the synthesizer's (a text completion with no tools is that stage's work), sent
    the view's system prompt and messages and nothing else - no agent system prompt, no memory, no
-   tools, no MCP instructions, no thinking - with `maxOutputTokens: view.maxTokens` and
-   `chatTimeoutMs`. Its tokens are charged as they arrive (`agent.usage`, `sessionUsage`) and
-   reported as ONE `usage` event of phase `'app'`; a failed call's spend is charged too.
+   tools, no MCP instructions - with `maxOutputTokens: view.maxTokens` and `chatTimeoutMs`. The
+   app's `maxTokens` is for the ANSWER: on Gemini and OpenAI a model's reasoning counts against the
+   output cap, and some models think whatever they are told (Gemini 3 Flash spent 111 of an app's
+   120 tokens thinking and answered "(e.g.,"). A call cut off (`length`) while the model reasoned
+   is asked once more with `reasoningTokens` (2048; `appSampling.reasoningTokens`, `0` = never)
+   on top, and from then on every request of that agent gets the room from the start. Its tokens
+   are charged as they arrive (`agent.usage`, `sessionUsage`) and reported as `usage` events of
+   phase `'app'` (two for a request asked again); a failed call's spend is charged too.
 
 The answer is returned and goes nowhere else: no memory, no event, no run. It is outside every
 run: no step clock, no run limits (`limits` are per run; the app's caps are its own).

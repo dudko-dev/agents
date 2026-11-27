@@ -157,7 +157,23 @@ export const McpPanel = ({
             No server of your own? This site runs a small one: tools that answer at once, two that
             ask you something in the middle of the call — a form (<code>plan_trip</code>) and a link
             (<code>open_docs</code>) — and one that comes with an app (<code>trip_board</code>): a
-            trip board drawn in the chat, whose pretend booking waits for your OK.
+            trip board drawn in the chat, whose pretend booking waits for your OK. It also serves
+            two skills, trip planning and dice games, which the button leaves off (experimental):{' '}
+            <button
+              type="button"
+              className="mcp__btn-ghost mcp__try-skills"
+              onClick={() =>
+                void mcp.add({
+                  name: 'demo',
+                  url: demoUrl,
+                  auth: 'none',
+                  protocol: 'auto',
+                  skills: true,
+                })
+              }
+            >
+              Try it with its skills
+            </button>
           </span>
         </div>
       )}

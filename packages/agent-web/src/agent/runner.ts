@@ -684,6 +684,8 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
   log.info(
     `agent ready — ${catalog.length} tool(s) (${strategy}, ~${toolTokens || '?'} tokens), window ${cfg.compaction.contextWindowTokens}${modelWindow ? ' (the model’s)' : ''}, skills: [${skills.map((s) => s.name).join(', ') || 'none'}], planner mode: ${plannerMode}, executor mode: ${executorMode}, approval: ${approval.mode}`,
   )
+  // Seen reasoning in a sampling call: later calls give it room from the start.
+  let samplingThinks = false
 
   // What this agent has spent, counted call by call as the usage arrives - so a run that is
   // stopped or fails still counts what it used, a resumed run adds only what THIS process spent,
@@ -1749,37 +1751,57 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
           /* a bad handler must not lose the answer */
         }
       }
-      let result: Awaited<ReturnType<typeof generate>>
-      try {
-        result = await generate(synthesizerModel, {
-          ...(view.systemPrompt ? { system: view.systemPrompt } : {}),
-          messages: view.messages.map((m) =>
-            m.role === 'assistant'
-              ? { role: 'assistant' as const, content: m.text }
-              : {
-                  role: 'user' as const,
-                  content: [
-                    ...(m.text ? [{ type: 'text' as const, text: m.text }] : []),
-                    ...m.images.map((i) => ({
-                      type: 'file' as const,
-                      data: i.data,
-                      mediaType: i.mimeType,
-                    })),
-                  ],
-                },
-          ),
-          maxOutputTokens: view.maxTokens,
-          ...(view.temperature !== undefined ? { temperature: view.temperature } : {}),
-          ...(options.signal ? { abortSignal: options.signal } : {}),
-          timeoutMs: cfg.chatTimeoutMs,
-        })
-      } catch (err) {
-        // A failed call still cost what it cost.
-        const u = usageOfError(err)
-        if (u.totalTokens > 0) spend(u)
-        throw err
+      const ask = async (maxOutputTokens: number) => {
+        try {
+          const r = await generate(synthesizerModel, {
+            ...(view.systemPrompt ? { system: view.systemPrompt } : {}),
+            messages: view.messages.map((m) =>
+              m.role === 'assistant'
+                ? { role: 'assistant' as const, content: m.text }
+                : {
+                    role: 'user' as const,
+                    content: [
+                      ...(m.text ? [{ type: 'text' as const, text: m.text }] : []),
+                      ...m.images.map((i) => ({
+                        type: 'file' as const,
+                        data: i.data,
+                        mediaType: i.mimeType,
+                      })),
+                    ],
+                  },
+            ),
+            maxOutputTokens,
+            ...(view.temperature !== undefined ? { temperature: view.temperature } : {}),
+            ...(options.signal ? { abortSignal: options.signal } : {}),
+            timeoutMs: cfg.chatTimeoutMs,
+          })
+          spend(normalizeUsage(r.usage))
+          return r
+        } catch (err) {
+          // A failed call still cost what it cost.
+          const u = usageOfError(err)
+          if (u.totalTokens > 0) spend(u)
+          throw err
+        }
       }
-      spend(normalizeUsage(result.usage))
+      // The app's maxTokens is for the answer. On Gemini and OpenAI a model's reasoning counts
+      // against the output cap, and some models think whatever they are told: a model seen
+      // thinking gets `reasoningTokens` more. Until it has been seen, the first call asks for the
+      // app's cap alone; cut off while it reasoned, the request is asked once more with the room.
+      const room = appSampling.reasoningTokens
+      let result = await ask(view.maxTokens + (samplingThinks ? room : 0))
+      if (
+        !samplingThinks &&
+        room > 0 &&
+        result.finishReason === 'length' &&
+        (normalizeUsage(result.usage).reasoningTokens ?? 0) > 0
+      ) {
+        samplingThinks = true
+        log.info(
+          `app ${resourceUri} of ${server}: the model reasoned its way through the cap - asked again with ${room} tokens for reasoning`,
+        )
+        result = await ask(view.maxTokens + room)
+      }
       return {
         role: 'assistant',
         content: { type: 'text', text: result.text },

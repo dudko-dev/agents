@@ -1068,6 +1068,13 @@ form is ordinary, and the step used to end under them (the elicitation answered 
   name for a rule to match, nothing a mode like `'ask-writes'` means for it), and it must always
   ask. The model is the synthesizer's: a completion with no tools is that stage's work. The rate
   is counted before the user is asked: a prompt is the scarce resource.
+- **An app's `maxTokens` is for the answer, not the reasoning.** Found on production: Gemini 3
+  Flash thinks whatever it is told (`thinkingBudget: 0` and the lowest level still thought 112 -
+  166 tokens), and its reasoning counts against `maxOutputTokens` - a 120-token request came back
+  "(e.g.," with `MAX_TOKENS`. Detecting thinking models by name would rot; the result says it
+  (`finishReason: 'length'` with reasoning tokens), so the first such call is asked once more with
+  `reasoningTokens` of room, and the agent remembers the model thinks. A model that never reasons
+  never gets more than the app asked for.
 - **Display modes are the UI's.** Full screen is a layout and a focus rule; nothing of it is in
   the core.
 - **Node: nothing yet.** The Node agent renders nothing, and an app's requests come from a browser:
