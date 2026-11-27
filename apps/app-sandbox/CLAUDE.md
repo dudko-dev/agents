@@ -4,7 +4,7 @@
 > workspace commands (pnpm + nx) and the rules shared by all packages; this file is about this
 > project only.
 
-The Cloudflare Worker of **https://agent-demo-apps.dudko.dev**: the MCP Apps sandbox page the demo
+The Cloudflare Worker of **https://agent-demo-apps.dudko.workers.dev**: the MCP Apps sandbox page the demo
 frames, so that an app runs on an origin of its own. Private, never published. A SEPARATE Worker
 from the site's (`apps/worker`): its own `wrangler.jsonc`, its own Workers Builds project
 (README.md), never built or deployed by `pnpm nx build site`.
@@ -17,9 +17,12 @@ from the site's (`apps/worker`): its own `wrangler.jsonc`, its own Workers Build
   security boundary with its own tests). `src/index.ts` adds the path (`/sandbox/v1`), the hosts
   from `env.ALLOWED_HOST_ORIGINS` and HSTS. A change to what the page does goes into the library,
   with its tests, never here.
-- **One origin, one thing.** `workers_dev: false`, `preview_urls: false`, one Custom Domain; every
-  other path is 404. Do not add routes, assets or other pages to this domain: anything served on
-  it is same-origin with every app the demo shows.
+- **One origin, one thing, never under dudko.dev.** `workers_dev: true` (its only address),
+  `preview_urls: false`, no route, no Custom Domain; every other path is 404. A host under
+  `dudko.dev` would let any app set cookies for every `dudko.dev` host (`Domain=dudko.dev`);
+  `workers.dev` is a public suffix, so cookies stop at `dudko.workers.dev`. Do not add routes,
+  assets or other pages: anything served on this host is same-origin with every app the demo
+  shows.
 - **Keeps nothing, says nothing.** No storage, no binding, no secret, no outbound request, no
   `console`, no observability.
 - **The hosts are configuration.** `vars.ALLOWED_HOST_ORIGINS` in `wrangler.jsonc`; the test pins
@@ -32,7 +35,7 @@ from the site's (`apps/worker`): its own `wrangler.jsonc`, its own Workers Build
 - `scripts/build.mjs` — esbuild like wrangler (platform `browser`, conditions `workerd`, `worker`,
   `browser`) → `dist/index.js`; fails on a `node:*` import, on React / the core / `ai` / `zod` in
   the bundle, or over 32 KiB gzipped (it is ~4 KiB).
-- `tests/worker.test.ts` — `wrangler.jsonc` pinned (name, one Custom Domain, no workers.dev, the
+- `tests/worker.test.ts` — `wrangler.jsonc` pinned (name, workers.dev only - no route, no Custom Domain -, the
   hosts and what they admit), the site's build and config free of this Worker, and the handler on
   the source and on the bundle.
 - `wrangler.jsonc` — the deployment; `README.md` — what the owner sets up on Cloudflare.

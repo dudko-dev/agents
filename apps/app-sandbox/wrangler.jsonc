@@ -1,4 +1,5 @@
-// The demo's MCP Apps sandbox page, on a domain of its own: https://agent-demo-apps.dudko.dev.
+// The demo's MCP Apps sandbox page, on a host of its own: https://agent-demo-apps.dudko.workers.dev.
+// workers.dev is a public suffix, so a cookie an app sets there can never reach dudko.dev.
 // A SEPARATE Worker from the site's (root wrangler.jsonc), deployed by a Workers Builds project of
 // its own (README.md: `pnpm nx build app-sandbox`, then
 // `npx wrangler deploy --config apps/app-sandbox/wrangler.jsonc`). It serves
@@ -9,10 +10,10 @@
   "name": "agent-demo-apps",
   "compatibility_date": "2026-11-01",
   "main": "./dist/index.js",
-  // One origin: the Custom Domain below. Not *.workers.dev, no preview URLs.
-  "workers_dev": false,
+  // One origin: agent-demo-apps.<account>.workers.dev - NOT a host under dudko.dev (a page there
+  // could set cookies for all of dudko.dev). No route, no Custom Domain, no preview URLs.
+  "workers_dev": true,
   "preview_urls": false,
-  "routes": [{ "pattern": "agent-demo-apps.dudko.dev", "custom_domain": true }],
   "vars": {
     // Who may frame the page and hand it an app: the site, and its Cloudflare previews
     // (`<version>-agents.dudko.workers.dev`). A `*` stands for ONE label fragment in the page's

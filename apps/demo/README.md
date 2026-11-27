@@ -45,7 +45,7 @@ Three tabs, sharing one "Agent settings" panel:
   something in the middle of the call — `plan_trip` (a form) and `open_docs` (a link). It is
   connected with the protocol on "Auto": its questions need the 2026-07-28 revision.
   A server's **MCP Apps** are drawn in the chat, on an origin of their own: the sandbox page of
-  `@dudko.dev/agent-web-react/mcp-app-sandbox` at `https://agent-demo-apps.dudko.dev/sandbox/v1`
+  `@dudko.dev/agent-web-react/mcp-app-sandbox` at `https://agent-demo-apps.dudko.workers.dev/sandbox/v1`
   (a second Worker, [`apps/app-sandbox`](../app-sandbox/); `src/app-sandbox.ts`). The frame says
   "sandboxed on its own origin"; when that page does not answer, it falls back to the opaque frame
   and says "sandboxed".
@@ -145,7 +145,7 @@ the opaque frame - open the demo on the name the server listens on, or pass `--h
 
 Cloudflare builds and serves it (Workers static assets, the root `wrangler.jsonc`; the one
 Worker script there answers `/mcp/*` only - the demo MCP server; the apps' sandbox page is a
-separate Worker on its own domain, [`apps/app-sandbox`](../app-sandbox/), deployed by a project
+separate Worker on `agent-demo-apps.dudko.workers.dev`, [`apps/app-sandbox`](../app-sandbox/), deployed by a project
 of its own): every push to
 `main` that touches the demo or the browser packages is built with `pnpm nx build demo` and
 deployed; pull requests get a preview. The Vite `base` is `/demo/` — the build lands in

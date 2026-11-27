@@ -29,11 +29,12 @@ private apps:
   `/mcp/demo` (the demo's "Try the demo server"). Stateless, both protocol revisions, abuse limits
   in code; bundled to `apps/worker/dist/index.js`. The demo's `vite dev` / `vite preview` serve the
   same handler on Node (`apps/worker/src/node.ts`), which is what the browser tests talk to.
-- `apps/app-sandbox` — a SECOND Cloudflare Worker, NOT the site's: https://agent-demo-apps.dudko.dev,
+- `apps/app-sandbox` — a SECOND Cloudflare Worker, NOT the site's: https://agent-demo-apps.dudko.workers.dev,
   the MCP Apps sandbox page (`/sandbox/v1/<policy>`, 404 elsewhere) the demo frames so that an app
   runs on an origin of its own. A thin deployment of the React package's `./mcp-app-sandbox`
   entry (the page, its headers and guards live and are tested there); its own `wrangler.jsonc`
-  (one Custom Domain, no workers.dev, the allowed hosts in `vars`), its own Workers Builds project.
+  (workers.dev only - never a host under dudko.dev, where an app could set cookies for all of
+  dudko.dev; the allowed hosts in `vars`), its own Workers Builds project.
   `pnpm nx build site` never builds it (`site` / `demo` do not depend on it; its test pins that).
   Locally the demo's `vite dev` / `vite preview` serve the same page under the other loopback name.
 
@@ -115,8 +116,8 @@ tool. Do not infer success from "the change looks right".
   (`apps/worker/tests/worker.test.ts` pins the config). Keep `"previews": {}`.
 - The apps' sandbox page is a second Workers Builds project (`agent-demo-apps`, set up by the
   owner - `apps/app-sandbox/README.md`): build `pnpm nx build app-sandbox`, deploy
-  `npx wrangler deploy --config apps/app-sandbox/wrangler.jsonc`, the Custom Domain
-  `agent-demo-apps.dudko.dev`. Never fold it into the site's Worker or `run_worker_first`: every
+  `npx wrangler deploy --config apps/app-sandbox/wrangler.jsonc`, served at
+  `agent-demo-apps.dudko.workers.dev` (no Custom Domain: see above). Never fold it into the site's Worker or `run_worker_first`: every
   site request would go through a script, and the page must be on ANOTHER origin than the site.
 - `autoupdate.yml` (weekly): `.github/scripts/autoupdate.mjs` runs `pnpm update -r --latest`
   (except `typescript` and `@types/node`), patch-bumps and changelogs the published packages whose

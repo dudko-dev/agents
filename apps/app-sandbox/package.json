@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "The Cloudflare Worker that serves the demo's MCP Apps sandbox page on its own domain (agent-demo-apps.dudko.dev): /sandbox/v1/<policy>, and nothing else. Deployed by a Workers Builds project of its own, not with the site.",
+  "description": "The Cloudflare Worker that serves the demo's MCP Apps sandbox page on its own host (agent-demo-apps.dudko.workers.dev, never under dudko.dev): /sandbox/v1/<policy>, and nothing else. Deployed by a Workers Builds project of its own, not with the site.",
   "exports": {
     ".": "./src/index.ts"
   },

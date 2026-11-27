@@ -46,12 +46,15 @@ const parseJsonc = (source: string): any => {
 const config = parseJsonc(readFileSync(resolve(project, 'wrangler.jsonc'), 'utf8'))
 const HOSTS = 'https://agent.dudko.dev https://*-agents.dudko.workers.dev'
 
-test('wrangler.jsonc: its own Worker on one Custom Domain, the site and its previews as hosts', () => {
+test('wrangler.jsonc: its own Worker on workers.dev only (never under dudko.dev), the site and its previews as hosts', () => {
   assert.equal(config.name, 'agent-demo-apps')
   assert.equal(config.main, './dist/index.js')
-  assert.equal(config.workers_dev, false)
+  // workers.dev is a public suffix: a cookie an app sets there cannot reach dudko.dev. A route or
+  // a Custom Domain under dudko.dev would let any app set cookies for every dudko.dev host.
+  assert.equal(config.workers_dev, true)
   assert.equal(config.preview_urls, false)
-  assert.deepEqual(config.routes, [{ pattern: 'agent-demo-apps.dudko.dev', custom_domain: true }])
+  assert.equal(config.routes, undefined)
+  assert.equal(config.route, undefined)
   assert.deepEqual(config.vars, { ALLOWED_HOST_ORIGINS: HOSTS })
   // A script and nothing else: no assets, no binding, no secret, no compatibility layer.
   for (const key of [
@@ -79,7 +82,7 @@ test('wrangler.jsonc: its own Worker on one Custom Domain, the site and its prev
     assert.equal(isMcpAppSandboxHost(hosts, origin), true, origin)
   }
   for (const origin of [
-    'https://agent-demo-apps.dudko.dev',
+    'https://agent-demo-apps.dudko.workers.dev',
     'https://agents.dudko.workers.dev',
     'https://other.dudko.workers.dev',
     'https://x.y-agents.dudko.workers.dev',
@@ -106,7 +109,7 @@ const PAGE_POLICY = { connect: ['https://api.example.com'], resources: [] }
 const TOKEN = mcpAppPolicyToken(PAGE_POLICY) as string
 const env: Env = { ALLOWED_HOST_ORIGINS: HOSTS }
 const at = (path: string, init?: RequestInit) =>
-  new Request(`https://agent-demo-apps.dudko.dev${path}`, init)
+  new Request(`https://agent-demo-apps.dudko.workers.dev${path}`, init)
 
 type Handler = (request: Request, env: Env) => Response | Promise<Response>
 
