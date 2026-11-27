@@ -16,8 +16,9 @@ export const RUN_JS_TOOL = 'run_js'
 export const SANDBOX_PACKAGE = 'quickjs-emscripten'
 
 export interface ISandboxConfig {
-  // Time one run may take, in ms (default 5000, at most 60000). Waiting for a file operation -
-  // a consent prompt included - does not count.
+  // Time one run may take, in ms (default 5000, at most 60000), counted from the program's first
+  // instruction: starting the worker and the engine does not count, and neither does waiting for
+  // a file operation - a consent prompt included.
   timeoutMs?: number
   // The guest's memory, in bytes: the whole WebAssembly memory of its engine instance, the
   // engine's own 16 MiB included (default 32 MiB, at least 16 MiB, at most 256 MiB).
@@ -432,6 +433,11 @@ export const runGuest = async (
 
   return new Promise<ISandboxResult>((resolve) => {
     const startedAt = Date.now()
+    // The limit's clock starts with the program (`onStart`), not here: what runs before it is the
+    // engine's own start (the host functions, the bootstrap) - our code, the same for every run,
+    // and nothing of the guest's. On a busy machine that start alone can outlast a short limit;
+    // a worker's start is bounded by `startupMs` instead.
+    let programAt = 0
     let finished = false
     let interrupted = false
     // Time spent inside the guest, and time spent waiting for the host to serve a file call.
@@ -453,7 +459,9 @@ export const runGuest = async (
 
     const cpuUsed = (): number => cpuMs + (entryAt ? Date.now() - entryAt : 0)
     const wallUsed = (): number =>
-      Date.now() - startedAt - waitMs - (waitingSince ? Date.now() - waitingSince : 0)
+      programAt === 0
+        ? 0
+        : Date.now() - programAt - waitMs - (waitingSince ? Date.now() - waitingSince : 0)
     const overTime = (): boolean =>
       cpuUsed() > limits.timeoutMs || (pendingCalls === 0 && wallUsed() > limits.timeoutMs)
 
@@ -863,6 +871,7 @@ export const runGuest = async (
       return
     }
 
+    programAt = Date.now()
     options.onStart?.()
     armWatchdog()
     enter(() => {
