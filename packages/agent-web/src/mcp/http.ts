@@ -133,9 +133,12 @@ export interface McpHttpServerConfig {
    * it. The skills come with the server's tools (each mounted tool carries them, like the
    * server's instructions), so merging `tools` into the agent's config is all a host does. Their
    * text is third-party - knowledge only, never policy; see the README, "MCP skills".
-   * `true`, or `{ consent }`: when a person is asked before one of its skills enters the model's
-   * context - `'once-per-skill'` (default, or the agent's `mcpSkills.consent`), `'ask'` (every
-   * run) or `'never'` (a server you vetted).
+   * `true`, or `{ consent, dynamic }`: `consent` is when a person is asked before one of its
+   * skills enters the model's context - `'once-per-skill'` (default, or the agent's
+   * `mcpSkills.consent`), `'ask'` (every run) or `'never'` (a server you vetted); `dynamic: true`
+   * also takes its GENERATED skills (`"resources": "dynamic"`, no checksums - declined by
+   * default), each read whole into a snapshot in memory before anyone is asked, approved and used
+   * as that copy only (README, "MCP skills").
    */
   skills?: McpSkillsSetting
   /**
@@ -1109,6 +1112,7 @@ const connectAndList = async (
         (level, message) => log(level, message),
         {
           ...(skillsSetting.consent ? { consent: skillsSetting.consent } : {}),
+          ...(skillsSetting.dynamic ? { dynamic: true } : {}),
           ...(notify ? { onChanged: () => notify(name) } : {}),
         },
       )

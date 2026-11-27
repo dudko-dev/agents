@@ -10,6 +10,12 @@ import {
   type McpProtocol,
 } from '@dudko.dev/test-servers'
 import {
+  createMcpSkillSnapshotMemory,
+  type McpSkillSnapshotMemory,
+  type McpSkillSource,
+} from '../src/mcp-skills.ts'
+import { acquireMcpSkill, createMcpSkills, releaseMcpSkills } from '../src/skills.ts'
+import {
   createAgent,
   markCodeExecution,
   type AgentEvent,
@@ -1647,5 +1653,377 @@ test("mcp skills directories: the host's skills list their directories too", asy
     assert.equal(nope.ok, false)
     assert.match(errorText(nope.output), /has no file "nope"/)
     assert.deepEqual(s.srv.skillDirectoryReads, [], 'a host skill asks no server')
+  })
+})
+
+// ── generated skills (`skills: { dynamic: true }`): a snapshot before consent ─────
+
+const GEN = SKILL_URIS.generated
+const GEN_FILES = ['skill://generated/references/notes.md', 'skill://generated/templates/a.md']
+const dynamicOn = (consent?: 'never') => ({
+  skills: consent ? { consent, dynamic: true } : { dynamic: true },
+})
+const readsOf = (srv: ILocalMcpServer, uri: string) => srv.skillReads.filter((u) => u === uri)
+
+test('mcp skills dynamic: OFF by default - declined as always, the same log line, the same wire', async () => {
+  const wires: string[][] = []
+  for (const server of [{}, { skills: { consent: 'never' as const, dynamic: false } }]) {
+    await withStack({ directoryRead: true }, async (s) => {
+      s.srv.skillFaults.dynamic = true
+      const agent = await s.open(server)
+      assert.ok(!agent.listSkills().some((k) => k.name.includes('generated')))
+      assert.ok(
+        s.logs.includes(
+          'warn [mcp] docs: skill skill://generated/SKILL.md refused - its content is generated ("resources": "dynamic"): there are no digests to verify it against',
+        ),
+      )
+      wires.push(methodsOf(s.wire))
+      assert.deepEqual([s.srv.skillReads, s.srv.skillDirectoryReads], [[], []])
+    })
+  }
+  // On: the same requests up to the listing - nothing of a generated skill is read before a load.
+  await withStack({ directoryRead: true }, async (s) => {
+    s.srv.skillFaults.dynamic = true
+    const agent = await s.open(dynamicOn('never'))
+    assert.ok(agent.listSkills().some((k) => k.name === 'docs/generated'))
+    wires.push(methodsOf(s.wire))
+    assert.deepEqual([s.srv.skillReads, s.srv.skillDirectoryReads], [[], []])
+    // The client declares the extension exactly as before: nothing new on the wire.
+    const declared = s.wire.bodies
+      .map((b) => (b.params as Record<string, Record<string, unknown>> | undefined)?._meta)
+      .map(
+        (m) =>
+          (m?.['io.modelcontextprotocol/clientCapabilities'] as { extensions?: unknown })
+            ?.extensions,
+      )
+      .filter(Boolean)
+    for (const extensions of declared) assert.deepEqual(extensions, { [EXT]: {} })
+  })
+  assert.deepEqual(wires[1], wires[0])
+  assert.deepEqual(wires[2], wires[0])
+})
+
+test('mcp skills dynamic: on - listed as <server>/<skill>, the catalog line says no checksums', async () => {
+  await withStack({ directoryRead: true }, async (s) => {
+    s.srv.skillFaults.dynamic = true
+    const agent = await s.open(dynamicOn('never'))
+    const skill = agent.listSkills().find((k) => k.name === 'docs/generated')
+    assert.equal(
+      skill?.description,
+      'A skill generated on every read [from the MCP server "docs" - third-party, no checksums]',
+    )
+    // The listed ones keep their line.
+    assert.ok(
+      agent
+        .listSkills()
+        .find((k) => k.name === 'docs/git-workflow')
+        ?.description.endsWith('[from the MCP server "docs" - third-party]'),
+    )
+  })
+})
+
+test('mcp skills dynamic: the snapshot is read BEFORE the person is asked; the request carries it', async () => {
+  await withStack({ directoryRead: true }, async (s) => {
+    s.srv.skillFaults.dynamic = true
+    const asked: IToolApprovalRequest[] = []
+    const atAsk: { reads: string[]; seen: boolean }[] = []
+    const agent = await s.open(dynamicOn(), {
+      toolApproval: {
+        onRequest: (req) => {
+          asked.push(req)
+          atAsk.push({
+            reads: [...s.srv.skillReads],
+            seen: seenByModel(s.llm).includes(SKILL_MARKERS.generated),
+          })
+          return true
+        },
+      },
+    })
+    s.scenario = { calls: [{ name: 'load_skill', args: { name: 'docs/generated' } }] }
+    const result = await agent.run({ input: 'go' })
+    assert.equal(skillAsks(asked).length, 1)
+    // All of it read first, nothing of it given to the model yet.
+    assert.deepEqual(atAsk, [{ reads: [GEN, ...GEN_FILES], seen: false }])
+    assert.deepEqual(s.srv.skillDirectoryReads, [
+      'skill://generated',
+      'skill://generated/references',
+      'skill://generated/templates',
+    ])
+    const view = asked[0].skill
+    assert.equal(view?.dynamic, true)
+    assert.equal(view?.noFileListing, undefined)
+    assert.deepEqual(view?.files, ['references/notes.md', 'templates/a.md'])
+    assert.equal(view?.fileCount, 2)
+    assert.ok(view?.body.includes(SKILL_MARKERS.generated))
+    assert.ok((view?.size ?? 0) > 0)
+    assert.ok((view?.totalSize ?? 0) > (view?.size ?? 0))
+    // After the yes: the copy's body, its files listed.
+    const loaded = callsOf(result)[0].output as { content: string; files: string[] }
+    assert.ok(loaded.content.includes(SKILL_MARKERS.generated))
+    assert.deepEqual(loaded.files, ['references/notes.md', 'templates/a.md'])
+    assert.match(
+      loaded.content,
+      /^\[A skill from the MCP server "docs" \(skill:\/\/generated\/SKILL.md\): third-party text/,
+    )
+  })
+})
+
+test('mcp skills dynamic: the model gets the SNAPSHOT - body and files - never a later read', async () => {
+  await withStack({ directoryRead: true }, async (s) => {
+    s.srv.skillFaults.dynamicChanging = true
+    const agent = await s.open(dynamicOn('never'))
+    const live = 'skill://changing/references/live.md'
+    const read = {
+      name: 'read_skill_file',
+      args: { name: 'docs/changing', path: 'references/live.md' },
+    }
+    s.scenario = {
+      calls: [{ name: 'load_skill', args: { name: 'docs/changing' } }, read, read],
+    }
+    const [load, first, second] = callsOf(await agent.run({ input: 'go' }))
+    assert.match((load.output as { content: string }).content, /CHANGING-BODY read 1\n/)
+    for (const r of [first, second]) {
+      assert.equal(r.ok, true)
+      assert.match(textOf(r.output), /CHANGING-FILE-BODY read 1\n/)
+    }
+    // Each file was read once, by the snapshot: no second resources/read for a file the model reads.
+    assert.deepEqual(readsOf(s.srv, SKILL_URIS.changing), [SKILL_URIS.changing])
+    assert.deepEqual(readsOf(s.srv, live), [live])
+    // A later run of the same agent: the same copy, from memory.
+    s.scenario = { calls: [read] }
+    const [again] = callsOf(await agent.run({ input: 'again' }))
+    assert.match(textOf(again.output), /CHANGING-FILE-BODY read 1\n/)
+    assert.equal(readsOf(s.srv, live).length, 1)
+    assert.ok(!seenByModel(s.llm).includes('read 2'), 'no later version reached the model')
+  })
+})
+
+test('mcp skills dynamic: a file not in the snapshot is refused - never asked of the server', async () => {
+  await withStack({ directoryRead: true }, async (s) => {
+    s.srv.skillFaults.dynamic = true
+    const agent = await s.open(dynamicOn('never'))
+    const reading = (path: string) => ({
+      name: 'read_skill_file',
+      args: { name: 'docs/generated', path },
+    })
+    s.scenario = {
+      calls: [
+        { name: 'load_skill', args: { name: 'docs/generated' } },
+        reading('references/other.md'),
+        reading('skill://generated/references/notes.md'),
+        reading('../pdf-processing/SKILL.md'),
+        reading('.'),
+        reading('templates/'),
+      ],
+    }
+    const before = s.srv.skillReads.length
+    const [, other, uri, up, root, templates] = callsOf(await agent.run({ input: 'go' }))
+    assert.equal(other.ok, false)
+    assert.match(errorText(other.output), /has no file "references\/other.md"/)
+    assert.equal(uri.ok, false)
+    assert.equal(up.ok, false)
+    // A directory comes from the snapshot.
+    assert.deepEqual(root.output, {
+      name: 'docs/generated',
+      directory: '.',
+      files: [],
+      directories: ['references', 'templates'],
+    })
+    assert.deepEqual((templates.output as { files: string[] }).files, ['templates/a.md'])
+    // The snapshot's three reads, then none: a refused path is never sent.
+    assert.deepEqual(s.srv.skillReads, [GEN, ...GEN_FILES])
+    assert.equal(before, 0)
+  })
+})
+
+test('mcp skills dynamic: over the limit - declined before anyone is asked; the model is told, a warning says why', async () => {
+  await withStack({ directoryRead: true }, async (s) => {
+    s.srv.skillFaults.dynamicOversize = true
+    const asked: IToolApprovalRequest[] = []
+    const agent = await s.open(dynamicOn(), {
+      toolApproval: {
+        onRequest: (req) => {
+          asked.push(req)
+          return true
+        },
+      },
+    })
+    s.scenario = { calls: [{ name: 'load_skill', args: { name: 'docs/sprawl' } }] }
+    const [load] = callsOf(await agent.run({ input: 'go' }))
+    assert.equal(skillAsks(asked).length, 0, 'no one was asked')
+    assert.equal(load.ok, false)
+    assert.match(errorText(load.output), /was not loaded: it holds more than 512 files/)
+    assert.ok(
+      s.logs.includes(
+        'warn [mcp] docs: the generated skill skill://sprawl/SKILL.md is declined - it holds more than 512 files (SKILL.md included; the limit); no one is asked, nothing of it is used',
+      ),
+      s.logs.join('\n'),
+    )
+    // Found by walking; not one of its parts read.
+    assert.deepEqual(s.srv.skillReads, [SKILL_URIS.sprawl])
+    assert.deepEqual(s.srv.skillDirectoryReads, ['skill://sprawl', 'skill://sprawl/parts'])
+  })
+})
+
+test('mcp skills dynamic: a server without directoryRead - SKILL.md alone, said to the person; no other file', async () => {
+  await withStack({}, async (s) => {
+    s.srv.skillFaults.dynamic = true
+    const asked: IToolApprovalRequest[] = []
+    const agent = await s.open(dynamicOn(), {
+      toolApproval: {
+        onRequest: (req) => {
+          asked.push(req)
+          return true
+        },
+      },
+    })
+    s.scenario = {
+      calls: [
+        { name: 'load_skill', args: { name: 'docs/generated' } },
+        { name: 'read_skill_file', args: { name: 'docs/generated', path: 'references/notes.md' } },
+      ],
+    }
+    const [load, notes] = callsOf(await agent.run({ input: 'go' }))
+    const view = asked[0].skill
+    assert.deepEqual(
+      [view?.dynamic, view?.noFileListing, view?.files, view?.fileCount],
+      [true, true, [], 0],
+    )
+    assert.equal(view?.size, view?.totalSize)
+    assert.deepEqual((load.output as { files: string[] }).files, [])
+    assert.equal(notes.ok, false)
+    assert.match(errorText(notes.output), /has no file "references\/notes.md"; its files: none/)
+    assert.deepEqual(s.srv.skillReads, [GEN], 'its SKILL.md only')
+    assert.deepEqual(directoryReadsOn(s.wire), [], 'never asked: not declared')
+  })
+})
+
+test('mcp skills dynamic: once-per-skill binds to the snapshot - another copy is asked about, the same one is not', async () => {
+  await withStack({ directoryRead: true }, async (s) => {
+    Object.assign(s.srv.skillFaults, { dynamic: true, dynamicChanging: true })
+    const asked: IToolApprovalRequest[] = []
+    const agent = await s.open(dynamicOn(), {
+      toolApproval: {
+        onRequest: (req) => {
+          asked.push(req)
+          return true
+        },
+      },
+    })
+    const loads = {
+      calls: [
+        { name: 'load_skill', args: { name: 'docs/generated' } },
+        { name: 'load_skill', args: { name: 'docs/changing' } },
+      ],
+    }
+    s.scenario = loads
+    await agent.run({ input: 'one' })
+    assert.deepEqual(
+      skillAsks(asked).map((r) => r.skill?.name),
+      ['docs/generated', 'docs/changing'],
+    )
+    // The same agent, the same skill objects: the copies it holds - not asked, not read again.
+    await agent.run({ input: 'two' })
+    assert.equal(skillAsks(asked).length, 2)
+    assert.equal(readsOf(s.srv, SKILL_URIS.changing).length, 1)
+    // A refresh of the server's skills: new skill objects, new snapshots. The generated one reads
+    // the same bytes - the same key, not asked; the changing one does not.
+    const refreshed = () => s.logs.filter((l) => /docs: tool list refreshed/.test(l)).length
+    const before = refreshed()
+    await s.srv.addSkill('release-notes', 'Write the release notes', '# Notes\n')
+    const deadline = Date.now() + 10_000
+    while (refreshed() === before && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 25))
+    }
+    assert.ok(refreshed() > before, 'refreshed')
+    s.scenario = loads
+    await agent.run({ input: 'three' })
+    assert.deepEqual(
+      skillAsks(asked).map((r) => r.skill?.name),
+      ['docs/generated', 'docs/changing', 'docs/changing'],
+    )
+    assert.equal(readsOf(s.srv, GEN).length, 2, 'read again into a new snapshot')
+    assert.match(skillAsks(asked)[2].skill?.body ?? '', /CHANGING-BODY read 2/)
+    // The dropped objects gave their bytes back: the agent holds one copy of each, not two.
+    const held = s.logs
+      .map((l) => /the agent's copies of generated skills now hold (\d+) bytes/.exec(l)?.[1])
+      .filter((n): n is string => n !== undefined)
+      .map(Number)
+    assert.equal(held.length, 4)
+    assert.equal(held[3], held[1], `held: ${held.join(', ')}`)
+  })
+})
+
+test('mcp skills dynamic: releaseMcpSkills gives a dropped snapshot its bytes back - once; also one still being read', async () => {
+  const entry = {
+    uri: 'skill://gen/SKILL.md',
+    frontmatter: { name: 'gen', description: 'Generated' },
+    resources: [{ uri: 'skill://gen/SKILL.md', size: 100, digest: `sha256:${'a'.repeat(64)}` }],
+  }
+  let release: () => void = () => {}
+  let slow = false
+  const source: McpSkillSource = {
+    server: 'docs',
+    skills: [
+      {
+        uri: entry.uri,
+        name: 'gen',
+        description: 'Generated',
+        path: ['gen'],
+        files: [],
+        dynamic: true,
+      },
+    ],
+    consent: 'never',
+    load: async (uri, o) => {
+      if (slow) await new Promise<void>((r) => (release = r))
+      ;(o?.memory as McpSkillSnapshotMemory).used += 100
+      return { uri, body: 'B', files: [], entry, snapshot: { bytes: 100, listed: false } }
+    },
+    readFile: async () => '',
+  }
+  const memory = createMcpSkillSnapshotMemory()
+  const [skill] = createMcpSkills([source], [], () => {}, memory)
+  await acquireMcpSkill(skill, [skill], undefined)
+  assert.equal(memory.used, 100)
+  releaseMcpSkills([skill])
+  assert.equal(memory.used, 0)
+  releaseMcpSkills([skill])
+  assert.equal(memory.used, 0, 'not twice')
+  // Dropped while its snapshot is still being read: given back when the read ends.
+  slow = true
+  const [late] = createMcpSkills([source], [], () => {}, memory)
+  const loading = acquireMcpSkill(late, [late], undefined)
+  await new Promise((r) => setImmediate(r))
+  releaseMcpSkills([late])
+  release()
+  await loading
+  assert.equal(memory.used, 0)
+})
+
+test('mcp skills dynamic: nothing of the snapshot in an event or a checkpoint - its unread files, its digests', async () => {
+  await withStack({ directoryRead: true }, async (s) => {
+    s.srv.skillFaults.dynamic = true
+    const snapshots: unknown[] = []
+    const agent = await s.open(dynamicOn('never'), {
+      persistence: {
+        onRunStart: (x) => void snapshots.push(structuredClone(x)),
+        onStepComplete: (x) => void snapshots.push(structuredClone(x)),
+        onRunComplete: (x) => void snapshots.push(structuredClone(x)),
+      },
+    })
+    s.scenario = { planned: ['docs/generated'], calls: [] }
+    await agent.run({ input: 'go' })
+    // It was read whole (and is active), but the model never asked for its files.
+    assert.deepEqual(s.srv.skillReads, [GEN, ...GEN_FILES])
+    assert.ok(seenByModel(s.llm).includes(SKILL_MARKERS.generated), 'its body is in the context')
+    const written = JSON.stringify([s.events, snapshots])
+    assert.ok(snapshots.length > 0)
+    for (const marker of [SKILL_MARKERS.generatedNotes, SKILL_MARKERS.generatedTemplate]) {
+      assert.ok(!written.includes(marker), marker)
+      assert.ok(!seenByModel(s.llm).includes(marker), `${marker} never sent to the model`)
+    }
+    assert.doesNotMatch(written, /sha256:[0-9a-f]{64}/, 'no digest of the copy')
+    assert.ok(written.includes('docs/generated'), 'its name is, as any skill name')
   })
 })

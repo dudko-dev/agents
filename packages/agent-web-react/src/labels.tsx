@@ -407,6 +407,13 @@ export interface AgentLabels {
   skillConsentByUri: string
   /** It sits inside another skill of the same server. */
   skillConsentNested: (enclosing: string) => string
+  /**
+   * A generated skill (`skill.dynamic`): the server publishes no checksums - the person approves
+   * the copy the agent just read, and only that copy is used.
+   */
+  skillConsentDynamic: string
+  /** (with `skillConsentDynamic`) The server cannot list the skill's files: SKILL.md alone. */
+  skillConsentNoFileListing: string
   /** The summary of the collapsible preview of its instructions. */
   skillConsentPreview: string
   /** Under the preview: its other files, and how many more there are than are shown. */
@@ -807,6 +814,10 @@ export const defaultLabels: AgentLabels = {
   skillConsentByUri: 'Not in the server’s list: the agent asked for it by its address.',
   skillConsentNested: (enclosing) =>
     `It sits inside the skill “${enclosing}”: allowing that one did not allow this one.`,
+  skillConsentDynamic:
+    'This server publishes no checksums for this skill: you approve the copy the agent just read, and only that copy is used.',
+  skillConsentNoFileListing:
+    'The server cannot list this skill’s files: that copy is its SKILL.md alone.',
   skillConsentPreview: 'Show what the agent would read',
   skillConsentFiles: (paths, more) =>
     `Its files, read as text and never run: ${paths}${more ? ` and ${more} more` : ''}`,

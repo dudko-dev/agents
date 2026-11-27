@@ -111,6 +111,7 @@ import { collectMcpInstructions, renderMcpInstructions } from '../mcp/shared.js'
 import {
   collectMcpSkillSources,
   createMcpSkillRunConsent,
+  createMcpSkillSnapshotMemory,
   isMcpSkillName,
   mcpSkillConsentOf,
   resolveMcpSkillConsent,
@@ -575,12 +576,16 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
   // the same way and at the same time: named `<server>/<skill>`, capped, loaded on demand. A
   // helper has its caller's (above), not a second copy.
   const mcpSkillSources = collectMcpSkillSources(baseTools)
+  // What this agent's snapshots of generated skills (`skills: { dynamic: true }`) hold in memory,
+  // together (a helper's count against its caller's: they are the caller's skills).
+  const mcpSkillMemory = createMcpSkillSnapshotMemory()
   if (!seed) {
     skills.push(
       ...createMcpSkills(
         mcpSkillSources,
         skills.map((s) => s.name),
         (m) => log.warn(m),
+        mcpSkillMemory,
       ),
     )
   }
@@ -864,7 +869,9 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
         createSkillTools(
           skills,
           (s) => activateSkill(s.name, 'tool'),
-          mcpSkillSources.length ? { sources: mcpSkillSources, scope: skillScope } : undefined,
+          mcpSkillSources.length
+            ? { sources: mcpSkillSources, scope: skillScope, memory: mcpSkillMemory }
+            : undefined,
         ),
       )
     }

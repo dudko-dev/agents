@@ -34,7 +34,8 @@ Required env vars (set directly or via --env-file):
   AGENT_MODEL           model id
   MCP_SERVERS           JSON: { "<name>": { "url": "...", "headers"?: {...} } | { "command": "...", "args"?: [], "env"?: {} } }
                         each entry may add "protocol": "legacy" (default) | "auto" | "modern" (the MCP revision: 2026-07-28 when offered / only),
-                        "skills": true | { "consent": "once-per-skill" | "ask" | "never" } (experimental; needs "auto" / "modern")
+                        "skills": true | { "consent": "once-per-skill" | "ask" | "never", "dynamic": true } (experimental; needs "auto" / "modern";
+                        "dynamic" also takes the server's generated skills, no checksums: read whole, you approve that copy)
                         and "connectTimeoutMs" (default 30000; 0 = no bound)
 
 Optional env vars (see env.example for the full list):

@@ -73,6 +73,12 @@ const SkillConsentCard = ({
         {L.skillConsentNested(skill.nestedIn)}
       </p>
     )}
+    {skill.dynamic && (
+      <p className="awr-approval__from awr-approval__dynamic">{L.skillConsentDynamic}</p>
+    )}
+    {skill.dynamic && skill.noFileListing && (
+      <p className="awr-approval__from">{L.skillConsentNoFileListing}</p>
+    )}
     {showPreview && skill.body !== undefined && (
       <details className="awr-approval__preview">
         <summary>{L.skillConsentPreview}</summary>

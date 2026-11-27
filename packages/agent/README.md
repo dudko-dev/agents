@@ -570,6 +570,8 @@ const agent = await createAgent({
     docs: { url: 'https://docs.example.com/mcp', protocol: 'auto', skills: true },
     // A server you vetted: its skills load without asking anyone.
     ours: { url: 'https://mcp.internal.example/mcp', protocol: 'auto', skills: { consent: 'never' } },
+    // A server you trust with its GENERATED skills (no checksums): see "Generated skills" below.
+    gen: { url: 'https://gen.example.com/mcp', protocol: 'auto', skills: { dynamic: true } },
   },
   // A person sees each skill before the model does (see "Consent" below).
   toolApproval: { onRequest: askThePerson },
@@ -578,7 +580,7 @@ agent.listSkills()
 // [{ name: 'docs/pdf-processing', description: 'Extract, fill and assemble PDF documents [from the MCP server "docs" - third-party]', server: 'docs' }, ...]
 ```
 
-- **Off by default.** Without `skills` (`true`, or `{ consent }`) the extension is not declared
+- **Off by default.** Without `skills` (`true`, or `{ consent, dynamic }`) the extension is not declared
   and nothing of it is sent. With it, the extension is declared only where 2026-07-28 may be spoken (`protocol:
   'auto'` or `'modern'`): on `protocol: 'legacy'` (or none) a warning says so and nothing is
   asked, and an `'auto'` connection that ends on a 2025 revision lists no skills. There is no
@@ -604,8 +606,9 @@ agent.listSkills()
   whatever the mode, a rule or an earlier "always allow" say; with no `onRequest`, it is refused.
 - **Caps.** At most 32 skills per server and 64 in all in the catalog, 16 000 characters of a
   skill's instructions and 32 000 of one file - each cut said, never silent. Entries over the
-  extension's own limits (512 files, 16 MiB), `"dynamic"` ones (no digests to check), and ones
-  whose URI and frontmatter name disagree are refused, with a warning.
+  extension's own limits (512 files, 16 MiB), `"dynamic"` ones (no digests to check; unless the
+  server has `skills: { dynamic: true }`, below), and ones whose URI and frontmatter name disagree
+  are refused, with a warning.
 - **Changes.** A change of a server's skills is announced as a resource list change: the agent
   re-lists them the way it re-lists tools after a `tools/list_changed` (between runs).
 - **Directories.** `read_skill_file` with a directory of an MCP skill (`templates/`, `.`) lists
@@ -620,14 +623,31 @@ agent.listSkills()
   again). A child of the entry the server no longer lists stays in the listing and is also named
   in `notServed` (a read of it will fail). If the directory read fails, the listing comes from the
   entry alone (a log line); a stop of the run still stops it. Without `directoryRead` the method
-  is never called. `"dynamic"` skills stay declined: a directory read is the only way to find
-  their files and verifies nothing, so a consent could not bind to what the model would read.
+  is never called. A generated skill's directories are listed from its snapshot, the same way.
+- **Generated skills (opt-in, per server).** A `"dynamic"` entry - the server generates the skill
+  and publishes no checksums - is declined unless THAT server has `skills: { dynamic: true }`
+  (no agent-wide switch). It then joins the catalog like any other, its line ending
+  `[from the MCP server "gen" - third-party, no checksums]`. When it would enter the context -
+  BEFORE anyone is asked - the agent reads all of it once: `SKILL.md` (its frontmatter compared
+  with the entry's) and, if the server declared `directoryRead`, its directory tree (direct
+  children each time, only `inode/directory` children inside the skill, never twice) and every
+  file found. Bounds: 512 files and 16 MiB read (the extension's limits, counted on what is
+  read), 64 directories, 8 levels deep, and 64 MiB held by all of the agent's copies
+  (`MCP_SKILL_SNAPSHOTS_MAX_BYTES`); past any of them it is declined - nobody is asked, the model
+  is told why, a warning says it. The agent computes each file's size and SHA-256 itself, and that
+  copy (a "snapshot") is the skill's entry from then on: the request carries `skill.dynamic` and
+  the copy's size, files and text; a yes binds to the copy's digests (after a refresh the agent
+  takes a new copy - one that differs is asked about again under `'once-per-skill'`, the same
+  bytes are not); and the model gets that copy only - its body, and every file from memory, never
+  read from the server again. Without `directoryRead` the copy is `SKILL.md` alone
+  (`skill.noFileListing`; no other file can be read). Nothing of a copy is written anywhere -
+  not to a checkpoint, an event or a log. `'never'` works too, for a vetted server.
 - **Consent: a person sees a skill before the model does.** The first time a server's skill would
   enter the model's context - `load_skill`, the planner picking it, a resumed run, or
   `read_skill_file` of one of its files - its `SKILL.md` is read and verified, then put to
   `toolApproval.onRequest` as a request with `skill` (`McpSkillConsentView`: `server`, `name`,
   `skill`, `uri`, `description`, `size` / `totalSize`, `files` / `fileCount`, `byUri`, `nestedIn`,
-  `consent`, and `body` - the very text the model would read, cleaned and capped as the model gets
+  `dynamic` / `noFileListing` (a generated skill: the copy just read), `consent`, and `body` - the very text the model would read, cleaned and capped as the model gets
   it); `toolName` is `load_skill`, `input` what it was called with. A yes lets it in; `remember:
   true` ("Always for this server") lets in that server's other skills for the agent's life; a no
   keeps all of it out - the model is told so ("The user did not allow the skill ... nothing of it
@@ -654,8 +674,9 @@ agent.listSkills()
 [security notes](https://github.com/dudko-dev/agents/blob/main/packages/agent-web/docs/security.md#mcp-skills-third-party-instructions)
 say what a server's skill can and cannot do; its
 [design notes](https://github.com/dudko-dev/agents/blob/main/packages/agent-web/docs/design.md#mcp-skills-one-catalog-namespaced-under-a-preamble-opt-in)
-why it is namespaced, loaded under a preamble and opt-in, why the consent is what it is, and why
-a directory is listed from the entry with the server asked only for staleness.
+why it is namespaced, loaded under a preamble and opt-in, why the consent is what it is, why
+a directory is listed from the entry with the server asked only for staleness, and why a
+generated skill is a snapshot served from memory, opt-in per server.
 
 ## Tool approval and autopilot
 
@@ -1483,7 +1504,7 @@ Consent is the host's job ([tool approval](#tool-approval-and-autopilot)) — th
 | `decisionModel` | Off by default. A [decision model](#decision-models): an object with `decide(question, { abortSignal })` that answers a closed question with `{ choice, confidence }` (`decisionModelFromAiSdk(...)` adapts Gemini Decision 1, TypeSafe's Jev or any AI SDK decision model). Where it is confident it replaces the replanner's continue / finish call and a pipeline node's route call. Never consulted for tool approval or egress. |
 | `decision` | `{ confidenceThreshold?, timeoutMs?, replan?, route? }` (defaults `0.8`, `5000`, `true`, `true`). Below the threshold, on an error, a timeout or an answer that is not an option, the ordinary model call runs unchanged. |
 | `plannerModel` / `synthesizerModel` | **Deprecated** model-only shortcuts. Equivalent to `planner: { model }` / `synthesizer: { model }`. The override block, if present, wins. |
-| `mcpServers` | `Record<name, { url, headers?, getHeaders?, authProvider?, fetch?, connectTimeoutMs?, protocol? } \| { command, args?, env?, cwd?, connectTimeoutMs?, protocol? }>` — StreamableHTTP for remote (legacy HTTP+SSE servers are **not** supported), stdio for locally-spawned servers. `protocol`: `'legacy'` (default) \| `'auto'` \| `'modern'` - the 2025 revisions, 2026-07-28 when the server offers it, or 2026-07-28 only; see [MCP protocol revision](#mcp-protocol-revision). `skills: true` or `{ consent: 'once-per-skill' \| 'ask' \| 'never' }` (**experimental**, needs `'auto'` / `'modern'`): load the server's skills into the catalog as `<server>/<skill>`, each let into the model's context only once a person allowed it (`consent`); off by default - see [MCP skills](#mcp-skills-experimental). |
+| `mcpServers` | `Record<name, { url, headers?, getHeaders?, authProvider?, fetch?, connectTimeoutMs?, protocol? } \| { command, args?, env?, cwd?, connectTimeoutMs?, protocol? }>` — StreamableHTTP for remote (legacy HTTP+SSE servers are **not** supported), stdio for locally-spawned servers. `protocol`: `'legacy'` (default) \| `'auto'` \| `'modern'` - the 2025 revisions, 2026-07-28 when the server offers it, or 2026-07-28 only; see [MCP protocol revision](#mcp-protocol-revision). `skills: true` or `{ consent: 'once-per-skill' \| 'ask' \| 'never', dynamic?: boolean }` (**experimental**, needs `'auto'` / `'modern'`): load the server's skills into the catalog as `<server>/<skill>`, each let into the model's context only once a person allowed it (`consent`); `dynamic: true` also takes its generated skills (no checksums: each read whole into a snapshot before anyone is asked, and only that copy used); off by default - see [MCP skills](#mcp-skills-experimental). |
 | `tools` | Optional `ToolSet` of native AI-SDK tools registered alongside MCP-discovered ones. Names must not collide with MCP-prefixed names or the built-in tools (`createAgent` throws on conflict). Mark read-only tools with `markReadOnly(tool)`, and tools that run code with `markCodeExecution(tool)` (always asked while a run acts on an MCP server's skill). |
 | `availableTools` / `excludedTools` | Whitelist / blacklist applied to **all** tools (MCP and native). |
 | `maxIterations` | Cap on **executed steps** across the run (every step counts, including those run after a `revise`). |
@@ -1700,7 +1721,7 @@ The newer features are env-driven too: `AGENT_THINKING` (`off | minimal | low | 
 
 **`AGENT_MCP_ELICITATION`** (`off` by default, `form`, `all`) lets a connected MCP server ask *you* something in the middle of a tool call ([MCP elicitation](#mcp-elicitation-a-server-asks-the-user)). The question is printed as a quotation (`| …` in front of every line: the server's words, not the CLI's) and answered at the prompt, in the same queue as the approval questions: `y` fills in the form field by field (Enter takes a field's default or skips an optional one, a value of the wrong kind is asked for again up to three times, `/cancel` dismisses), `n` declines, anything else cancels. `all` also accepts URL mode: the link is printed for you to open yourself - the CLI never opens it. What you type goes to that server only; a question nobody decided (a cap, a timeout, a form that cannot be shown) is reported as `!! <tool>: the server's question was answered "cancel" automatically (<reason>)`. The defaults of the library apply (5 minutes per question, 5 per tool call, 20 per run); helpers started with `AGENT_SUBAGENTS` cannot ask.
 
-**MCP skills at the prompt.** A server in `MCP_SERVERS` may add `"skills": true` (or `{"consent": "once-per-skill" | "ask" | "never"}`) with `"protocol": "auto"` or `"modern"` - `skills` without one of those is refused at start, by the server's name, since the extension is written against 2026-07-28 and would otherwise be silently off ([MCP skills](#mcp-skills-experimental)). Before one of its skills reaches the model you are shown it at the prompt, in the same queue as the approval questions: `[skill]   the server "docs" offers the skill "pdf-processing" (docs/pdf-processing)`, its description, size and URI, and the first 12 lines of exactly what the model would read, each behind `| ` (the server's words, not the CLI's; control characters removed); then `allow? [y]es / [n]o / [a]lways for this server`. `y` lets it in (for the session under `once-per-skill`, the default; for this task under `ask`), `a` every skill of that server except nested ones, anything else declines (`the user declined the skill`). A question nobody answers is closed like an approval's: `[skill]   closed: <why> - docs/pdf-processing was not loaded`. `/skills` lists the server's skills with the others. `"connectTimeoutMs"` (default 30000, `0` = no bound) bounds one server's connect.
+**MCP skills at the prompt.** A server in `MCP_SERVERS` may add `"skills": true` (or `{"consent": "once-per-skill" | "ask" | "never", "dynamic": true}` - `dynamic` also takes the server's generated skills, no checksums; any other value of it is refused at start, by the server's name) with `"protocol": "auto"` or `"modern"` - `skills` without one of those is refused at start, by the server's name, since the extension is written against 2026-07-28 and would otherwise be silently off ([MCP skills](#mcp-skills-experimental)). Before one of its skills reaches the model you are shown it at the prompt, in the same queue as the approval questions: `[skill]   the server "docs" offers the skill "pdf-processing" (docs/pdf-processing)`, its description, size and URI, and the first 12 lines of exactly what the model would read, each behind `| ` (the server's words, not the CLI's; control characters removed); a generated skill adds `the server publishes no checksums for this skill: you approve the copy the agent just read, and only that copy is used` (and, from a server that cannot list its files, `the server cannot list this skill's files: that copy is its SKILL.md alone`); then `allow? [y]es / [n]o / [a]lways for this server`. `y` lets it in (for the session under `once-per-skill`, the default; for this task under `ask`), `a` every skill of that server except nested ones, anything else declines (`the user declined the skill`). A question nobody answers is closed like an approval's: `[skill]   closed: <why> - docs/pdf-processing was not loaded`. `/skills` lists the server's skills with the others. `"connectTimeoutMs"` (default 30000, `0` = no bound) bounds one server's connect.
 
 **Talking to the agent while it works.** The REPL keeps reading while a run goes. Text you type then is said to the running agent (it sees it at its next boundary and the replanner re-checks the plan — see [Steering a run](#steering-a-run-that-is-already-going)): the REPL prints `[you->agent] queued` and then `delivered (round|step|final)`, and the message enters the history as a user turn. A message that arrives while the answer is being written is sent as the next prompt (`[follow-up]`). After Ctrl-C nothing is sent behind your back: what the agent never saw is listed as `[not delivered]`. While a run goes, `/agents` lists the running subagents and `/stop <n>` (or an id prefix, or just `/stop` when one runs) stops one — the run goes on; the other REPL commands work between runs. Each subagent's own steps and tool calls are logged as `[name id] ...` lines, so parallel ones can be told apart.
 

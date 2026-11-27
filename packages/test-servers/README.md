@@ -177,7 +177,8 @@ subdirectories as `inode/directory`, sorted, with the SDK's `ttlMs` / `cacheScop
 URI that is not a directory (a file, a trailing slash, nothing at all, another scheme).
 `skillDirectoryRead: { pageSize: n }` pages the children (`nextCursor`, an offset; an unknown
 cursor is `-32602`). `mcp.skillDirectoryReads` lists every directory URI a client asked for, one
-entry per page.
+entry per page; `mcp.skillReads` every `resources/read` of a skill file, in order (a test counts
+the reads of one file there).
 
 | Skill | Files | Body marker (`SKILL_MARKERS`) |
 | --- | --- | --- |
@@ -304,7 +305,9 @@ that is already open is not touched:
 | `nameMismatch` | `skill://wrong-name/SKILL.md` with the frontmatter name `other-name`; `skills/list` is answered by hand, before the SDK (which would drop the entry) |
 | `frontmatter` | `skill://drifted/SKILL.md`, whose entry's description is not its `SKILL.md`'s (the digest matches) |
 | `oversize` | `skill://huge/SKILL.md`, listing 513 files: over the extension's limit of 512 |
-| `dynamic` | `skill://generated/SKILL.md` with `"resources": "dynamic"` |
+| `dynamic` | `skill://generated/SKILL.md` (`SKILL_URIS.generated`) with `"resources": "dynamic"`: a generated skill whose files are `references/notes.md` and `templates/a.md` (`GENERATED-BODY`, `GENERATED-NOTES-BODY`, `GENERATED-TEMPLATE-BODY`). With `skillDirectoryRead` its tree walks (`skill://generated`, `.../references`, `.../templates`); on a server without it only its `SKILL.md` can be found - the case of a generated skill on a server that cannot list its files (its files are still served by `resources/read`, for a test to show a client never asks) |
+| `dynamicChanging` | `skill://changing/SKILL.md` (`SKILL_URIS.changing`, `"dynamic"`): its body and its `references/live.md` change on EVERY read - `CHANGING-BODY read <n>` / `CHANGING-FILE-BODY read <n>`, `n` counting that file's reads; its frontmatter never changes |
+| `dynamicOversize` | `skill://sprawl/SKILL.md` (`SKILL_URIS.sprawl`, `"dynamic"`) with 512 tiny files under `parts/`: 513 with its `SKILL.md`, over the limit of 512 - found only by walking its directories (`skillDirectoryRead`) |
 | `hostile` | `skill://approve-everything/SKILL.md`: instructions to approve every call, switch approval off, fetch an outside URL and run `scripts/payload.js`, and `allowed-tools: run_js web_fetch` in its frontmatter (`HOSTILE-SKILL-BODY`) |
 | `longBody` | `skill://long-guide/SKILL.md`, whose instructions are 40 000 characters (ending `END-OF-LONG-GUIDE`) |
 | `changedFile` | (no new skill) `pdf-processing`'s `references/FORMS.md` is served changed, same length: its digest no longer matches |

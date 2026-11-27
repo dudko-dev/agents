@@ -217,6 +217,32 @@ test("MCP_SERVERS: a wrong skills value or consent is refused by name, by the co
   }
 })
 
+test('MCP_SERVERS: skills.dynamic flows through as given; a value that is not a boolean is refused by name', () => {
+  setMinimalOpenAi()
+  process.env.MCP_SERVERS = JSON.stringify({
+    gen: { url: 'https://x', protocol: 'auto', skills: { dynamic: true } },
+    both: { command: '/bin/fs', protocol: 'modern', skills: { consent: 'never', dynamic: true } },
+    off: { url: 'https://y', protocol: 'auto', skills: { dynamic: false } },
+  })
+  const c = loadConfig().mcpServers
+  assert.deepEqual((c.gen as { skills?: unknown }).skills, { dynamic: true })
+  assert.deepEqual((c.both as { skills?: unknown }).skills, { consent: 'never', dynamic: true })
+  assert.deepEqual((c.off as { skills?: unknown }).skills, { dynamic: false })
+  for (const dynamic of ['yes', 1, null, 'true', {}]) {
+    process.env.MCP_SERVERS = JSON.stringify({
+      gen: { url: 'https://x', protocol: 'auto', skills: { dynamic } },
+    })
+    assert.throws(
+      () => loadConfig(),
+      /MCP_SERVERS\.gen: skills\.dynamic must be true or false/,
+      JSON.stringify(dynamic),
+    )
+  }
+  // It needs a protocol that may speak 2026-07-28, like any skills setting.
+  process.env.MCP_SERVERS = JSON.stringify({ gen: { url: 'https://x', skills: { dynamic: true } } })
+  assert.throws(() => loadConfig(), /MCP_SERVERS\.gen: "skills" needs "protocol"/)
+})
+
 test('MCP_SERVERS: connectTimeoutMs flows through (0 = no bound); anything but a non-negative integer is refused', () => {
   setMinimalOpenAi()
   process.env.MCP_SERVERS = JSON.stringify({

@@ -365,7 +365,13 @@ waiting for it. OFF
   entry; with `directoryRead` declared the catalog's `readDirectory` asks that server
   (`resources/directory/read`) only for staleness - `compareMcpSkillDirectory` counts what it
   lists beyond the entry, never names it, marks `notServed`; a change fires `onToolsChanged` once
-  per held entry; `"dynamic"` stays declined). A COPY of the server's `src/mcp-skills.ts`, byte for byte - change
+  per held entry), and GENERATED skills (`"dynamic"`): declined unless the server's
+  `skills: { dynamic: true }` (no agent-wide switch); then read into a SNAPSHOT before anyone is
+  asked (`startMcpSkillWalk` / `takeMcpSkillWalkListing` - the walk's bounds: 512 files, 64
+  directories, depth 8 -, `mcpSkillSnapshotBytesRefusal` - 16 MiB read, 64 MiB per agent -,
+  `mcpSkillSha256` over WebCrypto, `mcpSkillSnapshotEntry` = the held entry, files served from
+  memory, nothing written; `mcpSkillTag(server, true)`, the view's `dynamic` / `noFileListing`).
+  A COPY of the server's `src/mcp-skills.ts`, byte for byte - change
   both (the server's `tests/mcp-skills-shared.test.ts` compares them and tests every rule).
   `http.ts` wires it: the extension declared only with `skills: true` and a `protocol` that may
   speak 2026-07-28, listed only on a 2026-07-28 connection, the SDK's
@@ -373,7 +379,8 @@ waiting for it. OFF
   `notifications/resources/list_changed` (`resourcesListChanged` on the listen stream) and goes
   through `onToolsChanged` / `refreshServer`. `skills.ts` keeps an MCP skill's state per skill
   object (`acquireMcpSkill`: read, verify, ASK, then let in; `addMcpSkillByUri`;
-  `isMcpSkillAllowed` per run); the question is `askMcpSkillConsent` in `tools/approval.ts`
+  `isMcpSkillAllowed` per run; the agent's `McpSkillSnapshotMemory`, made by the runner, in each
+  skill's state); the question is `askMcpSkillConsent` in `tools/approval.ts`
   (`onRequest`, the request's `skill`, `ApprovalState.mcpSkillGrants` shared with helpers; the
   mode and the rules play no part); `config.mcpSkills.consent` is the agent-wide default; the
   runner makes the per-run `McpSkillConsentScope`. The runner collects them from `baseTools` at `createAgent` (a helper gets its caller's
