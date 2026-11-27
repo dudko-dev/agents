@@ -23,6 +23,13 @@ export const APP_SAMPLING_MAX_SYSTEM_CHARS = 4_000
 export const APP_SAMPLING_MAX_IMAGES = 4
 /** ...each at most this many bytes. */
 export const APP_SAMPLING_MAX_IMAGE_BYTES = 4 * 1024 * 1024
+/**
+ * Room for the model's reasoning on top of an app's `maxTokens`, for a model that thinks. On Gemini
+ * and OpenAI the reasoning counts against the output cap, and some models think whatever they are
+ * told (Gemini 3 Flash spent 111 of an app's 120 tokens thinking and answered "(e.g.,"). The app's
+ * `maxTokens` is meant for the answer: a model seen thinking gets this much more.
+ */
+export const APP_SAMPLING_REASONING_TOKENS = 2048
 /** Requests of one app (server + `ui://` resource) per minute. */
 export const APP_SAMPLING_PER_MINUTE = 5
 /** Requests of one app for the life of the agent (a page reload starts again). */
@@ -40,6 +47,11 @@ export interface AppSamplingSettings {
   maxRequests?: number
   /** Characters of a request's text (default `APP_SAMPLING_MAX_INPUT_CHARS`). */
   maxInputChars?: number
+  /**
+   * Tokens of reasoning allowed on top of a request's `maxTokens`, for a model seen thinking
+   * (default `APP_SAMPLING_REASONING_TOKENS`; `0` = never more than the app's `maxTokens`).
+   */
+  reasoningTokens?: number
 }
 
 export interface ResolvedAppSampling {
@@ -48,6 +60,7 @@ export interface ResolvedAppSampling {
   maxRequestsPerMinute: number
   maxRequests: number
   maxInputChars: number
+  reasoningTokens: number
 }
 
 const positiveInt = (value: unknown, name: string, fallback: number): number => {
@@ -60,7 +73,17 @@ const positiveInt = (value: unknown, name: string, fallback: number): number => 
   return value
 }
 
-/** `config.appSampling` resolved; throws on a cap that is not a whole number of at least 1. */
+const nonNegativeInt = (value: unknown, name: string, fallback: number): number => {
+  if (value === undefined) return fallback
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    throw new Error(
+      `appSampling.${name} must be a whole number of at least 0, got: ${String(value)}`,
+    )
+  }
+  return value
+}
+
+/** `config.appSampling` resolved; throws on a cap that is not a whole number of at least 1 (0 for `reasoningTokens`). */
 export const resolveAppSampling = (setting: unknown): ResolvedAppSampling => {
   const s = typeof setting === 'object' && setting !== null ? (setting as AppSamplingSettings) : {}
   return {
@@ -73,12 +96,21 @@ export const resolveAppSampling = (setting: unknown): ResolvedAppSampling => {
     ),
     maxRequests: positiveInt(s.maxRequests, 'maxRequests', APP_SAMPLING_PER_APP),
     maxInputChars: positiveInt(s.maxInputChars, 'maxInputChars', APP_SAMPLING_MAX_INPUT_CHARS),
+    reasoningTokens: nonNegativeInt(
+      s.reasoningTokens,
+      'reasoningTokens',
+      APP_SAMPLING_REASONING_TOKENS,
+    ),
   }
 }
 
 /** Why a request was not answered. */
 export type AppSamplingErrorCode =
-  'disabled' | 'invalid' | 'unsupported' | 'rate-limited' | 'denied'
+  | 'disabled'
+  | 'invalid'
+  | 'unsupported'
+  | 'rate-limited'
+  | 'denied'
 
 /** The JSON-RPC code an app is answered with for each (`-1`: MCP's "user rejected sampling"). */
 export const APP_SAMPLING_RPC_CODES: Record<AppSamplingErrorCode, number> = {

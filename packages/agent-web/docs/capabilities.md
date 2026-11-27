@@ -970,9 +970,14 @@ is told):
    answers `true` itself (the React package keeps that until a reload).
 5. **The model**: the synthesizer's (a text completion with no tools is that stage's work), sent
    the view's system prompt and messages and nothing else - no agent system prompt, no memory, no
-   tools, no MCP instructions, no thinking - with `maxOutputTokens: view.maxTokens` and
-   `chatTimeoutMs`. Its tokens are charged as they arrive (`agent.usage`, `sessionUsage`) and
-   reported as ONE `usage` event of phase `'app'`; a failed call's spend is charged too.
+   tools, no MCP instructions - with `maxOutputTokens: view.maxTokens` and `chatTimeoutMs`. The
+   app's `maxTokens` is for the ANSWER: on Gemini and OpenAI a model's reasoning counts against the
+   output cap, and some models think whatever they are told (Gemini 3 Flash spent 111 of an app's
+   120 tokens thinking and answered "(e.g.,"). A call cut off (`length`) while the model reasoned
+   is asked once more with `reasoningTokens` (2048; `appSampling.reasoningTokens`, `0` = never)
+   on top, and from then on every request of that agent gets the room from the start. Its tokens
+   are charged as they arrive (`agent.usage`, `sessionUsage`) and reported as `usage` events of
+   phase `'app'` (two for a request asked again); a failed call's spend is charged too.
 
 The answer is returned and goes nowhere else: no memory, no event, no run. It is outside every
 run: no step clock, no run limits (`limits` are per run; the app's caps are its own).
