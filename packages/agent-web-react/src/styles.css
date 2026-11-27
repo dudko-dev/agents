@@ -585,6 +585,9 @@
 }
 .awr-keyform__input {
   flex: 1 1 auto;
+  /* An input keeps its intrinsic width as a flex item: without this the buttons beside it are
+     pushed past a narrow column. */
+  min-width: 0;
   padding: 8px 10px;
   border: 1px solid var(--awr-border, #e5e7eb);
   border-radius: 8px;

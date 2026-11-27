@@ -4,6 +4,7 @@ import type { BrowserAgentConfig, ModelInput, ProviderType } from '@dudko.dev/ag
 import {
   AgentChat,
   ChatHistoryStore,
+  GeneratedMedia,
   IndexedDBStore,
   MemoryStore,
   VfsSkillStore,
@@ -26,19 +27,28 @@ import { Settings } from './components/Settings'
 import { buildMockCatalog } from './mockCatalog'
 import { MODELS } from './models'
 import { useNotesBoard } from './notes'
-import { RU_LABELS } from './i18n'
+import { LABELS } from './i18n'
 import { PIPELINE_URL } from './links'
 import { Markdown } from './markdown'
 import markUrl from './mark.svg'
 import {
   enabledSkillsFor,
+  SEARCH_CREDENTIAL,
   useDemoSettings,
   useSettingsConfig,
   type AnalystMode,
   type ThinkingChoice,
   type View,
 } from './settings'
-import { GPU_LOST, GPU_LOST_NOTICE, useDemoModel, useDemoTiers } from './use-model'
+import { useDemoDecision, useDemoMedia, useSavedKeys } from './use-extras'
+import {
+  autoTiers,
+  GPU_LOST,
+  GPU_LOST_NOTICE,
+  tierChoice,
+  useDemoModel,
+  useDemoTiers,
+} from './use-model'
 import { pdfToMarkdown, workspace } from './workspace'
 
 const NOTES_PROMPT = `You manage a sticky-notes board through the provided tools.
@@ -62,6 +72,20 @@ On your turn: 1) call get_position; 2) pick 2-4 candidate moves and ${
 }; 3) play the best one with make_move — exactly one move per turn.
 Then reply with one or two friendly sentences: your idea and any threat. Never ask the user anything.
 If make_move fails, read its error (it lists the legal moves) and try again. If the game is over, say so and do not move.`
+
+/** What a failed tool call told the model, as one readable line. */
+const toolErrorText = (output: unknown): string => {
+  const picked =
+    typeof output === 'string'
+      ? output
+      : output && typeof output === 'object'
+        ? ((output as { error?: unknown; message?: unknown }).error ??
+          (output as { message?: unknown }).message ??
+          output)
+        : output
+  const text = typeof picked === 'string' ? picked : (JSON.stringify(picked) ?? String(picked))
+  return text.length > 600 ? `${text.slice(0, 600)}…` : text
+}
 
 const VIEWS: View[] = ['notes', 'mcp', 'chess']
 
@@ -95,12 +119,27 @@ export const App = () => {
 
   // ── Agent settings shared by every tab ─────────────────────────────────────
   const { settings, update, reset: resetSettings } = useDemoSettings()
-  const { config: settingsConfig, rebuildKey } = useSettingsConfig(settings, modelWindow)
-  // Model tiers: an optional lighter and stronger executor next to the chosen model.
+  // Which keys are in the vault: what is "on when possible" is decided by it.
+  const savedKeys = useSavedKeys(credentials)
+  const { config: settingsConfig, rebuildKey } = useSettingsConfig(
+    settings,
+    modelWindow,
+    Boolean(savedKeys?.has(SEARCH_CREDENTIAL)),
+  )
+  // Model tiers: a lighter and a stronger executor next to the chosen model. "auto" takes them
+  // from the chosen model's own provider (the same key), when the list has such models.
+  const auto = autoTiers(model)
   const tiers = useDemoTiers(
-    { light: settings.tierLight, strong: settings.tierStrong },
+    {
+      light: tierChoice(settings.tierLight, auto.light),
+      strong: tierChoice(settings.tierStrong, auto.strong),
+    },
     credentials,
   )
+  // Media (image / speech / transcription) and the decision model: built in the app from a
+  // saved key, like the chat models; off while there is no key for them.
+  const media = useDemoMedia(settings.media, model.provider, credentials, savedKeys)
+  const decision = useDemoDecision(settings.decision, credentials, savedKeys)
   // The model's memory per conversation. With saved chats it lives in
   // IndexedDB too (keyed by the chat id), so a reopened chat continues with its
   // context; the chess game is not saved, so its memory isn't either.
@@ -153,6 +192,8 @@ export const App = () => {
     ...(settings.learning ? { learning: { store: notebooks[tab] } } : {}),
     // `standard` is the chosen model; nothing is passed when no tier is set (tiers off).
     ...(tiers.executorTiers ? { executorTiers: tiers.executorTiers } : {}),
+    ...(media.config ? { media: media.config } : {}),
+    ...(decision.model ? { decisionModel: decision.model } : {}),
     // The consent mode is applied live by useAgent — no rebuild on a switch.
     toolApproval: { mode: settings.approvalMode },
     // Images, where the core can't tell from the model (built-in, Gemma 4).
@@ -160,7 +201,7 @@ export const App = () => {
     // Stream the agent's internal phases to the console — handy for poking.
     logLevel: 'debug',
   })
-  const deps = [modelId, resolvedModel, rebuildKey, memories, tiers.key]
+  const deps = [modelId, resolvedModel, rebuildKey, memories, tiers.key, media.key, decision.key]
 
   // ── Tab 1: sticky notes ─────────────────────────────────────────────────────
   const board = useNotesBoard()
@@ -350,7 +391,8 @@ export const App = () => {
   }, [view])
 
   // Everything below is a prop of <AgentChat> — the "Chat UI" settings flip them.
-  const ru = settings.lang === 'ru'
+  // English is the library's own labels; the other languages are complete sets (i18n.ts).
+  const labels = settings.lang === 'en' ? undefined : LABELS[settings.lang]
   const chatCommon: Partial<AgentChatProps> = {
     showContext: settings.maxTotalTokens || true,
     showThoughts: settings.showThoughts,
@@ -359,8 +401,22 @@ export const App = () => {
     showTotalUsage: settings.showUsage,
     // The site is dark only, and so is the demo.
     theme: 'dark',
-    labels: ru ? RU_LABELS : undefined,
+    labels,
     files: settings.filesPanel ? workspace : undefined,
+    // What the media tools wrote is in the workspace whether its panel is shown or not (and the
+    // chess tab has no panel at all), so a generated file is always drawn from there.
+    renderMedia: (m) => <GeneratedMedia media={m} files={workspace} labels={labels} />,
+    // A tool call that failed says why, right under its row: a refused image (the provider's
+    // quota error), a blocked request, a tool's own complaint - the sentence the model got.
+    renderToolCall: (call, fallback) =>
+      call.status === 'done' && call.ok === false ? (
+        <>
+          {fallback}
+          <li className="tool-error">{toolErrorText(call.output)}</li>
+        </>
+      ) : (
+        fallback
+      ),
     // Answers are Markdown — render them (any renderer plugs in here).
     renderContent: (m) => (m.role === 'assistant' ? <Markdown text={m.content} /> : m.content),
     // A Markdown file the agent wrote is rendered the same way in its chip's preview.
@@ -368,7 +424,8 @@ export const App = () => {
       /\.(md|markdown)$/i.test(f.path) ? <Markdown text={text} /> : undefined,
   }
   const composer = (placeholder: string): AgentChatProps['composer'] => ({
-    placeholder: ru ? undefined : placeholder,
+    // The tabs' own placeholders are English: another language shows its label instead.
+    placeholder: labels ? undefined : placeholder,
     // The model and thinking chips switch the same state as the settings panel.
     model: {
       label: model.label.split(' — ')[0],
@@ -463,6 +520,19 @@ export const App = () => {
               controller={{ notes: notesAgent, mcp: mcpAgent, chess: chessAgent }[view]}
               modelWindow={modelWindow}
               tiersMissingKey={tiers.missingKey}
+              model={model}
+              savedKeys={savedKeys}
+              mediaProvider={media.provider}
+              decisionOn={Boolean(decision.model)}
+              tiersOn={{
+                light: Boolean(tiers.executorTiers?.light),
+                strong: Boolean(tiers.executorTiers?.strong),
+              }}
+              onKeyChange={() => {
+                notesAgent.reload()
+                mcpAgent.reload()
+                chessAgent.reload()
+              }}
               credentials={credentials}
               update={update}
               onReset={resetSettings}

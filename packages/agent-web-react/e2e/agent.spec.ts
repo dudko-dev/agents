@@ -107,6 +107,37 @@ test('a file dropped anywhere on the page is attached', async ({ page }) => {
   await expect(page.locator('.awr-files .awr-file__name')).toHaveText(['notes.md'])
 })
 
+test('a file pasted with nothing focused is attached; a paste into another field is left alone', async ({
+  page,
+}) => {
+  await mockGemini(page, () => ({ text: 'ok' }))
+  await openWithKey(page)
+  const paste = (selector: string) =>
+    page.evaluate((sel) => {
+      const d = new DataTransfer()
+      d.items.add(new File(['# Notes\n- one'], 'pasted.md', { type: 'text/markdown' }))
+      const e = new ClipboardEvent('paste', { clipboardData: d, bubbles: true, cancelable: true })
+      document.querySelector(sel)!.dispatchEvent(e)
+      return e.defaultPrevented
+    }, selector)
+  // Another field on the page keeps its paste.
+  await page.locator('.agentset__title').click()
+  expect(await paste('.agentset input')).toBe(false)
+  await expect(page.locator('.awr-files .awr-file__name')).toHaveCount(0)
+  // Nothing focused: the chat takes the file.
+  expect(await paste('body')).toBe(true)
+  await expect(page.locator('.awr-files .awr-file__name')).toHaveText(['pasted.md'])
+  // Text alone is never taken.
+  const text = await page.evaluate(() => {
+    const d = new DataTransfer()
+    d.setData('text/plain', 'hello')
+    const e = new ClipboardEvent('paste', { clipboardData: d, bubbles: true, cancelable: true })
+    document.body.dispatchEvent(e)
+    return e.defaultPrevented
+  })
+  expect(text).toBe(false)
+})
+
 test('consent: in "Ask" mode a write tool waits for the user', async ({ page }) => {
   await mockGemini(page, oneToolCall('add_note', { text: 'needs consent' }, 'Added it.'))
   await openWithKey(page)
@@ -239,7 +270,7 @@ test('a setting changed mid-run keeps the run going and applies to the next one'
   await send(page, 'hello')
   await expect(page.locator('.awr-sendbtn--stop')).toBeVisible()
   await page.locator('.agentset__title').click()
-  await page.locator('.agentset select').first().selectOption('high')
+  await page.locator('.agentset').getByLabel('Thinking').selectOption('high')
   // The rebuild doesn't flip the panel out of "running".
   await expect(page.locator('.awr-sendbtn--stop')).toBeVisible()
   await expect(page.locator('.awr-msg--assistant .awr-msg__bubble')).toHaveText('Hi there.')
@@ -316,11 +347,31 @@ test('fast answers: the step’s reply is the answer — no synthesizer call', a
   expect(calls.map((c) => c.stage)).toEqual(['planner', 'executor'])
 })
 
-test('labels: every text of the chat can be swapped (Russian)', async ({ page }) => {
+test('labels: every text of the chat can be swapped (Spanish, German)', async ({ page }) => {
   await mockGemini(page, () => ({ text: 'ok' }))
   await openWithKey(page)
   await page.locator('.agentset__title').click()
-  await page.getByLabel('Labels').selectOption('ru')
-  await expect(page.getByRole('button', { name: 'Отправить' })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Показать чаты' })).toBeVisible()
+  const lang = page.getByLabel('Chat language')
+  await expect(lang.locator('option')).toHaveText(['English', 'Español', 'Deutsch'])
+
+  await lang.selectOption('es')
+  await expect(page.getByRole('button', { name: 'Enviar' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Mostrar chats' })).toBeVisible()
+  await expect(page.getByRole('textbox', { name: 'Mensaje' })).toHaveAttribute(
+    'placeholder',
+    /Pida algo al agente/,
+  )
+
+  await lang.selectOption('de')
+  await expect(page.getByRole('button', { name: 'Senden' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Chats anzeigen' })).toBeVisible()
+  await expect(page.getByRole('textbox', { name: 'Nachricht' })).toHaveAttribute(
+    'placeholder',
+    /Geben Sie dem Agenten eine Aufgabe/,
+  )
+
+  // Back to English: the library's own labels and the tab's own placeholder.
+  await lang.selectOption('en')
+  await expect(page.getByRole('button', { name: 'Send' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Show chats' })).toBeVisible()
 })

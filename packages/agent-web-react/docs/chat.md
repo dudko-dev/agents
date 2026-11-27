@@ -129,7 +129,7 @@ full size) and file chips. The header shows the conversation's total.
 | `attachments` | `false`, or `{ accept, maxBytes, imageMaxDimension, imageMaxPixels }` |
 | `convertFile` / `convert` | file → text (e.g. PDF → Markdown), `'when-needed'` or `'always'` |
 | `files` | save attachments into a `VirtualFileSystem` under `/attachments/` |
-| `dropZone` | `'self'` (default), `'window'`, or a ref (`<AgentChat>` passes its panel) |
+| `dropZone` | `'self'` (default), `'window'`, or a ref (`<AgentChat>` passes its panel). Files dropped there are attached, and so are files pasted there with Ctrl+V - in the message field, on anything inside the zone, or with nothing focused when the zone is the window or the last click was inside it. A paste into another field, and pasted text, are left alone |
 | `speech` | `false`, or `{ lang }` |
 | `steering` / `showQueued` | typing to the agent while it works; the queue strips ([below](#talking-to-the-agent-while-it-works)) |
 | `showTimer` / `showAgents` / `showApprovalMode` / `showNotices` | toolbar parts |
@@ -575,13 +575,15 @@ model started says which helper asks - see [the tree](#subagents-and-helpers-the
 plurals work in any language:
 
 ```tsx
-<AgentChat labels={{ send: 'Отправить', steps: (n) => `${n} шаг(ов)` }} />
+<AgentChat
+  labels={{ send: 'Senden', steps: (n) => `${n} ${n === 1 ? 'Schritt' : 'Schritte'}` }}
+/>
 // or for a whole tree:
-<AgentLabelsProvider labels={ruLabels}>…</AgentLabelsProvider>
+<AgentLabelsProvider labels={deLabels}>…</AgentLabelsProvider>
 ```
 
-See `defaultLabels` for the full list (the demo ships a complete Russian set in
-`demo/src/i18n.ts`).
+See `defaultLabels` for the full list (the demo ships complete Spanish and German sets in
+`apps/demo/src/i18n.ts`).
 
 **Render props** — take over a part and keep the rest; each gets the built-in
 rendering as `fallback`:

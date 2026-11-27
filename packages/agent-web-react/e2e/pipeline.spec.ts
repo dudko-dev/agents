@@ -465,6 +465,100 @@ test('the keys, the model and the MCP servers are the demo’s: one origin, one 
   await expect(page.locator('.settings__summary-value').first()).toContainText('Pro')
 })
 
+test('a node gets the capabilities it ticks - and the tiers and the decision model of the demo - and no other node does', async ({
+  page,
+}) => {
+  const calls = await mockGemini(
+    page,
+    (c: GeminiCall): GeminiReply => {
+      if (c.system.includes('Router of one step')) {
+        return { text: JSON.stringify({ route: 'ROUTER-MODEL-WAS-ASKED' }) }
+      }
+      if (c.stage === 'planner') {
+        return {
+          text: JSON.stringify({
+            thought: 'One hard step.',
+            steps: [{ description: 'Work it out', complexity: 'high' }],
+          }),
+        }
+      }
+      if (c.stage === 'synthesizer') return { text: 'An answer.' }
+      return { text: 'Worked on it.' }
+    },
+    // The route is a closed question: the decision model answers it.
+    {
+      decide: (q) => ({
+        choice: q.options.includes('second') ? 'second' : q.options[0],
+        confidence: 0.97,
+      }),
+    },
+  )
+  await open(page)
+  await page.getByPlaceholder('AIza…').fill('AIza-test-key')
+  await page.getByRole('button', { name: 'Save' }).click()
+  await expect(page.locator('.settings__summary-status').first()).toHaveText('key stored ✓')
+
+  await page.locator('.awr-pipeline input[type=file]').setInputFiles({
+    name: 'caps.json',
+    mimeType: 'application/json',
+    buffer: Buffer.from(
+      JSON.stringify({
+        version: 1,
+        name: 'Capabilities',
+        entry: 'a',
+        nodes: [
+          {
+            id: 'a',
+            name: 'Coder',
+            instructions: 'NODE-A works with code.',
+            tools: ['code', 'web'],
+            routes: [
+              { label: 'second', description: 'Hand over to the second node' },
+              { label: 'stop', description: 'Nothing more to do' },
+            ],
+          },
+          { id: 'b', name: 'Plain', instructions: 'NODE-B only writes.' },
+        ],
+        edges: [{ from: 'a', to: 'b', when: { kind: 'route', label: 'second' } }],
+      }),
+    ),
+  })
+  await expect(page.locator('.awr-canvas__node')).toHaveCount(2)
+
+  // The inspector offers the capabilities as things a node can tick, and says what each is.
+  await node(page, 'a').click({ position: { x: 30, y: 12 } })
+  await expect(page.getByLabel('Run code')).toBeChecked()
+  await expect(page.getByLabel('Web pages')).toBeChecked()
+  await expect(page.getByLabel('Helpers')).not.toBeChecked()
+  await expect(page.getByLabel('Media')).not.toBeChecked()
+
+  await page.getByRole('textbox', { name: 'Request' }).fill('Do the thing')
+  await page.getByRole('button', { name: 'Run', exact: true }).click()
+  await expect(page.locator('.awr-presults__status')).toHaveText('Finished', { timeout: 30_000 })
+  await expect(page.locator('.awr-pvisit__name')).toHaveText(['Coder', 'Plain'])
+
+  const executorOf = (marker: string) =>
+    calls.filter((c) => c.stage === 'executor' && c.system.includes(marker))
+  const a = executorOf('NODE-A')
+  const b = executorOf('NODE-B')
+  expect(a.length).toBeGreaterThan(0)
+  expect(b.length).toBeGreaterThan(0)
+  // The ticked node has run_js and web_fetch; nobody has what nobody ticked.
+  expect(a[0].tools).toEqual(expect.arrayContaining(['run_js', 'web_fetch']))
+  expect(a[0].tools).not.toContain('spawn_subagent')
+  expect(a[0].tools).not.toContain('generate_image')
+  for (const tool of ['run_js', 'web_fetch', 'spawn_subagent', 'generate_image', 'web_search']) {
+    expect(b[0].tools).not.toContain(tool)
+  }
+  // Model tiers reach every node: the step rated hard ran on the provider's strongest model.
+  expect(a[0].model).toBe('gemini-3.1-pro-preview')
+  expect(b[0].model).toBe('gemini-3.1-pro-preview')
+  // The route was the decision model's: the router call of the language model never ran.
+  expect(calls.decisions.some((d) => d.options.includes('second'))).toBe(true)
+  expect(calls.filter((c) => c.system.includes('Router of one step'))).toHaveLength(0)
+  await expect(page.locator('.awr-pvisit__route')).toHaveText(['route: second'])
+})
+
 test.describe('on a phone', () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true })
 
