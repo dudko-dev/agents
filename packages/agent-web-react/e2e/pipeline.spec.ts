@@ -40,10 +40,13 @@ test('the page loads: one heading, a proper head, the starter pipeline on the ca
     'href',
     'https://agent.dudko.dev/pipeline/',
   )
+  // Its own card (apps/site/public/og/pipeline.png), with the size and the alt text previews read.
   await expect(page.locator('meta[property="og:image"]')).toHaveAttribute(
     'content',
-    'https://agent.dudko.dev/og.png',
+    'https://agent.dudko.dev/og/pipeline.png',
   )
+  await expect(page.locator('meta[property="og:image:width"]')).toHaveAttribute('content', '1200')
+  await expect(page.locator('meta[property="og:image:alt"]')).toHaveAttribute('content', /\S/)
   await expect(page.locator('.awr-canvas__node')).toHaveCount(3)
   await expect(edges(page)).toHaveCount(3)
   await expect(card(page, 'writer').locator('.awr-pnode__entry')).toHaveText('entry')

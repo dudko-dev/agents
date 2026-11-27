@@ -9,6 +9,7 @@
     "dev": "node scripts/sync-docs.mjs && astro dev",
     "build": "node scripts/sync-docs.mjs && astro build --force && node scripts/assemble.mjs",
     "preview": "astro preview",
+    "og-cards": "node scripts/og-cards.mjs",
     "typecheck": "node scripts/sync-docs.mjs && astro check",
     "format:check": "prettier --check \"src/**/*.{ts,css}\" \"scripts/*.mjs\" astro.config.mjs",
     "format": "prettier --write \"src/**/*.{ts,css}\" \"scripts/*.mjs\" astro.config.mjs"
@@ -23,6 +24,7 @@
   "devDependencies": {
     "@astrojs/check": "^0.9.12",
     "demo": "workspace:*",
+    "playwright": "^1.65.1",
     "prettier": "^3.10.1",
     "typescript": "^6.0.3",
     "worker": "workspace:*"

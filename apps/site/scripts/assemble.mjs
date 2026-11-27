@@ -37,13 +37,17 @@ for (const [, url] of page.matchAll(/(?:src|href)="(\/demo\/[^"]+)"/g)) {
   }
 }
 
-// The sitemap is written by Astro from its own pages. The pipeline editor is a page of the site
-// that Astro did not build: add it. (A file for crawlers; nothing in the interface links to it.)
+// The sitemap is written by Astro from its own pages. The demo and the pipeline editor are pages
+// of the site that Astro did not build: add them. (A file for crawlers; nothing in the interface
+// links to it.)
 const sitemap = resolve(dist, 'sitemap-0.xml')
-const loc = `<url><loc>${SITE}/pipeline/</loc></url>`
 if (!existsSync(sitemap)) throw new Error('sitemap-0.xml is missing from the Astro build')
-const xml = readFileSync(sitemap, 'utf8')
+let xml = readFileSync(sitemap, 'utf8')
 if (!xml.includes('</urlset>')) throw new Error('sitemap-0.xml has no </urlset> to add a page to')
-if (!xml.includes(loc)) writeFileSync(sitemap, xml.replace('</urlset>', `${loc}</urlset>`))
+for (const path of ['/demo/', '/pipeline/']) {
+  const loc = `<url><loc>${SITE}${path}</loc></url>`
+  if (!xml.includes(loc)) xml = xml.replace('</urlset>', `${loc}</urlset>`)
+}
+writeFileSync(sitemap, xml)
 
 console.log('assembled: the demo is under dist/demo/, the pipeline editor under dist/pipeline/')
