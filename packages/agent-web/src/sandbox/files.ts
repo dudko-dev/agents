@@ -1,6 +1,11 @@
 import type { ToolSet } from 'ai'
 import { fileToolBindingOf } from '../files/tools.js'
-import { isTextMime, normalizePath, type VirtualFileSystem } from '../files/vfs.js'
+import {
+  isTextMime,
+  normalizePath,
+  type VirtualFileInfo,
+  type VirtualFileSystem,
+} from '../files/vfs.js'
 import {
   moduleSpecifiersOf,
   resolveModulePath,
@@ -77,7 +82,12 @@ export const readWorkspaceText = async (
 
 /** Serves the guest's `fs` calls on the agent's side of the boundary. */
 export const createFileHost =
-  (files: SandboxFiles, approve: SandboxApprove | undefined): SandboxHostCall =>
+  (
+    files: SandboxFiles,
+    approve: SandboxApprove | undefined,
+    /** Told about every file the guest wrote, after the write succeeded (the run's `file.written`). */
+    onWrite?: (file: VirtualFileInfo) => void,
+  ): SandboxHostCall =>
   async (op, args) => {
     switch (op) {
       case 'readFile':
@@ -99,7 +109,8 @@ export const createFileHost =
           )
         }
         await approve?.(files.write, { path, content }, false)
-        await files.vfs.write(path, content)
+        const info = await files.vfs.write(path, content)
+        onWrite?.(info)
         return undefined
       }
       case 'readdir': {
