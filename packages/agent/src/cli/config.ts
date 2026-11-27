@@ -748,7 +748,7 @@ const parseMcpServers = (raw: string | undefined): Record<string, IMcpServerConf
     // by name, instead of at connect.
     const protocol =
       v.protocol === undefined ? undefined : mcpProtocolMode(v.protocol, `MCP_SERVERS.${name}`)
-    // The Skills extension (experimental): true, false or { consent }, checked by the core's own
+    // The Skills extension (experimental): true, false or { consent, dynamic }, checked by the core's own
     // rule. It is written against 2026-07-28, so it needs a protocol that may speak it: the core
     // would only warn and request nothing, which in an env var reads as "on" and is silently off.
     const skillsOn = mcpSkillsSettingOf(v.skills, `MCP_SERVERS.${name}`).on

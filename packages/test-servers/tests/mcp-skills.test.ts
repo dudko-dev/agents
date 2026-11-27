@@ -384,3 +384,96 @@ test('directory reads: the faults - an extra file, an omitted one, an error', as
     await mcp.close()
   }
 })
+
+test('generated skills: listed "dynamic"; their trees walk with directory reads; `changing` changes on every read', async () => {
+  const mcp = await startLocalMcpServer({
+    protocol: 'modern',
+    skills: true,
+    skillDirectoryRead: true,
+  })
+  const entry = async (uri: string) =>
+    (await rpc(mcp.url, 'skills/list')).result.skills.find((s: { uri: string }) => s.uri === uri)
+  const served = async (uri: string): Promise<string> =>
+    (await rpc(mcp.url, 'resources/read', { uri })).result.contents[0].text
+  try {
+    // Off: none of them listed.
+    for (const uri of [SKILL_URIS.generated, SKILL_URIS.changing, SKILL_URIS.sprawl]) {
+      assert.equal(await entry(uri), undefined, uri)
+    }
+    mcp.skillFaults.dynamic = true
+    assert.deepEqual(await entry(SKILL_URIS.generated), {
+      uri: SKILL_URIS.generated,
+      frontmatter: { name: 'generated', description: 'A skill generated on every read' },
+      resources: 'dynamic',
+    })
+    assert.deepEqual(childrenOf(await directory(mcp.url, 'skill://generated')), [
+      'skill://generated/SKILL.md text/markdown',
+      'skill://generated/references inode/directory',
+      'skill://generated/templates inode/directory',
+    ])
+    assert.deepEqual(childrenOf(await directory(mcp.url, 'skill://generated/references')), [
+      'skill://generated/references/notes.md text/markdown',
+    ])
+    assert.deepEqual(childrenOf(await directory(mcp.url, 'skill://generated/templates')), [
+      'skill://generated/templates/a.md text/markdown',
+    ])
+    assert.ok((await served(SKILL_URIS.generated)).includes(SKILL_MARKERS.generated))
+    assert.ok(
+      (await served('skill://generated/references/notes.md')).includes(
+        SKILL_MARKERS.generatedNotes,
+      ),
+    )
+    assert.ok(
+      (await served('skill://generated/templates/a.md')).includes(SKILL_MARKERS.generatedTemplate),
+    )
+    // The same bytes on every read.
+    assert.equal(await served(SKILL_URIS.generated), await served(SKILL_URIS.generated))
+
+    mcp.skillFaults.dynamicChanging = true
+    assert.equal((await entry(SKILL_URIS.changing)).resources, 'dynamic')
+    const first = await served(SKILL_URIS.changing)
+    const second = await served(SKILL_URIS.changing)
+    assert.match(first, new RegExp(`${SKILL_MARKERS.changingBody} read 1\\n$`))
+    assert.match(second, new RegExp(`${SKILL_MARKERS.changingBody} read 2\\n$`))
+    // The frontmatter never changes: only the body.
+    assert.equal(first.split('---')[1], second.split('---')[1])
+    const live = 'skill://changing/references/live.md'
+    assert.match(await served(live), new RegExp(`${SKILL_MARKERS.changingFile} read 1`))
+    assert.match(await served(live), new RegExp(`${SKILL_MARKERS.changingFile} read 2`))
+    assert.deepEqual(childrenOf(await directory(mcp.url, 'skill://changing/references')), [
+      `${live} text/markdown`,
+    ])
+
+    mcp.skillFaults.dynamicOversize = true
+    assert.equal((await entry(SKILL_URIS.sprawl)).resources, 'dynamic')
+    assert.deepEqual(childrenOf(await directory(mcp.url, 'skill://sprawl')), [
+      'skill://sprawl/SKILL.md text/markdown',
+      'skill://sprawl/parts inode/directory',
+    ])
+    const parts = await directory(mcp.url, 'skill://sprawl/parts')
+    assert.equal(parts.result.resources.length, 512, '513 files with its SKILL.md')
+    assert.equal(await served('skill://sprawl/parts/512.md'), 'part 512\n')
+    assert.ok(mcp.skillReads.includes(live), 'in the read log')
+  } finally {
+    await mcp.close()
+  }
+})
+
+test('generated skills without directory reads: nothing lists their files, resources/read still serves them', async () => {
+  const mcp = await startLocalMcpServer({ protocol: 'modern', skills: true })
+  try {
+    mcp.skillFaults.dynamic = true
+    const { result } = await rpc(mcp.url, 'skills/list')
+    assert.ok(result.skills.some((s: { uri: string }) => s.uri === SKILL_URIS.generated))
+    const read = await directory(mcp.url, 'skill://generated')
+    assert.ok(read.error, 'not served')
+    assert.notEqual(read.error.code, -32602, 'an unknown method')
+    // A client that knew the URI could read it: it is not listed in any entry, so it must not.
+    const notes = await rpc(mcp.url, 'resources/read', {
+      uri: 'skill://generated/references/notes.md',
+    })
+    assert.ok((notes.result.contents[0].text as string).includes(SKILL_MARKERS.generatedNotes))
+  } finally {
+    await mcp.close()
+  }
+})

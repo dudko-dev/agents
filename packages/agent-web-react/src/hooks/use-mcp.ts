@@ -95,25 +95,30 @@ export interface McpConnectOptions {
 }
 
 /**
- * `skills` on a server, as the hooks pass it on and remember it: `true`, or `{ consent }` -
- * `'once-per-skill'` (the core's default), `'ask'` or `'never'` (see the core's
- * `McpHttpServerConfig.skills`).
+ * `skills` on a server, as the hooks pass it on and remember it: `true`, or `{ consent, dynamic }`
+ * - `consent`: `'once-per-skill'` (the core's default), `'ask'` or `'never'`; `dynamic: true`: also
+ * the server's generated skills (no checksums - each read whole into a snapshot before anyone is
+ * asked, approved and used as that copy only; see the core's `McpHttpServerConfig.skills`).
  */
-export type McpSkillsSetting = true | { consent?: McpSkillConsent }
+export type McpSkillsSetting = true | { consent?: McpSkillConsent; dynamic?: boolean }
 
 /**
  * A `skills` value as the hooks take it - also from storage, so anything else is dropped: `true`,
- * an object with a known `consent` (or none: `true`), else `undefined` (off).
+ * an object with a known `consent` (or none) and a boolean `dynamic` (or none) - `{ dynamic: true }`
+ * kept, `false` dropped; neither left: `true` -, else `undefined` (off).
  */
 export const mcpSkillsSettingOf = (value: unknown): McpSkillsSetting | undefined => {
   if (value === true) return true
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
-  const consent = (value as { consent?: unknown }).consent
-  return consent === 'ask' || consent === 'once-per-skill' || consent === 'never'
-    ? { consent }
-    : consent === undefined
-      ? true
-      : undefined
+  const { consent, dynamic } = value as { consent?: unknown; dynamic?: unknown }
+  const known = consent === 'ask' || consent === 'once-per-skill' || consent === 'never'
+  if (!known && consent !== undefined) return undefined
+  if (dynamic !== undefined && typeof dynamic !== 'boolean') return undefined
+  if (!known && dynamic !== true) return true
+  return {
+    ...(known ? { consent: consent as McpSkillConsent } : {}),
+    ...(dynamic === true ? { dynamic: true as const } : {}),
+  }
 }
 
 export interface UseMcpOptions {

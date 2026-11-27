@@ -286,6 +286,86 @@ test.describe('MCP skills', () => {
     )
   })
 
+  test('a generated skill: the card says no checksums and shows the copy read; nothing reaches the model before "Allow once"', async ({
+    page,
+  }) => {
+    // A server added with `skills: { dynamic: true }` - remembered in the list as any setting, and
+    // reconnected from it on load: the hooks hand the setting to the core as it is.
+    const generated = await startLocalMcpServer({
+      cors: '*',
+      protocol: 'dual',
+      skills: true,
+      skillDirectoryRead: true,
+    })
+    generated.skillFaults.dynamic = true
+    try {
+      const calls = await mockGemini(page, loads('docs/generated'))
+      await page.addInitScript((url) => {
+        const key = 'agent-web-react:mcp-servers'
+        if (localStorage.getItem(key)) return
+        localStorage.setItem(
+          key,
+          JSON.stringify([
+            { name: 'docs', url, auth: 'none', protocol: 'auto', skills: { dynamic: true } },
+          ]),
+        )
+      }, generated.url)
+      await page.goto('/')
+      await page.getByPlaceholder('AIza…').fill('AIza-test-key')
+      await page.getByRole('button', { name: 'Save' }).click()
+      await page.getByRole('tab', { name: 'MCP servers' }).click()
+      await expect(status(page)).toContainText('Connected', { timeout: 15_000 })
+      await expect(page.getByRole('button', { name: 'Send' })).toBeVisible()
+      await send(page, 'Use the generated skill')
+
+      const card = page.locator('.awr-approval--skill')
+      await expect(card).toBeVisible({ timeout: 30_000 })
+      await expect(card).toHaveAttribute('data-skill', 'docs/generated')
+      await expect(card.locator('.awr-approval__dynamic')).toHaveText(
+        'This server publishes no checksums for this skill: you approve the copy the agent just read, and only that copy is used.',
+      )
+      // The size and files are the copy's: read whole before the card was shown.
+      await expect(card.locator('.awr-approval__skillmeta')).toContainText('2 more files')
+      expect(generated.skillReads).toEqual([
+        'skill://generated/SKILL.md',
+        'skill://generated/references/notes.md',
+        'skill://generated/templates/a.md',
+      ])
+      await card.locator('details.awr-approval__preview summary').click()
+      await expect(card.locator('.awr-approval__body')).toContainText(SKILL_MARKERS.generated)
+      await expect(card.locator('details.awr-approval__preview')).toContainText(
+        'references/notes.md, templates/a.md',
+      )
+      expect(sent(calls)).not.toContain(SKILL_MARKERS.generated)
+      // On a phone the card fits too.
+      await page.setViewportSize({ width: 390, height: 844 })
+      const overflow = await page.evaluate(
+        () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      )
+      expect(overflow).toBe(0)
+      await page.setViewportSize({ width: 1280, height: 720 })
+
+      await card.getByRole('button', { name: 'Allow once' }).click()
+      await expect(answer(page)).toHaveText('All done.', { timeout: 45_000 })
+      const executor = calls.filter((c) => c.stage === 'executor')
+      const loaded = executor.find((c) => c.functionResponses.some((r) => r.name === 'load_skill'))
+      expect(JSON.stringify(loaded?.functionResponses)).toContain(SKILL_MARKERS.generated)
+      // The files it read up front reached the model nowhere; nothing of the copy is stored.
+      for (const marker of [SKILL_MARKERS.generatedNotes, SKILL_MARKERS.generatedTemplate]) {
+        expect(sent(calls)).not.toContain(marker)
+      }
+      const saved = await page.evaluate(() => JSON.stringify(Object.entries(localStorage)))
+      expect(saved).not.toContain(SKILL_MARKERS.generated)
+      const list = await page.evaluate(() =>
+        JSON.parse(localStorage.getItem('agent-web-react:mcp-servers') ?? '[]'),
+      )
+      expect(list[0]?.skills).toEqual({ dynamic: true })
+      expect(generated.skillReads).toHaveLength(3)
+    } finally {
+      await generated.close()
+    }
+  })
+
   test('on a phone the card fits: no sideways scroll, the preview wraps', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 })
     await mockGemini(page, loads('docs/pdf-processing'))

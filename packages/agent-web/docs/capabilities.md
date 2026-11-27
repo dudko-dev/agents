@@ -362,6 +362,8 @@ const mcp = await connectMcpHttp(
     docs: { url, protocol: 'auto', skills: true },
     // A server you vetted: its skills load without a question.
     ours: { url: ourUrl, protocol: 'auto', skills: { consent: 'never' } },
+    // A server you trust with its generated skills (no checksums): step 8 below.
+    gen: { url: genUrl, protocol: 'auto', skills: { dynamic: true } },
   },
   { onToolsChanged: (name) => void mcp.refreshServer(name) },
 )
@@ -376,7 +378,7 @@ agent.skills.filter((s) => s.server) // [{ name: 'docs/pdf-processing', descript
 
 What happens, in order:
 
-1. **Negotiation.** With `skills` (`true`, or `{ consent }`) and a `protocol` that may speak 2026-07-28 (`'auto'`,
+1. **Negotiation.** With `skills` (`true`, or `{ consent, dynamic }`) and a `protocol` that may speak 2026-07-28 (`'auto'`,
    `'modern'`), the client declares `io.modelcontextprotocol/skills: {}` among its
    `extensions`. Without the flag - the default - nothing is declared and the wire is what it
    always was. On `'legacy'` (or no `protocol`) nothing is declared either and a `warn` line says
@@ -387,8 +389,9 @@ What happens, in order:
    follows the Agent Skills rules, there is a description, `resources` is the complete list of its
    files - each inside the skill's directory, listed once, with a `sha256:` digest and a size -
    within the extension's limits (512 files, 16 MiB). A `"dynamic"` entry (no digests) is
-   declined - deliberately, also where the server serves directory reads (step 5a). A refused
-   entry is a `warn` line naming why. Nothing is read: lazy retrieval.
+   declined - deliberately, also where the server serves directory reads (step 5a) - unless the
+   server has `skills: { dynamic: true }` (step 8): then it is taken when it meets every other
+   rule. A refused entry is a `warn` line naming why. Nothing is read: lazy retrieval.
 3. **The catalog.** The skills join `skills` as `<server>/<skill>`, the server by its key in the
    connection (the host's label). Host skills and lessons cannot hold a `/`, so no name is ever
    shared: a server cannot shadow one of yours or another server's skill, and a clash of bare
@@ -465,8 +468,7 @@ What happens, in order:
    - a directory read that fails (`-32602`, the SDK's capability error, a bad result) leaves the
      listing to the entry alone: no note, a `warn` line; a stop of the run still stops it.
    Without `directoryRead` the method is never called; without `skills` nothing of it exists.
-   `"dynamic"` skills stay declined (step 2): a directory read is the only way to find their
-   files, and it verifies nothing - a consent could not bind to what the model would read.
+   A generated skill (step 8) is listed from its snapshot, and compared the same way.
 6. **Changes.** The extension has no notice of its own: a server announces a change of its skills
    as a resource list change. With `onToolsChanged`, the connection listens for
    `notifications/resources/list_changed` too (on 2026-07-28, `resourcesListChanged` on the same
@@ -492,6 +494,48 @@ What happens, in order:
    so that it takes no name in use (`assignAddedMcpSkillName`: `docs/release-checklist`, or by its
    path, `docs/internal/git-workflow`, when `docs/git-workflow` is taken). A URI already in the
    catalog for that server is that skill: nothing is asked of the server.
+8. **Generated skills (opt-in).** A server that generates a skill publishes `"resources":
+   "dynamic"` instead of the list of its files: there are no digests, so nothing could be verified
+   and no consent could bind to the content. Such an entry is declined (step 2) unless that
+   server's config says `skills: { dynamic: true }` - per server, on purpose: there is no
+   agent-wide switch (`mcpSkills` stays consent only). Then:
+   - **Listing.** It joins the catalog like any other skill, its line ending
+     `[from the MCP server "docs" - third-party, no checksums]` (still within 300 characters).
+     Nothing of it is read.
+   - **A snapshot, before anyone is asked.** When it would enter the context (step 4 / 4a - the
+     same paths), the agent reads all of it once: `SKILL.md` through the SDK (`read(skill)`: the
+     frontmatter is still compared with the entry's), then - only if the server declared
+     `directoryRead` - its directory tree: `resources/directory/read` of the skill's root, then of
+     every `inode/directory` child inside the root (direct children only, two spellings of one
+     name are one, nothing visited twice; anything outside the root, with a query or no plain name
+     is ignored), and `resources/read` of every file found (nested `SKILL.md` files are files like
+     any other). Bounds: at most `MCP_SKILL_MAX_RESOURCES` (512) files including `SKILL.md`, at most
+     `MCP_SKILL_MAX_TOTAL_BYTES` (16 MiB) actually read, at most
+     `MCP_SKILL_SNAPSHOT_MAX_DIRECTORIES` (64) directories read, none deeper than
+     `MCP_SKILL_SNAPSHOT_MAX_DEPTH` (8), and all the snapshots one agent holds together at most
+     `MCP_SKILL_SNAPSHOTS_MAX_BYTES` (64 MiB). Over any of them - or a directory or a file that
+     cannot be read - the skill is declined: nobody is asked, the model is told why (the tool
+     call fails, a planner's pick is not activated), and a `warn` line names the reason. The
+     file count is checked as the directories are listed, before any file is read.
+   - **Its own entry.** The agent computes each file's byte size and SHA-256 itself (WebCrypto)
+     and makes a manifest of the copy (`resources: [{ uri, size, digest }]`). That manifest is the
+     skill's held entry from then on: the consent request carries `dynamic: true` and the copy's
+     `size`, `totalSize`, `files` and `body`; a yes binds to the copy's digests
+     (`mcpSkillGrantKey`), so under `'once-per-skill'` a later snapshot that differs - after a
+     refresh (the Node sibling) or in a new agent - is asked about again, and an identical one is
+     not. `'never'` works as for any skill (a vetted server).
+   - **Served from memory.** The model gets exactly what was approved: the body of the copy's
+     `SKILL.md`, and `read_skill_file` answers every file from the copy's bytes, never with a new
+     read (a generated skill may change on every read: the approved copy is what counts). A path
+     the copy does not hold is refused before any request. A directory is listed from the copy;
+     with `directoryRead`, the staleness check of step 5a works as for any skill (counts only).
+   - **No directory reads.** On a server that did not declare `directoryRead` the copy is
+     `SKILL.md` alone: the request says `noFileListing: true`, and no other file of the skill can
+     be read (none is in the held entry).
+   - **Nothing written.** The copy lives in memory, with the skill object (for the agent's life;
+     the Node sibling's refresh drops the old objects and gives their bytes back): never in
+     IndexedDB, a checkpoint, an event or a log - only what the model was given, as for any skill.
+     A resumed run in a new agent reads a new copy.
 
 While a run acts on an MCP skill - one of its own active skills, or one of the run that started
 it, for a helper - a call of a tool that **runs code** (`isCodeExecutionTool`: the sandbox's
@@ -2584,7 +2628,7 @@ Subscribe with `onEvent` (per run) or the handler you pass to `createAgent`; ren
 | --- | --- |
 | `skill.activated` | `name, by: 'plan' \| 'tool', server?` (`server`: the MCP server of a skill served with `skills: true`) |
 | `tools.discovered` | `step?, query, names` — `find_tools` activated more tools |
-| `tool.approval-requested` | `id, name, input, readOnly, step?, subagent?, app?, mcpSkills?, skill?` (`subagent: { id, depth }` when a helper the model started is asking; `app: { server, tool, resourceUri }` when an [MCP App](#mcp-apps-a-servers-interface-for-a-tool) asks - `agent.approveAppToolCall`; `mcpSkills`: the call runs code while the run acts on these [MCP skills](#mcp-skills-experimental), so it is asked whatever the mode says; `skill` (`McpSkillConsentView`, with `name: 'load_skill'`): not a tool call but an [MCP server's skill](#mcp-skills-experimental) about to enter the model's context - its server, name, description, size, files and the text the model would read) |
+| `tool.approval-requested` | `id, name, input, readOnly, step?, subagent?, app?, mcpSkills?, skill?` (`subagent: { id, depth }` when a helper the model started is asking; `app: { server, tool, resourceUri }` when an [MCP App](#mcp-apps-a-servers-interface-for-a-tool) asks - `agent.approveAppToolCall`; `mcpSkills`: the call runs code while the run acts on these [MCP skills](#mcp-skills-experimental), so it is asked whatever the mode says; `skill` (`McpSkillConsentView`, with `name: 'load_skill'`): not a tool call but an [MCP server's skill](#mcp-skills-experimental) about to enter the model's context - its server, name, description, size, files and the text the model would read; `dynamic` / `noFileListing` for a [generated one](#mcp-skills-experimental): the copy the agent just read) |
 | `tool.approval-resolved` | `id, name, approved, reason?, automatic` |
 | `mcp.elicitation-requested` | `id, server, tool, mode: 'form' \| 'url', message, requestedSchema?, url?, step?, subagent?` — an MCP server asked the user for input during a tool call and the connection's `onElicitation` is being called. The server's text, cleaned and capped ([elicitation](#mcp-elicitation-a-server-asks-the-user)) |
 | `mcp.elicitation-answered` | `id, server, tool, action: 'accept' \| 'decline' \| 'cancel', automatic, reason?, fields?` — the question was settled. `fields`: the NAMES of the fields an accepted form was answered with, never a value. `automatic`: nobody decided, the tool call fails, `reason` says why |

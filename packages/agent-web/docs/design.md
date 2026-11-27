@@ -911,12 +911,41 @@ source of the agent's skills, beside the host's and the lessons. The choices:
   lists is the entry's own path, so it is named (`notServed`). A failed directory read costs
   nothing but a log line: the entry is enough. The work is bounded - the SDK walks at most
   `listMaxPages` pages, and at most 640 entries of the answer are looked at.
-- **`"dynamic"` skills stay declined.** The extension lets a host decline them. A directory read
-  is the only way to find their files, and it verifies nothing: no digest, no size, nothing a
-  consent could bind to, so a yes would cover whatever the server serves next. Admitting them
-  through directory reads would turn the one surface where the extension's integrity is weakest
-  into the one that discovers files - for a feature (instructions as skills) that works without
-  it.
+- **`"dynamic"` skills: declined by default, a snapshot when a server is trusted with them.** The
+  extension lets a host decline them, and by default this one does: a directory read is the only
+  way to find their files, and it verifies nothing - no digest, no size, nothing a consent could
+  bind to, so a yes would cover whatever the server serves next. Some servers can only generate
+  their skills, though, so `skills: { dynamic: true }` takes them on terms that keep the one
+  property the consent stands for - what the model reads is what the person approved:
+  - **Why a snapshot.** With no published digests there is nothing to bind a yes to except bytes
+    the agent itself holds. So the agent reads the whole skill BEFORE asking (`SKILL.md`, then -
+    where the server lists directories - every file in its tree), computes the digests itself
+    and makes that manifest the held entry. The consent is then content-bound after all, to the
+    copy: the same machinery as a listed skill (`mcpSkillGrantKey`, `'once-per-skill'`, nested
+    rules, the card), nothing special-cased downstream. Reading up front breaks the extension's
+    lazy-retrieval rule for these skills; a copy must be complete to be what a person approves,
+    and the bounds (the extension's 512 files / 16 MiB counted on what is read, 64 directories,
+    8 levels, 64 MiB per agent) cap what that costs. A copy over a bound is declined before
+    anyone is asked: a person should not be asked about something the agent would not use.
+  - **Why served from memory.** A generated skill may differ on every read - the test server's
+    `changing` fault does exactly that. Reading a file again at `read_skill_file` time would give
+    the model bytes nobody saw, and there would be nothing to check them against. So every file
+    is served from the copy, and a path the copy does not hold is refused like an unlisted file
+    of any held entry. Memory, not IndexedDB or a checkpoint: a stored copy would be a second
+    copy to keep honest (the extension's cache rules) and would outlive the approval it was
+    taken for; a resumed run in a new agent simply reads - and, if it differs, asks - again.
+  - **Why opt-in per server, with no agent-wide switch.** The snapshot protects the approval, not
+    the content: the server still chooses what to send at that moment, and nothing protects
+    against it or an intermediary. Whether that is acceptable is a judgement about one server,
+    like `consent: 'never'` - so it is set where the server is configured, never for every server
+    at once (`mcpSkills` stays consent-only), and a new server never brings generated skills by
+    default.
+  - **Why the walk is pure and shared.** What is read (direct children, `inode/directory` only
+    inside the root, nothing twice, the bounds) is security-relevant and identical in both
+    packages, so it lives in the shared file (`startMcpSkillWalk`, `takeMcpSkillWalkListing`,
+    `mcpSkillSnapshotBytesRefusal`, `mcpSkillSnapshotEntry`), tested once rule by rule; the
+    digest is WebCrypto's (`globalThis.crypto.subtle`, browsers and Node >= 20), so the shared
+    file still imports nothing.
 
 ## MCP elicitation: the host answers, the model never sees the question
 

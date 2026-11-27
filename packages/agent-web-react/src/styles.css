@@ -2658,7 +2658,8 @@
   overflow-wrap: anywhere;
   min-width: 0;
 }
-.awr-approval__nested {
+.awr-approval__nested,
+.awr-approval__dynamic {
   color: var(--awr-fg);
   padding: 5px 8px;
   border-radius: 6px;

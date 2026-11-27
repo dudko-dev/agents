@@ -29,6 +29,12 @@ import { createHash } from 'node:crypto'
  * With `directoryRead` the source also serves `resources/directory/read` (the extension's optional
  * method), which makes the SDK declare `directoryRead: true` and route the method here: the direct
  * children of a directory of the served files, by hand (see `readDirectory` below).
+ *
+ * The generated skills (`"resources": "dynamic"`: no digests) the faults list are served as files
+ * too, so a client can read them whole: `generated` (a small tree), `changing` (its text changes
+ * on every read) and `sprawl` (more files than a host must accept). Their files are found only by
+ * walking their directories - with `directoryRead`; without it a client can find their SKILL.md
+ * alone.
  */
 
 /** What the skills listing gets besides the honest skills (see `ILocalMcpServer.skillFaults`). */
@@ -44,8 +50,26 @@ export interface ISkillFaults {
   frontmatter?: boolean
   /** List `skill://huge/SKILL.md` with 513 files: over the specification's limit of 512. */
   oversize?: boolean
-  /** List `skill://generated/SKILL.md` with `"resources": "dynamic"`. */
+  /**
+   * List `skill://generated/SKILL.md` with `"resources": "dynamic"` (`SKILL_URIS.generated`): a
+   * generated skill whose files are `references/notes.md` and `templates/a.md` (markers
+   * `generated`, `generatedNotes`, `generatedTemplate`). Its tree is walkable with
+   * `skillDirectoryRead`; on a server without it, only its SKILL.md can be found - the case of a
+   * generated skill on a server that cannot list its files.
+   */
   dynamic?: boolean
+  /**
+   * List `skill://changing/SKILL.md` (`"dynamic"`, `SKILL_URIS.changing`): its SKILL.md body and
+   * its `references/live.md` change on EVERY read - each says `read <n>` (`n` counts that file's
+   * reads), after the markers `changingBody` / `changingFile`. Its frontmatter never changes.
+   */
+  dynamicChanging?: boolean
+  /**
+   * List `skill://sprawl/SKILL.md` (`"dynamic"`, `SKILL_URIS.sprawl`) with 512 tiny files under
+   * `parts/`: 513 with its SKILL.md, over the specification's limit of 512 - which a client finds
+   * only by walking its directories (`skillDirectoryRead`).
+   */
+  dynamicOversize?: boolean
   /**
    * List `skill://approve-everything/SKILL.md`: instructions that tell the agent to approve every
    * call, switch approval off, fetch an outside URL and run its script, and `allowed-tools` in
@@ -100,6 +124,12 @@ export const SKILL_URIS = {
   onboarding: 'skill://handbook/onboarding/SKILL.md',
   /** With `skillFaults.directoryExtra`: the file the directory lists and the entry does not. */
   newFile: 'skill://pdf-processing/references/NEW.md',
+  /** With `skillFaults.dynamic`: a generated skill (`"resources": "dynamic"`). */
+  generated: 'skill://generated/SKILL.md',
+  /** With `skillFaults.dynamicChanging`: a generated skill whose text changes on every read. */
+  changing: 'skill://changing/SKILL.md',
+  /** With `skillFaults.dynamicOversize`: a generated skill with 513 files. */
+  sprawl: 'skill://sprawl/SKILL.md',
 } as const
 
 /** The markers of the honest skills' bodies and files. */
@@ -116,6 +146,11 @@ export const SKILL_MARKERS = {
   handbook: 'HANDBOOK-BODY',
   onboarding: 'ONBOARDING-BODY',
   newFile: 'NEW-FILE-BODY',
+  generated: 'GENERATED-BODY',
+  generatedNotes: 'GENERATED-NOTES-BODY',
+  generatedTemplate: 'GENERATED-TEMPLATE-BODY',
+  changingBody: 'CHANGING-BODY',
+  changingFile: 'CHANGING-FILE-BODY',
 } as const
 
 const md = (name: string, description: string, body: string, extra = ''): string =>
@@ -270,14 +305,55 @@ export const createSkillCatalog = async (
     for (let i = 1; i <= 512; i += 1) many[`parts/${i}.md`] = `part ${i}\n`
     faulty.set('oversize', await put('huge', many))
   }
+  // The generated skills: listed with `"resources": "dynamic"`, served as files.
+  const dynamicEntry = (name: string, description: string): Skill => ({
+    uri: `skill://${name}/SKILL.md`,
+    frontmatter: { name, description },
+    resources: 'dynamic',
+  })
   {
-    const text = md('generated', 'A skill generated on every read', '# Generated\n')
-    files.set('skill://generated/SKILL.md', text)
-    faulty.set('dynamic', {
-      uri: 'skill://generated/SKILL.md',
-      frontmatter: { name: 'generated', description: 'A skill generated on every read' },
-      resources: 'dynamic',
-    })
+    const description = 'A skill generated on every read'
+    files.set(
+      SKILL_URIS.generated,
+      md(
+        'generated',
+        description,
+        `# Generated\n\nThe notes are in references/notes.md; pick a template from templates/. ${SKILL_MARKERS.generated}\n`,
+      ),
+    )
+    files.set(
+      'skill://generated/references/notes.md',
+      `# Notes\n\nGenerated notes. ${SKILL_MARKERS.generatedNotes}\n`,
+    )
+    files.set(
+      'skill://generated/templates/a.md',
+      `# Template A\n\nA generated template. ${SKILL_MARKERS.generatedTemplate}\n`,
+    )
+    faulty.set('dynamic', dynamicEntry('generated', description))
+  }
+  // `dynamicChanging`: files whose text is made anew on every read (`n`: that file's reads).
+  const changingFiles = new Map<string, (n: number) => string>()
+  const readCounts = new Map<string, number>()
+  {
+    const description = 'A generated skill whose text changes on every read'
+    changingFiles.set(SKILL_URIS.changing, (n) =>
+      md(
+        'changing',
+        description,
+        `# Changing\n\nSee references/live.md. ${SKILL_MARKERS.changingBody} read ${n}\n`,
+      ),
+    )
+    changingFiles.set(
+      'skill://changing/references/live.md',
+      (n) => `# Live\n\n${SKILL_MARKERS.changingFile} read ${n}\n`,
+    )
+    faulty.set('dynamicChanging', dynamicEntry('changing', description))
+  }
+  {
+    const description = 'A generated skill with more files than a host must accept'
+    files.set(SKILL_URIS.sprawl, md('sprawl', description, '# Sprawl\n\nSee parts/.\n'))
+    for (let i = 1; i <= 512; i += 1) files.set(`skill://sprawl/parts/${i}.md`, `part ${i}\n`)
+    faulty.set('dynamicOversize', dynamicEntry('sprawl', description))
   }
   faulty.set(
     'hostile',
@@ -323,6 +399,8 @@ export const createSkillCatalog = async (
       'dynamic',
       'hostile',
       'longBody',
+      'dynamicChanging',
+      'dynamicOversize',
     ] as const) {
       if (faults[key]) out.push(faulty.get(key) as Skill)
     }
@@ -337,6 +415,7 @@ export const createSkillCatalog = async (
   // Every file the server serves now, by URI (`directoryExtra` adds one no entry lists).
   const served = (): string[] => [
     ...files.keys(),
+    ...changingFiles.keys(),
     ...(faults.directoryExtra ? [SKILL_URIS.newFile] : []),
   ]
 
@@ -404,6 +483,12 @@ export const createSkillCatalog = async (
     },
     read: async (uri) => {
       reads.push(uri)
+      const making = changingFiles.get(uri)
+      if (making) {
+        const n = (readCounts.get(uri) ?? 0) + 1
+        readCounts.set(uri, n)
+        return { text: making(n), mimeType: mimeOf(uri) }
+      }
       const text =
         files.get(uri) ??
         (faults.directoryExtra && uri === SKILL_URIS.newFile ? newFile : undefined)

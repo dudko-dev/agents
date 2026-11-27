@@ -109,6 +109,14 @@ export const skillApprovalPrompt = (view: McpSkillConsentView): string => {
       `${pad}it sits inside the skill "${oneLine(view.nestedIn)}": allowing that one did not allow this one`,
     )
   }
+  if (view.dynamic) {
+    out.push(
+      `${pad}the server publishes no checksums for this skill: you approve the copy the agent just read, and only that copy is used`,
+    )
+  }
+  if (view.noFileListing) {
+    out.push(`${pad}the server cannot list this skill's files: that copy is its SKILL.md alone`)
+  }
   const lines = plain(view.body).split('\n')
   out.push(`${pad}what the agent would read (the server's text):`)
   for (const line of lines.slice(0, SKILL_PREVIEW_LINES)) {

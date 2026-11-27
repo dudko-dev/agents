@@ -7,6 +7,7 @@ import { runContext } from './context.ts'
 import {
   assignAddedMcpSkillName,
   assignMcpSkillNames,
+  createMcpSkillSnapshotMemory,
   decideMcpSkillConsent,
   mcpSkillBodyText,
   mcpSkillConsentView,
@@ -32,6 +33,7 @@ import {
   type McpSkillLoaded,
   type McpSkillRecord,
   type McpSkillRunConsent,
+  type McpSkillSnapshotMemory,
   type McpSkillSource,
   type SkillDirectoryListing,
 } from './mcp-skills.ts'
@@ -135,13 +137,20 @@ export const learnedPreamble = (skill: ISkill): string => {
 // time the skill is loaded (load_skill, or the planner picking it), shown to a person, and put in
 // the model's context only on a yes (consent: see mcp-skills.ts); a file of it is read only when
 // read_skill_file asks for it, once the skill was let in. What the connection gives is kept here,
-// per skill object.
+// per skill object. A generated skill (`skills: { dynamic: true }`) is read whole into a snapshot
+// at that first load - before the person is asked - and its files are served from it; the
+// snapshots of one agent share a memory cap (`memory`), and a skill object the agent drops
+// (releaseMcpSkills: a refresh) gives its share back. Nothing of one is written anywhere.
 
 interface IMcpSkillState {
   source: McpSkillSource
   record: McpSkillRecord
   // Given by URI (skills/get), not listed.
   byUri?: boolean
+  // What the agent's snapshots of generated skills hold (shared by all its MCP skills).
+  memory: McpSkillSnapshotMemory
+  // Dropped by the agent (releaseMcpSkills): a snapshot still being read gives its bytes back.
+  dropped?: boolean
   // Read and verified - not yet in any context.
   fetched?: McpSkillLoaded
   fetching?: Promise<McpSkillLoaded>
@@ -208,12 +217,14 @@ export class McpSkillDeniedError extends Error {
  * capped per server and in all (selectMcpSkills - the notices go to `warn`), described with their
  * origin. `names` are the names already taken (the operator's skills and the lessons): a bare
  * name they share with an MCP skill is said - a collision is surfaced, never resolved silently;
- * the MCP skill keeps its own, namespaced name.
+ * the MCP skill keeps its own, namespaced name. `memory`: what the agent's snapshots of generated
+ * skills hold (MCP_SKILL_SNAPSHOTS_MAX_BYTES in all).
  */
 export const createMcpSkills = (
   sources: readonly McpSkillSource[],
   names: Iterable<string>,
   warn: (message: string) => void,
+  memory: McpSkillSnapshotMemory = createMcpSkillSnapshotMemory(),
 ): ISkill[] => {
   const own = new Set(names)
   const taken = new Set(own)
@@ -247,7 +258,7 @@ export const createMcpSkills = (
           `[mcp] ${source.server}: its skill "${record.name}" has the name of one of this agent's own skills; the agent's keeps the name, the server's is "${name}"`,
         )
       }
-      out.push(mcpSkillOf(source, record, name, added.has(record)))
+      out.push(mcpSkillOf(source, record, name, added.has(record), memory))
     }
   }
   return out
@@ -258,15 +269,45 @@ const mcpSkillOf = (
   record: McpSkillRecord,
   name: string,
   byUri: boolean,
+  memory: McpSkillSnapshotMemory,
 ): ISkill => {
   const skill: ISkill = {
     name,
-    description: mcpSkillDescription(record.description, source.server),
+    description: mcpSkillDescription(record.description, source.server, record.dynamic === true),
     content: '',
     mcp: { server: source.server, uri: record.uri },
   }
-  mcpSkillStates.set(skill, { source, record, ...(byUri ? { byUri: true } : {}) })
+  mcpSkillStates.set(skill, { source, record, memory, ...(byUri ? { byUri: true } : {}) })
   return skill
+}
+
+// The memory of the agent the MCP skills among `skills` belong to.
+const memoryOf = (skills: readonly ISkill[]): McpSkillSnapshotMemory | undefined => {
+  for (const skill of skills) {
+    const memory = mcpSkillStates.get(skill)?.memory
+    if (memory) {
+      return memory
+    }
+  }
+  return undefined
+}
+
+/**
+ * The agent drops these MCP skill objects (a refresh replaced them): what their snapshots of
+ * generated skills hold goes back to the agent's memory - now, or when a read still going ends.
+ */
+export const releaseMcpSkills = (skills: readonly ISkill[]): void => {
+  for (const skill of skills) {
+    const state = mcpSkillStates.get(skill)
+    if (!state || state.dropped) {
+      continue
+    }
+    state.dropped = true
+    const bytes = state.fetched?.snapshot?.bytes
+    if (bytes) {
+      state.memory.used = Math.max(0, state.memory.used - bytes)
+    }
+  }
 }
 
 /**
@@ -275,13 +316,16 @@ const mcpSkillOf = (
  * request; the catalog must have room for one more of that server (the caps count it like a
  * listed one); then `skills/get` goes to that server ONLY, and the entry passes the rules a listed
  * one does. It gets a name no other skill has (assignAddedMcpSkillName) and stays for the agent's
- * life. A skill the catalog already holds (the same server and URI) is returned as it is.
+ * life. A skill the catalog already holds (the same server and URI) is returned as it is. A
+ * generated skill's snapshot counts against the memory of the agent's other MCP skills, else
+ * `memory`.
  */
 export const addMcpSkillByUri = async (
   skills: ISkill[],
   sources: readonly McpSkillSource[],
   requested: { server?: unknown; uri?: unknown },
   signal?: AbortSignal,
+  memory?: McpSkillSnapshotMemory,
 ): Promise<ISkill> => {
   const refused = mcpSkillUriRefusal(requested.uri)
   if (refused) {
@@ -319,13 +363,20 @@ export const addMcpSkillByUri = async (
     return meanwhile
   }
   const name = assignAddedMcpSkillName(source.server, record, new Set(skills.map((s) => s.name)))
-  const skill = mcpSkillOf(source, record, name, true)
+  const skill = mcpSkillOf(
+    source,
+    record,
+    name,
+    true,
+    memoryOf(skills) ?? memory ?? createMcpSkillSnapshotMemory(),
+  )
   skills.push(skill)
   return skill
 }
 
-// Read and verify an MCP skill's SKILL.md (once per skill object; a failed read is not kept).
-// Nothing of it reaches any context here.
+// Read and verify an MCP skill's SKILL.md (once per skill object; a failed read is not kept) - a
+// generated skill's whole snapshot, counted against the agent's memory. Nothing of it reaches any
+// context here.
 const fetchMcpSkill = async (
   state: IMcpSkillState,
   signal?: AbortSignal,
@@ -333,9 +384,17 @@ const fetchMcpSkill = async (
   if (state.fetched) {
     return state.fetched
   }
-  state.fetching ??= state.source.load(state.record.uri, signal ? { signal } : undefined)
+  state.fetching ??= state.source.load(state.record.uri, {
+    ...(signal ? { signal } : {}),
+    memory: state.memory,
+  })
   try {
     state.fetched = await state.fetching
+    // Dropped while it was read: its bytes go back at once.
+    const bytes = state.fetched.snapshot?.bytes
+    if (state.dropped && bytes) {
+      state.memory.used = Math.max(0, state.memory.used - bytes)
+    }
     return state.fetched
   } catch (err) {
     state.fetching = undefined
@@ -424,6 +483,7 @@ export const acquireMcpSkill = async (
               skills.find((s) => s.mcp?.server === server && s.mcp.uri === outer)?.name ?? outer,
           }
         : {}),
+      ...(fetched.snapshot ? { snapshot: fetched.snapshot } : {}),
     })
     const answer = await scope.ask(opts.input ?? { name: skill.name }, view, opts.signal)
     if (answer.by === 'person') {
@@ -831,6 +891,8 @@ export interface ISkillToolsMcp {
   sources: () => readonly McpSkillSource[]
   // The current run's consent scope (undefined outside a run: nobody to ask).
   scope: () => IMcpSkillConsentScope | undefined
+  // What the agent's snapshots of generated skills hold (a skill added by URI counts there).
+  memory?: McpSkillSnapshotMemory
 }
 
 // The built-in load_skill / read_skill_file tools. Read-only, never need
@@ -909,6 +971,7 @@ export const createSkillTools = (
                   mcp?.sources() ?? [],
                   { server, uri },
                   options?.abortSignal,
+                  mcp?.memory,
                 )
                 return load(skill, { server, uri }, options?.abortSignal)
               }

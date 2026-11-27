@@ -217,11 +217,15 @@ appFullscreen appDownloads appSampling>`, `useMcpAppHost({ downloads, sampling, 
   dropped by the reducer once the request is decided or the run stops, so a saved chat never holds
   it), its own card in `ToolApprovalPrompt` (`SkillConsentCard`: lead, description, size, a
   collapsed `<details>` preview in a `<pre>` - text nodes only - Allow once / Always for this
-  server / Deny; `showSkillPreview`, also on `<AgentChat>`), labels `skillConsent*`, and the MCP
-  hooks' `skills: true | { consent }` (`mcpSkillsSettingOf`, `./mcp`). Tests:
-  `tests/skills.test.ts` (reducer, card markup, the setting) and the `MCP skills` block of
+  server / Deny; `showSkillPreview`, also on `<AgentChat>`; a generated skill's one-line notice,
+  `skill.dynamic` -> `skillConsentDynamic`, and `skill.noFileListing` ->
+  `skillConsentNoFileListing`), labels `skillConsent*`, and the MCP hooks'
+  `skills: true | { consent, dynamic }` (`mcpSkillsSettingOf`, `./mcp`: `dynamic` kept only when
+  `true`, a non-boolean is off). Tests: `tests/skills.test.ts` (reducer, card markup, the
+  setting), `tests/mcp.test.ts` (the setting reaches the core) and the `MCP skills` block of
   `e2e/mcp.spec.ts` (the demo, the test server's skills: nothing reaches the model before Allow,
-  nothing after Deny, no sideways scroll at 390).
+  nothing after Deny, no sideways scroll at 390; a generated skill - remembered with
+  `skills: { dynamic: true }` - shows the notice, the copy's files, and nothing before Allow).
 - `tests/state.test.ts`, `tests/chat.test.ts` — `node --test` over the reducer,
   composer helpers, labels and the history store (imports from `dist`). `tests/elicitation.test.ts`:
   the queue, the form helpers against the core's validator, the prompt as markup, and the queue as

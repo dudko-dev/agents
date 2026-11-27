@@ -334,6 +334,29 @@ test('skill: by URI, nested, ask-every-task and a short body are said; more file
   )
 })
 
+test('skill: a generated skill says there are no checksums and only the copy read is used; no listing is said', () => {
+  const dynamic = skillApprovalPrompt(skillView({ dynamic: true }))
+  const notice =
+    '          the server publishes no checksums for this skill: you approve the copy the agent just read, and only that copy is used'
+  assert.ok(dynamic.split('\n').includes(notice))
+  assert.doesNotMatch(dynamic, /cannot list/)
+  const unlisted = skillApprovalPrompt(
+    skillView({ dynamic: true, noFileListing: true, files: [], fileCount: 0 }),
+  )
+  assert.ok(unlisted.split('\n').includes(notice))
+  assert.ok(
+    unlisted
+      .split('\n')
+      .includes(
+        "          the server cannot list this skill's files: that copy is its SKILL.md alone",
+      ),
+  )
+  // Before the instructions: the person reads it before the text.
+  assert.ok(unlisted.indexOf('no checksums') < unlisted.indexOf('what the agent would read'))
+  // A listed skill says neither.
+  assert.doesNotMatch(skillApprovalPrompt(skillView()), /no checksums|cannot list/)
+})
+
 test('skill guard: no control character of the server reaches the terminal - in any field', () => {
   const esc = '\u001b[2J\u001b]0;pwned\u0007\r\u009b31m\u0000\u007f'
   const prompt = skillApprovalPrompt(

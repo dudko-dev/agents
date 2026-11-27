@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import {
@@ -51,6 +52,17 @@ import {
   skillDirectoryOf,
   skillDirectoryRef,
   resolveMcpSkillPath,
+  createMcpSkillSnapshotMemory,
+  mcpSkillSha256,
+  mcpSkillSnapshotBytesRefusal,
+  mcpSkillSnapshotEntry,
+  mcpSkillTag,
+  nextMcpSkillWalkDirectory,
+  startMcpSkillWalk,
+  takeMcpSkillWalkListing,
+  MCP_SKILL_SNAPSHOT_MAX_DEPTH,
+  MCP_SKILL_SNAPSHOT_MAX_DIRECTORIES,
+  MCP_SKILL_SNAPSHOTS_MAX_BYTES,
   type McpSkillEntryLike,
   type McpSkillSource,
   type McpSkillsClientLike,
@@ -1517,4 +1529,602 @@ test('catalog: a directory read that fails is listed from the entry alone - logg
     source.readDirectory!(loaded, 'references', { signal: controller.signal }),
     /aborted/,
   )
+})
+
+// ── a generated skill (`skills: { dynamic: true }`): its snapshot ─────────────────
+
+const generated = (over: Record<string, unknown> = {}) =>
+  entry({
+    uri: 'skill://gen/SKILL.md',
+    frontmatter: { name: 'gen', description: 'A generated skill' },
+    resources: 'dynamic',
+    ...over,
+  })
+
+test('dynamic settings: { dynamic } is a boolean - true is kept, false is off; anything else is refused by name', () => {
+  assert.deepEqual(mcpSkillsSettingOf({ dynamic: true }, 'docs'), { on: true, dynamic: true })
+  assert.deepEqual(mcpSkillsSettingOf({ dynamic: false }, 'docs'), { on: true })
+  assert.deepEqual(mcpSkillsSettingOf({ consent: 'never', dynamic: true }, 'docs'), {
+    on: true,
+    consent: 'never',
+    dynamic: true,
+  })
+  assert.deepEqual(mcpSkillsSettingOf(true, 'docs'), { on: true }, 'true takes no generated skill')
+  for (const dynamic of ['yes', 'true', 1, 0, null, {}, []]) {
+    assert.throws(
+      () => mcpSkillsSettingOf({ dynamic }, 'docs'),
+      /^Error: docs: skills\.dynamic must be true or false, got /,
+      JSON.stringify(dynamic),
+    )
+  }
+  assert.throws(() => mcpSkillsSettingOf(7, 'docs'), /dynamic\?: boolean/, 'the shape is said')
+})
+
+test('dynamic admission: a "dynamic" entry passes only with { dynamic: true }, and only under every other rule', () => {
+  const declined = /its content is generated \("resources": "dynamic"\)/
+  assert.match(String(mcpSkillEntryRefusal(generated())), declined, 'off by default')
+  assert.match(String(mcpSkillEntryRefusal(generated(), {})), declined)
+  assert.match(String(mcpSkillEntryRefusal(generated(), { dynamic: false })), declined)
+  assert.match(
+    String(mcpSkillEntryRefusal(generated(), { dynamic: 'yes' as never })),
+    declined,
+    'only true',
+  )
+  assert.equal(mcpSkillEntryRefusal(generated(), { dynamic: true }), undefined)
+  // Every other rule still holds.
+  const on = { dynamic: true }
+  assert.match(
+    String(
+      mcpSkillEntryRefusal(generated({ frontmatter: { name: 'other', description: 'x' } }), on),
+    ),
+    /URI names the skill "gen" but its frontmatter name is "other"/,
+  )
+  assert.match(
+    String(mcpSkillEntryRefusal(generated({ frontmatter: { name: 'gen', description: ' ' } }), on)),
+    /no description/,
+  )
+  assert.match(
+    String(
+      mcpSkillEntryRefusal(
+        generated({ uri: 'skill://Gen/SKILL.md', frontmatter: { name: 'Gen', description: 'x' } }),
+        on,
+      ),
+    ),
+    /not a skill name/,
+  )
+  assert.ok(mcpSkillEntryRefusal(generated({ uri: 'skill://SKILL.md' }), on))
+  assert.match(String(mcpSkillEntryRefusal(generated({ resources: 'other' }), on)), /does not list/)
+  // Its record: no files known, marked generated.
+  const record = mcpSkillRecordOf(generated() as McpSkillEntryLike)
+  assert.deepEqual([record.files, record.dynamic], [[], true])
+  assert.equal(mcpSkillRecordOf(entry() as McpSkillEntryLike).dynamic, undefined)
+})
+
+test('dynamic catalog line: "no checksums" in the origin tag, within MCP_SKILL_DESCRIPTION_MAX_CHARS', () => {
+  assert.equal(mcpSkillTag('docs'), '[from the MCP server "docs" - third-party]')
+  assert.equal(
+    mcpSkillTag('docs', true),
+    '[from the MCP server "docs" - third-party, no checksums]',
+  )
+  assert.equal(
+    mcpSkillDescription('Made\nfresh', 'docs', true),
+    'Made fresh [from the MCP server "docs" - third-party, no checksums]',
+  )
+  const long = mcpSkillDescription('x'.repeat(2000), 'a'.repeat(80), true)
+  assert.ok(long.length <= MCP_SKILL_DESCRIPTION_MAX_CHARS, String(long.length))
+  assert.ok(long.endsWith(', no checksums]'))
+  assert.ok(!mcpSkillDescription('x', 'docs').includes('checksums'))
+})
+
+// A directory listing as a server answers it: files by name, `/`-ended names are directories.
+const listing = (root: string, names: string[]) =>
+  names.map((n) =>
+    n.endsWith('/')
+      ? { uri: `${root}/${n.slice(0, -1)}`, name: n, mimeType: 'inode/directory' }
+      : { uri: `${root}/${n}`, name: n, mimeType: 'text/markdown' },
+  )
+
+test('walk: the root first, then each directory found; only direct children; SKILL.md of the root is no file', () => {
+  const walk = startMcpSkillWalk('skill://gen/SKILL.md')!
+  const root = nextMcpSkillWalkDirectory(walk)!
+  assert.deepEqual(root, { path: '', depth: 0, uri: 'skill://gen' })
+  assert.equal(
+    takeMcpSkillWalkListing(walk, root, [
+      ...listing('skill://gen', ['SKILL.md', 'notes.md', 'templates/', 'sub/']),
+      // Not direct children of the root: ignored.
+      { uri: 'skill://gen/templates/deep.md', mimeType: 'text/markdown' },
+    ]),
+    undefined,
+  )
+  assert.deepEqual(walk.files, ['notes.md'])
+  const templates = nextMcpSkillWalkDirectory(walk)!
+  assert.deepEqual(templates, { path: 'templates', depth: 1, uri: 'skill://gen/templates' })
+  takeMcpSkillWalkListing(walk, templates, listing('skill://gen/templates', ['a.md']))
+  const sub = nextMcpSkillWalkDirectory(walk)!
+  // A nested SKILL.md is a file of the skill like any other.
+  takeMcpSkillWalkListing(walk, sub, listing('skill://gen/sub', ['SKILL.md']))
+  assert.equal(nextMcpSkillWalkDirectory(walk), undefined, 'done')
+  assert.deepEqual(walk.files, ['notes.md', 'templates/a.md', 'sub/SKILL.md'])
+})
+
+test('walk: a child outside the root - or no plain name - is ignored', () => {
+  const walk = startMcpSkillWalk('skill://gen/SKILL.md')!
+  const root = nextMcpSkillWalkDirectory(walk)!
+  assert.equal(
+    takeMcpSkillWalkListing(walk, root, [
+      { uri: 'skill://other/x.md' },
+      { uri: 'skill://gen-evil/x.md' },
+      { uri: 'skill://gen/a%2Fb.md' },
+      { uri: 'skill://gen/q.md?x=1' },
+      { uri: 'skill://gen/back\\slash.md' },
+      { uri: 'skill://gen//empty.md' },
+      { uri: 'https://example.com/gen/x.md' },
+      { uri: 'skill://gen' },
+      { uri: 'not a uri' },
+      { name: 'no-uri.md' },
+      null,
+      'skill://gen/string.md',
+      { uri: 'skill://other/dir', mimeType: 'inode/directory' },
+      // The one real child, and its fragment-only twin.
+      { uri: 'skill://gen/ok.md' },
+      { uri: 'skill://gen/ok.md#part' },
+    ]),
+    undefined,
+  )
+  assert.deepEqual(walk.files, ['ok.md'])
+  assert.equal(nextMcpSkillWalkDirectory(walk), undefined, 'no directory outside was queued')
+  // Dot segments are resolved first: what they reach outside the root is outside.
+  const deep = startMcpSkillWalk('skill://acme/gen/SKILL.md')!
+  takeMcpSkillWalkListing(deep, nextMcpSkillWalkDirectory(deep)!, [
+    { uri: 'skill://acme/gen/../other.md' },
+    { uri: 'skill://acme/gen/%2e%2e/escape.md' },
+    { uri: 'skill://acme/gen/../gen-x/y.md' },
+    { uri: 'skill://acme/gen/./in.md' },
+  ])
+  assert.deepEqual(deep.files, ['in.md'])
+})
+
+test('walk: never twice - two spellings of one name are one child, a directory is read once', () => {
+  const walk = startMcpSkillWalk('skill://gen/SKILL.md')!
+  const root = nextMcpSkillWalkDirectory(walk)!
+  takeMcpSkillWalkListing(walk, root, [
+    { uri: 'skill://gen/Q&A.md' },
+    { uri: 'skill://gen/Q%26A.md' },
+    { uri: 'skill://gen/docs', mimeType: 'inode/directory' },
+    { uri: 'skill://gen/%64ocs', mimeType: 'inode/directory' },
+    { uri: 'skill://gen/SKILL.md' },
+    { uri: 'skill://gen/%53KILL.md' },
+  ])
+  assert.deepEqual(walk.files, ['Q&A.md'])
+  const docs = nextMcpSkillWalkDirectory(walk)!
+  assert.equal(docs.uri, 'skill://gen/docs')
+  // The same directory listed again, from inside, and as a file: not read again.
+  takeMcpSkillWalkListing(walk, root, [{ uri: 'skill://gen/docs', mimeType: 'inode/directory' }])
+  takeMcpSkillWalkListing(walk, root, [{ uri: 'skill://gen/docs' }])
+  assert.equal(nextMcpSkillWalkDirectory(walk), undefined)
+  assert.deepEqual(walk.files, ['Q&A.md'])
+})
+
+test('walk bound: at most MCP_SKILL_MAX_RESOURCES files, SKILL.md included', () => {
+  const names = (n: number) => Array.from({ length: n }, (_, i) => `f${i}.md`)
+  const fits = startMcpSkillWalk('skill://gen/SKILL.md')!
+  const at = nextMcpSkillWalkDirectory(fits)!
+  assert.equal(
+    takeMcpSkillWalkListing(fits, at, listing('skill://gen', names(MCP_SKILL_MAX_RESOURCES - 1))),
+    undefined,
+  )
+  assert.equal(fits.files.length + 1, MCP_SKILL_MAX_RESOURCES)
+  const over = startMcpSkillWalk('skill://gen/SKILL.md')!
+  assert.match(
+    String(
+      takeMcpSkillWalkListing(
+        over,
+        nextMcpSkillWalkDirectory(over)!,
+        listing('skill://gen', names(MCP_SKILL_MAX_RESOURCES)),
+      ),
+    ),
+    /it holds more than 512 files/,
+  )
+})
+
+test('walk bound: at most MCP_SKILL_SNAPSHOT_MAX_DIRECTORIES directories, the root included', () => {
+  const dirs = (n: number) => Array.from({ length: n }, (_, i) => `d${i}/`)
+  const fits = startMcpSkillWalk('skill://gen/SKILL.md')!
+  assert.equal(
+    takeMcpSkillWalkListing(
+      fits,
+      nextMcpSkillWalkDirectory(fits)!,
+      listing('skill://gen', dirs(MCP_SKILL_SNAPSHOT_MAX_DIRECTORIES - 1)),
+    ),
+    undefined,
+  )
+  let reads = 1
+  while (nextMcpSkillWalkDirectory(fits)) reads += 1
+  assert.equal(reads, MCP_SKILL_SNAPSHOT_MAX_DIRECTORIES)
+  const over = startMcpSkillWalk('skill://gen/SKILL.md')!
+  assert.match(
+    String(
+      takeMcpSkillWalkListing(
+        over,
+        nextMcpSkillWalkDirectory(over)!,
+        listing('skill://gen', dirs(MCP_SKILL_SNAPSHOT_MAX_DIRECTORIES)),
+      ),
+    ),
+    /more than 64 directories to read/,
+  )
+})
+
+test('walk bound: no directory deeper than MCP_SKILL_SNAPSHOT_MAX_DEPTH', () => {
+  const descend = (levels: number): string | undefined => {
+    const walk = startMcpSkillWalk('skill://gen/SKILL.md')!
+    for (let at = nextMcpSkillWalkDirectory(walk); at; at = nextMcpSkillWalkDirectory(walk)) {
+      if (at.depth >= levels) continue
+      const refused = takeMcpSkillWalkListing(walk, at, listing(at.uri, ['d/']))
+      if (refused) return refused
+    }
+    return undefined
+  }
+  assert.equal(descend(MCP_SKILL_SNAPSHOT_MAX_DEPTH), undefined)
+  assert.match(String(descend(MCP_SKILL_SNAPSHOT_MAX_DEPTH + 1)), /deeper than 8 levels/)
+})
+
+test('snapshot bytes: at most MCP_SKILL_MAX_TOTAL_BYTES read for one skill, MCP_SKILL_SNAPSHOTS_MAX_BYTES held in all', () => {
+  assert.equal(mcpSkillSnapshotBytesRefusal(MCP_SKILL_MAX_TOTAL_BYTES), undefined)
+  assert.match(
+    String(mcpSkillSnapshotBytesRefusal(MCP_SKILL_MAX_TOTAL_BYTES + 1)),
+    /more than 16777216 bytes \(the limit for one skill\)/,
+  )
+  assert.equal(mcpSkillSnapshotBytesRefusal(10, MCP_SKILL_SNAPSHOTS_MAX_BYTES - 10), undefined)
+  assert.match(
+    String(mcpSkillSnapshotBytesRefusal(11, MCP_SKILL_SNAPSHOTS_MAX_BYTES - 10)),
+    /the copies of generated skills this agent holds would pass 67108864 bytes/,
+  )
+  assert.equal(MCP_SKILL_SNAPSHOTS_MAX_BYTES, 64 * 1024 * 1024)
+})
+
+const utf8 = (text: string) => new TextEncoder().encode(text)
+const nodeSha = (bytes: Uint8Array) => `sha256:${createHash('sha256').update(bytes).digest('hex')}`
+
+test("snapshot digest: sha256 of the bytes with the platform's WebCrypto", async () => {
+  assert.equal(
+    await mcpSkillSha256(utf8('abc')),
+    'sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+  )
+  const bytes = new Uint8Array([0, 255, 1, 2, 3])
+  assert.equal(await mcpSkillSha256(bytes), nodeSha(bytes))
+})
+
+test('snapshot manifest: the entry of the copy - it passes the listed rules; the consent key binds to its digests', async () => {
+  const files = async (notes: string) => [
+    {
+      uri: 'skill://gen/SKILL.md',
+      size: utf8('MD').byteLength,
+      digest: await mcpSkillSha256(utf8('MD')),
+    },
+    {
+      uri: 'skill://gen/references/notes.md',
+      size: utf8(notes).byteLength,
+      digest: await mcpSkillSha256(utf8(notes)),
+    },
+  ]
+  const manifest = mcpSkillSnapshotEntry(generated() as McpSkillEntryLike, await files('NOTES'))
+  assert.equal(mcpSkillEntryRefusal(manifest), undefined, 'a listed entry in every respect')
+  assert.deepEqual(manifest.frontmatter, generated().frontmatter)
+  assert.deepEqual(mcpSkillRecordOf(manifest).files, ['references/notes.md'])
+  assert.equal(mcpSkillRecordOf(manifest).dynamic, undefined)
+  const key = mcpSkillGrantKey('docs', manifest)
+  const same = mcpSkillSnapshotEntry(generated() as McpSkillEntryLike, await files('NOTES'))
+  assert.equal(mcpSkillGrantKey('docs', same), key, 'the same copy: the same key')
+  const changed = mcpSkillSnapshotEntry(generated() as McpSkillEntryLike, await files('NOTEs'))
+  assert.notEqual(mcpSkillGrantKey('docs', changed), key, 'a byte changed: another key')
+  assert.notEqual(
+    mcpSkillGrantKey('docs', manifest),
+    mcpSkillGrantKey('docs', generated() as McpSkillEntryLike),
+    'never the key of the "dynamic" entry itself',
+  )
+})
+
+// A fake SkillsClient serving a generated skill's tree: `tree` maps paths inside skill://gen to
+// text (or bytes); with `directoryRead` it lists them, like the test server.
+const treeClient = (o: {
+  tree: Record<string, string | Uint8Array>
+  directoryRead?: boolean
+  answer?: (uri: string) => unknown
+  onRead?: (uri: string) => void
+}) => {
+  const reads: string[] = []
+  const directories: string[] = []
+  // What the server answered for each URI, last.
+  const answers = new Map<string, string>()
+  const root = 'skill://gen'
+  const client: McpSkillsClientLike = {
+    supported: true,
+    directoryRead: o.directoryRead === true,
+    list: async () => ({ skills: [generated()], invalid: [] }),
+    get: async () => ({ skill: generated() }),
+    read: async (skill: never, ref?: string) => {
+      const uri = ref ? new URL(ref, `${root}/`).href : (skill as { uri: string }).uri
+      reads.push(uri)
+      const path = uri.slice(root.length + 1)
+      const value = o.tree[path]
+      if (typeof value === 'string') answers.set(uri, value)
+      o.onRead?.(uri)
+      if (value === undefined) throw Object.assign(new Error(`no ${uri}`), { code: -32602 })
+      if (typeof value !== 'string') return { bytes: value }
+      return {
+        text: value,
+        bytes: utf8(value),
+        ...(path === 'SKILL.md' ? { body: value.replace(/^---[\s\S]*?---\n/, '') } : {}),
+      }
+    },
+    // A method, as the SDK's is: called detached from its client it has no `this`.
+    async readDirectory(this: McpSkillsClientLike | undefined, uri: string) {
+      if (this?.directoryRead !== true) throw new Error('readDirectory called without its client')
+      directories.push(uri)
+      const answered = o.answer?.(uri)
+      if (answered instanceof Error) throw answered
+      if (answered !== undefined) return answered as { resources: unknown[] }
+      const prefix = uri === root ? '' : `${uri.slice(root.length + 1)}/`
+      const children = new Map<string, { uri: string; mimeType: string }>()
+      for (const path of Object.keys(o.tree)) {
+        if (!path.startsWith(prefix)) continue
+        const rest = path.slice(prefix.length)
+        const cut = rest.indexOf('/')
+        const child = `${uri}/${cut < 0 ? rest : rest.slice(0, cut)}`
+        children.set(child, { uri: child, mimeType: cut < 0 ? 'text/markdown' : 'inode/directory' })
+      }
+      return { resources: [...children.values()] }
+    },
+  }
+  return { client, reads, directories, answers }
+}
+const GEN_TREE = {
+  'SKILL.md': '---\nname: gen\ndescription: A generated skill\n---\nGEN-BODY',
+  'references/notes.md': 'NOTES',
+  'templates/a.md': 'TEMPLATE',
+}
+const genCatalog = async (
+  c: ReturnType<typeof treeClient>,
+  logs: string[] = [],
+  dynamic = true,
+) => {
+  const catalog = createMcpSkillCatalog('docs', c.client, (l, m) => logs.push(`${l} ${m}`), {
+    dynamic,
+  })
+  await catalog.refresh()
+  return catalog
+}
+
+test('catalog: without { dynamic } a generated skill is declined at listing - as it always was, nothing read', async () => {
+  const logs: string[] = []
+  const c = treeClient({ tree: GEN_TREE, directoryRead: true })
+  const { source } = await genCatalog(c, logs, false)
+  assert.deepEqual(source.skills, [])
+  assert.ok(
+    logs.includes(
+      'warn [mcp] docs: skill skill://gen/SKILL.md refused - its content is generated ("resources": "dynamic"): there are no digests to verify it against',
+    ),
+  )
+  await assert.rejects(source.load('skill://gen/SKILL.md'), /no longer lists the skill/)
+  assert.deepEqual([c.reads, c.directories], [[], []])
+})
+
+test('catalog snapshot: SKILL.md, the tree walked, every file read once; digests and sizes computed here', async () => {
+  const logs: string[] = []
+  const c = treeClient({ tree: GEN_TREE, directoryRead: true })
+  const { source } = await genCatalog(c, logs)
+  assert.deepEqual(
+    source.skills.map((r) => [r.uri, r.dynamic, r.files]),
+    [['skill://gen/SKILL.md', true, []]],
+  )
+  assert.deepEqual([c.reads, c.directories], [[], []], 'nothing read at listing')
+  const memory = createMcpSkillSnapshotMemory()
+  const loaded = await source.load('skill://gen/SKILL.md', { memory })
+  assert.deepEqual(c.directories, [
+    'skill://gen',
+    'skill://gen/references',
+    'skill://gen/templates',
+  ])
+  assert.deepEqual(c.reads, [
+    'skill://gen/SKILL.md',
+    'skill://gen/references/notes.md',
+    'skill://gen/templates/a.md',
+  ])
+  assert.equal(loaded.body, 'GEN-BODY')
+  assert.deepEqual(loaded.files, ['references/notes.md', 'templates/a.md'])
+  const bytes = Object.values(GEN_TREE).reduce((n, t) => n + utf8(t).byteLength, 0)
+  assert.deepEqual(loaded.snapshot, { bytes, listed: true })
+  assert.equal(memory.used, bytes, 'counted against the agent')
+  assert.deepEqual(loaded.entry.resources, [
+    {
+      uri: 'skill://gen/SKILL.md',
+      size: utf8(GEN_TREE['SKILL.md']).byteLength,
+      digest: nodeSha(utf8(GEN_TREE['SKILL.md'])),
+    },
+    { uri: 'skill://gen/references/notes.md', size: 5, digest: nodeSha(utf8('NOTES')) },
+    { uri: 'skill://gen/templates/a.md', size: 8, digest: nodeSha(utf8('TEMPLATE')) },
+  ])
+  assert.equal(mcpSkillEntryRefusal(loaded.entry), undefined)
+  assert.ok(
+    logs.some((l) =>
+      /^info .*the generated skill skill:\/\/gen\/SKILL.md read into a snapshot - 3 file\(s\)/.test(
+        l,
+      ),
+    ),
+  )
+})
+
+test('catalog snapshot: files are served from the copy - never read again, nothing outside it', async () => {
+  let version = 1
+  const tree = { ...GEN_TREE }
+  const c = treeClient({
+    tree,
+    directoryRead: true,
+    onRead: () => {
+      // The server makes it anew on every read.
+      tree['references/notes.md'] = `NOTES v${(version += 1)}`
+    },
+  })
+  const { source } = await genCatalog(c)
+  const loaded = await source.load('skill://gen/SKILL.md')
+  const read = c.reads.length
+  const copy = c.answers.get('skill://gen/references/notes.md')
+  assert.match(String(copy), /^NOTES v\d$/)
+  assert.notEqual(tree['references/notes.md'], copy, 'the server serves another text by now')
+  assert.equal(await source.readFile(loaded, 'references/notes.md'), copy, 'the approved copy')
+  assert.equal(await source.readFile(loaded, 'references/notes.md'), copy)
+  assert.equal(await source.readFile(loaded, 'templates/a.md'), 'TEMPLATE')
+  assert.equal(c.reads.length, read, 'no file is read again')
+  await assert.rejects(source.readFile(loaded, 'references/other.md'), /has no file/)
+  await assert.rejects(source.readFile(loaded, '../x/SKILL.md'), /not a path inside the skill/)
+  assert.equal(c.reads.length, read)
+  // A forged loaded skill reads nothing.
+  await assert.rejects(
+    source.readFile({ ...loaded }, 'references/notes.md'),
+    /was not loaded from the MCP server/,
+  )
+  // A file that is not text is held (counted, digested) but not shown.
+  const blob = treeClient({
+    tree: { ...GEN_TREE, 'img.png': new Uint8Array([137, 80]) },
+    directoryRead: true,
+  })
+  const withBlob = await genCatalog(blob)
+  const png = await withBlob.source.load('skill://gen/SKILL.md')
+  assert.ok(png.files.includes('img.png'))
+  await assert.rejects(withBlob.source.readFile(png, 'img.png'), /is not text/)
+})
+
+test('catalog snapshot: a server without directoryRead - SKILL.md alone, no directory asked, no other file', async () => {
+  const c = treeClient({ tree: GEN_TREE, directoryRead: false })
+  const { source } = await genCatalog(c)
+  const loaded = await source.load('skill://gen/SKILL.md')
+  assert.deepEqual(c.directories, [], 'never asked')
+  assert.deepEqual(c.reads, ['skill://gen/SKILL.md'])
+  assert.deepEqual(loaded.files, [])
+  assert.deepEqual(loaded.snapshot, { bytes: utf8(GEN_TREE['SKILL.md']).byteLength, listed: false })
+  assert.equal(loaded.entry.resources.length, 1)
+  await assert.rejects(source.readFile(loaded, 'references/notes.md'), /has no file/)
+  assert.deepEqual(c.reads, ['skill://gen/SKILL.md'])
+})
+
+test('catalog snapshot: over a bound - declined, logged, the person never asked; over the files before any is read', async () => {
+  const logs: string[] = []
+  const many: Record<string, string> = { 'SKILL.md': GEN_TREE['SKILL.md'] }
+  for (let i = 0; i < MCP_SKILL_MAX_RESOURCES; i += 1) many[`parts/${i}.md`] = 'p'
+  const c = treeClient({ tree: many, directoryRead: true })
+  const { source } = await genCatalog(c, logs)
+  const memory = createMcpSkillSnapshotMemory()
+  await assert.rejects(
+    source.load('skill://gen/SKILL.md', { memory }),
+    /skill:\/\/gen\/SKILL.md of the MCP server "docs" was not loaded: it holds more than 512 files/,
+  )
+  assert.deepEqual(c.reads, ['skill://gen/SKILL.md'], 'no file of it read')
+  assert.equal(memory.used, 0, 'nothing held')
+  assert.ok(
+    logs.includes(
+      'warn [mcp] docs: the generated skill skill://gen/SKILL.md is declined - it holds more than 512 files (SKILL.md included; the limit); no one is asked, nothing of it is used',
+    ),
+  )
+  // Bytes: counted on what is read, stopped at the first file past the limit.
+  const big = treeClient({
+    tree: {
+      'SKILL.md': GEN_TREE['SKILL.md'],
+      'a.bin': new Uint8Array(MCP_SKILL_MAX_TOTAL_BYTES - 100),
+      'b.bin': new Uint8Array(200),
+      'c.bin': new Uint8Array(1),
+    },
+    directoryRead: true,
+  })
+  await assert.rejects(
+    (await genCatalog(big)).source.load('skill://gen/SKILL.md'),
+    /its files take more than 16777216 bytes/,
+  )
+  assert.equal(big.reads.at(-1), 'skill://gen/b.bin', 'nothing read after the bound')
+  // The agent's memory: what its other snapshots hold counts.
+  const full = { used: MCP_SKILL_SNAPSHOTS_MAX_BYTES - 10 }
+  await assert.rejects(
+    (await genCatalog(treeClient({ tree: GEN_TREE, directoryRead: true }))).source.load(
+      'skill://gen/SKILL.md',
+      { memory: full },
+    ),
+    /would pass 67108864 bytes/,
+  )
+  assert.equal(full.used, MCP_SKILL_SNAPSHOTS_MAX_BYTES - 10, 'unchanged')
+})
+
+test('catalog snapshot: a directory or a file that cannot be read declines it - a stop propagates', async () => {
+  const logs: string[] = []
+  for (const answer of [
+    () => Object.assign(new Error('boom'), { code: -32603 }),
+    () => ({ resources: 'nope' }),
+  ]) {
+    const c = treeClient({ tree: GEN_TREE, directoryRead: true, answer })
+    await assert.rejects(
+      (await genCatalog(c, logs)).source.load('skill://gen/SKILL.md'),
+      /was not loaded: resources\/directory\/read of skill:\/\/gen (failed - boom \(-32603\)|gave no list)/,
+    )
+  }
+  const missing = treeClient({
+    tree: GEN_TREE,
+    directoryRead: true,
+    answer: (uri) =>
+      uri === 'skill://gen'
+        ? { resources: [{ uri: 'skill://gen/gone.md', mimeType: 'text/markdown' }] }
+        : undefined,
+  })
+  await assert.rejects(
+    (await genCatalog(missing, logs)).source.load('skill://gen/SKILL.md'),
+    /its file "gone.md" was not read: no skill:\/\/gen\/gone.md/,
+  )
+  const controller = new AbortController()
+  const stopped = treeClient({
+    tree: GEN_TREE,
+    directoryRead: true,
+    answer: () => {
+      controller.abort()
+      return Object.assign(new Error('This operation was aborted'), { name: 'AbortError' })
+    },
+  })
+  await assert.rejects(
+    (await genCatalog(stopped)).source.load('skill://gen/SKILL.md', { signal: controller.signal }),
+    (err: Error) => err.name === 'AbortError',
+  )
+})
+
+test('consent view of a snapshot: dynamic, its size and files from the copy; no listing said', () => {
+  const manifest = mcpSkillSnapshotEntry(generated() as McpSkillEntryLike, [
+    { uri: 'skill://gen/SKILL.md', size: 40, digest: D('a') },
+    { uri: 'skill://gen/references/notes.md', size: 5, digest: D('b') },
+  ])
+  const view = mcpSkillConsentView({
+    server: 'docs',
+    name: 'docs/gen',
+    entry: manifest,
+    body: 'GEN-BODY',
+    consent: 'once-per-skill',
+    snapshot: { listed: true },
+  })
+  assert.deepEqual(
+    [view.dynamic, view.noFileListing, view.size, view.totalSize, view.files, view.fileCount],
+    [true, undefined, 40, 45, ['references/notes.md'], 1],
+  )
+  const alone = mcpSkillConsentView({
+    server: 'docs',
+    name: 'docs/gen',
+    entry: mcpSkillSnapshotEntry(generated() as McpSkillEntryLike, [
+      { uri: 'skill://gen/SKILL.md', size: 40, digest: D('a') },
+    ]),
+    body: 'GEN-BODY',
+    consent: 'ask',
+    snapshot: { listed: false },
+  })
+  assert.deepEqual([alone.dynamic, alone.noFileListing, alone.fileCount], [true, true, 0])
+  const listed = mcpSkillConsentView({
+    server: 'docs',
+    name: 'docs/pdf-processing',
+    entry: entry() as McpSkillEntryLike,
+    body: 'B',
+    consent: 'ask',
+  })
+  assert.ok(!('dynamic' in listed) && !('noFileListing' in listed))
 })

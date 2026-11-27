@@ -202,8 +202,8 @@
   - `mcp-skills.ts` (pure, no imports; `skills: true` on a server, EXPERIMENTAL - the MCP Skills
     extension `io.modelcontextprotocol/skills`, Beta, written against 2026-07-28): the rules on a
     server's entries (`mcpSkillEntryRefusal`: URI last segment = frontmatter name, the naming
-    rules, `"dynamic"` declined, complete file list inside the skill, sha256 digests, the 512-file /
-    16 MiB limits), the catalog names (`assignMcpSkillNames`: `<server>/<skill>` by the HOST's
+    rules, `"dynamic"` declined unless `{ dynamic: true }`, complete file list inside the skill,
+    sha256 digests, the 512-file / 16 MiB limits), the catalog names (`assignMcpSkillNames`: `<server>/<skill>` by the HOST's
     label - no host skill or lesson name can hold a "/", so nothing shadows anything), the caps
     (`selectMcpSkills`, 32 per server / 64 in all; body / file / description caps), the preamble
     (`mcpSkillPreamble`: knowledge, never policy), the file rule (`resolveMcpSkillFile`: only what
@@ -228,8 +228,20 @@
     that server for `<root>[/<dir>]` and `compareMcpSkillDirectory` only counts what it lists
     beyond the entry (never named: `mcpSkillDirectoryNote` is counts only) and marks `notServed`;
     a change logs a `warn` and calls `onChanged` (wired to `onToolsChanged`: the deferred
-    refresh) once per held entry; a failed read = the entry alone. `"dynamic"` stays declined.
-    A COPY of the browser sibling's
+    refresh) once per held entry; a failed read = the entry alone. GENERATED skills
+    (`"resources": "dynamic"`) are declined unless the server's `skills: { dynamic: true }`
+    (`mcpSkillsSettingOf` returns `dynamic`, refuses a non-boolean by name; NO agent-wide switch):
+    then the catalog's `load` reads one into a SNAPSHOT before anyone is asked - SKILL.md through
+    the SDK, then with `directoryRead` the tree (`startMcpSkillWalk` / `nextMcpSkillWalkDirectory`
+    / `takeMcpSkillWalkListing`: direct children, `inode/directory` inside the root, never twice;
+    512 files, 64 directories (`MCP_SKILL_SNAPSHOT_MAX_DIRECTORIES`), depth 8
+    (`MCP_SKILL_SNAPSHOT_MAX_DEPTH`)) and every file, bytes counted as read
+    (`mcpSkillSnapshotBytesRefusal`: 16 MiB per skill, `MCP_SKILL_SNAPSHOTS_MAX_BYTES` 64 MiB per
+    agent, `McpSkillSnapshotMemory`), digests computed here (`mcpSkillSha256`, WebCrypto, or
+    `options.digest`), the manifest (`mcpSkillSnapshotEntry`) = the held entry (`loaded.snapshot`);
+    `readFile` serves its files from memory, never re-read; past a bound: declined, `warn`, nobody
+    asked. The record's `dynamic` marks the catalog line (`mcpSkillTag(server, true)`: "no
+    checksums"), the view's `dynamic` / `noFileListing` the request. A COPY of the browser sibling's
     `src/mcp/skills.ts`, byte for byte: change both (`tests/mcp-skills-shared.test.ts` compares
     them and tests every rule). `mcp.ts` wires it (the extension declared only with `skills: true`
     and a mode that may speak 2026-07-28; listed only on a 2026-07-28 connection; a change comes
@@ -237,7 +249,8 @@
     `onToolsChanged` -> `refreshServer` path); `skills.ts` keeps an MCP skill's state per skill
     object (`createMcpSkills`, `acquireMcpSkill` - read, verify, ASK, then let in -,
     `addMcpSkillByUri`, `prepareMcpSkills`; `isMcpSkillAllowed` per run, `IRunState.mcpSkillConsent`;
-    `skillPreamble`); the question is `approval.ts`'s `askSkill` (`onRequest`, the request's
+    `skillPreamble`; the agent's snapshot memory in each skill's state, given back by
+    `releaseMcpSkills` when `syncMcpSkills` drops the objects); the question is `approval.ts`'s `askSkill` (`onRequest`, the request's
     `skill`; the mode and the rules play no part; grants in `mcpSkillGrants`); `agent.ts`
     syncs them into `skills` between runs; the runner reads a planner's pick before activating
     it. While a run (or a run above it) acts on an MCP skill, a tool that runs code
@@ -325,7 +338,8 @@
     into tools). Neither is public API.
   - `cli/` — the `dd-agent` REPL (`start.ts` entry, `args.ts` flags + `--help`, `config.ts` env →
     `IAgentConfig`, `run.ts` the REPL and its slash commands, `live.ts` what a line typed *while* a
-    run goes means, `questions.ts` the approval / elicitation questions at the prompt: one at a
+    run goes means, `questions.ts` the approval / elicitation / skill questions at the prompt -
+    `skillApprovalPrompt` says a generated skill's "no checksums" and "SKILL.md alone": one at a
     time, and one the agent stops waiting for - its `signal` aborted - closed with one line, the
     event's own line skipped via `closedAtPrompt`; `tests/cli-questions.test.ts` drives it over a
     real `readline/promises` interface and the real REPL). A new env var / flag / command goes in `args.ts` (help), `config.ts` /

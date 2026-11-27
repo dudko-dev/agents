@@ -1078,6 +1078,7 @@ export const connectMcpServers = async (
               (level, message) => log(level, message),
               {
                 ...(skillsSetting.consent ? { consent: skillsSetting.consent } : {}),
+                ...(skillsSetting.dynamic ? { dynamic: true } : {}),
                 ...(onToolsChanged ? { onChanged: () => onToolsChanged(name) } : {}),
               },
             )

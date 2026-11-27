@@ -77,7 +77,11 @@ published**, never a runtime dependency of anything.
   the SDK's -32602, `pageSize` paging), which is what makes the SDK declare `directoryRead: true`
   and route `resources/directory/read`; its log is `skillDirectoryReads`, its faults
   `directoryExtra` / `directoryOmit` / `directoryError`. Without the option the source has no
-  `readDirectory`: the capability and the wire stay what they were.
+  `readDirectory`: the capability and the wire stay what they were. The generated skills
+  (`"resources": "dynamic"`) are served as files so a client can walk and read them whole:
+  `dynamic` (`generated`, a small tree), `dynamicChanging` (`changing`: its text is made anew on
+  every read, `read <n>`), `dynamicOversize` (`sprawl`, 513 files); without `skillDirectoryRead`
+  a client finds their SKILL.md alone (the no-`directoryRead` case is that, not a fault).
 - `src/mcp-elicitation.ts` — the `elicit_*` tools as step functions (ask or finish), the signed
   `requestState`, the URL-mode pages and `elicitationFaults`. It knows no transport: the modern
   driver (an `input_required` result) and the legacy one (real `elicitation/create` requests on the

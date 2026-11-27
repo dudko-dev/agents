@@ -203,3 +203,72 @@ test('hooks: a skills setting is true or { consent } with a known value; anythin
     assert.equal(mcpSkillsSettingOf(off), undefined, JSON.stringify(off))
   }
 })
+
+test('hooks: { dynamic: true } is kept (with or without a consent), false dropped, a non-boolean is off', () => {
+  assert.deepEqual(mcpSkillsSettingOf({ dynamic: true }), { dynamic: true })
+  assert.deepEqual(mcpSkillsSettingOf({ consent: 'never', dynamic: true }), {
+    consent: 'never',
+    dynamic: true,
+  })
+  assert.equal(mcpSkillsSettingOf({ dynamic: false }), true, 'on, no generated skills')
+  assert.deepEqual(mcpSkillsSettingOf({ consent: 'ask', dynamic: false }), { consent: 'ask' })
+  // From storage: anything else is dropped - never read as "on, with generated skills".
+  for (const off of [
+    { dynamic: 'yes' },
+    { dynamic: 1 },
+    { dynamic: null },
+    { consent: 'x', dynamic: true },
+  ]) {
+    assert.equal(mcpSkillsSettingOf(off), undefined, JSON.stringify(off))
+  }
+})
+
+test('card: a generated skill says there are no checksums and only the copy read is used; no listing is said', () => {
+  const plain = card([pendingView()]).markup
+  assert.ok(!plain.includes(L.skillConsentDynamic))
+  assert.ok(!plain.includes('awr-approval__dynamic'))
+  const generated = card([pendingView({ dynamic: true })]).markup
+  assert.ok(
+    generated.includes(
+      `<p class="awr-approval__from awr-approval__dynamic">${L.skillConsentDynamic}</p>`,
+    ),
+    generated,
+  )
+  assert.equal(
+    L.skillConsentDynamic,
+    'This server publishes no checksums for this skill: you approve the copy the agent just read, and only that copy is used.',
+  )
+  // Before the preview and the answers: read first.
+  assert.ok(generated.indexOf('awr-approval__dynamic') < generated.indexOf('awr-approval__preview'))
+  assert.ok(!generated.includes(L.skillConsentNoFileListing), 'listed: not said')
+  const alone = card([
+    pendingView({ dynamic: true, noFileListing: true, files: [], fileCount: 0 }),
+  ]).markup
+  assert.ok(alone.includes(L.skillConsentNoFileListing))
+  // Relabelled like every string.
+  const es = card([pendingView({ dynamic: true })], {
+    labels: { skillConsentDynamic: 'Sin sumas de control: apruebas esta copia.' },
+  }).markup
+  assert.ok(es.includes('Sin sumas de control: apruebas esta copia.'))
+})
+
+test('reducer: a generated skill keeps dynamic once decided - only the text is dropped', () => {
+  let s = event(createInitialAgentState(), { type: 'run.start', goal: 'go', runId: 'r1' })
+  s = event(s, requested(view({ dynamic: true, noFileListing: true })))
+  assert.equal(s.approvals[0].skill?.dynamic, true)
+  s = event(s, {
+    type: 'tool.approval-resolved',
+    id: 'q1',
+    name: 'load_skill',
+    approved: true,
+    automatic: false,
+  })
+  assert.deepEqual(
+    [
+      s.approvals[0].skill?.dynamic,
+      s.approvals[0].skill?.noFileListing,
+      s.approvals[0].skill?.body,
+    ],
+    [true, true, undefined],
+  )
+})

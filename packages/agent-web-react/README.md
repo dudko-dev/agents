@@ -472,7 +472,7 @@ Options:
 | `connect({ url, name, headers })` | the endpoint, the tool prefix (`"<name>__<tool>"`, default `mcp`), static headers |
 | `connect({ oauth })` | `true`, or `{ redirectUrl, scope, clientName, clientMetadataUrl, registration }` (`McpOAuthOptions`) - each overrides the hook-level value for this server; `registration` is below |
 | `connect({ protocol })` | the MCP protocol revisions this connection may use: `'legacy'` (the 2025 revisions), `'auto'` (2026-07-28 when the server offers it, the 2025 ones otherwise) or `'modern'` (2026-07-28 only). Left out, nothing is passed and the core speaks the 2025 revisions, exactly as before. Kept across the OAuth redirect. See [the protocol revision](#the-protocol-revision) |
-| `connect({ skills })` | **experimental**: load the skills the server serves (the MCP Skills extension) into the agent's skills catalog, as `<server>/<skill>`. They come with `tools` - nothing else to wire. Needs `protocol: 'auto'` or `'modern'`. `true`, or `{ consent: 'once-per-skill' \| 'ask' \| 'never' }` (when a person is asked before one of its skills enters the agent's context; `McpSkillsSetting`, `mcpSkillsSettingOf`). Off (left out) by default. Kept across the OAuth redirect. See [MCP skills](#mcp-skills-experimental) |
+| `connect({ skills })` | **experimental**: load the skills the server serves (the MCP Skills extension) into the agent's skills catalog, as `<server>/<skill>`. They come with `tools` - nothing else to wire. Needs `protocol: 'auto'` or `'modern'`. `true`, or `{ consent: 'once-per-skill' \| 'ask' \| 'never', dynamic?: boolean }` (`consent`: when a person is asked before one of its skills enters the agent's context; `dynamic: true`: its generated skills too, no checksums - see [MCP skills](#mcp-skills-experimental); `McpSkillsSetting`, `mcpSkillsSettingOf`). Off (left out) by default. Kept across the OAuth redirect. See [MCP skills](#mcp-skills-experimental) |
 
 **`clientMetadataUrl` (CIMD).** Instead of registering itself with every authorization server, an
 app can publish one JSON document that describes it and use that document's URL as its
@@ -554,7 +554,7 @@ const config = { model, tools: { ...myTools, ...mcp.tools } } // "<name>__<tool>
 `elicitation`) plus `persist`, `storageKey`, `autoConnect` and `connectTimeoutMs`, and returns
 `{ servers, tools, catalog, protocols, connectedCount, pendingElicitations, answerElicitation, … }`.
 A server may be added with its own `protocol` (`add({ name, url, protocol: 'auto' })`),
-`skills: true` or `{ consent }` ([MCP skills](#mcp-skills-experimental); `servers[i].skills`) and `apps: false`
+`skills: true` or `{ consent, dynamic }` ([MCP skills](#mcp-skills-experimental); `servers[i].skills`) and `apps: false`
 (that server's [MCP Apps](#mcp-apps--a-servers-interface-in-the-chat) off while the others' are
 shown; `servers[i].apps`), all remembered with the list; `servers[i].protocolMode` is what it was added with and
 `servers[i].protocol` (`{ version, era }`) what was negotiated while it is connected - `protocols`
@@ -583,6 +583,9 @@ await mcp.add({ name: 'docs', url, protocol: 'auto', skills: true })
 // the agent's catalog now has docs/<skill> entries; mcp.servers[0].skills === true
 // a server you vetted: its skills load without asking
 await mcp.add({ name: 'ours', url: ourUrl, protocol: 'auto', skills: { consent: 'never' } })
+// a server you trust with its GENERATED skills (no checksums): each is read whole, and the
+// person approves that copy
+await mcp.add({ name: 'gen', url: genUrl, protocol: 'auto', skills: { dynamic: true } })
 ```
 
 A server may serve **skills** (the `io.modelcontextprotocol/skills` extension, Beta): instruction
@@ -614,6 +617,17 @@ it), `'ask'` (every task that loads it) or `'never'` (a server you vetted: today
 skill inside another one (nested) is asked about on its own. The agent may also load a skill a
 server names by its address (`skill://…/SKILL.md`, in its instructions or a skill), from that
 server only - the card says so (`skill.byUri`).
+
+**Generated skills** (`"resources": "dynamic"`: the server publishes no checksums) are declined
+unless the server was added with `skills: { dynamic: true }` (remembered with the list; there is
+no switch for every server). Then, before the person is asked, the core reads the whole skill -
+its `SKILL.md` and, if the server can list directories, every file in them, within the
+specification's limits (512 files, 16 MiB) - computes the digests itself and keeps that copy in
+memory: the card shows its size and files, says so in one line (`skill.dynamic`;
+`skillConsentDynamic`: "This server publishes no checksums for this skill: you approve the copy
+the agent just read, and only that copy is used."), and the agent is given that copy only, never
+a later read. A server that cannot list its files gives `SKILL.md` alone (`skill.noFileListing`,
+`skillConsentNoFileListing`). Nothing of the copy is stored.
 
 ### The protocol revision
 

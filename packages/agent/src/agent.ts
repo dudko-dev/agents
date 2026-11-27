@@ -15,6 +15,7 @@ import { createDynamicSubagentTool } from './subagent-dynamic.ts'
 import { resolveDynamicSubagents, SPAWN_SUBAGENT_TOOL } from './subagent-dynamic-shared.ts'
 import {
   collectMcpSkillSources,
+  createMcpSkillSnapshotMemory,
   mcpSkillConsentOf,
   mcpSkillsSettingOf,
   resolveMcpSkillConsent,
@@ -25,6 +26,7 @@ import {
   createSkillTools,
   isMcpSkill,
   mcpSkillConsentScope,
+  releaseMcpSkills,
   validateSkills,
 } from './skills.ts'
 import { createEgressTools } from './web-fetch.ts'
@@ -205,6 +207,9 @@ export const createAgent = async (
   }
   // The servers' skill sources, as the last connect / refresh left them.
   let mcpSkillSources: McpSkillSource[] = []
+  // What this agent's snapshots of generated skills (`skills: { dynamic: true }`) hold in memory,
+  // together: the skill objects a refresh drops give theirs back (releaseMcpSkills).
+  const mcpSkillMemory = createMcpSkillSnapshotMemory()
   const builtinTools = wrapToolSet(
     createSkillTools(skills, {
       live: Boolean(learning) || mcpSkillsOn,
@@ -221,6 +226,7 @@ export const createAgent = async (
                   runContext.getStore()?.state?.mcpSkillConsent,
                   mcpSkillConsent,
                 ),
+              memory: mcpSkillMemory,
             },
           }
         : {}),
@@ -407,7 +413,7 @@ export const createAgent = async (
     mcpSkillSources = sources
     for (let i = skills.length - 1; i >= 0; i--) {
       if (isMcpSkill(skills[i])) {
-        skills.splice(i, 1)
+        releaseMcpSkills(skills.splice(i, 1))
       }
     }
     if (sources.length) {
@@ -416,6 +422,7 @@ export const createAgent = async (
           sources,
           skills.map((s) => s.name),
           (m) => log('warn', m),
+          mcpSkillMemory,
         ),
       )
     }

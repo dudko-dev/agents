@@ -431,6 +431,10 @@ export const ES_LABELS: AgentLabels = {
   skillConsentByUri: 'No está en la lista del servidor: el agente la pidió por su dirección.',
   skillConsentNested: (enclosing) =>
     `Está dentro de la habilidad «${enclosing}»: permitir aquella no permitió esta.`,
+  skillConsentDynamic:
+    'Este servidor no publica sumas de comprobación para esta habilidad: apruebas la copia que el agente acaba de leer, y solo se usa esa copia.',
+  skillConsentNoFileListing:
+    'El servidor no puede listar los archivos de esta habilidad: esa copia es solo su SKILL.md.',
   skillConsentPreview: 'Mostrar lo que leería el agente',
   skillConsentFiles: (paths, more) =>
     `Sus archivos, leídos como texto y nunca ejecutados: ${paths}${more ? ` y ${more} más` : ''}`,
@@ -856,6 +860,10 @@ export const DE_LABELS: AgentLabels = {
     'Nicht in der Liste des Servers: Der Agent hat ihn über seine Adresse angefordert.',
   skillConsentNested: (enclosing) =>
     `Er liegt im Skill „${enclosing}“: Dessen Freigabe gilt nicht für diesen.`,
+  skillConsentDynamic:
+    'Dieser Server veröffentlicht keine Prüfsummen für diesen Skill: Sie geben die Kopie frei, die der Agent gerade gelesen hat, und nur diese Kopie wird verwendet.',
+  skillConsentNoFileListing:
+    'Der Server kann die Dateien dieses Skills nicht auflisten: Diese Kopie ist nur seine SKILL.md.',
   skillConsentPreview: 'Zeigen, was der Agent lesen würde',
   skillConsentFiles: (paths, more) =>
     `Seine Dateien, nur als Text gelesen, nie ausgeführt: ${paths}${more ? ` und ${more} weitere` : ''}`,

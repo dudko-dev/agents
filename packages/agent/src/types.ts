@@ -349,9 +349,12 @@ export interface IMcpHttpServerConfig {
   // Off by default: without it the extension is not declared and nothing of it is sent. Needs
   // the 2026-07-28 revision (`protocol: 'auto'` or `'modern'`): the extension is written against
   // it. Third-party text - knowledge only, never policy; see the README, "MCP skills".
-  // `true`, or `{ consent }`: when a person is asked before one of its skills enters the model's
-  // context - 'once-per-skill' (default, or the agent's `mcpSkills.consent`), 'ask' (every run)
-  // or 'never' (a server you vetted).
+  // `true`, or `{ consent, dynamic }`: `consent` is when a person is asked before one of its
+  // skills enters the model's context - 'once-per-skill' (default, or the agent's
+  // `mcpSkills.consent`), 'ask' (every run) or 'never' (a server you vetted); `dynamic: true` also
+  // takes its GENERATED skills (`"resources": "dynamic"`, no checksums - declined by default),
+  // each read whole into a snapshot in memory before anyone is asked, approved and used as that
+  // copy only (README, "MCP skills").
   skills?: McpSkillsSetting
 }
 
