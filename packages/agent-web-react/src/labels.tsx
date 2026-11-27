@@ -396,6 +396,28 @@ export interface AgentLabels {
   appSamplingAllow: string
   appSamplingAlways: string
   appSamplingDeny: string
+  /**
+   * An MCP server's skill about to enter the model's context (`<ToolApprovalPrompt>`, a request
+   * with `approval.skill`): the lead, its size and files, how it was found, the body preview.
+   */
+  skillConsentLead: (server: string, skill: string) => string
+  /** The size of its SKILL.md, and how many more files it bundles. */
+  skillConsentSize: (bytes: number, files: number) => string
+  /** It was named by its address (`skills/get`), not in the server's list. */
+  skillConsentByUri: string
+  /** It sits inside another skill of the same server. */
+  skillConsentNested: (enclosing: string) => string
+  /** The summary of the collapsible preview of its instructions. */
+  skillConsentPreview: string
+  /** Under the preview: its other files, and how many more there are than are shown. */
+  skillConsentFiles: (paths: string, more: number) => string
+  /** What a yes means: `'once-per-skill'` - this text for the session; `'ask'` - this task. */
+  skillConsentNote: (server: string, consent: 'ask' | 'once-per-skill') => string
+  skillConsentAllow: string
+  skillConsentAlways: string
+  skillConsentDeny: string
+  /** The reason a "Deny" gives the agent. */
+  skillConsentDeclined: string
 }
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`
@@ -779,6 +801,25 @@ export const defaultLabels: AgentLabels = {
   appSamplingAllow: 'Allow once',
   appSamplingAlways: 'Always for this app',
   appSamplingDeny: 'Deny',
+  skillConsentLead: (server, skill) => `The server “${server}” offers the skill “${skill}”`,
+  skillConsentSize: (bytes, files) =>
+    `SKILL.md ${kb(bytes)}${files ? ` · ${plural(files, 'more file', 'more files')}` : ''}`,
+  skillConsentByUri: 'Not in the server’s list: the agent asked for it by its address.',
+  skillConsentNested: (enclosing) =>
+    `It sits inside the skill “${enclosing}”: allowing that one did not allow this one.`,
+  skillConsentPreview: 'Show what the agent would read',
+  skillConsentFiles: (paths, more) =>
+    `Its files, read as text and never run: ${paths}${more ? ` and ${more} more` : ''}`,
+  skillConsentNote: (server, consent) =>
+    `Instructions written by the server “${server}”, not by you. They reach the agent only if you allow it${
+      consent === 'ask'
+        ? ', and you are asked again in every task that loads them.'
+        : ' - you are asked again if the server changes them.'
+    } They cannot change the agent’s rules or approvals.`,
+  skillConsentAllow: 'Allow once',
+  skillConsentAlways: 'Always for this server',
+  skillConsentDeny: 'Deny',
+  skillConsentDeclined: 'the user declined the skill',
 }
 
 /** Overrides: any label, with the nested groups merged key by key. */

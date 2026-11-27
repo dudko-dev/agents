@@ -67,7 +67,9 @@ published**, never a runtime dependency of anything.
   from inside) and its tools' data. `appTools` mounts the
   `flights.*` tools and the `ui://` resources in both eras; `appFaults` breaks the resource.
 - `src/mcp-skills.ts` — the skills (`skills`, the `io.modelcontextprotocol/skills` extension, 2026-07-28
-  only): the honest ones, the misbehaving ones `skillFaults` adds, `addSkill`, and a `SkillSource`
+  only): the honest ones, one never listed but served by `skills/get` (`SKILL_URIS.unlisted`), the
+  misbehaving ones `skillFaults` adds (and `nested`, `emptyListing`), `addSkill` (`listed: false`:
+  by `skills/get` only), the `skills/get` log (`skillGets`), and a `SkillSource`
   for the 2.x SDK's `SkillsExtension` (attached to every modern server the handler builds). The
   `nameMismatch` listing is answered by hand in `mcp-server.ts`: the SDK drops such an entry.
 - `src/mcp-elicitation.ts` — the `elicit_*` tools as step functions (ask or finish), the signed

@@ -19,8 +19,14 @@ import { checkLimits, resolveLimits } from './limits.ts'
 import { createInitialPlan, filterPlanSkills, planStepCap } from './planner.ts'
 import { renderTrace, renderTraceSteps } from './prompts.ts'
 import { decideNextAction, decideWithDecisionModel, type ReplanDecision } from './replanner.ts'
-import { isMcpSkillName } from './mcp-skills.ts'
-import { activateSkill, isMcpSkill, isMcpSkillLoaded, prepareMcpSkills } from './skills.ts'
+import { createMcpSkillRunConsent, isMcpSkillName } from './mcp-skills.ts'
+import {
+  activateSkill,
+  isMcpSkill,
+  isMcpSkillAllowed,
+  mcpSkillConsentScope,
+  prepareMcpSkills,
+} from './skills.ts'
 import { synthesizeAnswer } from './synthesizer.ts'
 import {
   createStepWrites,
@@ -309,6 +315,7 @@ const runAgentLoopInner = async (
     strategy: runToolStrategy(ctx),
     discovered: [],
     activeSkills: [...(resumed?.activeSkills ?? [])],
+    mcpSkillConsent: createMcpSkillRunConsent(),
     traceSummary: resumed?.traceSummary,
     traceSummaryUpTo: resumed?.traceSummaryUpTo ?? 0,
     userUpdates: (resumed?.userUpdates ?? []).map((u) => ({ ...u })),
@@ -369,24 +376,26 @@ const runAgentLoopInner = async (
   const activate = (name: string, by: 'plan' | 'tool'): void => {
     activateSkill(ctx.skills ?? [], name, by, state, proxiedCtx.emit)
   }
-  // An MCP server's skill is read (and verified) before it is activated: the planner's picks
-  // here, and a resumed run's active ones below. One that cannot be read is left out.
+  // An MCP server's skill is read (and verified) - and let in by the person, where its consent
+  // says so - before it is activated: the planner's picks here, and a resumed run's active ones
+  // below. One that is not let in is left out.
   const warnSkill = (message: string): void =>
     proxiedCtx.emit({ type: 'log', level: 'warn', message })
+  const skillScope = mcpSkillConsentScope(ctx.approval, state.mcpSkillConsent, ctx.mcpSkillConsent)
   const activatePlanned = async (names: readonly string[] | undefined): Promise<void> => {
     if (!names?.length) {
       return
     }
-    await prepareMcpSkills(ctx.skills ?? [], names, warnSkill, signal)
+    await prepareMcpSkills(ctx.skills ?? [], names, warnSkill, skillScope, signal)
     for (const name of names) {
       activate(name, 'plan')
     }
   }
   if (state.activeSkills.some(isMcpSkillName)) {
-    await prepareMcpSkills(ctx.skills ?? [], state.activeSkills, warnSkill, signal)
+    await prepareMcpSkills(ctx.skills ?? [], state.activeSkills, warnSkill, skillScope, signal)
     state.activeSkills = state.activeSkills.filter((name) => {
       const skill = ctx.skills?.find((s) => s.name === name)
-      return !skill || !isMcpSkill(skill) || isMcpSkillLoaded(skill)
+      return !skill || !isMcpSkill(skill) || isMcpSkillAllowed(skill, state.mcpSkillConsent)
     })
   }
 

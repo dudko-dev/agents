@@ -177,6 +177,16 @@ const resetRun = (state: AgentUiState): AgentUiState => ({
 const patchStep = (steps: StepView[], id: string, fn: (s: StepView) => StepView): StepView[] =>
   steps.map((s) => (s.id === id ? fn(s) : s))
 
+/**
+ * A decided request about an MCP server's skill keeps who and what - not the server's text: the
+ * preview was for the decision, and a saved conversation must not hold a server's instructions.
+ */
+const withoutSkillBody = (a: ApprovalView): ApprovalView => {
+  if (!a.skill || a.skill.body === undefined) return a
+  const { body: _body, ...skill } = a.skill
+  return { ...a, skill }
+}
+
 const patchApproval = (
   approvals: ApprovalView[],
   id: string,
@@ -530,6 +540,7 @@ const applySubagent = (
                   ...(node ? { name: node.name } : {}),
                   ...(node?.role ? { role: node.role } : {}),
                 },
+                ...(inner.skill ? { skill: inner.skill } : {}),
                 status: 'pending',
               },
             ],
@@ -539,12 +550,14 @@ const applySubagent = (
           return known.approvals.some((a) => a.id === inner.id)
             ? {
                 ...known,
-                approvals: patchApproval(known.approvals, inner.id, (a) => ({
-                  ...a,
-                  status: inner.approved ? 'approved' : 'denied',
-                  reason: inner.reason,
-                  automatic: inner.automatic,
-                })),
+                approvals: patchApproval(known.approvals, inner.id, (a) =>
+                  withoutSkillBody({
+                    ...a,
+                    status: inner.approved ? 'approved' : 'denied',
+                    reason: inner.reason,
+                    automatic: inner.automatic,
+                  }),
+                ),
               }
             : known
 
@@ -1087,6 +1100,7 @@ const applyEvent = (state: AgentUiState, event: AgentEvent, ctx: EventContext): 
             stepId: event.step?.id,
             ...(event.subagent ? { subagent: event.subagent } : {}),
             ...(event.app ? { app: event.app } : {}),
+            ...(event.skill ? { skill: event.skill } : {}),
             status: 'pending',
           },
         ],
@@ -1094,12 +1108,13 @@ const applyEvent = (state: AgentUiState, event: AgentEvent, ctx: EventContext): 
 
     case 'tool.approval-resolved': {
       const known = state.approvals.some((a) => a.id === event.id)
-      const decided = (a: ApprovalView): ApprovalView => ({
-        ...a,
-        status: event.approved ? 'approved' : 'denied',
-        reason: event.reason,
-        automatic: event.automatic,
-      })
+      const decided = (a: ApprovalView): ApprovalView =>
+        withoutSkillBody({
+          ...a,
+          status: event.approved ? 'approved' : 'denied',
+          reason: event.reason,
+          automatic: event.automatic,
+        })
       return {
         ...state,
         approvals: known
@@ -1195,7 +1210,7 @@ const applyEvent = (state: AgentUiState, event: AgentEvent, ctx: EventContext): 
         // the run's).
         approvals: state.approvals.map((a) =>
           a.status === 'pending' && !a.app
-            ? { ...a, status: 'denied' as const, reason: 'stopped' }
+            ? withoutSkillBody({ ...a, status: 'denied' as const, reason: 'stopped' })
             : a,
         ),
         ...(state.elicitations

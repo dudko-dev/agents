@@ -694,10 +694,38 @@ the server writes them, and can change them at any time.
 
 **What is enforced**
 
-- **Opt-in, per server, off by default.** Without `skills: true` the extension is not declared and
-  nothing of it is requested. There is no agent-wide switch: a new server never brings skills by
-  default. The per-server flag is the "explicit user policy" the extension says governs whether a
-  skill is loaded at all.
+- **Opt-in, per server, off by default.** Without `skills` (`true` / `{ consent }`) the extension
+  is not declared and nothing of it is requested. There is no agent-wide switch to turn it on: a
+  new server never brings skills by default. The per-server flag is the "explicit user policy" the
+  extension says governs whether a skill is loaded at all.
+- **A person sees it before the model does.** Unless the host set `consent: 'never'` (for that
+  server, or agent-wide), a server's skill enters the model's context only after a person was
+  shown it - the server, the skill, its description and size, and the very text the model would
+  read (`skill.body` is the model's text, cleaned and capped the same way: what is approved is what
+  is sent) - and said yes, through `toolApproval.onRequest`. The approval mode does not lower it:
+  `autopilot` asks too, a rule allowing everything does not apply to it. Nobody to ask (no
+  `onRequest`), no answer in time, a handler that fails: not loaded. A no is final for the run - a
+  second load of the same skill is refused without a second question, so a model cannot wear a
+  person down - and the model is told nothing of it is in its context. A `read_skill_file` of a
+  skill nobody allowed asks first too: a file is part of the skill. The SKILL.md is fetched when
+  the model asks for the skill (the point of need, as the extension's lazy-retrieval rule asks)
+  so that it can be shown; it is not in any context until the yes.
+- **A consent covers what was shown, and that only.** Under `'once-per-skill'` a yes is bound to
+  the server, the URI and every file's digest (`mcpSkillGrantKey`): a skill the server changes -
+  one file rotated, added or removed - is asked about again (the extension's content-bound
+  approval). "Always for this server" covers that server's skills for the agent's life, never
+  another server's and never a **nested** skill (a `SKILL.md` inside another skill of the
+  server): approving the enclosing skill, or the server, does not approve it - it is asked about
+  on its own. Grants live in memory, for the agent's life; nothing is persisted.
+- **A URI reaches the server the model names, and only it.** A skill the listing leaves out can be
+  loaded by its URI (`load_skill({ server, uri })`), because a server may point at skills it does
+  not list. Before any request: the URI must be `skill://…/<name>/SKILL.md` (no other scheme - the
+  model read it in third-party text, and an `https:` or `file:` URI there would only be a lure),
+  the server must be one whose `skills` are on (a server you did not opt in is never asked, even if
+  it serves skills), and the per-server cap must have room. Then `skills/get` goes to that server
+  ONLY - never to another that might serve the same URI, so a skill cannot make the agent fetch
+  from a server it does not come from - and the entry passes every rule, check, preamble and
+  consent a listed one does. Its name never takes one in use.
 - **A namespace a server cannot leave.** Its skills are `<server>/<skill>`, the server named by
   YOUR key for it, never by what it calls itself. No other kind of skill name can hold a `/`, so a
   server cannot take the name of one of your skills, of a lesson the agent wrote, or of another
@@ -743,6 +771,13 @@ the server writes them, and can change them at any time.
 - **Digests are not a signature.** They come from the same server as the content (the extension
   says so): a match proves the two are consistent, not that either is honest, and an intermediary
   that rewrites both is not detected. They catch a skill that changed since it was listed.
+- **What a person approves.** The card shows the skill's text; a person who clicks "Allow" without
+  reading it has approved it all the same, and "Always for this server" trusts that server with
+  every skill it will serve while the agent lives. `consent: 'never'` turns the question off for a
+  server: use it only for a server you vetted.
+- **A skill named in a server's own text.** The model may be told (by the server's instructions or
+  skill) to load another skill of THAT server by URI; that skill is still asked about, verified
+  and namespaced, but it is the server's choice of words that led there.
 - **Code-execution tools you do not mark.** The rule above covers `run_js` and the tools you mark;
   a host tool that runs code but is not marked is an ordinary tool. A subagent you configured
   (`createSubagentTool`) is its own agent with its own policy.

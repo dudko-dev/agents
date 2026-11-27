@@ -4,6 +4,7 @@ import test from 'node:test'
 import {
   startLocalMcpServer,
   SKILL_MARKERS,
+  SKILL_URIS,
   type ILocalMcpServer,
   type McpProtocol,
 } from '@dudko.dev/test-servers'
@@ -113,10 +114,12 @@ const withRig = async (
   const changed: string[] = []
   const mcp = await connectMcpHttp(
     {
+      // The host vetted this server (`consent: 'never'`): these tests are about loading. The
+      // consent has its own tests below, with `skills: true` (the default consent).
       docs: {
         url: server.url,
         protocol: 'modern',
-        skills: true,
+        skills: { consent: 'never' },
         fetch: wire.fetch,
         ...opts.server,
       },
@@ -206,7 +209,7 @@ test('mcp skills (browser): a 2025 connection declares and asks nothing (the ext
 })
 
 test('mcp skills (browser): ON - the catalog comes with the tools, <server>/<skill>, nothing read', async () => {
-  await withRig({}, async (rig) => {
+  await withRig({ server: { skills: true } }, async (rig) => {
     assert.equal(declaresSkills(rig.wire), true)
     const agent = await rig.agent()
     assert.deepEqual(
@@ -503,5 +506,384 @@ test('mcp skills (browser): run_js is asked while the run acts on an MCP skill, 
       asked.map((r) => [r.toolName, r.mcpSkills]),
       [['run_js', ['docs/git-workflow']]],
     )
+  })
+})
+
+// ── consent: a person sees a server's skill before its text enters the model's context ─────
+
+const seenByModel = (rig: Rig): string => JSON.stringify(rig.calls.map((c) => c.options.prompt))
+const skillAsks = (asked: ToolApprovalRequest[]) => asked.filter((r) => r.skill)
+
+/** Both servers on one connection: `docs` (the rig's) and `other`, each with `skills`. */
+const withTwo = async (
+  rig: Rig,
+  other: ILocalMcpServer,
+  skills: McpHttpServerConfig['skills'],
+  body: (mcp: ConnectedMcp) => Promise<void>,
+): Promise<void> => {
+  const mcp = await connectMcpHttp({
+    docs: { url: rig.server.url, protocol: 'modern', skills },
+    other: { url: other.url, protocol: 'modern', skills },
+  })
+  try {
+    await body(mcp)
+  } finally {
+    await mcp.close()
+  }
+}
+
+test('mcp skills consent (browser): asked BEFORE the body enters; Allow lets it in, once per skill', async () => {
+  await withRig({ server: { skills: true } }, async (rig) => {
+    const asked: ToolApprovalRequest[] = []
+    const before: boolean[] = []
+    const agent = await rig.agent({
+      toolApproval: {
+        onRequest: (req) => {
+          asked.push(req)
+          before.push(seenByModel(rig).includes(SKILL_MARKERS.pdfProcessing))
+          return true
+        },
+      },
+    })
+    rig.scenario = { calls: [{ name: 'load_skill', args: { name: 'docs/pdf-processing' } }] }
+    const result = await run(rig, agent)
+    assert.deepEqual(before, [false], 'not a byte of it before the yes')
+    const [req] = asked
+    assert.equal(req.toolName, 'load_skill')
+    assert.deepEqual(req.input, { name: 'docs/pdf-processing' })
+    assert.deepEqual(
+      [req.skill?.server, req.skill?.name, req.skill?.skill, req.skill?.consent],
+      ['docs', 'docs/pdf-processing', 'pdf-processing', 'once-per-skill'],
+    )
+    assert.equal(req.skill?.description, 'Extract, fill and assemble PDF documents')
+    assert.ok(req.skill?.body.includes(SKILL_MARKERS.pdfProcessing))
+    const requested = rig.events.find((e) => e.type === 'tool.approval-requested')
+    assert.equal(
+      requested?.type === 'tool.approval-requested' && requested.skill?.name,
+      'docs/pdf-processing',
+    )
+    assert.equal(callsOf(result)[0].ok, true)
+    assert.ok(seenByModel(rig).includes(SKILL_MARKERS.pdfProcessing))
+    await run(rig, agent)
+    assert.equal(skillAsks(asked).length, 1, 'once-per-skill: not asked again')
+  })
+})
+
+test('mcp skills consent (browser): Deny keeps all of it out - the body, a file; the run does not ask again', async () => {
+  await withRig({ server: { skills: true } }, async (rig) => {
+    const asked: ToolApprovalRequest[] = []
+    const agent = await rig.agent({
+      toolApproval: {
+        onRequest: (req) => {
+          asked.push(req)
+          return { approved: false, reason: 'no' }
+        },
+      },
+    })
+    rig.scenario = {
+      planned: ['docs/git-workflow'],
+      calls: [
+        { name: 'load_skill', args: { name: 'docs/git-workflow' } },
+        {
+          name: 'read_skill_file',
+          args: { name: 'docs/pdf-processing', path: 'references/FORMS.md' },
+        },
+      ],
+    }
+    const result = await run(rig, agent)
+    const [load, file] = callsOf(result)
+    assert.equal(load.ok, false)
+    assert.match(errorOf(load.output), /already refused the skill "docs\/git-workflow"/)
+    assert.equal(file.ok, false)
+    assert.match(errorOf(file.output), /The user did not allow the skill "docs\/pdf-processing"/)
+    assert.deepEqual(
+      skillAsks(asked).map((r) => r.skill?.name),
+      ['docs/git-workflow', 'docs/pdf-processing'],
+      "the planner's pick was asked about once; load_skill of it then refused at once",
+    )
+    assert.deepEqual(result.skills, [])
+    assert.ok(!seenByModel(rig).includes(SKILL_MARKERS.gitWorkflow))
+    assert.ok(!seenByModel(rig).includes(SKILL_MARKERS.forms))
+    assert.ok(!rig.server.skillReads.includes('skill://pdf-processing/references/FORMS.md'))
+  })
+})
+
+test('mcp skills consent (browser): "Always for this server" - that server only; a nested skill asks again', async () => {
+  const other = await startLocalMcpServer({ protocol: 'modern', skills: true })
+  try {
+    await withRig({}, async (rig) => {
+      rig.server.skillFaults.nested = true
+      await withTwo(rig, other, true, async (mcp) => {
+        const asked: ToolApprovalRequest[] = []
+        const agent = await rig.agent({
+          tools: mcp.tools,
+          toolApproval: {
+            onRequest: (req) => {
+              asked.push(req)
+              return { approved: true, remember: true }
+            },
+          },
+        })
+        rig.scenario = {
+          calls: [
+            { name: 'load_skill', args: { name: 'docs/handbook' } },
+            { name: 'load_skill', args: { name: 'docs/git-workflow' } },
+            { name: 'load_skill', args: { name: 'docs/onboarding' } },
+            { name: 'load_skill', args: { name: 'other/git-workflow' } },
+          ],
+        }
+        const result = await run(rig, agent)
+        assert.ok(callsOf(result).every((c) => c.ok))
+        assert.deepEqual(
+          skillAsks(asked).map((r) => [r.skill?.name, r.skill?.nestedIn]),
+          [
+            ['docs/handbook', undefined],
+            ['docs/onboarding', 'docs/handbook'],
+            ['other/git-workflow', undefined],
+          ],
+        )
+      })
+    })
+  } finally {
+    await other.close()
+  }
+})
+
+test("mcp skills consent (browser): 'never' skips it, a server's own setting wins, autopilot still asks", async () => {
+  await withRig({ server: { skills: true } }, async (rig) => {
+    const asked: ToolApprovalRequest[] = []
+    const onRequest = (req: ToolApprovalRequest) => {
+      asked.push(req)
+      return true
+    }
+    rig.scenario = { calls: [{ name: 'load_skill', args: { name: 'docs/git-workflow' } }] }
+    await run(
+      rig,
+      await rig.agent({ mcpSkills: { consent: 'never' }, toolApproval: { onRequest } }),
+    )
+    assert.equal(skillAsks(asked).length, 0)
+    await run(
+      rig,
+      await rig.agent({
+        toolApproval: { mode: 'autopilot', rules: { '*': 'allow' }, onRequest },
+      }),
+    )
+    assert.equal(skillAsks(asked).length, 1, 'autopilot and a rule do not skip it')
+    await assert.rejects(
+      rig.agent({ mcpSkills: { consent: 'sometimes' as never } }),
+      /mcpSkills.consent must be/,
+    )
+  })
+  await withRig({ server: { skills: { consent: 'ask' } } }, async (rig) => {
+    const asked: ToolApprovalRequest[] = []
+    const agent = await rig.agent({
+      mcpSkills: { consent: 'never' },
+      toolApproval: {
+        onRequest: (req) => {
+          asked.push(req)
+          return true
+        },
+      },
+    })
+    rig.scenario = { calls: [{ name: 'load_skill', args: { name: 'docs/git-workflow' } }] }
+    await run(rig, agent)
+    await run(rig, agent)
+    assert.deepEqual(
+      skillAsks(asked).map((r) => r.skill?.consent),
+      ['ask', 'ask'],
+    )
+  })
+  // Nobody to ask: not loaded, and said at createAgent.
+  await withRig({ server: { skills: true } }, async (rig) => {
+    const agent = await rig.agent()
+    assert.ok(
+      rig.logs.some((l) => /docs: its skills are loaded only with a person's consent/.test(l)),
+    )
+    rig.scenario = { calls: [{ name: 'load_skill', args: { name: 'docs/git-workflow' } }] }
+    const [load] = callsOf(await run(rig, agent))
+    assert.match(errorOf(load.output), /no approval handler is configured/)
+    assert.ok(!seenByModel(rig).includes(SKILL_MARKERS.gitWorkflow))
+  })
+})
+
+// ── by URI ──────────────────────────────────────────────────────────────────
+
+test('mcp skills by URI (browser): from the named server only, under the same rules; it joins the catalog', async () => {
+  const other = await startLocalMcpServer({ protocol: 'modern', skills: true })
+  const vendor = 'skill://elsewhere/vendor-guide/SKILL.md'
+  try {
+    await other.addSkill('elsewhere/vendor-guide', 'The vendor guide', '# V\n\nVENDOR-BODY\n', {
+      listed: false,
+    })
+    await withRig({}, async (rig) => {
+      await withTwo(rig, other, true, async (mcp) => {
+        const asked: ToolApprovalRequest[] = []
+        const agent = await rig.agent({
+          tools: mcp.tools,
+          toolApproval: {
+            onRequest: (req) => {
+              asked.push(req)
+              return true
+            },
+          },
+        })
+        rig.scenario = {
+          calls: [
+            { name: 'load_skill', args: { server: 'docs', uri: SKILL_URIS.unlisted } },
+            { name: 'load_skill', args: { server: 'other', uri: vendor } },
+          ],
+        }
+        const result = await run(rig, agent)
+        const out = callsOf(result)[0].output as { name: string; content: string }
+        const second = callsOf(result)[1].output as { name: string; content: string }
+        assert.equal(second.name, 'other/vendor-guide')
+        assert.ok(second.content.includes('VENDOR-BODY'))
+        assert.equal(out.name, 'docs/release-checklist')
+        assert.match(out.content, /^\[A skill from the MCP server "docs"/)
+        assert.ok(out.content.includes(SKILL_MARKERS.unlisted))
+        // Each URI went to the server named with it, and to no other.
+        assert.deepEqual(rig.server.skillGets, [SKILL_URIS.unlisted])
+        assert.deepEqual(other.skillGets, [vendor])
+        assert.deepEqual(
+          skillAsks(asked).map((r) => [r.skill?.byUri, r.input]),
+          [
+            [true, { server: 'docs', uri: SKILL_URIS.unlisted }],
+            [true, { server: 'other', uri: vendor }],
+          ],
+        )
+        assert.ok(
+          agent.skills.some((s) => s.name === 'docs/release-checklist' && s.server === 'docs'),
+        )
+        assert.deepEqual(result.skills, ['docs/release-checklist', 'other/vendor-guide'])
+        // Its description says how, and to whom.
+        const executor = rig.calls.find((c) => stageOf(c) === 'executor')!
+        const tool = (executor.options.tools as { name: string; description?: string }[]).find(
+          (t) => t.name === 'load_skill',
+        )
+        assert.match(String(tool?.description), /Servers whose skills can be loaded: docs, other\./)
+      })
+    })
+  } finally {
+    await other.close()
+  }
+})
+
+test('mcp skills by URI (browser): refused before any request; -32602 surfaced; rules, verification, cap', async () => {
+  const other = await startLocalMcpServer({ protocol: 'modern', skills: true })
+  try {
+    await other.addSkill('elsewhere/vendor-guide', 'Vendor', '# V\n\nVENDOR-BODY\n', {
+      listed: false,
+    })
+    await withRig({}, async (rig) => {
+      // `other` is connected WITHOUT skills: its server serves them, its config did not ask.
+      const mcp = await connectMcpHttp({
+        docs: { url: rig.server.url, protocol: 'modern', skills: { consent: 'never' } },
+        other: { url: other.url, protocol: 'modern' },
+      })
+      try {
+        Object.assign(rig.server.skillFaults, { emptyListing: true, digest: true, dynamic: true })
+        const agent = await rig.agent({ tools: mcp.tools, maxStepsPerTask: 8 })
+        const vendor = 'skill://elsewhere/vendor-guide/SKILL.md'
+        rig.scenario = {
+          calls: [
+            { name: 'load_skill', args: { server: 'other', uri: vendor } },
+            {
+              name: 'load_skill',
+              args: { server: 'docs', uri: 'https://evil.example/a/SKILL.md' },
+            },
+            { name: 'load_skill', args: { server: 'docs', uri: vendor } },
+            { name: 'load_skill', args: { server: 'docs', uri: 'skill://tampered/SKILL.md' } },
+            { name: 'load_skill', args: { server: 'docs', uri: 'skill://generated/SKILL.md' } },
+          ],
+        }
+        const [notOn, notSkill, unknown, tampered, generated] = callsOf(await run(rig, agent))
+        assert.match(errorOf(notOn.output), /"other" is not a server whose skills can be loaded/)
+        assert.match(errorOf(notSkill.output), /is not a skill:\/\/ URI/)
+        assert.match(errorOf(unknown.output), /the server serves no skill at that URI \(-32602/)
+        assert.match(errorOf(tampered.output), /\(digest\)/)
+        assert.match(errorOf(generated.output), /its content is generated/)
+        assert.deepEqual(rig.server.skillGets, [
+          vendor,
+          'skill://tampered/SKILL.md',
+          'skill://generated/SKILL.md',
+        ])
+        assert.deepEqual(other.skillGets, [], 'nothing was sent to a server not opted in')
+        assert.ok(
+          !seenByModel(rig).includes('VENDOR-BODY') && !seenByModel(rig).includes('TAMPERED-BODY'),
+        )
+      } finally {
+        await mcp.close()
+      }
+    })
+  } finally {
+    await other.close()
+  }
+  await withRig({}, async (rig) => {
+    rig.server.skillFaults.extra = 40
+    await rig.mcp.refreshServer('docs')
+    const agent = await rig.agent()
+    rig.scenario = {
+      calls: [{ name: 'load_skill', args: { server: 'docs', uri: SKILL_URIS.unlisted } }],
+    }
+    const [full] = callsOf(await run(rig, agent))
+    assert.match(errorOf(full.output), /already has 32 skills in the catalog/)
+    assert.deepEqual(rig.server.skillGets, [])
+  })
+})
+
+test('mcp skills by URI (browser): never shadows a name in use', async () => {
+  await withRig({}, async (rig) => {
+    await rig.server.addSkill('internal/git-workflow', 'Another', '# O\n\nOTHER-GIT\n', {
+      listed: false,
+    })
+    const agent = await rig.agent({
+      skills: [{ name: 'git-workflow', description: 'Ours', content: 'HOST-GIT-WORKFLOW' }],
+    })
+    rig.scenario = {
+      calls: [
+        {
+          name: 'load_skill',
+          args: { server: 'docs', uri: 'skill://internal/git-workflow/SKILL.md' },
+        },
+        { name: 'load_skill', args: { name: 'git-workflow' } },
+      ],
+    }
+    const [byUri, host] = callsOf(await run(rig, agent))
+    assert.equal((byUri.output as { name: string }).name, 'docs/internal/git-workflow')
+    assert.equal((host.output as { content: string }).content, 'HOST-GIT-WORKFLOW')
+    assert.deepEqual(
+      agent.skills.map((s) => s.name).filter((n) => n.includes('git-workflow')),
+      ['git-workflow', 'docs/git-workflow', 'docs/internal/git-workflow'],
+    )
+  })
+})
+
+test("mcp skills consent (browser): 'ask' - let in by an earlier run, not active in a run whose person said no", async () => {
+  await withRig({ server: { skills: { consent: 'ask' } } }, async (rig) => {
+    const answers = [true, false]
+    const asked: ToolApprovalRequest[] = []
+    const agent = await rig.agent({
+      toolApproval: {
+        onRequest: (req) => {
+          asked.push(req)
+          return answers.shift() ?? false
+        },
+      },
+    })
+    rig.scenario = { calls: [{ name: 'load_skill', args: { name: 'docs/git-workflow' } }] }
+    await run(rig, agent)
+    const before = rig.calls.length
+    rig.events.length = 0
+    rig.scenario = { planned: ['docs/git-workflow'] }
+    const result = await run(rig, agent)
+    assert.equal(skillAsks(asked).length, 2)
+    assert.deepEqual(result.skills, [])
+    assert.deepEqual(
+      rig.events.filter((e) => e.type === 'skill.activated'),
+      [],
+    )
+    const executor = rig.calls.slice(before).filter((c) => stageOf(c) === 'executor')
+    assert.ok(executor.length > 0)
+    assert.ok(executor.every((c) => !c.system.includes(SKILL_MARKERS.gitWorkflow)))
   })
 })

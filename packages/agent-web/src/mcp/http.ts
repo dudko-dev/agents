@@ -46,8 +46,10 @@ import {
   createMcpSkillCatalog,
   markMcpSkills,
   MCP_SKILLS_EXTENSION,
+  mcpSkillsSettingOf,
   type McpSkillSource,
   type McpSkillsClientLike,
+  type McpSkillsSetting,
 } from './skills.js'
 import { assertSecureOAuthUrl } from './oauth.js'
 import {
@@ -131,8 +133,11 @@ export interface McpHttpServerConfig {
    * it. The skills come with the server's tools (each mounted tool carries them, like the
    * server's instructions), so merging `tools` into the agent's config is all a host does. Their
    * text is third-party - knowledge only, never policy; see the README, "MCP skills".
+   * `true`, or `{ consent }`: when a person is asked before one of its skills enters the model's
+   * context - `'once-per-skill'` (default, or the agent's `mcpSkills.consent`), `'ask'` (every
+   * run) or `'never'` (a server you vetted).
    */
-  skills?: boolean
+  skills?: McpSkillsSetting
   /**
    * MCP Apps for THIS server, over the connection's `apps`: `false` keeps its apps off while
    * other servers' are shown - nothing is declared to it, no app of it is read, no `mcp.app`
@@ -994,8 +999,9 @@ const connectAndList = async (
   const apps = mcpAppsModeOf(cfg.apps, opts.apps) === 'on'
   // `skills: true` (experimental): the Skills extension is written against 2026-07-28, so it is
   // declared only where that revision may be spoken; never on a 'legacy' connection.
-  const skillsWanted = cfg.skills === true && mode !== 'legacy'
-  if (cfg.skills === true && mode === 'legacy') {
+  const skillsSetting = mcpSkillsSettingOf(cfg.skills, name)
+  const skillsWanted = skillsSetting.on && mode !== 'legacy'
+  if (skillsSetting.on && mode === 'legacy') {
     log(
       'warn',
       `[mcp] ${name}: skills: true needs protocol 'auto' or 'modern' (the Skills extension is written against 2026-07-28); no skills are requested`,
@@ -1095,6 +1101,7 @@ const connectAndList = async (
         name,
         new SkillsClient(client, { skipInvalid: true }) as unknown as McpSkillsClientLike,
         (level, message) => log(level, message),
+        skillsSetting.consent ? { consent: skillsSetting.consent } : {},
       )
       await skills.refresh()
     }

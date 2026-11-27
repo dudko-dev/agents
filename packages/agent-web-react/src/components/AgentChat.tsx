@@ -146,6 +146,11 @@ export interface AgentChatProps {
    * (default true). Shown once `elicitations` and `onElicitationAnswer` are given.
    */
   showElicitation?: boolean
+  /**
+   * In the consent card of an MCP server's skill: the collapsible preview of the instructions
+   * the agent would read (default true; `<ToolApprovalPrompt showSkillPreview>`).
+   */
+  showSkillPreview?: boolean
 
   // ── features ───────────────────────────────────────────────────────────────
   /**
@@ -333,6 +338,7 @@ const AgentChatInner = ({
   showContext = false,
   activityOpen = false,
   showElicitation = true,
+  showSkillPreview = true,
   elicitations,
   onElicitationAnswer,
   renderElicitation,
@@ -678,6 +684,7 @@ const AgentChatInner = ({
             approvals={agent.pendingApprovals}
             onApprove={agent.approve}
             onDeny={agent.deny}
+            showSkillPreview={showSkillPreview}
             renderApproval={renderApproval}
           />
           {/* Asked of the user, in this order: tool calls (the agent's and an app's), what an

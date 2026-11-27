@@ -352,16 +352,25 @@ waiting for it. OFF
   on a server's entries, the `<server>/<skill>` names (by the HOST's label; no host skill or lesson
   name can hold a "/"), the caps, `mcpSkillPreamble` (knowledge, never policy), the file rule (only
   what the entry the skill was LOADED with lists), the mark that carries a server's skills on its
-  tools (`markMcpSkills` / `collectMcpSkillSources`: merging `mcp.tools` is all a host does) and
-  one server's catalog over the SDK's `SkillsClient` (`createMcpSkillCatalog`; the SDK verifies
-  size, digest, frontmatter). A COPY of the server's `src/mcp-skills.ts`, byte for byte - change
+  tools (`markMcpSkills` / `collectMcpSkillSources`: merging `mcp.tools` is all a host does),
+  one server's catalog over the SDK's `SkillsClient` (`createMcpSkillCatalog`, with `get` -
+  `skills/get` to that server only, kept in `source.added`; the SDK verifies size, digest,
+  frontmatter), a skill by URI (`mcpSkillUriRefusal`: `skill://` only; `resolveMcpSkillServer`;
+  `mcpSkillRoomRefusal`; `assignAddedMcpSkillName`) and the consent before a skill's text enters
+  the context (`McpSkillConsent`: `'once-per-skill'` default / `'ask'` / `'never'`;
+  `decideMcpSkillConsent`, `recordMcpSkillConsent`, `mcpSkillGrantKey` - server, URI, every digest -,
+  `mcpSkillEnclosingUri` for nested skills, `mcpSkillConsentView`). A COPY of the server's `src/mcp-skills.ts`, byte for byte - change
   both (the server's `tests/mcp-skills-shared.test.ts` compares them and tests every rule).
   `http.ts` wires it: the extension declared only with `skills: true` and a `protocol` that may
   speak 2026-07-28, listed only on a 2026-07-28 connection, the SDK's
   `@modelcontextprotocol/client/ext/skills` imported dynamically there; a change arrives as
   `notifications/resources/list_changed` (`resourcesListChanged` on the listen stream) and goes
   through `onToolsChanged` / `refreshServer`. `skills.ts` keeps an MCP skill's state per skill
-  object; the runner collects them from `baseTools` at `createAgent` (a helper gets its caller's
+  object (`acquireMcpSkill`: read, verify, ASK, then let in; `addMcpSkillByUri`;
+  `isMcpSkillAllowed` per run); the question is `askMcpSkillConsent` in `tools/approval.ts`
+  (`onRequest`, the request's `skill`, `ApprovalState.mcpSkillGrants` shared with helpers; the
+  mode and the rules play no part); `config.mcpSkills.consent` is the agent-wide default; the
+  runner makes the per-run `McpSkillConsentScope`. The runner collects them from `baseTools` at `createAgent` (a helper gets its caller's
   through `config.skills`, `isMcpSkill`), reads a planner's pick before activating it, and hands
   `wrapToolsForRun` `mcpSkills` (its own active MCP skills + `SpawnSeed.mcpSkills`): a tool that
   runs code (`markCodeExecution`: `run_js`) is ALWAYS asked while there is one. OFF without

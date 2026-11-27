@@ -103,6 +103,14 @@ test('"Try it with its skills": the agent loads demo/trip-planning, under the th
   expect(sent.filter((s) => s.uri?.startsWith('skill://'))).toEqual([])
 
   await send(page, 'Plan three days in Lisbon for two of us')
+  // The planner's pick is the server's text: before it reaches the model the user is asked, with
+  // the server named and the text shown (consent 'once-per-skill', the default).
+  const card = page.locator('.awr-approval--skill')
+  await expect(card).toContainText('The server “demo” offers the skill “trip-planning”', {
+    timeout: 30_000,
+  })
+  expect(calls.some((c) => c.system.includes('# Trip planning with the demo server'))).toBe(false)
+  await card.getByRole('button', { name: 'Allow once' }).click()
   await expect(answerBubble(page)).toHaveText('All done.', { timeout: 45_000 })
 
   // The catalog: both skills, namespaced by the host's label, tagged with their origin.

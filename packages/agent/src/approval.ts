@@ -1,7 +1,12 @@
 import { randomUUID } from 'node:crypto'
 import { runContext } from './context.ts'
 import type { IRunState } from './internal.ts'
-import { isMcpSkillName } from './mcp-skills.ts'
+import {
+  createMcpSkillGrants,
+  isMcpSkillName,
+  type McpSkillConsentView,
+  type McpSkillGrants,
+} from './mcp-skills.ts'
 import type {
   EventHandler,
   IToolApprovalConfig,
@@ -197,6 +202,22 @@ export interface IApprovalController {
   remembered: Set<string>
   // Resolves when the call may run; throws ToolDeniedError otherwise.
   gate: (name: string, input: unknown, opts: IApprovalGateOptions) => Promise<void>
+  // What a person allowed of MCP servers' skills for the agent's life (shared by its helpers).
+  mcpSkillGrants: McpSkillGrants
+  // Ask the person whether an MCP server's skill may enter the model's context (the same
+  // `onRequest`, `timeoutMs` and events as a tool call, the request carrying `skill`; the
+  // approval mode and the rules play no part). Resolves with the answer - `by` says whether a
+  // person gave it - and throws only when the run was stopped.
+  askSkill: (
+    input: unknown,
+    skill: McpSkillConsentView,
+    opts: { signal?: AbortSignal },
+  ) => Promise<{
+    approved: boolean
+    remember?: boolean
+    reason?: string
+    by: 'person' | 'no-handler' | 'no-answer'
+  }>
 }
 
 const normalizeDecision = (
@@ -426,7 +447,95 @@ export const createApprovalController = (
     }
   }
 
+  const mcpSkillGrants = createMcpSkillGrants()
+
+  // The same question as a tool call's, about a skill: no mode, no rule, no "always allow" of
+  // the tools' (a yes with remember is "Always for this server", kept by the caller).
+  const askSkill: IApprovalController['askSkill'] = async (input, skill, opts) => {
+    const store = runContext.getStore()
+    const emit: EventHandler = store?.emit ?? deps.fallbackEmit ?? (() => {})
+    const id = randomUUID()
+    const name = 'load_skill'
+    const onRequest = config?.onRequest
+    if (!onRequest) {
+      const reason = 'no approval handler configured'
+      emit({ type: 'tool.approval-resolved', id, name, approved: false, reason, automatic: true })
+      return { approved: false, reason, by: 'no-handler' }
+    }
+    const step = store?.currentStep
+    const scope = store?.state?.spawn
+    const subagent = scope?.id ? { id: scope.id, depth: scope.depth } : undefined
+    emit({
+      type: 'tool.approval-requested',
+      id,
+      name,
+      input,
+      readOnly: true,
+      ...(step ? { step } : {}),
+      ...(subagent ? { subagent } : {}),
+      skill,
+    })
+    const request: IToolApprovalRequest = {
+      id,
+      toolName: name,
+      input,
+      readOnly: true,
+      ...(step ? { step } : {}),
+      ...(store?.runId ? { runId: store.runId } : {}),
+      ...(subagent ? { subagent } : {}),
+      skill,
+    }
+    const asked = new AbortController()
+    const resume = store?.state?.clock?.pause()
+    let raw: ToolApprovalDecision
+    try {
+      raw = await awaitDecision(
+        Promise.resolve().then(() => onRequest(request, { signal: asked.signal })),
+        timeoutMs,
+        opts.signal,
+      )
+    } catch (err) {
+      asked.abort(err)
+      if (opts.signal?.aborted) {
+        emit({
+          type: 'tool.approval-resolved',
+          id,
+          name,
+          approved: false,
+          reason: 'aborted',
+          automatic: true,
+        })
+        throw err
+      }
+      const reason =
+        err instanceof ApprovalTimeout
+          ? `no decision within ${timeoutMs}ms`
+          : `approval handler failed: ${(err as Error)?.message ?? String(err)}`
+      emit({ type: 'tool.approval-resolved', id, name, approved: false, reason, automatic: true })
+      return { approved: false, reason, by: 'no-answer' }
+    } finally {
+      resume?.()
+    }
+    const d = normalizeDecision(raw)
+    emit({
+      type: 'tool.approval-resolved',
+      id,
+      name,
+      approved: d.approved,
+      ...(d.reason ? { reason: d.reason } : {}),
+      automatic: false,
+    })
+    return {
+      approved: d.approved,
+      ...(d.remember ? { remember: true } : {}),
+      ...(d.reason ? { reason: d.reason } : {}),
+      by: 'person',
+    }
+  }
+
   return {
+    mcpSkillGrants,
+    askSkill,
     getMode: () => mode,
     setMode: (next) => {
       if (!isToolApprovalMode(next)) {

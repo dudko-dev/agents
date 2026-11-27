@@ -26,14 +26,16 @@ import {
   createSkillTools,
   defineSkill,
   isMcpSkill,
-  isMcpSkillLoaded,
+  isMcpSkillAllowed,
   prepareMcpSkills,
   renderActiveSkills,
   renderSkillIndex,
   SKILL_TOOL_NAMES,
+  type McpSkillConsentScope,
   type Skill,
 } from '../skills.js'
 import {
+  askMcpSkillConsent,
   createApprovalState,
   gateToolCall,
   type ToolApprovalMode,
@@ -106,7 +108,13 @@ import {
   type IStepWrites,
 } from '../tiers.js'
 import { collectMcpInstructions, renderMcpInstructions } from '../mcp/shared.js'
-import { collectMcpSkillSources, isMcpSkillName } from '../mcp/skills.js'
+import {
+  collectMcpSkillSources,
+  createMcpSkillRunConsent,
+  isMcpSkillName,
+  mcpSkillConsentOf,
+  resolveMcpSkillConsent,
+} from '../mcp/skills.js'
 import {
   AttachmentsNotSupportedError,
   attachmentKind,
@@ -566,14 +574,29 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
   // The skills of the MCP servers with `skills: true` (experimental), read from the mounted tools
   // the same way and at the same time: named `<server>/<skill>`, capped, loaded on demand. A
   // helper has its caller's (above), not a second copy.
+  const mcpSkillSources = collectMcpSkillSources(baseTools)
   if (!seed) {
     skills.push(
       ...createMcpSkills(
-        collectMcpSkillSources(baseTools),
+        mcpSkillSources,
         skills.map((s) => s.name),
         (m) => log.warn(m),
       ),
     )
+  }
+  // When a person is asked before an MCP skill's text enters the context, for the servers whose
+  // own `skills: { consent }` does not say (checked here: a wrong value is a configuration error).
+  const mcpSkillConsent = mcpSkillConsentOf(config.mcpSkills?.consent, 'mcpSkills.consent')
+  // Asked through toolApproval.onRequest: without one, nobody can say yes - said once, here.
+  if (!seed && !config.toolApproval?.onRequest) {
+    for (const source of mcpSkillSources) {
+      const consent = resolveMcpSkillConsent(source.consent, mcpSkillConsent)
+      if (consent !== 'never') {
+        log.warn(
+          `[mcp] ${source.server}: its skills are loaded only with a person's consent (consent '${consent}'), and there is no toolApproval.onRequest - every load of one will be refused; skills: { consent: 'never' } is for a server you vetted`,
+        )
+      }
+    }
   }
 
   const catalog = toolCatalogOf(baseTools)
@@ -730,23 +753,17 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
     // ── per-run tool state: skills, discovered tools, call budget, current step
     // Restored silently: `skill.activated` already fired in the run that activated them.
     const activeSkillNames = new Set<string>((resumed?.skills ?? []).filter(hasSkill))
-    // A resumed run's MCP skills are read again (and verified) before they are active again; one
-    // that cannot be is left out.
-    if ([...activeSkillNames].some(isMcpSkillName)) {
-      await prepareMcpSkills(skills, activeSkillNames, (m) => log.warn(m), opts.signal)
-      for (const name of [...activeSkillNames]) {
-        const skill = skills.find((s) => s.name === name)
-        if (skill && isMcpSkill(skill) && !isMcpSkillLoaded(skill)) activeSkillNames.delete(name)
-      }
-    }
+    // The MCP skills this run let into its context, and refused (the person's consent).
+    const skillRun = createMcpSkillRunConsent()
     result.skills = [...activeSkillNames]
     // Pages web_fetch reads in this run: provenance for any lesson the run writes.
     const fetched: string[] = []
     const activateSkill = (name: string, by: 'plan' | 'tool'): void => {
       if (activeSkillNames.has(name) || !hasSkill(name)) return
       const skill = skills.find((s) => s.name === name) as Skill
-      // An MCP skill is active only once its instructions were read and verified.
-      if (isMcpSkill(skill) && !isMcpSkillLoaded(skill)) return
+      // An MCP skill is active only once its instructions were read, verified and let into THIS
+      // run's context (the person's consent).
+      if (isMcpSkill(skill) && !isMcpSkillAllowed(skill, skillRun)) return
       activeSkillNames.add(name)
       result.skills = [...activeSkillNames]
       emit({
@@ -774,6 +791,52 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
     // The run's clock: its step limit and the time limits of its subagents are deadlines of it,
     // and it stops while a tool call of the run (or of a subagent below it) waits for a person.
     const clock = createWaitClock()
+    // How an MCP skill's text gets in: the agent's consent, the session's grants (a helper shares
+    // its caller's approval state, and so the grants), this run's record, and the question - the
+    // same gate as a tool call's, the run's clock stopped while a person decides.
+    const skillScope: McpSkillConsentScope = {
+      ...(mcpSkillConsent ? { agentConsent: mcpSkillConsent } : {}),
+      grants: approval.mcpSkillGrants,
+      run: skillRun,
+      ask: (input, skill, signal) =>
+        askMcpSkillConsent(
+          approval,
+          {
+            input,
+            skill,
+            ...(currentStep ? { step: currentStep } : {}),
+            ...(seed ? { subagent: seed.subagent } : {}),
+          },
+          {
+            requested: (req) =>
+              emit({
+                type: 'tool.approval-requested',
+                id: req.id,
+                name: req.toolName,
+                input: req.input,
+                readOnly: req.readOnly,
+                step: req.step,
+                ...(req.subagent ? { subagent: req.subagent } : {}),
+                ...(req.skill ? { skill: req.skill } : {}),
+              }),
+            resolved: (r) => emit({ type: 'tool.approval-resolved', ...r }),
+            wait: clock.pause,
+          },
+          signal ?? opts.signal,
+        ),
+    }
+    // A resumed run's MCP skills are read again (and verified, and let in) before they are active
+    // again; one that cannot be is left out.
+    if ([...activeSkillNames].some(isMcpSkillName)) {
+      await prepareMcpSkills(skills, activeSkillNames, (m) => log.warn(m), skillScope, opts.signal)
+      for (const name of [...activeSkillNames]) {
+        const skill = skills.find((s) => s.name === name)
+        if (skill && isMcpSkill(skill) && !isMcpSkillAllowed(skill, skillRun)) {
+          activeSkillNames.delete(name)
+        }
+      }
+      result.skills = [...activeSkillNames]
+    }
     const counter = createCallCounter(cfg.maxToolCalls, resumed?.toolCalls)
     // A helper's call also counts on the run that started it, all the way up: it cannot make a
     // call its parent has no budget left for.
@@ -798,7 +861,11 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
     if (skills.length || learning) {
       Object.assign(
         builtins,
-        createSkillTools(skills, (s) => activateSkill(s.name, 'tool')),
+        createSkillTools(
+          skills,
+          (s) => activateSkill(s.name, 'tool'),
+          mcpSkillSources.length ? { sources: mcpSkillSources, scope: skillScope } : undefined,
+        ),
       )
     }
     if (strategy === 'search') {
@@ -1072,7 +1139,7 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
       emit({ type: 'plan.created', plan: announced })
       announced.steps.forEach((step, index) => emit({ type: 'plan.step-added', step, index }))
       // An MCP server's skill is read (and verified) before it is activated.
-      await prepareMcpSkills(skills, planned.skills, (m) => log.warn(m), opts.signal)
+      await prepareMcpSkills(skills, planned.skills, (m) => log.warn(m), skillScope, opts.signal)
       for (const name of planned.skills) activateSkill(name, 'plan')
 
       // 2) EXECUTE → REPLAN
@@ -1612,6 +1679,7 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
           config: approval.config,
           timeoutMs: approval.timeoutMs,
           remembered: appRemembered,
+          mcpSkillGrants: approval.mcpSkillGrants,
         },
         {
           toolName: call.tool,

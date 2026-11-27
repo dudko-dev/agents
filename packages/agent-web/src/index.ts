@@ -194,8 +194,16 @@ export {
   MCP_SKILL_MAX_TOTAL_BYTES,
   MCP_SKILLS_MAX_PER_SERVER,
   MCP_SKILLS_MAX_TOTAL,
+  MCP_SKILL_CONSENTS,
+  MCP_SKILL_CONSENT_DEFAULT,
+  MCP_SKILL_URI_MAX_CHARS,
   mcpSkillEntryRefusal,
   mcpSkillPreamble,
+  mcpSkillUriRefusal,
+  type McpSkillConsent,
+  type McpSkillConsentView,
+  type McpSkillsOptions,
+  type McpSkillsSetting,
 } from './mcp/skills.js'
 
 // ── Learning: the agent's notebook of lessons (skills it wrote itself) ───────

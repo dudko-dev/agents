@@ -2,6 +2,7 @@ import type { LanguageModel, ToolSet } from 'ai'
 import type { IApprovalController } from './approval.ts'
 import type { RunControlPort } from './control.ts'
 import type { ISpawnReservation } from './subagent-dynamic-shared.ts'
+import type { McpSkillConsent, McpSkillRunConsent } from './mcp-skills.ts'
 import type { IMedia } from './media.ts'
 import type { IResolvedEscalation, IStepWrites } from './tiers.ts'
 import type { IWaitClock } from './wait-clock.ts'
@@ -57,6 +58,9 @@ export interface IRunState {
   stepActive?: Set<string>
   // Skill names active for the rest of the run, in activation order.
   activeSkills: string[]
+  // MCP servers' skills this run let into its context, and refused (the person's consent;
+  // mcp-skills.ts). An MCP skill is active only when it is allowed here.
+  mcpSkillConsent?: McpSkillRunConsent
   // Pages web_fetch read in this run (origin + path), kept as provenance for any lesson the run writes.
   fetched?: string[]
   // Running summary of trace[0, traceSummaryUpTo).
@@ -133,6 +137,8 @@ export interface IAgentInternalContext {
   // reads its own copy of this context, so the text cannot change under a run.
   mcpInstructions?: string
   approval?: IApprovalController
+  // config.mcpSkills.consent: the consent for MCP servers' skills whose server config names none.
+  mcpSkillConsent?: McpSkillConsent
   // Set when config.media names a model: its tools are among `tools`; the runner uses it to
   // transcribe a run's audio attachments.
   media?: IMedia

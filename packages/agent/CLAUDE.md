@@ -210,14 +210,25 @@
     the LOADED entry lists, never a URI / absolute / `..`), the mark that carries a server's
     skills on its tools (`markMcpSkills` / `collectMcpSkillSources`, like the instructions: a
     server with no mounted tool offers none) and one server's catalog over the SDK's
-    `SkillsClient` (`createMcpSkillCatalog`: list, load SKILL.md, read a file against the held
-    entry - the SDK verifies size, digest and frontmatter). A COPY of the browser sibling's
+    `SkillsClient` (`createMcpSkillCatalog`: list, `get` one by URI (`skills/get`, kept in
+    `source.added`), load SKILL.md, read a file against the held entry - the SDK verifies size,
+    digest and frontmatter), a skill by URI (`mcpSkillUriRefusal`: `skill://` only;
+    `resolveMcpSkillServer`: the server the model names, never a search; `mcpSkillRoomRefusal`;
+    `assignAddedMcpSkillName`) and the person's consent before a skill's text enters the context
+    (`McpSkillConsent` `'once-per-skill'` default / `'ask'` / `'never'`, per server `skills:
+    { consent }` over `config.mcpSkills.consent`; `decideMcpSkillConsent` / `recordMcpSkillConsent`,
+    the grant bound to `mcpSkillGrantKey` - server, URI, every digest; nested skills
+    (`mcpSkillEnclosingUri`) never covered by another yes; `mcpSkillConsentView` - the body is
+    the model's text exactly). A COPY of the browser sibling's
     `src/mcp/skills.ts`, byte for byte: change both (`tests/mcp-skills-shared.test.ts` compares
     them and tests every rule). `mcp.ts` wires it (the extension declared only with `skills: true`
     and a mode that may speak 2026-07-28; listed only on a 2026-07-28 connection; a change comes
     as `notifications/resources/list_changed`, on the same listen stream, and goes the
     `onToolsChanged` -> `refreshServer` path); `skills.ts` keeps an MCP skill's state per skill
-    object (`createMcpSkills`, `loadMcpSkill`, `prepareMcpSkills`; `skillPreamble`); `agent.ts`
+    object (`createMcpSkills`, `acquireMcpSkill` - read, verify, ASK, then let in -,
+    `addMcpSkillByUri`, `prepareMcpSkills`; `isMcpSkillAllowed` per run, `IRunState.mcpSkillConsent`;
+    `skillPreamble`); the question is `approval.ts`'s `askSkill` (`onRequest`, the request's
+    `skill`; the mode and the rules play no part; grants in `mcpSkillGrants`); `agent.ts`
     syncs them into `skills` between runs; the runner reads a planner's pick before activating
     it. While a run (or a run above it) acts on an MCP skill, a tool that runs code
     (`markCodeExecution`: `run_js`) is ALWAYS asked (`decideToolPermission`, source

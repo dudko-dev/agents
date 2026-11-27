@@ -3,6 +3,7 @@ import { createApprovalController, isReadOnlyTool } from './approval.ts'
 import { compactionMaxTokens } from './call-options.ts'
 import { compactHistory, resolveCompaction } from './compaction.ts'
 import type { IAgentInternalContext, IExecutorTiers } from './internal.ts'
+import { runContext } from './context.ts'
 import { connectMcpServers, filterTools } from './mcp.ts'
 import { collectMcpInstructions, renderMcpInstructions } from './mcp-shared.ts'
 import { buildModelFromStage, resolveStage } from './provider.ts'
@@ -12,8 +13,20 @@ import { MODEL_TIERS, resolveEscalation } from './tiers.ts'
 import { createSandboxTools, RUN_JS_TOOL } from './sandbox.ts'
 import { createDynamicSubagentTool } from './subagent-dynamic.ts'
 import { resolveDynamicSubagents, SPAWN_SUBAGENT_TOOL } from './subagent-dynamic-shared.ts'
-import { collectMcpSkillSources, type McpSkillSource } from './mcp-skills.ts'
-import { createMcpSkills, createSkillTools, isMcpSkill, validateSkills } from './skills.ts'
+import {
+  collectMcpSkillSources,
+  mcpSkillConsentOf,
+  mcpSkillsSettingOf,
+  resolveMcpSkillConsent,
+  type McpSkillSource,
+} from './mcp-skills.ts'
+import {
+  createMcpSkills,
+  createSkillTools,
+  isMcpSkill,
+  mcpSkillConsentScope,
+  validateSkills,
+} from './skills.ts'
 import { createEgressTools } from './web-fetch.ts'
 import { createSearchTools } from './web-search.ts'
 import { createMedia } from './media.ts'
@@ -169,11 +182,49 @@ export const createAgent = async (
         log('warn', m),
       )
     : undefined
-  // `skills: true` on an MCP server (experimental): its skills join `skills` once it is
-  // connected (and again after a refresh), so the skill tools exist from the start.
-  const mcpSkillsOn = Object.values(config.mcpServers).some((s) => s.skills === true)
+  // `skills` on an MCP server (experimental): its skills join `skills` once it is connected (and
+  // again after a refresh), so the skill tools exist from the start. The settings are checked
+  // here, before anything connects: a wrong one is a configuration error.
+  const mcpSkillServers = Object.entries(config.mcpServers)
+    .filter(([name, s]) => mcpSkillsSettingOf(s.skills, `mcpServers.${name}`).on)
+    .map(([name]) => name)
+  const mcpSkillsOn = mcpSkillServers.length > 0
+  const mcpSkillConsent = mcpSkillConsentOf(config.mcpSkills?.consent, 'mcpSkills.consent')
+  // Asked through toolApproval.onRequest: without one, nobody can say yes - said once, here.
+  if (!config.toolApproval?.onRequest) {
+    for (const name of mcpSkillServers) {
+      const own = mcpSkillsSettingOf(config.mcpServers[name].skills, `mcpServers.${name}`).consent
+      const consent = resolveMcpSkillConsent(own, mcpSkillConsent)
+      if (consent !== 'never') {
+        log(
+          'warn',
+          `[mcp] ${name}: its skills are loaded only with a person's consent (consent '${consent}'), and there is no toolApproval.onRequest - every load of one will be refused; skills: { consent: 'never' } is for a server you vetted`,
+        )
+      }
+    }
+  }
+  // The servers' skill sources, as the last connect / refresh left them.
+  let mcpSkillSources: McpSkillSource[] = []
   const builtinTools = wrapToolSet(
-    createSkillTools(skills, { live: Boolean(learning) || mcpSkillsOn }),
+    createSkillTools(skills, {
+      live: Boolean(learning) || mcpSkillsOn,
+      ...(mcpSkillsOn
+        ? {
+            mcp: {
+              servers: mcpSkillServers,
+              sources: () => mcpSkillSources,
+              // The run's consent record, from the run context: a person is asked through the
+              // same gate as a tool call.
+              scope: () =>
+                mcpSkillConsentScope(
+                  approval,
+                  runContext.getStore()?.state?.mcpSkillConsent,
+                  mcpSkillConsent,
+                ),
+            },
+          }
+        : {}),
+    }),
     wrapDeps,
     {
       builtIn: true,
@@ -353,6 +404,7 @@ export const createAgent = async (
   // The MCP servers' skills in `skills` (mutated in place, as the lessons are): replaced only
   // between runs - at start, after a refresh or a reconnect - never under one.
   const syncMcpSkills = (sources: McpSkillSource[]): void => {
+    mcpSkillSources = sources
     for (let i = skills.length - 1; i >= 0; i--) {
       if (isMcpSkill(skills[i])) {
         skills.splice(i, 1)
@@ -493,6 +545,7 @@ export const createAgent = async (
         }
       : {}),
     approval,
+    ...(mcpSkillConsent ? { mcpSkillConsent } : {}),
     ...(media ? { media } : {}),
   }
   // Only between runs (here, a refresh, a reconnect): a run keeps the text it started with.

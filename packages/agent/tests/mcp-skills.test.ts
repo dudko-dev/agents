@@ -5,6 +5,7 @@ import { z } from 'zod'
 import {
   startLocalMcpServer,
   SKILL_MARKERS,
+  SKILL_URIS,
   type ILocalMcpServer,
   type McpProtocol,
 } from '@dudko.dev/test-servers'
@@ -147,8 +148,16 @@ const withStack = async (
           baseURL: llm.baseURL,
           apiKey: 'not-a-real-key',
           model: 'scripted',
+          // The host vetted this server (`consent: 'never'`): these tests are about loading. The
+          // consent has its own tests below, with `skills: true` (the default consent).
           mcpServers: {
-            docs: { url: srv.url, protocol: 'modern', skills: true, fetch: wire.fetch, ...server },
+            docs: {
+              url: srv.url,
+              protocol: 'modern',
+              skills: { consent: 'never' },
+              fetch: wire.fetch,
+              ...server,
+            },
           },
           maxIterations: 4,
           maxStepsPerTask: 8,
@@ -226,7 +235,7 @@ test('mcp skills: on a 2025 connection - nothing declared or asked; said (the ex
 
 test('mcp skills: ON - declared, listed into the catalog as <server>/<skill>, nothing read yet', async () => {
   await withStack({}, async ({ open, wire, srv, llm }) => {
-    const agent = await open()
+    const agent = await open({ skills: true })
     assert.equal(declaresSkills(wire), true)
     const listed = agent.listSkills()
     assert.deepEqual(
@@ -349,8 +358,8 @@ test("mcp skills: another server's skill of the same name cannot shadow - each r
         {},
         {
           mcpServers: {
-            docs: { url: s.srv.url, protocol: 'modern', skills: true },
-            other: { url: other.url, protocol: 'modern', skills: true },
+            docs: { url: s.srv.url, protocol: 'modern', skills: { consent: 'never' } },
+            other: { url: other.url, protocol: 'modern', skills: { consent: 'never' } },
           },
         },
       )
@@ -689,5 +698,632 @@ test('mcp skills: the planner picks one that fails verification - it is not acti
     assert.ok(
       s.logs.some((l) => /warn \[skills\] docs\/tampered is not loaded: .*\(digest\)/.test(l)),
     )
+  })
+})
+
+// ── consent: a person sees a server's skill before its text enters the model's context ─────
+
+// What the model has been sent so far, every stage.
+const seenByModel = (llm: ILocalOpenAI): string => JSON.stringify(llm.requests)
+const skillAsks = (asked: IToolApprovalRequest[]) => asked.filter((r) => r.skill)
+const errorText = (output: unknown): string =>
+  textOf((output as Error | undefined)?.message ?? output)
+
+test('mcp skills consent: asked BEFORE the body enters the context - with the server, the skill, its size and its text', async () => {
+  await withStack({}, async (s) => {
+    const asked: IToolApprovalRequest[] = []
+    const before: boolean[] = []
+    const agent = await s.open(
+      { skills: true },
+      {
+        toolApproval: {
+          onRequest: (req) => {
+            asked.push(req)
+            // The model has not been given a byte of it yet.
+            before.push(seenByModel(s.llm).includes(SKILL_MARKERS.pdfProcessing))
+            return true
+          },
+        },
+      },
+    )
+    s.scenario = { calls: [{ name: 'load_skill', args: { name: 'docs/pdf-processing' } }] }
+    const result = await agent.run({ input: 'fill the form' })
+    assert.deepEqual(before, [false])
+    const [req] = asked
+    assert.equal(req.toolName, 'load_skill')
+    assert.deepEqual(req.input, { name: 'docs/pdf-processing' })
+    assert.equal(req.readOnly, true)
+    assert.equal(req.skill?.server, 'docs')
+    assert.equal(req.skill?.name, 'docs/pdf-processing')
+    assert.equal(req.skill?.skill, 'pdf-processing')
+    assert.equal(req.skill?.uri, 'skill://pdf-processing/SKILL.md')
+    assert.equal(req.skill?.description, 'Extract, fill and assemble PDF documents')
+    assert.deepEqual(req.skill?.files, ['references/FORMS.md', 'scripts/extract.py'])
+    assert.equal(req.skill?.consent, 'once-per-skill')
+    assert.ok((req.skill?.size ?? 0) > 0 && (req.skill?.totalSize ?? 0) > (req.skill?.size ?? 0))
+    assert.ok(req.skill?.body.includes(SKILL_MARKERS.pdfProcessing), 'the person sees the text')
+    // The request event carries the same view.
+    const requested = s.events.find((e) => e.type === 'tool.approval-requested')
+    assert.equal(
+      requested?.type === 'tool.approval-requested' && requested.skill?.name,
+      'docs/pdf-processing',
+    )
+    // After the yes it is in the model's context, under the preamble.
+    assert.equal(callsOf(result)[0].ok, true)
+    assert.ok(seenByModel(s.llm).includes(SKILL_MARKERS.pdfProcessing))
+    // once-per-skill: the next run that loads it is not asked again.
+    await agent.run({ input: 'fill another' })
+    assert.equal(skillAsks(asked).length, 1)
+  })
+})
+
+test('mcp skills consent: Deny - nothing of it enters, the model is told; not asked again in the run', async () => {
+  await withStack({}, async (s) => {
+    const asked: IToolApprovalRequest[] = []
+    const agent = await s.open(
+      { skills: true },
+      {
+        toolApproval: {
+          onRequest: (req) => {
+            asked.push(req)
+            return { approved: false, reason: 'not this one' }
+          },
+        },
+      },
+    )
+    s.scenario = {
+      calls: [
+        { name: 'load_skill', args: { name: 'docs/git-workflow' } },
+        { name: 'load_skill', args: { name: 'docs/git-workflow' } },
+        {
+          name: 'read_skill_file',
+          args: { name: 'docs/pdf-processing', path: 'references/FORMS.md' },
+        },
+      ],
+    }
+    const result = await agent.run({ input: 'commit it' })
+    const [first, again, file] = callsOf(result)
+    assert.equal(first.ok, false)
+    assert.match(
+      errorText(first.output),
+      /The user did not allow the skill "docs\/git-workflow" of the MCP server "docs" to be loaded \(not this one\): nothing of it is in your context/,
+    )
+    assert.equal(again.ok, false)
+    assert.match(errorText(again.output), /already refused the skill "docs\/git-workflow"/)
+    // A file of a skill the person refused is not read either.
+    assert.equal(file.ok, false)
+    assert.deepEqual(
+      skillAsks(asked).map((r) => r.skill?.name),
+      ['docs/git-workflow', 'docs/pdf-processing'],
+    )
+    assert.ok(!seenByModel(s.llm).includes(SKILL_MARKERS.gitWorkflow))
+    assert.ok(!seenByModel(s.llm).includes(SKILL_MARKERS.forms))
+    assert.ok(!s.srv.skillReads.includes('skill://pdf-processing/references/FORMS.md'))
+    assert.deepEqual(
+      s.events.filter((e) => e.type === 'skill.activated'),
+      [],
+    )
+    // A new run asks again.
+    s.scenario = { calls: [{ name: 'load_skill', args: { name: 'docs/git-workflow' } }] }
+    await agent.run({ input: 'commit it' })
+    assert.equal(skillAsks(asked).length, 3)
+  })
+})
+
+test('mcp skills consent: "Always for this server" skips later prompts for that server only', async () => {
+  const other = await startLocalMcpServer({ protocol: 'modern', skills: true })
+  try {
+    await withStack({}, async (s) => {
+      const asked: IToolApprovalRequest[] = []
+      const agent = await s.open(
+        {},
+        {
+          mcpServers: {
+            docs: { url: s.srv.url, protocol: 'modern', skills: true },
+            other: { url: other.url, protocol: 'modern', skills: true },
+          },
+          toolApproval: {
+            onRequest: (req) => {
+              asked.push(req)
+              return { approved: true, remember: true }
+            },
+          },
+        },
+      )
+      s.scenario = {
+        calls: [
+          { name: 'load_skill', args: { name: 'docs/git-workflow' } },
+          { name: 'load_skill', args: { name: 'docs/pdf-processing' } },
+          { name: 'load_skill', args: { name: 'other/git-workflow' } },
+          { name: 'load_skill', args: { name: 'other/pdf-processing' } },
+        ],
+      }
+      const result = await agent.run({ input: 'do it' })
+      assert.ok(callsOf(result).every((c) => c.ok))
+      assert.deepEqual(
+        skillAsks(asked).map((r) => r.skill?.name),
+        ['docs/git-workflow', 'other/git-workflow'],
+      )
+    })
+  } finally {
+    await other.close()
+  }
+})
+
+test("mcp skills consent: 'never' (server or agent-wide) skips it; a server's own setting wins; 'ask' asks every run", async () => {
+  await withStack({}, async (s) => {
+    const asked: IToolApprovalRequest[] = []
+    const onRequest = (req: IToolApprovalRequest) => {
+      asked.push(req)
+      return true
+    }
+    s.scenario = { calls: [{ name: 'load_skill', args: { name: 'docs/git-workflow' } }] }
+    const vetted = await s.open({ skills: { consent: 'never' } }, { toolApproval: { onRequest } })
+    await vetted.run({ input: 'go' })
+    const agentWide = await s.open(
+      { skills: true },
+      { mcpSkills: { consent: 'never' }, toolApproval: { onRequest } },
+    )
+    await agentWide.run({ input: 'go' })
+    assert.equal(skillAsks(asked).length, 0)
+    assert.ok(seenByModel(s.llm).includes(SKILL_MARKERS.gitWorkflow))
+    const strict = await s.open(
+      { skills: { consent: 'ask' } },
+      { mcpSkills: { consent: 'never' }, toolApproval: { onRequest } },
+    )
+    await strict.run({ input: 'go' })
+    await strict.run({ input: 'again' })
+    assert.deepEqual(
+      skillAsks(asked).map((r) => r.skill?.consent),
+      ['ask', 'ask'],
+      "'ask': every run that loads it",
+    )
+  })
+})
+
+test('mcp skills consent: autopilot and an allow-everything rule do not skip it; nobody to ask = not loaded', async () => {
+  await withStack({}, async (s) => {
+    const asked: IToolApprovalRequest[] = []
+    const agent = await s.open(
+      { skills: true },
+      {
+        toolApproval: {
+          mode: 'autopilot',
+          rules: { '*': 'allow', load_skill: 'allow' },
+          onRequest: (req) => {
+            asked.push(req)
+            return true
+          },
+        },
+      },
+    )
+    s.scenario = { calls: [{ name: 'load_skill', args: { name: 'docs/git-workflow' } }] }
+    await agent.run({ input: 'go' })
+    assert.equal(skillAsks(asked).length, 1)
+  })
+  await withStack({}, async (s) => {
+    const agent = await s.open({ skills: true })
+    assert.ok(
+      s.logs.some((l) =>
+        /warn \[mcp\] docs: its skills are loaded only with a person's consent \(consent 'once-per-skill'\), and there is no toolApproval.onRequest/.test(
+          l,
+        ),
+      ),
+    )
+    s.scenario = { calls: [{ name: 'load_skill', args: { name: 'docs/git-workflow' } }] }
+    const result = await agent.run({ input: 'go' })
+    assert.equal(callsOf(result)[0].ok, false)
+    assert.match(errorText(callsOf(result)[0].output), /no approval handler is configured/)
+    assert.ok(!seenByModel(s.llm).includes(SKILL_MARKERS.gitWorkflow))
+  })
+})
+
+test('mcp skills consent: a nested skill asks again - its enclosing skill, or the server, did not approve it', async () => {
+  await withStack({}, async (s) => {
+    s.srv.skillFaults.nested = true
+    const asked: IToolApprovalRequest[] = []
+    const agent = await s.open(
+      { skills: true },
+      {
+        toolApproval: {
+          onRequest: (req) => {
+            asked.push(req)
+            return { approved: true, remember: true }
+          },
+        },
+      },
+    )
+    s.scenario = {
+      calls: [
+        { name: 'load_skill', args: { name: 'docs/handbook' } },
+        { name: 'load_skill', args: { name: 'docs/onboarding' } },
+        { name: 'load_skill', args: { name: 'docs/git-workflow' } },
+      ],
+    }
+    const result = await agent.run({ input: 'welcome them' })
+    assert.ok(callsOf(result).every((c) => c.ok))
+    assert.deepEqual(
+      skillAsks(asked).map((r) => [r.skill?.name, r.skill?.nestedIn]),
+      [
+        ['docs/handbook', undefined],
+        ['docs/onboarding', 'docs/handbook'],
+      ],
+      'the server-wide yes covers git-workflow, not the nested onboarding',
+    )
+  })
+})
+
+test("mcp skills consent: the planner's pick is asked before it is active; a no keeps it out of the prompt", async () => {
+  await withStack({}, async (s) => {
+    const asked: IToolApprovalRequest[] = []
+    const agent = await s.open(
+      { skills: true },
+      {
+        toolApproval: {
+          onRequest: (req) => {
+            asked.push(req)
+            return false
+          },
+        },
+      },
+    )
+    s.scenario = { planned: ['docs/git-workflow'] }
+    await agent.run({ input: 'commit it' })
+    assert.deepEqual(
+      skillAsks(asked).map((r) => r.input),
+      [{ name: 'docs/git-workflow' }],
+    )
+    assert.deepEqual(
+      s.events.filter((e) => e.type === 'skill.activated'),
+      [],
+    )
+    const executor = executorRequests(s.llm)[0]
+    assert.ok(!systemOf(executor).includes('### Skill: docs/git-workflow'))
+    assert.ok(!seenByModel(s.llm).includes(SKILL_MARKERS.gitWorkflow))
+    assert.ok(
+      s.logs.some((l) =>
+        /warn \[skills\] docs\/git-workflow is not loaded: The user did not allow/.test(l),
+      ),
+    )
+  })
+})
+
+test('mcp skills consent: bound to the entry - a skill whose files changed is asked about again', async () => {
+  await withStack({}, async (s) => {
+    const asked: IToolApprovalRequest[] = []
+    const agent = await s.open(
+      { skills: true },
+      {
+        toolApproval: {
+          onRequest: (req) => {
+            asked.push(req)
+            return true
+          },
+        },
+      },
+    )
+    // A change of the server's skills reaches the agent as a resource list change: wait for the
+    // refresh it starts.
+    const refreshed = () => s.logs.filter((l) => /docs: tool list refreshed/.test(l)).length
+    const change = async (body: string) => {
+      const before = refreshed()
+      await s.srv.addSkill('release-notes', 'Write the release notes', body)
+      const deadline = Date.now() + 10_000
+      while (refreshed() === before && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 25))
+      }
+      assert.ok(refreshed() > before, 'refreshed')
+    }
+    await change('# Notes v1\n')
+    s.scenario = { calls: [{ name: 'load_skill', args: { name: 'docs/release-notes' } }] }
+    await agent.run({ input: 'write them' })
+    await agent.run({ input: 'write them again' })
+    assert.equal(skillAsks(asked).length, 1, 'the same entry: asked once')
+    await change('# Notes v2\n')
+    await agent.run({ input: 'and now' })
+    assert.equal(skillAsks(asked).length, 2, 'another digest: asked again')
+    assert.match(skillAsks(asked)[1].skill?.body ?? '', /Notes v2/)
+  })
+})
+
+test('mcp skills consent: no answer in time is a refusal nobody gave - asked again next time', async () => {
+  await withStack({}, async (s) => {
+    const asked: IToolApprovalRequest[] = []
+    const agent = await s.open(
+      { skills: true },
+      {
+        toolApproval: {
+          timeoutMs: 50,
+          onRequest: (req) => {
+            asked.push(req)
+            return new Promise(() => {})
+          },
+        },
+      },
+    )
+    s.scenario = {
+      calls: [
+        { name: 'load_skill', args: { name: 'docs/git-workflow' } },
+        { name: 'load_skill', args: { name: 'docs/git-workflow' } },
+      ],
+    }
+    const result = await agent.run({ input: 'go' })
+    const [first, second] = callsOf(result)
+    assert.match(errorText(first.output), /No one answered whether the skill "docs\/git-workflow"/)
+    assert.match(errorText(second.output), /No one answered/)
+    assert.equal(skillAsks(asked).length, 2)
+    const resolved = s.events.filter((e) => e.type === 'tool.approval-resolved')
+    assert.ok(resolved.every((e) => e.type === 'tool.approval-resolved' && e.automatic))
+  })
+})
+
+// ── by URI: a skill the listing does not hold, from the server that names it ────────────────
+
+test('mcp skills by URI: loaded from the right server only (skills/get), under the same rules; joins the catalog', async () => {
+  const other = await startLocalMcpServer({ protocol: 'modern', skills: true })
+  try {
+    await withStack({}, async (s) => {
+      const asked: IToolApprovalRequest[] = []
+      const agent = await s.open(
+        {},
+        {
+          mcpServers: {
+            docs: { url: s.srv.url, protocol: 'modern', skills: true },
+            other: { url: other.url, protocol: 'modern', skills: true },
+          },
+          toolApproval: {
+            onRequest: (req) => {
+              asked.push(req)
+              return true
+            },
+          },
+        },
+      )
+      assert.ok(!agent.listSkills().some((k) => k.name === 'docs/release-checklist'))
+      s.scenario = {
+        calls: [{ name: 'load_skill', args: { server: 'docs', uri: SKILL_URIS.unlisted } }],
+      }
+      const result = await agent.run({ input: 'check the release' })
+      const [load] = callsOf(result)
+      assert.equal(load.ok, true)
+      const out = load.output as { name: string; content: string }
+      assert.equal(out.name, 'docs/release-checklist')
+      assert.match(
+        out.content,
+        /^\[A skill from the MCP server "docs" \(skill:\/\/internal\/release-checklist\/SKILL.md\)/,
+      )
+      assert.ok(out.content.includes(SKILL_MARKERS.unlisted))
+      assert.deepEqual(s.srv.skillGets, [SKILL_URIS.unlisted])
+      assert.deepEqual(other.skillGets, [], 'the URI went to docs only')
+      assert.deepEqual(other.skillReads, [])
+      // The person was asked, and told it was named by URI.
+      assert.deepEqual(
+        skillAsks(asked).map((r) => [r.skill?.name, r.skill?.byUri, r.input]),
+        [['docs/release-checklist', true, { server: 'docs', uri: SKILL_URIS.unlisted }]],
+      )
+      // In the catalog for the rest of the session, as a skill of docs.
+      assert.deepEqual(
+        agent.listSkills().find((k) => k.name === 'docs/release-checklist')?.server,
+        'docs',
+      )
+      // load_skill says so in its description, naming the servers.
+      const executor = executorRequests(s.llm)[0] as unknown as {
+        tools?: { function: { name: string; description: string } }[]
+      }
+      const desc = executor.tools?.find((t) => t.function.name === 'load_skill')?.function
+        .description
+      assert.match(String(desc), /pass "server" .* and "uri"/)
+      assert.match(String(desc), /Servers whose skills can be loaded: docs, other\./)
+    })
+  } finally {
+    await other.close()
+  }
+})
+
+test('mcp skills by URI: refused before any request - a server not opted in, an unknown one, a URI not skill://', async () => {
+  const plain = await startLocalMcpServer({ protocol: 'modern', skills: true })
+  try {
+    await withStack({}, async (s) => {
+      const agent = await s.open(
+        {},
+        {
+          mcpServers: {
+            docs: { url: s.srv.url, protocol: 'modern', skills: { consent: 'never' } },
+            // Serves skills, but its config did not ask for them.
+            plain: { url: plain.url, protocol: 'modern' },
+          },
+        },
+      )
+      s.scenario = {
+        calls: [
+          { name: 'load_skill', args: { server: 'plain', uri: SKILL_URIS.unlisted } },
+          { name: 'load_skill', args: { server: 'nobody', uri: SKILL_URIS.unlisted } },
+          { name: 'load_skill', args: { server: 'docs', uri: 'https://evil.example/x/SKILL.md' } },
+          { name: 'load_skill', args: { server: 'docs', uri: 'skill://x/README.md' } },
+          { name: 'load_skill', args: { uri: SKILL_URIS.unlisted } },
+        ],
+      }
+      const result = await agent.run({ input: 'go' })
+      const outs = callsOf(result).map((c) => [c.ok, errorText(c.output)])
+      assert.ok(outs.every(([ok]) => ok === false))
+      assert.match(
+        String(outs[0][1]),
+        /"plain" is not a server whose skills can be loaded; those are: docs/,
+      )
+      assert.match(String(outs[1][1]), /"nobody" is not a server/)
+      assert.match(String(outs[2][1]), /is not a skill:\/\/ URI/)
+      assert.match(String(outs[3][1]), /not the SKILL.md of a named skill directory/)
+      assert.match(String(outs[4][1]), /no server given/)
+      assert.deepEqual(s.srv.skillGets, [])
+      assert.deepEqual(plain.skillGets, [])
+      assert.ok(!plain.requests.some((r) => r.method.startsWith('skills/')))
+    })
+  } finally {
+    await plain.close()
+  }
+})
+
+test('mcp skills by URI: a URI another server serves is asked of the named one only - its -32602 reaches the model', async () => {
+  const other = await startLocalMcpServer({ protocol: 'modern', skills: true })
+  try {
+    await other.addSkill(
+      'elsewhere/vendor-guide',
+      'The vendor guide',
+      '# Vendor\n\nVENDOR-BODY\n',
+      {
+        listed: false,
+      },
+    )
+    await withStack({}, async (s) => {
+      const agent = await s.open(
+        {},
+        {
+          mcpServers: {
+            docs: { url: s.srv.url, protocol: 'modern', skills: { consent: 'never' } },
+            other: { url: other.url, protocol: 'modern', skills: { consent: 'never' } },
+          },
+        },
+      )
+      const uri = 'skill://elsewhere/vendor-guide/SKILL.md'
+      s.scenario = { calls: [{ name: 'load_skill', args: { server: 'docs', uri } }] }
+      const [load] = callsOf(await agent.run({ input: 'read the vendor guide' }))
+      assert.equal(load.ok, false)
+      assert.match(
+        errorText(load.output),
+        /the MCP server "docs" gave no skill for skill:\/\/elsewhere\/vendor-guide\/SKILL.md: the server serves no skill at that URI \(-32602/,
+      )
+      assert.deepEqual(s.srv.skillGets, [uri])
+      assert.deepEqual(other.skillGets, [], 'never sent to the server that does serve it')
+      assert.ok(!seenByModel(s.llm).includes('VENDOR-BODY'))
+      // Named with its own server, it loads.
+      s.scenario = { calls: [{ name: 'load_skill', args: { server: 'other', uri } }] }
+      const [ok] = callsOf(await agent.run({ input: 'read it' }))
+      assert.equal(ok.ok, true)
+      assert.equal((ok.output as { name: string }).name, 'other/vendor-guide')
+    })
+  } finally {
+    await other.close()
+  }
+})
+
+test('mcp skills by URI: the entry rules and verification hold - dynamic refused, a tampered body not used', async () => {
+  await withStack({}, async (s) => {
+    Object.assign(s.srv.skillFaults, {
+      emptyListing: true,
+      digest: true,
+      dynamic: true,
+      nameMismatch: false,
+    })
+    const agent = await s.open()
+    assert.deepEqual(agent.listSkills(), [], 'an empty listing')
+    s.scenario = {
+      calls: [
+        { name: 'load_skill', args: { server: 'docs', uri: 'skill://tampered/SKILL.md' } },
+        { name: 'load_skill', args: { server: 'docs', uri: 'skill://generated/SKILL.md' } },
+        { name: 'load_skill', args: { server: 'docs', uri: 'skill://git-workflow/SKILL.md' } },
+      ],
+    }
+    const [tampered, generated, honest] = callsOf(await agent.run({ input: 'go' }))
+    assert.equal(tampered.ok, false)
+    assert.match(
+      errorText(tampered.output),
+      /does not match the entry the server listed \(digest\)/,
+    )
+    assert.equal(generated.ok, false)
+    assert.match(errorText(generated.output), /is refused: its content is generated/)
+    assert.equal(honest.ok, true, 'a skill the empty listing left out is loadable by URI')
+    assert.ok(!seenByModel(s.llm).includes('TAMPERED-BODY'))
+    assert.ok(!agent.listSkills().some((k) => k.name.includes('generated')))
+  })
+})
+
+test('mcp skills by URI: counted against the per-server cap - refused before skills/get when full', async () => {
+  await withStack({}, async (s) => {
+    s.srv.skillFaults.extra = 40
+    const agent = await s.open()
+    assert.equal(agent.listSkills().length, 32)
+    s.scenario = {
+      calls: [{ name: 'load_skill', args: { server: 'docs', uri: SKILL_URIS.unlisted } }],
+    }
+    const [load] = callsOf(await agent.run({ input: 'go' }))
+    assert.equal(load.ok, false)
+    assert.match(
+      errorText(load.output),
+      /"docs" already has 32 skills in the catalog \(at most 32 per server\)/,
+    )
+    assert.deepEqual(s.srv.skillGets, [])
+  })
+})
+
+test('mcp skills by URI: it never shadows - a name in use makes it take its path', async () => {
+  await withStack({}, async (s) => {
+    await s.srv.addSkill(
+      'internal/git-workflow',
+      'Another git workflow',
+      '# Other\n\nOTHER-GIT\n',
+      {
+        listed: false,
+      },
+    )
+    const agent = await s.open(
+      {},
+      { skills: [{ name: 'git-workflow', description: 'Ours', content: 'HOST-GIT-WORKFLOW' }] },
+    )
+    s.scenario = {
+      calls: [
+        {
+          name: 'load_skill',
+          args: { server: 'docs', uri: 'skill://internal/git-workflow/SKILL.md' },
+        },
+        { name: 'load_skill', args: { name: 'git-workflow' } },
+        { name: 'load_skill', args: { name: 'docs/git-workflow' } },
+      ],
+    }
+    const [byUri, host, listed] = callsOf(await agent.run({ input: 'go' }))
+    assert.equal((byUri.output as { name: string }).name, 'docs/internal/git-workflow')
+    assert.ok((byUri.output as { content: string }).content.includes('OTHER-GIT'))
+    assert.equal((host.output as { content: string }).content, 'HOST-GIT-WORKFLOW')
+    assert.ok((listed.output as { content: string }).content.includes(SKILL_MARKERS.gitWorkflow))
+    assert.deepEqual(
+      agent
+        .listSkills()
+        .map((k) => k.name)
+        .filter((n) => n.includes('git-workflow')),
+      ['git-workflow', 'docs/git-workflow', 'docs/internal/git-workflow'],
+    )
+  })
+})
+
+test("mcp skills consent: 'ask' - a skill let in by an earlier run is not active in a run whose person said no", async () => {
+  await withStack({}, async (s) => {
+    const answers = [true, false]
+    const asked: IToolApprovalRequest[] = []
+    const agent = await s.open(
+      { skills: { consent: 'ask' } },
+      {
+        toolApproval: {
+          onRequest: (req) => {
+            asked.push(req)
+            return answers.shift() ?? false
+          },
+        },
+      },
+    )
+    s.scenario = { calls: [{ name: 'load_skill', args: { name: 'docs/git-workflow' } }] }
+    await agent.run({ input: 'first' })
+    assert.equal(skillAsks(asked).length, 1)
+    // The next run: the planner picks it, the person says no.
+    s.events.length = 0
+    const before = executorRequests(s.llm).length
+    s.scenario = { planned: ['docs/git-workflow'] }
+    await agent.run({ input: 'second' })
+    assert.equal(skillAsks(asked).length, 2)
+    assert.deepEqual(
+      s.events.filter((e) => e.type === 'skill.activated'),
+      [],
+    )
+    const executor = executorRequests(s.llm).slice(before)
+    assert.ok(executor.length > 0)
+    assert.ok(executor.every((r) => !systemOf(r).includes(SKILL_MARKERS.gitWorkflow)))
   })
 })
