@@ -1163,7 +1163,7 @@ That registers one tool, `run_js({ code })`, which returns `{ ok, stdout, result
 
 | | Default | At most | How |
 | --- | --- | --- | --- |
-| `timeoutMs` | 5000 | 60000 | QuickJS's interrupt handler stops JavaScript that loops (and a guest cannot catch it). A single long native call cannot be interrupted, so every run is in its own **worker thread**, which is **terminated** at `timeoutMs` + 1 s. The agent's thread is never blocked. |
+| `timeoutMs` | 5000 | 60000 | Counted from the program's first instruction: starting the worker and the engine is not the guest's time (on a busy machine it can outlast a short limit), and a start that never finishes is given up after 20 s. QuickJS's interrupt handler stops JavaScript that loops (and a guest cannot catch it). A single long native call cannot be interrupted, so every run is in its own **worker thread**, which is **terminated** at `timeoutMs` + 1 s. The agent's thread is never blocked. |
 | `memoryLimitBytes` | 32 MiB | 256 MiB | The whole WebAssembly memory of the guest's engine instance (the engine's own 16 MiB minimum included) has this as its hard maximum, enforced by the wasm runtime. Allocation past it fails *inside the guest* as `out of memory`. |
 | `maxOutputChars` | 8000 | 100000 | `stdout` and `result` together; cut in the engine and again on the agent's side. `truncated: true` says so. |
 | `maxCodeChars` | 100000 | 1000000 | A longer program is refused before anything starts. |
