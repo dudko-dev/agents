@@ -20,7 +20,14 @@ export default defineConfig({
   // `pipeline` is its own entry too: the editor (a canvas, an inspector, a code generator) is not
   // something a chat should carry, and it needs a core that has `createPipeline` - see
   // src/pipeline.ts.
-  entry: { index: 'src/index.ts', mcp: 'src/mcp.ts', pipeline: 'src/pipeline.ts' },
+  // `mcp-app-sandbox` is the sandbox proxy page for a SERVER (a Worker, Node): no React, no core,
+  // no import at all - see src/mcp-app-sandbox.ts.
+  entry: {
+    index: 'src/index.ts',
+    mcp: 'src/mcp.ts',
+    pipeline: 'src/pipeline.ts',
+    'mcp-app-sandbox': 'src/mcp-app-sandbox.ts',
+  },
   format: ['esm', 'cjs'],
   dts: true,
   sourcemap: true,

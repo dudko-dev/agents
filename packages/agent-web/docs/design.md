@@ -866,6 +866,24 @@ form is ordinary, and the step used to end under them (the elicitation answered 
   no imports). Both follow the package's
   types (`spec.types.ts`) and wire (`ui/initialize` → `ui/notifications/initialized` →
   `tool-input` / `tool-result`), and the test server's app speaks it by hand.
+- **An origin of its own is opt-in, and its guards are not in the sandbox page.** The default
+  frame is opaque because a library in a page has no second origin. `appSandbox` adds the
+  specification's proxy for a host that has one, and keeps it the stricter fallback. The design
+  follows from one fact the reference proxy of `ext-apps` (`examples/basic-host`) does not plan
+  for: the app is same-origin with the proxy, so it can reach into it - run code there, click a
+  link it put there - and a frame may always navigate itself. So nothing the proxy page says can
+  hold the app; what holds it is out of its reach: the app's policy is a response HEADER of the
+  proxy page (inherited by the app's `document.write` frame, by the page's own realm, by any copy
+  of the page), built from the URL's PATH so that the host's shell can pin the proxy's frame to
+  that exact URL with `frame-src` (a source with a path matches the path, never the query - a
+  query-borne policy, as in the reference, would let one app reload another's proxy with a policy
+  of its choosing); the sandbox flags are on the host's frames; a second handshake means the
+  proxy was loaded again and stops the app. The proxy page binds to the first ANCESTOR on an
+  allowed origin, not to its parent, because the shell (no script) sits between. The page and
+  its server are one import-free module (`./mcp-app-sandbox`) because the core does not
+  tree-shake into a small Worker; its origin rule is a copy of `mcpAppOrigin`, held to it by a
+  test. A per-server origin is a template (`{server}` in the host name, a DNS label), never the
+  server's own `_meta.ui.domain`: the host decides origins.
 - **Node: nothing yet.** The Node agent renders nothing, and an app's requests come from a browser:
   a server-side host would need the bridge in the page and a round trip for every app call. The
   names (`apps`, `mcp.app`, `readUiResource`, `appTool`, `callAppTool`, `approveAppToolCall`) are

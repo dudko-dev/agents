@@ -1,6 +1,6 @@
 # agents — instructions for Claude
 
-Monorepo (pnpm workspaces + Nx) of three published packages, one private test package and three
+Monorepo (pnpm workspaces + Nx) of three published packages, one private test package and four
 private apps:
 
 - `packages/agent` — `@dudko.dev/agent`, the Node / server agent.
@@ -29,6 +29,13 @@ private apps:
   `/mcp/demo` (the demo's "Try the demo server"). Stateless, both protocol revisions, abuse limits
   in code; bundled to `apps/worker/dist/index.js`. The demo's `vite dev` / `vite preview` serve the
   same handler on Node (`apps/worker/src/node.ts`), which is what the browser tests talk to.
+- `apps/app-sandbox` — a SECOND Cloudflare Worker, NOT the site's: https://agent-demo-apps.dudko.dev,
+  the MCP Apps sandbox page (`/sandbox/v1/<policy>`, 404 elsewhere) the demo frames so that an app
+  runs on an origin of its own. A thin deployment of the React package's `./mcp-app-sandbox`
+  entry (the page, its headers and guards live and are tested there); its own `wrangler.jsonc`
+  (one Custom Domain, no workers.dev, the allowed hosts in `vars`), its own Workers Builds project.
+  `pnpm nx build site` never builds it (`site` / `demo` do not depend on it; its test pins that).
+  Locally the demo's `vite dev` / `vite preview` serve the same page under the other loopback name.
 
 **Each package has its own `CLAUDE.md`. Read it before changing that package** — layout, conventions
 and the reasons behind them live there. This file holds only what is shared.
@@ -46,7 +53,7 @@ pnpm nx <target> <project>   # e.g. pnpm nx test @dudko.dev/agent-web
 ```
 
 Projects: `@dudko.dev/agent`, `@dudko.dev/agent-web`, `@dudko.dev/agent-web-react`,
-`@dudko.dev/test-servers`, `demo`, `site`, `worker`.
+`@dudko.dev/test-servers`, `demo`, `site`, `worker`, `app-sandbox`.
 Targets come from each package's `scripts`: `typecheck`, `format:check`, `format`, `build`, `test`
 (and `test:e2e` in the React package; `@dudko.dev/test-servers` has no `build`).
 
@@ -106,6 +113,11 @@ tool. Do not infer success from "the change looks right".
   page included, is answered by the assets exactly as before. Keep it that way: a path added to
   `run_worker_first` is a path the static site no longer answers first
   (`apps/worker/tests/worker.test.ts` pins the config). Keep `"previews": {}`.
+- The apps' sandbox page is a second Workers Builds project (`agent-demo-apps`, set up by the
+  owner - `apps/app-sandbox/README.md`): build `pnpm nx build app-sandbox`, deploy
+  `npx wrangler deploy --config apps/app-sandbox/wrangler.jsonc`, the Custom Domain
+  `agent-demo-apps.dudko.dev`. Never fold it into the site's Worker or `run_worker_first`: every
+  site request would go through a script, and the page must be on ANOTHER origin than the site.
 - `autoupdate.yml` (weekly): `.github/scripts/autoupdate.mjs` runs `pnpm update -r --latest`
   (except `typescript` and `@types/node`), patch-bumps and changelogs the published packages whose
   own `dependencies` changed, opens a PR, merges it when CI is green and dispatches the release.

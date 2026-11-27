@@ -11,7 +11,8 @@ import {
 import { fileURLToPath } from 'node:url'
 import react from '@vitejs/plugin-react'
 import { defineConfig, type Plugin } from 'vite'
-import { demoMcpMiddleware } from 'worker/node'
+import { mcpAppSandboxResponse } from '@dudko.dev/agent-web-react/mcp-app-sandbox'
+import { demoMcpMiddleware, sendWebResponse, toWebRequest } from 'worker/node'
 
 const at = (p: string) => fileURLToPath(new URL(p, import.meta.url))
 
@@ -104,6 +105,37 @@ const demoMcpServer = (): Plugin => ({
   },
 })
 
+// The MCP Apps sandbox page (src/app-sandbox.ts). On the site it is a Worker of its own on its own
+// domain (apps/app-sandbox); here the dev and preview servers answer it - the same handler, from
+// the React package's `./mcp-app-sandbox` entry - and only the OTHER loopback name may frame it: the
+// page reached as localhost:PORT may frame only a page of 127.0.0.1:PORT, and the other way round.
+// So a demo on 127.0.0.1 runs its apps on localhost (another origin, another site - cookies are per
+// host, not per port), and nothing frames the sandbox from its own origin.
+const APP_SANDBOX_PATH = '/sandbox/v1'
+const OTHER_LOOPBACK: Record<string, string> = { localhost: '127.0.0.1', '127.0.0.1': 'localhost' }
+const appSandbox = (): Plugin => {
+  const middleware = (
+    req: import('node:http').IncomingMessage,
+    res: import('node:http').ServerResponse,
+    next: () => void,
+  ) => {
+    if (!(req.url ?? '').startsWith(`${APP_SANDBOX_PATH}/`)) return next()
+    const [hostname, port] = (req.headers.host ?? '').split(':')
+    const other = OTHER_LOOPBACK[hostname]
+    if (!other) return next()
+    const host = `http://${other}${port ? `:${port}` : ''}`
+    void sendWebResponse(
+      res,
+      mcpAppSandboxResponse(toWebRequest(req), { path: APP_SANDBOX_PATH, hosts: [host] }),
+    )
+  }
+  return {
+    name: 'demo-app-sandbox',
+    configureServer: (server) => void server.middlewares.use(middleware),
+    configurePreviewServer: (server) => void server.middlewares.use(middleware),
+  }
+}
+
 // transformers.js loads the ONNX runtime's wasm from jsDelivr at run time (its default in a
 // page), yet the bundler also emits a copy because onnxruntime-web references it by URL. That copy
 // is never requested, and at 25.6 MiB it is over the 25 MiB a Cloudflare Workers asset may be -
@@ -152,6 +184,7 @@ export default defineConfig({
     pipelinePage(),
     assetSizeLimit(),
     demoMcpServer(),
+    appSandbox(),
   ],
   resolve: {
     // The library's dist sits outside this app; force ONE copy of each (two Reacts break every hook).

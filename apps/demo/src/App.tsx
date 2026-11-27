@@ -17,6 +17,7 @@ import {
 // The MCP hooks live behind their own subpath: a host that never imports it never needs
 // `@modelcontextprotocol/client` in its build.
 import { useMcpServers } from '@dudko.dev/agent-web-react/mcp'
+import { APP_SANDBOX } from './app-sandbox'
 import { ANALYST_PROMPT, engineTools } from './chess/analyst-tools'
 import { ChessPanel } from './chess/ChessPanel'
 import { outcomeText, useChessGame } from './chess/game'
@@ -591,6 +592,7 @@ export const App = () => {
                   onElicitationAnswer={mcp.answerElicitation}
                   {...chatCommon}
                   mcpApps={showApps ? mcp.apps : undefined}
+                  appSandbox={APP_SANDBOX}
                   appPanel={wide ? appPanelEl : 'sheet'}
                   onAppPanel={(app) => setAppInPanel(Boolean(app))}
                 />

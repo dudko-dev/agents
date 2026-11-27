@@ -504,6 +504,7 @@ approval.app // { server, tool, resourceUri } - an app asks, not the agent
 | `mcpApps` | - | the connection: `useMcpServers({ apps: true }).apps` (or `useMcp`'s, or the core's `ConnectedMcp.apps`). Without it no app is drawn |
 | `showApps` | `true` | draw the apps (chat / message list) |
 | `appsCollapsed` | `false` | start every app folded to one line |
+| `appSandbox` | - | `{ url, timeoutMs? }`: run apps on an origin of their own, behind your sandbox page on another origin ([below](#an-app-on-an-origin-of-its-own)). Without it, an opaque frame |
 | `appPanel` | `'auto'` | where "Open in panel" goes: `'auto'` (beside a wide chat, a sheet on a narrow one), `'sheet'`, an element of your page, or `false` (no panel) |
 | `onAppPanel` | - | told when an app goes into the panel (`app`) or leaves it (`undefined`) |
 | `renderApp(app, message, fallback)` | - | draw an app yourself |
@@ -511,8 +512,8 @@ approval.app // { server, tool, resourceUri } - an app asks, not the agent
 
 The parts on their own: `<McpAppFrame app host variant? theme? defaultCollapsed? onOpenPanel?
 onClosePanel? showCalls?>`, `<McpAppLine app note action onAction>`, `<AppRequestPrompt requests
-onAnswer renderRequest?>`, `useMcpAppHost({ connection, approve, approvals })` (what `<AgentChat>`
-uses: `read`, `callTool`, `openLink`, `message`, `requests`, `answer`, `draft`, `isWaiting`),
+onAnswer renderRequest?>`, `useMcpAppHost({ connection, approve, approvals, sandbox? })` (what `<AgentChat>`
+uses: `read`, `callTool`, `openLink`, `message`, `requests`, `answer`, `draft`, `isWaiting`, `sandbox`),
 and `<AgentComposer draft={{ id, text }}>` (an accepted message, appended once per `id`, never
 sent). `<MessageList renderApp showApps>` draws `message.apps`.
 
@@ -522,7 +523,8 @@ An app is third-party HTML **with scripts**, written by the server's author - no
 not by you. Every line below is a guard with a test (`tests/apps.test.ts`; in a real browser against
 a hostile app, `e2e/apps.spec.ts`):
 
-- **Opaque origin.** `<iframe sandbox="allow-scripts">`, never `allow-same-origin`, no navigation,
+- **Opaque origin** (the default; with `appSandbox`, [an origin of its own](#an-app-on-an-origin-of-its-own)
+  instead). `<iframe sandbox="allow-scripts">`, never `allow-same-origin`, no navigation,
   popup, form, modal or download token, no `allow` attribute: the app cannot read your DOM,
   `localStorage`, `sessionStorage`, cookies or IndexedDB (the key vault), cannot navigate your tab,
   cannot open windows, and gets no camera, microphone, location or clipboard - whatever it asked
@@ -554,10 +556,13 @@ a hostile app, `e2e/apps.spec.ts`):
 
 What it does **not** do, in this version:
 
-- **The specification's dedicated origin.** The 2026-01-26 revision asks a web host for a sandbox
-  proxy on another origin with `allow-same-origin`; a library in your page has no second origin,
-  and `allow-same-origin` on a `srcdoc` frame would be YOUR origin. So the app has an opaque
-  origin: no storage, no cookies, and its requests carry `Origin: null` (its APIs must allow it).
+- **The specification's dedicated origin, by default.** The 2026-01-26 revision asks a web host for
+  a sandbox proxy on another origin with `allow-same-origin`; a library in your page has no second
+  origin, and `allow-same-origin` on a `srcdoc` frame would be YOUR origin. So by default the app
+  has an opaque origin: no storage, no cookies, and its requests carry `Origin: null` (its APIs
+  must allow it). Serve the sandbox page on another origin and pass `appSandbox` to give it one
+  ([below](#an-app-on-an-origin-of-its-own)). The resource's own `_meta.ui.domain` is not
+  honoured either way: the host decides origins, a server does not.
 - **WebRTC** is not governed by `connect-src` in Chromium: an app could reach a STUN server it
   names - with what it has (the tool's input and result, what the user typed into it), never
   anything of your page. Its CPU and memory are not limited.
@@ -565,7 +570,124 @@ What it does **not** do, in this version:
   fullscreen / picture-in-picture, the host's style variables. A teardown is announced to the app
   but not waited for.
 
-Labels: `appFrom`, `appSandboxed`, `appWaiting`, `appTag`, `appsCount`, `appLoading`, `appFailed`,
+### An app on an origin of its own
+
+By default an app runs in the opaque frame above. Opt in, and it runs on an origin of its own -
+`localStorage`, IndexedDB and cookies of its own, a real `Origin` on its requests that an API can
+allow by name - behind a **sandbox page** you serve on ANOTHER origin: the specification's
+"sandbox proxy" (`specification/2026-01-26/apps.mdx`, "Sandbox proxy").
+
+```tsx
+<AgentChat
+  controller={agent}
+  mcpApps={mcp.apps}
+  appSandbox={{ url: 'https://apps.example.com/sandbox/v1' }} // timeoutMs?: 5000
+/>
+// The hook on its own: useMcpAppHost({ connection, approve, approvals, sandbox: { url } })
+```
+
+`url` is the base: an app's frame loads `<url>/<policy>`, where `<policy>` is the app's declared
+origins (base64url, one path segment). `{server}` in the HOST NAME gives each server an origin of
+its own - `https://{server}.apps.example.com/sandbox/v1`; the server's name (the key you gave it)
+must then be a lowercase DNS label, and you need a wildcard certificate (`*.apps.example.com`).
+
+**Serving the page.** `@dudko.dev/agent-web-react/mcp-app-sandbox` is a framework-free entry (no
+React, no core, no import at all) for the server: `mcpAppSandboxResponse(request, { path, hosts })`
+takes a `Request` and returns the `Response` - a Cloudflare Worker, Deno, Bun or Node 18+ serves it
+as it is (the demo's `apps/app-sandbox` is a whole Worker around that one call). `hosts` are the origins of
+the pages that may use it: exact origins (`https://chat.example.com`, `http://127.0.0.1:4173`) or
+a pattern with ONE `*` in the first label (`https://*-preview.example.workers.dev`; the `*` is one
+run of `[a-z0-9-]`, no dot), separated by spaces, commas or lines. An entry that is neither, or no
+entry at all, makes every page a 503: a sandbox nobody may frame is a configuration error.
+
+What it answers:
+
+| Request | Answer |
+| --- | --- |
+| `GET` / `HEAD <path>/<policy>` | the page (`mcpAppSandboxPage`) |
+| a `<policy>` that is not exactly what the host writes (another encoding, a key more, an entry that is not an origin, more than 32) | 400 |
+| another method | 405, `Allow: GET, HEAD` |
+| any other path (`<path>` itself included) | 404 |
+
+The page's headers (`mcpAppSandboxHeaders`) - serve them exactly, or the boundary is not there:
+
+| Header | Value | Why |
+| --- | --- | --- |
+| `Content-Security-Policy` | the app's policy (`default-src 'none'`, scripts / styles inline, its declared origins only, `frame-src 'none'`, `worker-src 'none'`, `form-action 'none'`, `base-uri 'none'`) + `frame-ancestors <hosts>` | the app's frame inherits it, and so does every document the app can reach on that origin; only your pages may frame it (a pattern is widened to `https://*.<rest>` here: CSP cannot say "one label"; the page's script holds it to one) |
+| `X-Content-Type-Options` | `nosniff` | |
+| `Cache-Control` | `no-store` | a policy is never served from a stale copy |
+| `Referrer-Policy` | `no-referrer` | |
+| `X-Robots-Tag` | `noindex, nofollow` | |
+| `Permissions-Policy` | `camera=(), microphone=(), geolocation=(), display-capture=(), payment=(), usb=(), serial=(), midi=()` | no permission, whatever an app asks for |
+
+Add HSTS on a real domain. Do not add `X-Frame-Options` (`frame-ancestors` decides).
+
+**How it is put together**, from your page down:
+
+```
+your page
+└ <iframe sandbox="allow-scripts allow-same-origin" srcdoc=SHELL>       your origin; ours, no script
+   SHELL: script-src 'none'; frame-src = the sandbox page's exact URL
+   └ <iframe sandbox="allow-scripts allow-same-origin" src=<url>/<policy>>   the sandbox origin
+      the page: its policy header; relays messages
+      └ <iframe sandbox="allow-scripts allow-same-origin">                  the sandbox origin
+         the app, written into it (document.write): it inherits the policy
+```
+
+The handshake is the specification's: the page sends `ui/notifications/sandbox-proxy-ready`
+(content-free, to each window above it), yours answers once with
+`ui/notifications/sandbox-resource-ready` (`{ html, csp }`), and from then on the page relays every
+other message between your page and the app - never a `ui/notifications/sandbox-*` one. The page
+takes the app only from a window above it on an allowed host origin, posts to that window's exact
+origin and to its own, and ignores a `sandbox`, `csp` or `permissions` in the message: its header
+is the policy, and nothing is granted.
+
+**Why the guards are where they are.** The app is same-origin with the sandbox page, so it can
+reach into it - run code there, add a link and click it. A frame may always navigate ITSELF, and
+only the policy of the document that embeds it decides where to. So:
+
+- the app's network policy is a HEADER of the sandbox page, built from the URL's PATH: the app's
+  frame inherits it, the page's own realm has it (a `fetch` through the page is held the same),
+  and a fresh copy of the page has it too. A query would not do - see the next point;
+- your page frames the sandbox page through a shell of ours whose `frame-src` is that page's
+  exact URL (a source with a path matches that path only, and ignores the query). Without it, a
+  hostile app navigates the sandbox page to any address - a request to an origin it never
+  declared (the browser test `e2e/apps-sandbox.spec.ts` shows the shell refusing it; without the
+  shell, Chromium sends it). With it, the only place it can send the page is the same URL - which
+  loads the page again and sends a second `sandbox-proxy-ready`: your page takes that as the app
+  having reloaded its frame, and stops it ("The app reloaded its frame, so it was stopped. Reload
+  it to start again.");
+- your page accepts a message only when it comes from the sandbox page's window (`event.source`)
+  AND the sandbox origin (`event.origin`), and posts to that origin, never `*`;
+- the frames' sandbox flags are drawn on YOUR side (the shell's frame, the page's frame), out of
+  the app's reach: it can lift its own frame's `sandbox` attribute (same origin as its parent),
+  and gets no more than the page has - scripts and an origin; no top navigation, popups, forms,
+  modals, downloads.
+
+**Refused, and the fallback.** A sandbox URL on your page's own origin (`allow-same-origin` would
+hand the app your storage and the key vault), not `https://` (`http://` only on `localhost` /
+`127.0.0.1`; CSP cannot name `[::1]`), with credentials, a query or a fragment, or a path a policy
+cannot name; `{server}` outside the host name, twice, or for a server name that is not a DNS
+label; a policy too long for a URL (more than 4096 characters of origins); a page without an
+origin of its own. Each is said once in the console, and the app runs in the opaque frame. So it
+does when the sandbox page does not answer the handshake within `timeoutMs` (default 5000 ms, or
+1 s after its frame has loaded - an error page, a refused `frame-ancestors`): that origin is not
+waited for again on this page (an app's **Reload** tries again). Falling back is safe - the opaque
+frame is the stricter of the two - and visible: the header says "sandboxed", not "sandboxed on its
+own origin", and the menu says why ("Not on an origin of its own (the sandbox page did not
+answer): …"). An app that needs its storage may not work there.
+
+**What one origin for all costs.** Apps on the same sandbox origin are same-origin with EACH
+OTHER: they share storage, and while two are on screen one can reach into the other's document
+(its frames are reachable through `window.top`) and act as it - including asking the user in its
+name. With a single URL for every server, that is every app of every server. `{server}` gives each
+server its own origin (two apps of the same server still share one). And the sandbox origin's
+SITE: on a subdomain of your site (`apps.example.com` beside `chat.example.com`), cookies set for
+the whole site (`Domain=example.com`) are the app's to read and to set. Use a domain of its own
+when your site has such cookies.
+
+Labels: `appFrom`, `appSandboxed`, `appSandboxedOrigin`, `appSandboxOrigin`, `appSandboxFallback`,
+`appSandboxReasons`, `appSandboxBroken`, `appWaiting`, `appTag`, `appsCount`, `appLoading`, `appFailed`,
 `appUnavailable`, `appHidden`, `appShow`, `appMenu`, `appReload`, `appOpenPanel`, `appHide`,
 `appServedBy`, `appInPanel`, `appBringBack`, `appClosePanel`, `appPanelNote`, `appFrameName`,
 `appRan`, `appRefused`, `approvalLeadApp`, `approvalFromApp`, `appLinkLead`, `appLinkNote`,
@@ -850,7 +972,7 @@ tokens inside an element with class `awr-theme`.
 | `useMcp` / `useMcpServers` | one or several MCP servers, merged tools — import from `@dudko.dev/agent-web-react/mcp`. With `apps: true` they declare MCP Apps and return `apps` for `<AgentChat mcpApps>`. `instructions` (on `useMcp`, and on each of `useMcpServers().servers`) is what the server told the agent in its handshake - third-party text that goes into the agent's prompt: show it to the user as the server's words. `protocol` (`useMcp`) / `servers[i].protocol` and `protocols` (`useMcpServers`) are the negotiated MCP revisions; a server is connected with `protocol: 'legacy' \| 'auto' \| 'modern'` (`connect` / `add`). `pendingElicitations` / `answerElicitation` are the servers' [questions to the user](#questions-from-mcp-servers-elicitation). Options: `clientName`, `clientMetadataUrl` (a client ID metadata document, CIMD, used as the OAuth `client_id` where the authorization server supports it; per server through `oauth.clientMetadataUrl`), `onLog`, `elicitation` (`true` or the core's settings; off by default), `apps` (off by default) — see the README |
 | `elicitationFields`, `elicitationInitialDraft`, `elicitationFormAnswer`, `elicitationLink`, `formatCountdown` | the elicitation prompt's pure logic ([above](#questions-from-mcp-servers-elicitation)) |
 | `mcpOAuthProviderOptions` | the options the MCP hooks hand the core's OAuth provider for one server (pure; same subpath) |
-| `useMcpAppHost` | MCP Apps: reads an app from its server, puts its tool calls through the agent's gate, holds its link / message requests ([above](#mcp-apps-a-servers-interface-in-the-chat)). `mcpAppsRouter` (`./mcp`) is the stable `apps` the MCP hooks return |
+| `useMcpAppHost` | MCP Apps: reads an app from its server, puts its tool calls through the agent's gate, holds its link / message requests ([above](#mcp-apps-a-servers-interface-in-the-chat)); `sandbox: { url, timeoutMs? }` runs apps on an origin of their own ([above](#an-app-on-an-origin-of-its-own)). `mcpAppsRouter` (`./mcp`) is the stable `apps` the MCP hooks return |
 | `McpAppBridge`, `buildMcpAppDocument`, `mcpAppCsp`, `appLinkOf`, `appMessageTextOf`, `clampAppHeight` | the frame's security core, pure: the bridge without a DOM, the shell, the policy, the link and message checks |
 | `agentStateReducer` | the pure event → UI reducer |
 | `subagentTree` | `agent.subagents` (flat) as nested `SubagentNode[]` |

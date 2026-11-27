@@ -11,6 +11,7 @@ import {
   type AppRequestView,
   type McpAppsConnectionLike,
 } from '../hooks/use-mcp-app-host.js'
+import type { McpAppSandboxOptions } from '../mcp-app.js'
 import type { AppView, ChatMessage } from '../types.js'
 import { AppRequestPrompt } from './AppRequestPrompt.js'
 import { McpAppFrame, McpAppLine } from './McpAppFrame.js'
@@ -216,6 +217,15 @@ export interface AgentChatProps {
   mcpApps?: McpAppsConnectionLike
   /** Draw MCP Apps (default true; needs `mcpApps`). */
   showApps?: boolean
+  /**
+   * Run apps on an origin of their own: `{ url }` of a sandbox page you serve on ANOTHER origin
+   * (`@dudko.dev/agent-web-react/mcp-app-sandbox`), e.g.
+   * `{ url: 'https://apps.example.com/sandbox/v1' }` - or `'https://{server}.apps.example.com/…'`
+   * for one origin per server. Default: none - apps run in an opaque frame (no storage of their
+   * own). A URL on this page's origin, or not https, is refused (opaque); so is a page that does
+   * not answer in `timeoutMs`.
+   */
+  appSandbox?: McpAppSandboxOptions
   /** Start every app folded to one line (default false). */
   appsCollapsed?: boolean
   /**
@@ -329,6 +339,7 @@ const AgentChatInner = ({
   className,
   style,
   mcpApps,
+  appSandbox,
   showApps = true,
   appsCollapsed = false,
   appPanel = 'auto',
@@ -407,6 +418,7 @@ const AgentChatInner = ({
     connection: mcpApps,
     approve: agent.approveAppToolCall,
     approvals: agent.pendingApprovals,
+    sandbox: appSandbox,
   })
   const prefersDark = usePrefersDark()
   const appTheme: 'light' | 'dark' = theme === 'auto' ? (prefersDark ? 'dark' : 'light') : theme

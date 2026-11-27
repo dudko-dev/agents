@@ -118,6 +118,9 @@ against its production build.
   `AppRequestPrompt` (MCP Apps, below),
   `ContextMeter`, `Composer` (minimal), `PlanView`, `ModelLoadBar`,
   `UsageBadge`, `ApiKeyForm`, `icons`, `format`. Docs: `docs/chat.md`.
+- `apps/demo/src/app-sandbox.ts` (monorepo root) — where the demo's apps run: the production sandbox
+  page (`apps/app-sandbox`), or on loopback the same page under the other loopback name (the Vite
+  servers' `appSandbox` plugin).
 - `apps/demo/src/components/McpPanel.tsx` (monorepo root) — the demo's "bring your own MCP" panel,
   and its "Try the demo server" (adds `${location.origin}/mcp/demo`, protocol `auto`: the site's
   own MCP server, `apps/worker`).
@@ -152,6 +155,35 @@ against its production build.
   server's hostile "travel" app, counted endpoints for a declared and an undeclared origin), and a
   change needs a mutation check. Never add `allow-same-origin`, an `allow` attribute, or a method
   to the allow-list without its consent and a test.
+- MCP Apps on an origin of their own (opt-in: `appSandbox` / `useMcpAppHost({ sandbox })`, the
+  specification's sandbox proxy) - three files, two sides:
+  - `src/mcp-app-policy.ts` - shared, pure, NO imports (a Worker bundles it): `mcpAppPolicy` (the
+    app's CSP - `mcpAppCsp` is built on it, so the page's frame and the sandbox page cannot
+    differ), the policy as a PATH segment (`mcpAppPolicyToken` / `mcpAppPolicyOfToken`: canonical,
+    strict), the sandbox message names, and `mcpAppPolicyOrigin` - a COPY of the core's
+    `mcpAppOrigin` (`tests/apps-sandbox.test.ts` holds them to the same lines and answers).
+  - `src/mcp-app-sandbox.ts` - the **`./mcp-app-sandbox` entry**, for a SERVER: the page
+    (`mcpAppSandboxPage`, `MCP_APP_SANDBOX_SCRIPT`: binds to the first ancestor on an allowed host
+    that sends `sandbox-resource-ready`, once; writes the app into an `allow-scripts
+    allow-same-origin` frame; relays to exact origins; ignores `sandbox` / `csp` / `permissions`),
+    its headers (the app's policy + `frame-ancestors`), `parseMcpAppSandboxHosts` (exact origins,
+    one-label `*` patterns), `mcpAppSandboxResponse` (Request → Response; 400 / 404 / 405 / 503).
+    No React, no core, no import but the policy module - `tests/entries.test.ts` checks the entry
+    and its chunks. `apps/app-sandbox` deploys it; the demo's Vite servers mount it.
+  - `src/mcp-app.ts` (page side): `mcpAppSandboxTarget` (the URL: another origin than the page's,
+    `https` or loopback `http`, `{server}` only in the host name and only a DNS label),
+    `mcpAppSandboxProxyUrl`, `buildMcpAppSandboxShell` (ours, the page's origin, NO script,
+    `frame-src` = the proxy's exact URL - the only thing that stops the app, same-origin with its
+    proxy, navigating it to an undeclared origin), `McpAppSandboxLink` (source AND origin, posts to
+    the sandbox origin only, one handshake; a second = the app reloaded its frame → stopped).
+    `McpAppFrame` falls back to the opaque frame on a refused URL or a silent page (`timeoutMs`;
+    1 s after the shell loaded), remembers a silent origin for the page's life, says which mode in
+    its badge (`appSandboxed` / `appSandboxedOrigin`, `data-sandbox`). Labels `appSandbox*`.
+  - Tests: `tests/apps-sandbox.test.ts` (every guard, the proxy's script under stand-in windows,
+    the server) and `e2e/apps-sandbox.spec.ts` (the demo's sandbox page on the other loopback name;
+    the hostile app's probes through its sandbox page, navigating and reloading it, forged
+    messages, `frame-ancestors`, the fallback). `e2e/apps-shared.ts` is what both app specs share.
+    Security boundary: each guard a test and a mutation check.
 - `src/util.ts` — tiny shared helpers (`errMessage`).
 - `src/styles.css` — optional theme (light + dark).
 - `src/index.ts` — public surface (+ curated re-exports from the core).

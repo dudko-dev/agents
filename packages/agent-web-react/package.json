@@ -40,6 +40,16 @@
         "default": "./dist/pipeline.cjs"
       }
     },
+    "./mcp-app-sandbox": {
+      "import": {
+        "types": "./dist/mcp-app-sandbox.d.ts",
+        "default": "./dist/mcp-app-sandbox.js"
+      },
+      "require": {
+        "types": "./dist/mcp-app-sandbox.d.cts",
+        "default": "./dist/mcp-app-sandbox.cjs"
+      }
+    },
     "./styles.css": "./dist/styles.css",
     "./pipeline.css": "./dist/pipeline.css",
     "./package.json": "./package.json"

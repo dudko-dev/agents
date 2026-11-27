@@ -1,13 +1,22 @@
-import { expect, test, type FrameLocator, type Page } from '@playwright/test'
-import { createServer, type Server } from 'node:http'
-import type { AddressInfo } from 'node:net'
+import { expect, test } from '@playwright/test'
 import {
   startLocalMcpServer,
   TRAVEL_CHECKOUT_URL,
   TRAVEL_MESSAGE,
   type ILocalMcpServer,
 } from '@dudko.dev/test-servers'
-import { mockGemini, plan, type GeminiCall, type GeminiReply } from './gemini.ts'
+import { plan, type GeminiCall, type GeminiReply } from './gemini.ts'
+import {
+  APP_TITLE,
+  appOf,
+  counted,
+  openWithApp as open,
+  runProbes,
+  script,
+  status,
+  type AppMode,
+  type ICounted,
+} from './apps-shared.ts'
 
 /**
  * MCP Apps in a real browser: the demo's real agent and chat, a REAL MCP server on loopback whose
@@ -17,34 +26,12 @@ import { mockGemini, plan, type GeminiCall, type GeminiReply } from './gemini.ts
  * stand for the network: one origin the app's resource DECLARES (`connectDomains`), one it does
  * not. Every guard of the frame and the bridge is checked here as the browser enforces it; the
  * same guards are unit-tested in `tests/apps.test.ts`.
+ *
+ * The demo runs apps on an origin of their own (its sandbox page, `appSandbox`): the flows below
+ * go through that page. The frame and the hostile app are checked here in the OPAQUE frame - the
+ * library's default, which is also what an app gets when the sandbox page does not answer (its
+ * requests are aborted for those tests). The sandbox origin's own guards: `apps-sandbox.spec.ts`.
  */
-
-interface ICounted {
-  url: string
-  hits: string[]
-  close: () => Promise<void>
-}
-
-/** An HTTP server that counts what reaches it (and answers any origin, as an API would). */
-const counted = async (): Promise<ICounted> => {
-  const hits: string[] = []
-  const server: Server = createServer((req, res) => {
-    hits.push(req.url ?? '')
-    res.writeHead(200, { 'content-type': 'text/plain', 'access-control-allow-origin': '*' })
-    res.end('counted')
-  })
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-  const port = (server.address() as AddressInfo).port
-  return {
-    url: `http://127.0.0.1:${port}`,
-    hits,
-    close: () =>
-      new Promise<void>((resolve) => {
-        server.closeAllConnections()
-        server.close(() => resolve())
-      }),
-  }
-}
 
 let mcp: ILocalMcpServer
 let declared: ICounted
@@ -69,81 +56,16 @@ test.afterEach(async () => {
   await undeclared.close()
 })
 
-/** The run: one step that calls the tool with an app, then an answer. */
-const script = (c: GeminiCall): GeminiReply => {
-  if (c.stage === 'planner') return plan('Search flights Lisbon to Vienna')
-  if (c.stage === 'executor') {
-    return c.functionResponses.length === 0
-      ? { call: { name: 'travel__flights_search', args: { from: 'LIS', to: 'VIE' } } }
-      : { text: 'Three flights found.' }
-  }
-  if (c.stage === 'replanner') return { text: JSON.stringify({ decision: 'finish', reason: 'ok' }) }
-  return { text: 'I found three options for 12 December. Pick one in the app.' }
-}
+const openWithApp = (
+  page: Parameters<typeof open>[0],
+  reply?: (c: GeminiCall) => GeminiReply,
+  mode: AppMode = 'origin',
+) => open(page, mcp, { mode, ...(reply ? { reply } : {}) })
 
-const APP_TITLE = 'App from server travel'
-
-/** The app's own document: the outer frame (ours, the shell) and the app inside it. */
-const appOf = (page: Page): FrameLocator =>
-  page.frameLocator(`iframe[title="${APP_TITLE}"]`).frameLocator('#app')
-
-const status = (app: FrameLocator) => app.locator('#status')
-
-/** Key, the MCP server connected as "travel", a question, the answer with its app. */
-const openWithApp = async (page: Page, reply: (c: GeminiCall) => GeminiReply = script) => {
-  const calls = await mockGemini(page, reply)
-  await page.goto('/')
-  await page.getByPlaceholder('AIza…').fill('AIza-test-key')
-  await page.getByRole('button', { name: 'Save' }).click()
-  await page.getByRole('tab', { name: 'MCP servers' }).click()
-  await page.getByPlaceholder('https://your-server.example/mcp').fill(mcp.url)
-  await page.getByLabel('Name (tool prefix)').fill('travel')
-  await page.getByRole('button', { name: 'Add server' }).click()
-  await expect(page.locator('.mcp__server-status')).toContainText('Connected')
-  // The panel names the server's app; the app-only tool is not the agent's.
-  await expect(page.locator('.mcp__app')).toHaveText([
-    'ui://travel/results.html',
-    'ui://travel/bad.html',
-  ])
-  await expect(page.locator('.mcp__tool code')).not.toContainText(['travel__flights_refresh'])
-  await page
-    .getByRole('textbox', { name: 'Message' })
-    .fill('Find me a flight from Lisbon to Vienna')
-  await page.getByRole('button', { name: 'Send' }).click()
-  const answer = page.locator('.awr-msg--assistant').last()
-  await expect(answer.locator('.awr-msg__bubble')).toContainText('I found three options', {
-    timeout: 45_000,
-  })
-  const frame = answer.locator('.awr-frame--app')
-  await expect(frame.locator('.awr-frame__title')).toHaveText('App from server “travel”')
-  const app = appOf(page)
-  // The app received the call's input and result and rendered them.
-  await expect(app.locator('body')).toHaveAttribute('data-result', 'yes', { timeout: 15_000 })
-  await expect(app.locator('.f')).toHaveCount(3)
-  // The app reports its height once it has drawn the result, and the frame (and the transcript
-  // around it) moves: a click in that moment can land on whatever moved under it. Wait for the
-  // frame to keep still.
-  const outer = page.locator(`iframe[title="${APP_TITLE}"]`)
-  let last = ''
-  await expect
-    .poll(
-      async () => {
-        const box = await outer.boundingBox()
-        const now = box ? `${Math.round(box.y)}:${Math.round(box.height)}` : ''
-        const still = now !== '' && now === last
-        last = now
-        return still
-      },
-      { intervals: [150], timeout: 10_000 },
-    )
-    .toBe(true)
-  return { calls, answer, frame, app }
-}
-
-test('an app renders inside the host’s frame, under the answer, with the host’s chrome outside it', async ({
+test('an app renders inside the host’s frame, under the answer, with the host’s chrome outside it (the opaque frame)', async ({
   page,
 }) => {
-  const { answer, frame, app } = await openWithApp(page)
+  const { answer, frame, app } = await openWithApp(page, undefined, 'opaque')
   await expect(app.locator('body')).toHaveAttribute(
     'data-input',
     JSON.stringify({ from: 'LIS', to: 'VIE' }),
@@ -158,19 +80,25 @@ test('an app renders inside the host’s frame, under the answer, with the host�
   expect(await outer.getAttribute('allow')).toBeNull()
   const inner = page.frameLocator(`iframe[title="${APP_TITLE}"]`).locator('#app')
   await expect(inner).toHaveAttribute('sandbox', 'allow-scripts')
-  // The label and the controls are in the page, outside the frame.
-  await expect(frame.locator('.awr-frame__head')).toContainText('sandboxed')
+  // The label and the controls are in the page, outside the frame. The sandbox page did not
+  // answer: "sandboxed", not "on its own origin", and the menu says why.
+  await expect(frame.locator('.awr-frame__badges')).toHaveText('sandboxed')
   await expect(frame.getByRole('button', { name: 'App menu' })).toBeVisible()
   // Folded and shown again: one line, then the app from the start.
   await frame.getByRole('button', { name: 'App menu' }).click()
-  await expect(frame.locator('.awr-frame__menunote')).toContainText(
+  await expect(frame.locator('.awr-frame__menunote').first()).toContainText(
     'Served by travel as ui://travel/results.html',
+  )
+  await expect(frame.locator('.awr-frame__menunote').last()).toHaveText(
+    'Not on an origin of its own (the sandbox page did not answer): it runs in an opaque sandbox, with no storage of its own.',
   )
   await frame.getByRole('menuitem', { name: 'Hide app' }).click()
   const line = answer.locator('.awr-frame--line')
   await expect(line).toContainText('hidden')
   await expect(answer.locator(`iframe[title="${APP_TITLE}"]`)).toHaveCount(0)
   await line.getByRole('button', { name: 'Show' }).click()
+  // The sandbox origin is not waited for again on this page: opaque at once.
+  await expect(answer.locator('.awr-frame--app')).toHaveAttribute('data-sandbox', 'opaque')
   await expect(app.locator('.f')).toHaveCount(3)
 })
 
@@ -268,19 +196,24 @@ test('a height the app asks for is clamped to the host’s bound', async ({ page
   await expect.poll(async () => (await outer.boundingBox())?.height).toBe(800)
 })
 
-test('guard: what a hostile app tries fails - the page, storage, other origins, navigation, the top window', async ({
+test('guard: what a hostile app tries fails - the page, storage, other origins, navigation, the top window (the opaque frame)', async ({
   page,
 }) => {
-  const { app } = await openWithApp(page)
+  const { app } = await openWithApp(page, undefined, 'opaque')
   // Something of the page's own to steal.
   await page.evaluate(() => localStorage.setItem('host-secret', 'vault-key'))
   const url = page.url()
-  await app.getByRole('button', { name: 'Run probes' }).click()
-  await expect(app.locator('body')).toHaveAttribute('data-probes', 'done', { timeout: 15_000 })
-  const verdict = async (name: string) =>
-    (await app.locator(`[data-probe="${name}"]`).textContent())?.trim()
+  const verdict = await runProbes(app)
+  // No origin at all: opaque, and its document is the shell's `srcdoc`.
+  expect(await verdict('origin')).toBe('origin: null null')
   for (const name of [
     'parent-dom',
+    'top-dom',
+    'grandparent-dom',
+    'host-secret',
+    'parent-fetch',
+    'parent-image',
+    'parent-frame',
     'top-location',
     'local-storage',
     'session-storage',
@@ -297,6 +230,8 @@ test('guard: what a hostile app tries fails - the page, storage, other origins, 
   // The origin the resource declared is reachable: the policy comes from the metadata.
   expect(await verdict('fetch-declared')).toBe('allowed: 200')
   expect(declared.hits).toEqual(['/declared?fetch'])
+  // From an opaque origin, a request says so.
+  expect(declared.origins).toEqual(['null'])
   expect(undeclared.hits).toEqual([])
   expect(page.url()).toBe(url)
   // The page's storage is as it was: nothing read, nothing added.
@@ -313,8 +248,16 @@ test('guard: what a hostile app tries fails - the page, storage, other origins, 
   await expect(page.locator('.awr-approval--app')).toHaveCount(0)
   expect(mcp.calls.some((c) => JSON.stringify(c.args).includes('SPOOF'))).toBe(false)
 
+  // The frame around it is not of its origin: it cannot be used to leave either.
+  await app.getByRole('button', { name: 'Leave through the frame' }).click()
+  await expect(status(app)).toHaveText('frame: blocked')
+  await app.getByRole('button', { name: 'Reload the frame' }).click()
+  await expect(status(app)).toHaveText('frame: blocked')
+  await app.getByRole('button', { name: 'Lift its sandbox' }).click()
+  await expect(status(app)).toHaveText('lift: blocked')
+
   // Navigating itself away: refused by the shell's policy - nothing is requested.
-  await app.getByRole('button', { name: 'Leave' }).click()
+  await app.getByRole('button', { name: 'Leave', exact: true }).click()
   await page.waitForTimeout(800)
   expect(undeclared.hits).toEqual([])
   expect(page.url()).toBe(url)

@@ -779,6 +779,7 @@ yourself):
 - Frame the app in an `<iframe sandbox>` WITHOUT `allow-same-origin` (and without top
   navigation, popups, forms, modals, downloads), by `srcdoc`, never by a URL of your origin.
   `allow-same-origin` on a `srcdoc` frame gives it YOUR origin - your storage and the key vault.
+  The one exception is a sandbox page on ANOTHER origin you serve (below).
 - Put the policy where the document cannot pre-empt it, and stop the frame navigating itself
   (the embedding document's `frame-src` is the only thing that does).
 - Accept messages only from the frame you drew (`event.source`), answer an allow-list of
@@ -787,14 +788,32 @@ yourself):
 - Draw your controls outside the frame: an app can paint anything inside its box, including a
   fake "Allow" button.
 
-**Deviation from the specification.** The 2026-01-26 revision wants a web host to frame apps in a
-sandbox proxy on a DIFFERENT ORIGIN with `allow-scripts allow-same-origin`, served by a server
-the host controls. A library in a page has no second origin to give, and `allow-same-origin` on a
-`srcdoc` frame would be the page's own origin. So the frame has an opaque origin instead -
-stricter: an app gets no `localStorage`, `sessionStorage`, IndexedDB or cookies, its requests go
-out with `Origin: null` (a server must answer `Access-Control-Allow-Origin: *` or `null` to it),
-and `_meta.ui.domain` is not honoured. The draft of the specification no longer prescribes the
-framing.
+**Two modes: an opaque frame (the default) or an origin of its own (opt-in).** The 2026-01-26
+revision wants a web host to frame apps through a sandbox proxy on a DIFFERENT ORIGIN with
+`allow-scripts allow-same-origin`, served by a server the host controls. A library in a page has
+no second origin to give, and `allow-same-origin` on a `srcdoc` frame would be the page's own
+origin. So by default the frame has an opaque origin - stricter: an app gets no `localStorage`,
+`sessionStorage`, IndexedDB or cookies, its requests go out with `Origin: null` (a server must
+answer `Access-Control-Allow-Origin: *` or `null` to it), and `_meta.ui.domain` is not honoured.
+
+With the React package's `appSandbox` (`{ url }` of the sandbox page of its `./mcp-app-sandbox`
+entry, served on another origin) an app runs on THAT origin, as the specification describes. What
+the two modes trade:
+
+| | Opaque (default) | Its own origin (`appSandbox`) |
+| --- | --- | --- |
+| The app's storage, cookies, `Origin` | none; `Origin: null` | its own; a real `Origin` an API can allow |
+| Your page's DOM, storage, IndexedDB, cookies | out of reach (opaque) | out of reach (another origin) - refused if the URL is your own origin |
+| Another app on the page | out of reach (each frame its own opaque origin) | **same origin** as every app on the same sandbox origin: shared storage, and while both are on screen one can reach into the other's document and act as it. `{server}` in the URL gives each server its own origin (needs a wildcard certificate) |
+| Your site's cookies | none | on a subdomain of your site: cookies set for the whole site (`Domain=`) are readable and settable. Use a domain of its own when that matters |
+| Network | only the declared origins (the frame's policy) | the same policy, as the sandbox page's response header (from its URL's path), inherited by the app and by every page of that origin the app can reach |
+| Navigation | the shell's `frame-src 'none'` | the sandbox page's `frame-src 'none'` for the app; for the sandbox page itself - which the app CAN navigate, being same-origin with it - a shell of ours whose `frame-src` is that page's exact URL (without it, a hostile app sends the page, and a request, anywhere; the browser test shows both) |
+| Messages | the frame's window | the sandbox page's window AND origin, posted to that origin only; one handshake - a second (the app reloaded its frame) stops the app |
+| Needs | nothing | a server on another origin, its headers exactly, `frame-ancestors` = your pages |
+
+When the sandbox URL is refused or its page does not answer the handshake in time, the app runs
+in the opaque frame - the stricter mode, so an attacker who blocks the sandbox gains nothing - and
+the frame says so. The draft of the specification no longer prescribes the framing.
 
 **Known gaps.** WebRTC is not governed by `connect-src` in Chromium (`webrtc 'block'` is set for
 browsers that implement it): an app with scripts can reach a STUN/TURN server it names. What it

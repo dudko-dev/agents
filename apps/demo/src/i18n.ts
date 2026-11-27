@@ -350,6 +350,21 @@ export const ES_LABELS: AgentLabels = {
 
   appFrom: (server) => `App del servidor «${server}»`,
   appSandboxed: 'aislada',
+  appSandboxedOrigin: 'aislada en su propio origen',
+  appSandboxOrigin: (origin) =>
+    `Se ejecuta en su propio origen, ${origin}: su almacenamiento es suyo, nunca el de esta página.`,
+  appSandboxFallback: (reason) =>
+    `Sin origen propio (${reason}): se ejecuta en un entorno aislado opaco, sin almacenamiento propio.`,
+  appSandboxReasons: {
+    invalid: 'la URL del entorno aislado no es válida',
+    insecure: 'la URL del entorno aislado no es https',
+    'same-origin': 'la URL del entorno aislado está en el origen de esta página',
+    'no-page-origin': 'esta página no tiene un origen propio',
+    'server-name': 'el nombre del servidor no es una etiqueta DNS',
+    'too-many-origins': 'declara demasiados orígenes',
+    'no-answer': 'la página del entorno aislado no respondió',
+  },
+  appSandboxBroken: 'La app recargó su marco, así que se detuvo. Recárguela para empezar de nuevo.',
   appWaiting: 'le espera',
   appTag: 'app',
   appsCount: (n) => count(n, 'app', 'apps'),
@@ -713,6 +728,22 @@ export const DE_LABELS: AgentLabels = {
 
   appFrom: (server) => `App vom Server „${server}“`,
   appSandboxed: 'abgeschottet',
+  appSandboxedOrigin: 'abgeschottet, mit eigenem Origin',
+  appSandboxOrigin: (origin) =>
+    `Läuft auf einem eigenen Origin, ${origin}: ihr Speicher gehört ihr, nie dieser Seite.`,
+  appSandboxFallback: (reason) =>
+    `Ohne eigenen Origin (${reason}): sie läuft in einer opaken Sandbox, ohne eigenen Speicher.`,
+  appSandboxReasons: {
+    invalid: 'die Sandbox-URL ist ungültig',
+    insecure: 'die Sandbox-URL ist nicht https',
+    'same-origin': 'die Sandbox-URL liegt auf dem Origin dieser Seite',
+    'no-page-origin': 'diese Seite hat keinen eigenen Origin',
+    'server-name': 'der Name des Servers ist kein DNS-Label',
+    'too-many-origins': 'sie deklariert zu viele Origins',
+    'no-answer': 'die Sandbox-Seite hat nicht geantwortet',
+  },
+  appSandboxBroken:
+    'Die App hat ihren Rahmen neu geladen und wurde deshalb angehalten. Laden Sie sie neu, um von vorn zu beginnen.',
   appWaiting: 'wartet auf Sie',
   appTag: 'App',
   appsCount: (n) => count(n, 'App', 'Apps'),
