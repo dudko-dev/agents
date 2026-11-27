@@ -240,12 +240,20 @@ export interface ILocalMcpServer {
   skillFaults: ISkillFaults
   /** Every skill file (`resources/read` of a skill URI) a client read, in order (with `skills`). */
   skillReads: string[]
+  /** Every `skills/get` URI a client asked for, in order (with `skills`). */
+  skillGets: string[]
   /**
    * Serve one more skill (with `skills`) - `path` is its skill path, its last segment its name -
    * and announce a resource list change (`notifications/resources/list_changed`) to every
-   * listening client, which is how a skills change reaches one.
+   * listening client, which is how a skills change reaches one. `listed: false`: served by
+   * `skills/get` only, never listed (and nothing is announced).
    */
-  addSkill: (path: string, description: string, body: string) => Promise<void>
+  addSkill: (
+    path: string,
+    description: string,
+    body: string,
+    options?: { listed?: boolean },
+  ) => Promise<void>
   /** Every round of every elicitation tool: what the client declared, answered and echoed. */
   elicitations: IElicitationRound[]
   /** The pages URL-mode elicitations pointed at. `POST` to a page's `url` submits it. */
@@ -1136,12 +1144,13 @@ export const startLocalMcpServer = async (
     appFaults,
     skillFaults: skillCatalog?.faults ?? {},
     skillReads: skillCatalog?.reads ?? [],
-    addSkill: async (path, description, body) => {
+    skillGets: skillCatalog?.gets ?? [],
+    addSkill: async (path, description, body, options) => {
       if (!skillCatalog) {
         throw new Error('addSkill: this server was started without `skills`')
       }
-      await skillCatalog.add(path, description, body)
-      modern?.notify.resourcesChanged()
+      await skillCatalog.add(path, description, body, options)
+      if (options?.listed !== false) modern?.notify.resourcesChanged()
     },
     elicitations: elicitation.rounds,
     urlElicitations: elicitation.urlElicitations,

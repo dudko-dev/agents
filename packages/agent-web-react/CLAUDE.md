@@ -212,6 +212,16 @@ appFullscreen appDownloads appSampling>`, `useMcpAppHost({ downloads, sampling, 
 - `src/index.ts` — public surface (+ curated re-exports from the core).
 - `tests/files.test.ts` — files of a turn: the reducer, the chips, and every guard of the sandboxed
   frame as a string check.
+- An MCP server's skill about to enter the agent's context (the core's `tool.approval-requested`
+  with `skill`): `ApprovalView.skill` (`SkillConsentView`; its `body` - the server's text - is
+  dropped by the reducer once the request is decided or the run stops, so a saved chat never holds
+  it), its own card in `ToolApprovalPrompt` (`SkillConsentCard`: lead, description, size, a
+  collapsed `<details>` preview in a `<pre>` - text nodes only - Allow once / Always for this
+  server / Deny; `showSkillPreview`, also on `<AgentChat>`), labels `skillConsent*`, and the MCP
+  hooks' `skills: true | { consent }` (`mcpSkillsSettingOf`, `./mcp`). Tests:
+  `tests/skills.test.ts` (reducer, card markup, the setting) and the `MCP skills` block of
+  `e2e/mcp.spec.ts` (the demo, the test server's skills: nothing reaches the model before Allow,
+  nothing after Deny, no sideways scroll at 390).
 - `tests/state.test.ts`, `tests/chat.test.ts` — `node --test` over the reducer,
   composer helpers, labels and the history store (imports from `dist`). `tests/elicitation.test.ts`:
   the queue, the form helpers against the core's validator, the prompt as markup, and the queue as

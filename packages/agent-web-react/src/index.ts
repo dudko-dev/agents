@@ -99,6 +99,7 @@ export type {
   QueuedMessageView,
   UserNoteView,
   ApprovalView,
+  SkillConsentView,
   ElicitationView,
   BudgetView,
   ChatAttachment,

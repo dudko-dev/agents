@@ -22,6 +22,7 @@ import {
   mcpOAuthRecordOf,
   mcpOAuthRegistrationOf,
   mcpProtocolOf,
+  mcpSkillsSettingOf,
   newMcpOAuthProvider,
   OAUTH_UNSUPPORTED,
   PENDING_TTL_MS,
@@ -34,6 +35,7 @@ import {
   type McpElicitationControls,
   type McpOAuthOptions,
   type McpOAuthRecord,
+  type McpSkillsSetting,
   type McpStatus,
   type UseMcpOptions,
 } from './use-mcp.js'
@@ -65,10 +67,10 @@ export interface McpServerSpec {
   protocol?: McpProtocolMode
   /**
    * EXPERIMENTAL: load the server's skills into the agent's catalog, as `<server>/<skill>` (see
-   * `McpConnectOptions.skills`; needs `protocol: 'auto'` or `'modern'`). Remembered with the
-   * server. Left out, nothing is passed (off).
+   * `McpConnectOptions.skills`; needs `protocol: 'auto'` or `'modern'`): `true`, or
+   * `{ consent }`. Remembered with the server. Left out, nothing is passed (off).
    */
-  skills?: boolean
+  skills?: McpSkillsSetting
   /**
    * MCP Apps for this server: `false` keeps its apps off while other servers' are shown (nothing
    * is declared to it, no app of it is read, its app-only tools are hidden from everyone and its
@@ -85,8 +87,8 @@ export interface McpServerView {
   auth: McpAuthMode
   /** The protocol revisions the server was added with, when it was given any. */
   protocolMode?: McpProtocolMode
-  /** It was added with `skills: true`: its skills (if it serves any) are in the agent's catalog. */
-  skills?: boolean
+  /** It was added with `skills` (as given): its skills (if it serves any) are in the catalog. */
+  skills?: McpSkillsSetting
   /** It was added with `apps` set (`false`: its apps are off; absent: the hook's `apps`). */
   apps?: boolean
   /** What was negotiated (`version`, `era`), while it is connected and the core reports it. */
@@ -160,7 +162,7 @@ interface StoredServer {
   auth: McpAuthMode
   oauth?: McpServerSpec['oauth']
   protocol?: McpProtocolMode
-  skills?: boolean
+  skills?: McpSkillsSetting
   apps?: boolean
 }
 
@@ -191,7 +193,7 @@ const view = (s: StoredServer, patch: Partial<McpServerView> = {}): McpServerVie
   url: s.url,
   auth: s.auth,
   ...(isProtocolMode(s.protocol) ? { protocolMode: s.protocol } : {}),
-  ...(s.skills === true ? { skills: true } : {}),
+  ...(mcpSkillsSettingOf(s.skills) ? { skills: mcpSkillsSettingOf(s.skills) } : {}),
   ...(typeof s.apps === 'boolean' ? { apps: s.apps } : {}),
   status: 'idle',
   catalog: [],
@@ -247,7 +249,7 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
         auth: s.auth,
         ...(oauth && typeof oauth === 'object' ? { oauth } : {}),
         ...(s.protocolMode ? { protocol: s.protocolMode } : {}),
-        ...(s.skills ? { skills: true } : {}),
+        ...(mcpSkillsSettingOf(s.skills) ? { skills: mcpSkillsSettingOf(s.skills) } : {}),
         ...(typeof s.apps === 'boolean' ? { apps: s.apps } : {}),
       })
     }
@@ -340,7 +342,9 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
               connectTimeoutMs: optionsRef.current.connectTimeoutMs,
               // Only when asked for: without it the connection is built as it always was.
               ...(spec.protocol ? { protocol: spec.protocol } : {}),
-              ...(spec.skills === true ? { skills: true } : {}),
+              ...(mcpSkillsSettingOf(spec.skills)
+                ? { skills: mcpSkillsSettingOf(spec.skills) }
+                : {}),
               // Only when given: without it the hook's `apps` decides, as before.
               ...(typeof spec.apps === 'boolean' ? { apps: spec.apps } : {}),
             },
@@ -416,7 +420,7 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
         auth: input.auth ?? 'none',
         ...(input.oauth ? { oauth: input.oauth } : {}),
         ...(isProtocolMode(input.protocol) ? { protocol: input.protocol } : {}),
-        ...(input.skills === true ? { skills: true } : {}),
+        ...(mcpSkillsSettingOf(input.skills) ? { skills: mcpSkillsSettingOf(input.skills) } : {}),
         ...(typeof input.apps === 'boolean' ? { apps: input.apps } : {}),
       }
       specsRef.current.set(name, spec)

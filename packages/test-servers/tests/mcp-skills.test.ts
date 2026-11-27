@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import test from 'node:test'
-import { SKILL_MARKERS, startLocalMcpServer } from '../src/index.ts'
+import { SKILL_MARKERS, SKILL_URIS, startLocalMcpServer } from '../src/index.ts'
 import { initialize, legacy, modern } from './mcp-wire.ts'
 
 // The skills (`skills`), on the wire with hand-built JSON-RPC: the extension in `server/discover`,
@@ -164,6 +164,82 @@ test('skills: addSkill serves it from then on', async () => {
     )
     const got = await rpc(mcp.url, 'skills/get', { uri: 'skill://release-notes/SKILL.md' })
     assert.equal(got.result.skill.frontmatter.description, 'Write the release notes')
+  } finally {
+    await mcp.close()
+  }
+})
+
+test('skills: one skill is never listed, but skills/get and resources/read answer for it', async () => {
+  const mcp = await startLocalMcpServer({ protocol: 'modern', skills: true })
+  try {
+    const listed = (await rpc(mcp.url, 'skills/list')).result.skills.map(
+      (s: { uri: string }) => s.uri,
+    )
+    assert.ok(!listed.includes(SKILL_URIS.unlisted), 'not listed')
+    const got = await rpc(mcp.url, 'skills/get', { uri: SKILL_URIS.unlisted })
+    assert.equal(got.result.resultType, 'complete')
+    assert.equal(got.result.skill.uri, SKILL_URIS.unlisted)
+    assert.equal(got.result.skill.frontmatter.name, 'release-checklist')
+    const [file] = got.result.skill.resources
+    const text = (await rpc(mcp.url, 'resources/read', { uri: file.uri })).result.contents[0]
+      .text as string
+    assert.equal(sha256(text), file.digest)
+    assert.ok(text.includes(SKILL_MARKERS.unlisted))
+    assert.deepEqual(mcp.skillGets, [SKILL_URIS.unlisted])
+    // addSkill with `listed: false` serves one more the same way.
+    await mcp.addSkill('elsewhere/vendor-guide', 'A guide', '# Vendor\n', { listed: false })
+    const vendor = await rpc(mcp.url, 'skills/get', {
+      uri: 'skill://elsewhere/vendor-guide/SKILL.md',
+    })
+    assert.equal(vendor.result.skill.frontmatter.name, 'vendor-guide')
+    assert.ok(
+      !(await rpc(mcp.url, 'skills/list')).result.skills.some(
+        (s: { uri: string }) => s.uri === 'skill://elsewhere/vendor-guide/SKILL.md',
+      ),
+    )
+  } finally {
+    await mcp.close()
+  }
+})
+
+test('skills: `nested` lists a skill with a skill inside it, each with its own entry', async () => {
+  const mcp = await startLocalMcpServer({ protocol: 'modern', skills: true })
+  try {
+    mcp.skillFaults.nested = true
+    const skills = (await rpc(mcp.url, 'skills/list')).result.skills as {
+      uri: string
+      resources: { uri: string; digest: string }[]
+    }[]
+    const handbook = skills.find((s) => s.uri === SKILL_URIS.handbook)!
+    const onboarding = skills.find((s) => s.uri === SKILL_URIS.onboarding)!
+    assert.deepEqual(handbook.resources.map((r) => r.uri).sort(), [
+      'skill://handbook/SKILL.md',
+      'skill://handbook/onboarding/SKILL.md',
+    ])
+    // The same file, listed by both: the same digest.
+    assert.equal(
+      handbook.resources.find((r) => r.uri === SKILL_URIS.onboarding)?.digest,
+      onboarding.resources[0].digest,
+    )
+    const body = (await rpc(mcp.url, 'resources/read', { uri: SKILL_URIS.onboarding })).result
+      .contents[0].text as string
+    assert.ok(body.includes(SKILL_MARKERS.onboarding))
+  } finally {
+    await mcp.close()
+  }
+})
+
+test('skills: `emptyListing` lists nothing; skills/get still answers, faults included', async () => {
+  const mcp = await startLocalMcpServer({ protocol: 'modern', skills: true })
+  try {
+    Object.assign(mcp.skillFaults, { emptyListing: true, digest: true })
+    assert.deepEqual((await rpc(mcp.url, 'skills/list')).result.skills, [])
+    const pdf = await rpc(mcp.url, 'skills/get', { uri: 'skill://pdf-processing/SKILL.md' })
+    assert.equal(pdf.result.skill.frontmatter.name, 'pdf-processing')
+    const tampered = await rpc(mcp.url, 'skills/get', { uri: 'skill://tampered/SKILL.md' })
+    assert.equal(tampered.result.skill.frontmatter.name, 'tampered')
+    const nope = await rpc(mcp.url, 'skills/get', { uri: 'skill://nope/SKILL.md' })
+    assert.equal(nope.error?.code, -32602)
   } finally {
     await mcp.close()
   }

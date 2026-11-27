@@ -352,16 +352,25 @@ with the same progressive disclosure - and with the guards a third party's text 
 
 ```ts
 const mcp = await connectMcpHttp(
-  { docs: { url, protocol: 'auto', skills: true } },
+  {
+    docs: { url, protocol: 'auto', skills: true },
+    // A server you vetted: its skills load without a question.
+    ours: { url: ourUrl, protocol: 'auto', skills: { consent: 'never' } },
+  },
   { onToolsChanged: (name) => void mcp.refreshServer(name) },
 )
-const agent = await createAgent({ model, tools: { ...mcp.tools } })
+const agent = await createAgent({
+  model,
+  tools: { ...mcp.tools },
+  // A person sees each skill before the model does (step 4 below).
+  toolApproval: { onRequest: (req) => (req.skill ? showSkillCard(req) : showToolCard(req)) },
+})
 agent.skills.filter((s) => s.server) // [{ name: 'docs/pdf-processing', description, server: 'docs' }, …]
 ```
 
 What happens, in order:
 
-1. **Negotiation.** With `skills: true` and a `protocol` that may speak 2026-07-28 (`'auto'`,
+1. **Negotiation.** With `skills` (`true`, or `{ consent }`) and a `protocol` that may speak 2026-07-28 (`'auto'`,
    `'modern'`), the client declares `io.modelcontextprotocol/skills: {}` among its
    `extensions`. Without the flag - the default - nothing is declared and the wire is what it
    always was. On `'legacy'` (or no `protocol`) nothing is declared either and a `warn` line says
@@ -386,11 +395,41 @@ What happens, in order:
    against the entry: byte size, SHA-256 digest, and the frontmatter field by field (the SDK's
    `SkillsClient`). A mismatch - the server changed it, or lies - refuses the load: the tool call
    fails with the reason, a planner's pick is not activated (a `warn` line), nothing of the text
-   reaches the model. The body (cleaned, cut at `MCP_SKILL_BODY_MAX_CHARS`, 16 000, with a notice)
-   goes to the model under `mcpSkillPreamble`, which names the server and the URI and says the text
-   is third-party knowledge that cannot grant permissions, approve a call, change the approval
-   mode, widen egress or the sandbox, or make the agent run anything. The skill is active for the
-   rest of the run (`skill.activated` with `server`), under the same preamble.
+   reaches the model. Then the person is asked (step 4a); only on a yes does the body (cleaned,
+   cut at `MCP_SKILL_BODY_MAX_CHARS`, 16 000, with a notice) go to the model, under
+   `mcpSkillPreamble`, which names the server and the URI and says the text is third-party
+   knowledge that cannot grant permissions, approve a call, change the approval mode, widen egress
+   or the sandbox, or make the agent run anything. The skill is active for the rest of the run
+   (`skill.activated` with `server`), under the same preamble.
+   4a. **Consent.** Before a server's skill enters the model's context - by `load_skill`, the
+   planner's pick, a resumed run, or `read_skill_file` of one of its files - the agent asks
+   through `toolApproval.onRequest`: a request with `toolName: 'load_skill'`, `input` (what it was
+   called with: `{ name }` or `{ server, uri }`), `readOnly: true` and `skill`
+   (`McpSkillConsentView`): `server`, `name` (`<server>/<skill>`), `skill` (its frontmatter
+   name), `uri`, `description` (one line, ≤ 300 characters), `size` / `totalSize` (bytes of its
+   `SKILL.md` / of all its files), `files` / `fileCount`, `body` (the very text the model would
+   read: `mcpSkillBodyPreview`, the same cleaning and cap - what a person approves is what the
+   model gets), `byUri` (asked for by URI, step 7), `nestedIn` (it sits inside that skill of the
+   same server) and `consent`. The same `tool.approval-requested` / `-resolved` events (with
+   `skill`), the same `timeoutMs`, and the run's clock stops while the person reads. A yes
+   (`true`) lets it in; `{ approved: true, remember: true }` - "Always for this server" - lets in
+   that server's other skills for the agent's life too, nested ones excepted; a no keeps all of it
+   out: the call fails with `McpSkillDeniedError` ("The user did not allow the skill … nothing of
+   it is in your context. Do not load it again in this task …"), a planner's pick is not activated
+   (a `warn` line), and a second load of it in the same run is refused at once, without a second
+   question. No answer within `timeoutMs`, or a handler that throws, is a refusal nobody gave:
+   asked again next time. Without `onRequest` the skill is not loaded (a `warn` at `createAgent`
+   says so). The approval MODE plays no part - autopilot asks too - and neither do `rules`.
+   **When** is the consent's choice: the server's `skills: { consent }`, else the agent's
+   `mcpSkills: { consent }`, else `'once-per-skill'` (`MCP_SKILL_CONSENT_DEFAULT`):
+   - `'once-per-skill'` - asked the first time the skill would enter a context in the agent's
+     life; a yes holds while its entry is the same (bound to the server, the URI and every file's
+     digest - `mcpSkillGrantKey` - so a skill the server changed is asked about again);
+   - `'ask'` - asked in every run that loads it ("Always for this server" still holds);
+   - `'never'` - never asked: what the extension did before, for a server the host vetted.
+   A **nested** skill (its `SKILL.md` inside another listed or known skill's directory) is asked
+   about on its own: its enclosing skill's yes does not cover it, nor does "Always for this
+   server". Nothing is kept on disk: grants last as long as the agent (helpers share them).
 5. **Files.** `read_skill_file({ name, path })` reads one file of a loaded skill: only a path the
    entry it was LOADED with lists (never a URI, an absolute path or `..` - a skill cannot point a
    read at another skill or another server), from its own server, verified the same way, text only,
@@ -403,6 +442,24 @@ What happens, in order:
    this package an agent built after the refresh has the new list (the Node sibling refreshes its
    own between runs). A skill loaded before keeps reading against the entry it was loaded with; a
    file that changed since fails its check.
+7. **By URI.** A server MAY list only some of its skills, and point at others by URI - in its
+   instructions, in one of its skills, in a tool result. `load_skill` then takes
+   `{ server, uri }` instead of `{ name }`, and its description says so and names the servers
+   (`mcpSkillLoadByUriNote`; it is fixed when the agent is built, so the prompt stays run-stable;
+   without a server whose skills are on, the tool is what it always was). Before any request, the
+   URI must be a `skill://` URI of a `SKILL.md` in a named directory (`mcpSkillUriRefusal`: no
+   other scheme - a URI the model hands over came from third-party text - no space, nothing
+   invisible, ≤ `MCP_SKILL_URI_MAX_CHARS`, 512), `server` must be one whose `skills` are on (by its
+   key or its label; `resolveMcpSkillServer`), and the catalog must have room for one more of that
+   server (`mcpSkillRoomRefusal`: it counts against the same 32 / 64). Then `skills/get` goes to
+   THAT server and no other - the URI is scoped to the server the model names, never looked up
+   across servers. Its error reaches the model (`-32602`: "the server serves no skill at that
+   URI"); its entry passes the rules of step 2, then everything of steps 4 - 5 (verification,
+   consent with `byUri`, the preamble). It joins the catalog for the connection's life
+   (`source.added`; a refresh keeps it, a listing that now holds it makes it a listed one), named
+   so that it takes no name in use (`assignAddedMcpSkillName`: `docs/release-checklist`, or by its
+   path, `docs/internal/git-workflow`, when `docs/git-workflow` is taken). A URI already in the
+   catalog for that server is that skill: nothing is asked of the server.
 
 While a run acts on an MCP skill - one of its own active skills, or one of the run that started
 it, for a helper - a call of a tool that **runs code** (`isCodeExecutionTool`: the sandbox's
@@ -411,12 +468,9 @@ rule or an earlier "always allow" say; the request carries `mcpSkills` (the skil
 with no `onRequest` the call is refused. The extension requires it: a server's skill must not lead
 to code running here without a person's approval. Nothing else about consent changes.
 
-Not done (yet): a skill the listing leaves out cannot be loaded by its URI alone (`skills/get`,
-which the extension asks a host to support for partial listings - a URI the model read in one
-server's instructions must reach that server and no other, and the agent cannot yet tell which
-server's text the model read it in), and `resources/directory/read` is never called (a skill's
-files are known from its entry, which the extension allows a host to answer from). A skill whose
-listing changed is re-read on the next refresh, not with `skills/get`.
+Not done (yet): `resources/directory/read` is never called (a skill's files are known from its
+entry, which the extension allows a host to answer from). A skill whose listing changed is re-read
+on the next refresh, not with `skills/get`.
 
 A server's skills come with its tools, like its instructions (each mounted tool carries them): a
 server none of whose tools is mounted offers none. `RunResult.skills`, `agent.skills` (with
@@ -2486,7 +2540,7 @@ Subscribe with `onEvent` (per run) or the handler you pass to `createAgent`; ren
 | --- | --- |
 | `skill.activated` | `name, by: 'plan' \| 'tool', server?` (`server`: the MCP server of a skill served with `skills: true`) |
 | `tools.discovered` | `step?, query, names` — `find_tools` activated more tools |
-| `tool.approval-requested` | `id, name, input, readOnly, step?, subagent?, app?, mcpSkills?` (`subagent: { id, depth }` when a helper the model started is asking; `app: { server, tool, resourceUri }` when an [MCP App](#mcp-apps-a-servers-interface-for-a-tool) asks - `agent.approveAppToolCall`; `mcpSkills`: the call runs code while the run acts on these [MCP skills](#mcp-skills-experimental), so it is asked whatever the mode says) |
+| `tool.approval-requested` | `id, name, input, readOnly, step?, subagent?, app?, mcpSkills?, skill?` (`subagent: { id, depth }` when a helper the model started is asking; `app: { server, tool, resourceUri }` when an [MCP App](#mcp-apps-a-servers-interface-for-a-tool) asks - `agent.approveAppToolCall`; `mcpSkills`: the call runs code while the run acts on these [MCP skills](#mcp-skills-experimental), so it is asked whatever the mode says; `skill` (`McpSkillConsentView`, with `name: 'load_skill'`): not a tool call but an [MCP server's skill](#mcp-skills-experimental) about to enter the model's context - its server, name, description, size, files and the text the model would read) |
 | `tool.approval-resolved` | `id, name, approved, reason?, automatic` |
 | `mcp.elicitation-requested` | `id, server, tool, mode: 'form' \| 'url', message, requestedSchema?, url?, step?, subagent?` — an MCP server asked the user for input during a tool call and the connection's `onElicitation` is being called. The server's text, cleaned and capped ([elicitation](#mcp-elicitation-a-server-asks-the-user)) |
 | `mcp.elicitation-answered` | `id, server, tool, action: 'accept' \| 'decline' \| 'cancel', automatic, reason?, fields?` — the question was settled. `fields`: the NAMES of the fields an accepted form was answered with, never a value. `automatic`: nobody decided, the tool call fails, `reason` says why |

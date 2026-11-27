@@ -240,7 +240,7 @@ export const McpPanel = ({
                 {s.skills && (
                   <span
                     className="mcp__badge mcp__badge--muted"
-                    title="Its skills (if it serves any) are in the agent's skills catalog, as <server>/<skill>: third-party text, knowledge only"
+                    title="Its skills (if it serves any) are in the agent's skills catalog, as <server>/<skill>: third-party text, knowledge only, each asked about before it first reaches the agent"
                   >
                     skills · experimental
                   </span>
@@ -394,7 +394,8 @@ export const McpPanel = ({
           <p className="settings__note">
             Its skills join the agent’s as <code>server/skill</code> and are read only when needed,
             checked against the server’s digests - third-party knowledge that cannot approve a call,
-            reach the web or execute anything. Needs the 2026-07-28 revision (Auto or 2026-07-28).
+            reach the web or execute anything. You see each one, and allow or deny it, before it
+            first reaches the agent. Needs the 2026-07-28 revision (Auto or 2026-07-28).
           </p>
         )}
 

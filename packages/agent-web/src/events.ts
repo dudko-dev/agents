@@ -11,6 +11,7 @@ import type { IDecisionEvent } from './decision.js'
 import type { LimitKind } from './limits.js'
 import type { McpAppToolResult } from './mcp/apps.js'
 import type { McpElicitationReason, McpElicitationSchema } from './mcp/elicitation.js'
+import type { McpSkillConsentView } from './mcp/skills.js'
 import type { PipelineEvent } from './pipeline/engine.js'
 import type { ToolApprovalApp } from './tools/approval.js'
 
@@ -188,6 +189,11 @@ type AgentEventBody =
       app?: ToolApprovalApp
       /** See `ToolApprovalRequest.mcpSkills`. */
       mcpSkills?: string[]
+      /**
+       * Set when the request is about an MCP server's skill about to enter the model's context,
+       * not a tool call (see `ToolApprovalRequest.skill`): the server's words, as plain text.
+       */
+      skill?: McpSkillConsentView
     }
   /** A consent decision: from the user, or `automatic` (policy denial). */
   | {

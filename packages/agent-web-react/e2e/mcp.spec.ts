@@ -1,4 +1,6 @@
 import { expect, test, type Page } from '@playwright/test'
+import { SKILL_MARKERS, startLocalMcpServer, type ILocalMcpServer } from '@dudko.dev/test-servers'
+import { mockGemini, plan, type GeminiCall, type GeminiReply } from './gemini.ts'
 import { startServers, type ILocalServers } from './servers.ts'
 
 /**
@@ -160,4 +162,142 @@ test('several servers merge into one toolbox', async ({ page }) => {
 
   await expect(status(page)).toHaveText([/Connected/, /Connected/])
   await expect(page.locator('.mcp__tool code')).toHaveText(['mcp__echo', 'second__echo'])
+})
+
+/**
+ * MCP skills (`skills` on a server): a server's skill is shown to the person before its text
+ * reaches the model - the demo's real agent and connector, the test server's skills over real
+ * sockets (2026-07-28), Gemini's answers scripted. What only a page can check: the card a person
+ * reads, the preview opened by a click, and that the model was sent nothing of the skill before
+ * the click on "Allow once" - and nothing at all after "Deny".
+ */
+test.describe('MCP skills', () => {
+  let skills: ILocalMcpServer
+
+  test.beforeEach(async () => {
+    skills = await startLocalMcpServer({ cors: '*', protocol: 'dual', skills: true })
+  })
+
+  test.afterEach(async () => {
+    await skills.close()
+  })
+
+  /** One step that loads `skill`, then an answer. */
+  const loads =
+    (skill: string) =>
+    (c: GeminiCall): GeminiReply => {
+      if (c.stage === 'planner') return plan('Use the skill')
+      if (c.stage === 'executor') {
+        return c.functionResponses.length === 0
+          ? { call: { name: 'load_skill', args: { name: skill } } }
+          : { text: 'Step done.' }
+      }
+      if (c.stage === 'replanner') {
+        return { text: JSON.stringify({ decision: 'finish', reason: 'done' }) }
+      }
+      return { text: 'All done.' }
+    }
+
+  /** A key, the MCP tab, and the skills server added as "docs" with its skills on. */
+  const openWithSkills = async (page: Page) => {
+    await page.goto('/')
+    await page.getByPlaceholder('AIza…').fill('AIza-test-key')
+    await page.getByRole('button', { name: 'Save' }).click()
+    await expect(page.getByRole('button', { name: 'Send' })).toBeVisible()
+    await page.getByRole('tab', { name: 'MCP servers' }).click()
+    await page.getByPlaceholder('https://your-server.example/mcp').fill(skills.url)
+    await page.getByLabel('Name (tool prefix)').fill('docs')
+    await page.getByLabel('Load skills from this server (experimental)').check()
+    await page.getByRole('button', { name: 'Add server' }).click()
+    await expect(status(page)).toContainText('Connected')
+    await expect(page.getByRole('button', { name: 'Send' })).toBeVisible()
+  }
+
+  const send = async (page: Page, text: string) => {
+    await page.getByRole('textbox', { name: 'Message' }).fill(text)
+    await page.getByRole('button', { name: 'Send' }).click()
+  }
+
+  const answer = (page: Page) => page.locator('.awr-msg--assistant .awr-msg__bubble').last()
+  const sent = (calls: GeminiCall[]): string => JSON.stringify(calls)
+
+  test('the card says whose skill it is and shows its text; nothing reaches the model before "Allow once"', async ({
+    page,
+  }) => {
+    const calls = await mockGemini(page, loads('docs/pdf-processing'))
+    await openWithSkills(page)
+    await send(page, 'Fill in the form')
+
+    const card = page.locator('.awr-approval--skill')
+    await expect(card).toBeVisible({ timeout: 30_000 })
+    await expect(card).toHaveAttribute('data-skill', 'docs/pdf-processing')
+    await expect(card.locator('.awr-approval__head')).toHaveText(
+      'The server “docs” offers the skill “pdf-processing”',
+    )
+    await expect(card.locator('.awr-approval__quote').first()).toHaveText(
+      'Extract, fill and assemble PDF documents',
+    )
+    await expect(card.locator('.awr-approval__skillmeta')).toContainText('docs/pdf-processing')
+    await expect(card.locator('.awr-approval__skillmeta')).toContainText('2 more files')
+    // The text is behind a click, and it is the server's text, as text.
+    const preview = card.locator('details.awr-approval__preview')
+    await expect(preview).not.toHaveAttribute('open', '')
+    await expect(card.locator('.awr-approval__body')).toBeHidden()
+    await preview.locator('summary').click()
+    await expect(card.locator('.awr-approval__body')).toBeVisible()
+    await expect(card.locator('.awr-approval__body')).toContainText(SKILL_MARKERS.pdfProcessing)
+    await expect(card.locator('.awr-approval__body img, .awr-approval__body a')).toHaveCount(0)
+    await expect(preview).toContainText('references/FORMS.md, scripts/extract.py')
+    // The model has been sent nothing of it yet.
+    expect(sent(calls)).not.toContain(SKILL_MARKERS.pdfProcessing)
+    expect(skills.skillReads).toEqual(['skill://pdf-processing/SKILL.md'])
+
+    await card.getByRole('button', { name: 'Allow once' }).click()
+    await expect(answer(page)).toHaveText('All done.', { timeout: 45_000 })
+    await expect(card).toHaveCount(0)
+    // Now it is the load_skill result the executor read.
+    const executor = calls.filter((c) => c.stage === 'executor')
+    const loaded = executor.find((c) => c.functionResponses.some((r) => r.name === 'load_skill'))
+    expect(JSON.stringify(loaded?.functionResponses)).toContain(SKILL_MARKERS.pdfProcessing)
+    // A saved chat keeps who and what, not the server's text.
+    const saved = await page.evaluate(() => JSON.stringify(Object.entries(localStorage)))
+    expect(saved).not.toContain(SKILL_MARKERS.pdfProcessing)
+  })
+
+  test('"Deny" keeps all of it out: the model is told, and never sent the text', async ({
+    page,
+  }) => {
+    const calls = await mockGemini(page, loads('docs/git-workflow'))
+    await openWithSkills(page)
+    await send(page, 'Commit it')
+
+    const card = page.locator('.awr-approval--skill')
+    await expect(card).toBeVisible({ timeout: 30_000 })
+    await expect(card.locator('.awr-approval__head')).toHaveText(
+      'The server “docs” offers the skill “git-workflow”',
+    )
+    await card.getByRole('button', { name: 'Deny' }).click()
+    await expect(answer(page)).toHaveText('All done.', { timeout: 45_000 })
+    await expect(card).toHaveCount(0)
+    expect(sent(calls)).not.toContain(SKILL_MARKERS.gitWorkflow)
+    const executor = calls.filter((c) => c.stage === 'executor')
+    expect(JSON.stringify(executor.at(-1)?.functionResponses)).toContain(
+      'The user did not allow the skill \\"docs/git-workflow\\"',
+    )
+  })
+
+  test('on a phone the card fits: no sideways scroll, the preview wraps', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 })
+    await mockGemini(page, loads('docs/pdf-processing'))
+    await openWithSkills(page)
+    await send(page, 'Fill in the form')
+    const card = page.locator('.awr-approval--skill')
+    await expect(card).toBeVisible({ timeout: 30_000 })
+    await card.locator('details.awr-approval__preview summary').click()
+    const overflow = await page.evaluate(
+      () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    )
+    expect(overflow).toBe(0)
+    await card.getByRole('button', { name: 'Deny' }).click()
+  })
 })

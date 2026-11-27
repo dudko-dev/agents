@@ -55,6 +55,7 @@ import {
   createMcpSkillCatalog,
   markMcpSkills,
   MCP_SKILLS_EXTENSION,
+  mcpSkillsSettingOf,
   type McpSkillSource,
   type McpSkillsClientLike,
 } from './mcp-skills.ts'
@@ -993,8 +994,9 @@ export const connectMcpServers = async (
       const elicitation = elicitationSessionOf(name)
       // `skills: true` (experimental): the Skills extension is written against 2026-07-28, so
       // it is declared only where that revision may be spoken; never on a 'legacy' connection.
-      const skillsWanted = cfg.skills === true && mode !== 'legacy'
-      if (cfg.skills === true && mode === 'legacy') {
+      const skillsSetting = mcpSkillsSettingOf(cfg.skills, name)
+      const skillsWanted = skillsSetting.on && mode !== 'legacy'
+      if (skillsSetting.on && mode === 'legacy') {
         log(
           'warn',
           `[mcp] ${name}: skills: true needs protocol 'auto' or 'modern' (the Skills extension is written against 2026-07-28); no skills are requested`,
@@ -1072,6 +1074,7 @@ export const connectMcpServers = async (
               name,
               skillsClient as unknown as McpSkillsClientLike,
               (level, message) => log(level, message),
+              skillsSetting.consent ? { consent: skillsSetting.consent } : {},
             )
             await skills.refresh()
             await bail()

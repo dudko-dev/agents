@@ -14,6 +14,7 @@ import type {
   McpElicitationSchema,
 } from './mcp-elicitation.ts'
 import type { McpProtocolMode } from './mcp-shared.ts'
+import type { McpSkillConsent, McpSkillConsentView, McpSkillsSetting } from './mcp-skills.ts'
 import type { ISubagentsConfig } from './subagent-dynamic-shared.ts'
 
 export type ProviderType =
@@ -252,6 +253,14 @@ export interface IToolApprovalRequest {
   // whatever the mode, a rule or an earlier "always allow" say (the Skills extension: a server's
   // skill must not lead to code running on this side without a person's approval).
   mcpSkills?: string[]
+  // Set when the request is not about a tool call but about an MCP server's skill that is about to
+  // enter the model's context (`load_skill`, the planner's pick, a resumed run; `skills` on a
+  // server, consent 'ask' / 'once-per-skill'): the server, the skill, its description and size
+  // and the very text the model would read - the SERVER's words, to show as plain text. `toolName`
+  // is 'load_skill'. Approve to let it in ("remember: true" = every skill of that server for the
+  // agent's life, nested ones excepted), deny to keep it out. Asked whatever the approval mode
+  // and the rules say.
+  skill?: McpSkillConsentView
 }
 
 // What the gate hands `onRequest` beside the request.
@@ -340,7 +349,10 @@ export interface IMcpHttpServerConfig {
   // Off by default: without it the extension is not declared and nothing of it is sent. Needs
   // the 2026-07-28 revision (`protocol: 'auto'` or `'modern'`): the extension is written against
   // it. Third-party text - knowledge only, never policy; see the README, "MCP skills".
-  skills?: boolean
+  // `true`, or `{ consent }`: when a person is asked before one of its skills enters the model's
+  // context - 'once-per-skill' (default, or the agent's `mcpSkills.consent`), 'ask' (every run)
+  // or 'never' (a server you vetted).
+  skills?: McpSkillsSetting
 }
 
 // Local MCP server spawned as a child process. The transport speaks JSON-RPC
@@ -358,7 +370,7 @@ export interface IMcpStdioServerConfig {
   // not know must not take the session's process with it): the command runs twice per connect.
   protocol?: McpProtocolMode
   // See IMcpHttpServerConfig.skills.
-  skills?: boolean
+  skills?: McpSkillsSetting
 }
 
 // Discriminated union: callers pick HTTP or stdio per server. Existing
@@ -556,6 +568,13 @@ export interface IAgentConfig {
   // by a spawn_subagent helper ask too; default false: a helper's question is cancelled without
   // the callback being called).
   elicitation?: McpElicitationOptions
+  // The MCP servers' skills (`skills` on a server, experimental): `consent` - when a person is
+  // asked before a skill's text enters the model's context - for every server whose own
+  // `skills: { consent }` does not say: 'once-per-skill' (default: the first time per skill in
+  // the agent's life, again when its entry changes), 'ask' (in every run that loads it) or
+  // 'never' (no question: servers you vetted). Asked through `toolApproval.onRequest`, the request
+  // carrying `skill`; without a handler such a skill is not loaded. Autopilot does not skip it.
+  mcpSkills?: { consent?: McpSkillConsent }
   // Show the model the `instructions` a connected MCP server returned in its
   // initialize result (planner and executor system prompts, under a preamble
   // that marks them as third-party text; capped per server and in total).
@@ -796,6 +815,8 @@ type AgentEventBody =
       subagent?: { id: string; depth: number }
       // See IToolApprovalRequest.mcpSkills.
       mcpSkills?: string[]
+      // See IToolApprovalRequest.skill: the request is about an MCP server's skill.
+      skill?: McpSkillConsentView
     }
   // automatic: true for rule / mode / timeout denials nobody decided on.
   // Automatic ALLOWs emit nothing, to keep the stream quiet.

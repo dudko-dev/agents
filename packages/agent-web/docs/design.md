@@ -846,6 +846,51 @@ source of the agent's skills, beside the host's and the lessons. The choices:
   `run_js` (and whatever the host marks): while the run, or the run that started a helper, has an
   MCP skill active, a call of one is asked whatever the mode. This only tightens: a deny stays a
   deny, and nothing else about consent changes.
+- **A person sees a skill before the model does - through the gate the host already has.** The
+  extension says a host SHOULD let users inspect a skill before it is loaded and MAY gate loading
+  per skill or per server; for a third party's instructions both are cheap and worth it. The
+  question goes to `toolApproval.onRequest` - the same handler, events, timeout and clock as a
+  tool call, with `skill` on the request - rather than a callback of its own: every UI that
+  answers tool calls (the React card, the Node REPL's prompt) answers it already, and one that
+  does not know `skill` still shows a request for `load_skill` instead of loading silently. The
+  approval MODE does not lower it: a mode is about tool calls, and autopilot is exactly the
+  setting where nobody would see the text otherwise (the same reasoning as an MCP App's writes).
+- **The default: once per skill, bound to its entry.** Every run would make a person click through
+  the same text over and over, and a click that is routine stops meaning anything. Never would
+  mean nobody ever sees a third party's instructions. Once per skill per agent - per session -
+  shows every text a person has not seen, and binds the yes to what was shown: the server, the URI
+  and every file's digest (the extension's content-bound approval), so a server that changes the
+  skill is asked about again. `'ask'` (every run) is there for hosts that want it, `'never'` for a
+  server the host vetted (the behaviour before the question existed). Per server, with an
+  agent-wide default: the decision is about a server, and a host trusts its own servers and not a
+  URL a user typed in. Nothing is persisted: a grant on disk would have to be bound and revoked
+  across restarts, and a person re-seeing a skill once per session is cheap.
+- **Fetched to be shown, not to be used.** To be inspected, the text must be read before the yes.
+  It is read when the model asks for the skill (the point of need, which the lazy-retrieval rule
+  allows), verified, held off any context, and shown; only a yes puts it in. The preview is the
+  model's text exactly (`mcpSkillBodyPreview`: the same cleaning and cap), so what is approved is
+  what is sent. A decided request keeps no copy of it (the React state drops `body`).
+- **Nested skills, and "Always for this server".** A nested skill needs "fresh, explicit user
+  consent", and approving the enclosing skill does not substitute for it. Per-skill grants are
+  keyed by URI, so the enclosing skill's yes never covers it; a server-wide yes, given before the
+  nested skill was ever shown, is not "fresh" either, so it does not cover nested skills. Nesting
+  is read from the URIs the agent knows (listed and given by URI): a `SKILL.md` inside another
+  one's directory.
+- **A no is final for the run.** A model that is refused tends to try again; the run remembers the
+  refusal and answers the next load of that skill itself, so a person is not asked the same
+  question twice in one task. Nobody to ask, or no answer in time, is not a person's no: it is not
+  remembered, and the skill is asked about next time.
+- **By URI: the server the model names, nothing else.** The listing may be partial, and a host
+  "MUST support loading a skill given only its URI"; a URI is scoped to the server that serves it.
+  The agent cannot tell which server's text the model read a URI in (instructions, a skill, a tool
+  result all end up in one context), so it does not guess: `load_skill({ server, uri })` names the
+  server, the URI goes to that one server only, and only to a server whose skills the host turned
+  on. Searching every server for a URI would let one server's text make the agent ask another one
+  - the cross-server confused deputy the extension warns about. Only `skill://` is taken from the
+  model: other schemes are allowed in a listing, but a URI the model hands over came from
+  third-party text, and `skill://` is what the extension's servers use. What comes back is an
+  entry like a listed one - the same rules, cap, verification, preamble and consent - and it stays
+  in the catalog (on the connection's source) so the next run, and the planner, see it.
 
 ## MCP elicitation: the host answers, the model never sees the question
 

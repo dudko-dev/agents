@@ -135,7 +135,7 @@ Pass an event handler as the second argument to `createAgent`, or per run via `o
 | --- | --- |
 | `skill.activated` | A skill became active (`by: 'plan' \| 'tool'`; `server` for a skill an MCP server serves). |
 | `tools.discovered` | `find_tools` activated tools (`query`, `names`). |
-| `tool.approval-requested` / `tool.approval-resolved` | The approval gate asked / decided (`automatic` for rule, mode and timeout denials). `mcpSkills` on a request: the call runs code while the run acts on those MCP skills (always asked). |
+| `tool.approval-requested` / `tool.approval-resolved` | The approval gate asked / decided (`automatic` for rule, mode and timeout denials). `mcpSkills` on a request: the call runs code while the run acts on those MCP skills (always asked). `skill` on a request (`name: 'load_skill'`): an MCP server's skill about to enter the model's context - see [MCP skills](#mcp-skills-experimental). |
 | `mcp.elicitation-requested` / `mcp.elicitation-answered` | An MCP server asked the user for input during a tool call and `onElicitation` is being called (`id`, `server`, `tool`, `mode`, `message`, `requestedSchema?`, `url?`, `step?`, `subagent?` - the server's text, cleaned and capped) / the question was settled (`action`, `automatic`, `reason?`, `fields?` - field names, never a value). See [MCP elicitation](#mcp-elicitation-a-server-asks-the-user). |
 | `egress.request` | A `web_fetch` request (or `web_search`'s call to its [search API](#search-finding-the-page-to-fetch)), allowed or refused by the [egress policy](#egress-what-the-model-may-fetch) (`url` is origin and path only, `allowed`, `status?`, `reason?`). |
 | `media.generated` | A [media tool](#media-images-speech-and-transcription) wrote a file: `kind: 'image' \| 'speech'`, `path` (absolute), `mediaType`, `bytes`, `model`, `step?`. The bytes are in the file, never in an event. |
@@ -554,7 +554,7 @@ Progressive disclosure keeps them cheap:
 
 1. The planner and executor system prompts carry only an index: `- name: description`.
 2. The planner's plan has an optional `skills` field naming the skills that apply (unknown names are dropped with a warning). Their instructions are injected into the executor, replanner and synthesizer system prompts for the rest of the run (24k chars in total, clipped beyond that).
-3. The executor gets two read-only built-in tools: `load_skill({ name })` returns `{ name, content, files }` and activates the skill for later steps; `read_skill_file({ name, path })` returns a bundled file. Both always run without approval.
+3. The executor gets two read-only built-in tools: `load_skill({ name })` returns `{ name, content, files }` and activates the skill for later steps; `read_skill_file({ name, path })` returns a bundled file. Both always run without approval (an MCP server's skill is the one exception: a person sees it first - [MCP skills](#mcp-skills-experimental)).
 
 Every activation emits `skill.activated` (`by: 'plan' | 'tool'`). A host or MCP tool named `load_skill` / `read_skill_file` is a configuration error. `parseSkillMarkdown(markdown, files?)` and `defineSkill(skill)` validate skills you build yourself (names match `[a-z0-9-]{1,64}`). `loadSkillsFromDir` bundles text files (`.md .txt .json .yaml .yml .csv .ts .js .py .sh .html .css .xml .toml`, up to 256 KB each).
 
@@ -566,14 +566,20 @@ An MCP server may serve skills too (the [Skills extension](https://github.com/mo
 ```ts
 const agent = await createAgent({
   ...config,
-  mcpServers: { docs: { url: 'https://docs.example.com/mcp', protocol: 'auto', skills: true } },
+  mcpServers: {
+    docs: { url: 'https://docs.example.com/mcp', protocol: 'auto', skills: true },
+    // A server you vetted: its skills load without asking anyone.
+    ours: { url: 'https://mcp.internal.example/mcp', protocol: 'auto', skills: { consent: 'never' } },
+  },
+  // A person sees each skill before the model does (see "Consent" below).
+  toolApproval: { onRequest: askThePerson },
 })
 agent.listSkills()
 // [{ name: 'docs/pdf-processing', description: 'Extract, fill and assemble PDF documents [from the MCP server "docs" - third-party]', server: 'docs' }, ...]
 ```
 
-- **Off by default.** Without `skills: true` the extension is not declared and nothing of it is
-  sent. With it, the extension is declared only where 2026-07-28 may be spoken (`protocol:
+- **Off by default.** Without `skills` (`true`, or `{ consent }`) the extension is not declared
+  and nothing of it is sent. With it, the extension is declared only where 2026-07-28 may be spoken (`protocol:
   'auto'` or `'modern'`): on `protocol: 'legacy'` (or none) a warning says so and nothing is
   asked, and an `'auto'` connection that ends on a 2025 revision lists no skills. There is no
   agent-wide switch: a server is trusted with this one by one.
@@ -602,13 +608,40 @@ agent.listSkills()
   whose URI and frontmatter name disagree are refused, with a warning.
 - **Changes.** A change of a server's skills is announced as a resource list change: the agent
   re-lists them the way it re-lists tools after a `tools/list_changed` (between runs).
+- **Consent: a person sees a skill before the model does.** The first time a server's skill would
+  enter the model's context - `load_skill`, the planner picking it, a resumed run, or
+  `read_skill_file` of one of its files - its `SKILL.md` is read and verified, then put to
+  `toolApproval.onRequest` as a request with `skill` (`McpSkillConsentView`: `server`, `name`,
+  `skill`, `uri`, `description`, `size` / `totalSize`, `files` / `fileCount`, `byUri`, `nestedIn`,
+  `consent`, and `body` - the very text the model would read, cleaned and capped as the model gets
+  it); `toolName` is `load_skill`, `input` what it was called with. A yes lets it in; `remember:
+  true` ("Always for this server") lets in that server's other skills for the agent's life; a no
+  keeps all of it out - the model is told so ("The user did not allow the skill ... nothing of it
+  is in your context") and is not asked again in that run. Asked whatever the approval mode says -
+  autopilot and an allow-everything rule included. With no `onRequest` such a skill is not loaded
+  (a warning at `createAgent` says so). When: `skills: { consent }` per server, else
+  `mcpSkills: { consent }` for the agent, else `'once-per-skill'` - once per skill in the agent's
+  life, bound to its entry (the server, the URI and every file's digest: a changed skill is asked
+  about again); `'ask'` - in every run that loads it; `'never'` - no question, for a server you
+  vetted. A skill nested inside another one of the server is asked about on its own: neither its
+  enclosing skill's yes nor "Always for this server" covers it. A no-answer (`timeoutMs`) is a
+  refusal nobody gave: asked again next time.
+- **By URI.** The listing may be partial: a skill a server names by its URI - in its instructions,
+  in one of its skills, in a tool result - loads with `load_skill({ server, uri })` (its
+  description says so, and names the servers). The URI must be a `skill://.../<name>/SKILL.md`
+  and `server` one whose `skills` are on - both checked before any request; the catalog must have
+  room for one more of that server (it counts like a listed one); then `skills/get` goes to THAT
+  server only (a `-32602` "no such skill" reaches the model as the call's error), and the entry
+  passes every rule a listed one does, then the same verification, preamble and consent
+  (`skill.byUri`). It joins the catalog for the agent's life under a name no other skill has
+  (`docs/release-checklist`, or `docs/internal/git-workflow` when `docs/git-workflow` is taken).
 
 `skill.activated` carries `server` for these. The browser package's
 [security notes](https://github.com/dudko-dev/agents/blob/main/packages/agent-web/docs/security.md#mcp-skills-third-party-instructions)
 say what a server's skill can and cannot do; its
 [design notes](https://github.com/dudko-dev/agents/blob/main/packages/agent-web/docs/design.md#mcp-skills-one-catalog-namespaced-under-a-preamble-opt-in)
-why it is namespaced, loaded under a preamble and opt-in. Not done (yet): loading a skill the
-listing leaves out by its URI alone (`skills/get`), and `resources/directory/read`.
+why it is namespaced, loaded under a preamble and opt-in, and why the consent is what it is. Not
+done (yet): `resources/directory/read`.
 
 ## Tool approval and autopilot
 
@@ -1436,7 +1469,7 @@ Consent is the host's job ([tool approval](#tool-approval-and-autopilot)) — th
 | `decisionModel` | Off by default. A [decision model](#decision-models): an object with `decide(question, { abortSignal })` that answers a closed question with `{ choice, confidence }` (`decisionModelFromAiSdk(...)` adapts Gemini Decision 1, TypeSafe's Jev or any AI SDK decision model). Where it is confident it replaces the replanner's continue / finish call and a pipeline node's route call. Never consulted for tool approval or egress. |
 | `decision` | `{ confidenceThreshold?, timeoutMs?, replan?, route? }` (defaults `0.8`, `5000`, `true`, `true`). Below the threshold, on an error, a timeout or an answer that is not an option, the ordinary model call runs unchanged. |
 | `plannerModel` / `synthesizerModel` | **Deprecated** model-only shortcuts. Equivalent to `planner: { model }` / `synthesizer: { model }`. The override block, if present, wins. |
-| `mcpServers` | `Record<name, { url, headers?, getHeaders?, authProvider?, fetch?, connectTimeoutMs?, protocol? } \| { command, args?, env?, cwd?, connectTimeoutMs?, protocol? }>` — StreamableHTTP for remote (legacy HTTP+SSE servers are **not** supported), stdio for locally-spawned servers. `protocol`: `'legacy'` (default) \| `'auto'` \| `'modern'` - the 2025 revisions, 2026-07-28 when the server offers it, or 2026-07-28 only; see [MCP protocol revision](#mcp-protocol-revision). `skills: true` (**experimental**, needs `'auto'` / `'modern'`): load the server's skills into the catalog as `<server>/<skill>`; off by default - see [MCP skills](#mcp-skills-experimental). |
+| `mcpServers` | `Record<name, { url, headers?, getHeaders?, authProvider?, fetch?, connectTimeoutMs?, protocol? } \| { command, args?, env?, cwd?, connectTimeoutMs?, protocol? }>` — StreamableHTTP for remote (legacy HTTP+SSE servers are **not** supported), stdio for locally-spawned servers. `protocol`: `'legacy'` (default) \| `'auto'` \| `'modern'` - the 2025 revisions, 2026-07-28 when the server offers it, or 2026-07-28 only; see [MCP protocol revision](#mcp-protocol-revision). `skills: true` or `{ consent: 'once-per-skill' \| 'ask' \| 'never' }` (**experimental**, needs `'auto'` / `'modern'`): load the server's skills into the catalog as `<server>/<skill>`, each let into the model's context only once a person allowed it (`consent`); off by default - see [MCP skills](#mcp-skills-experimental). |
 | `tools` | Optional `ToolSet` of native AI-SDK tools registered alongside MCP-discovered ones. Names must not collide with MCP-prefixed names or the built-in tools (`createAgent` throws on conflict). Mark read-only tools with `markReadOnly(tool)`, and tools that run code with `markCodeExecution(tool)` (always asked while a run acts on an MCP server's skill). |
 | `availableTools` / `excludedTools` | Whitelist / blacklist applied to **all** tools (MCP and native). |
 | `maxIterations` | Cap on **executed steps** across the run (every step counts, including those run after a `revise`). |
@@ -1457,6 +1490,7 @@ Consent is the host's job ([tool approval](#tool-approval-and-autopilot)) — th
 | `mcpConnectTimeoutMs` | Connect + `tools/list` budget per MCP server (each server's `connectTimeoutMs` wins). Default `30000`; `0` disables. |
 | `onElicitation` | `(request, { signal }) => { action: 'accept', content? } \| { action: 'decline' } \| { action: 'cancel' }`. Answers an MCP server that asks the user for input during a tool call. Unset (default): no capability is declared, a server cannot ask, the wire is unchanged. See [MCP elicitation](#mcp-elicitation-a-server-asks-the-user). |
 | `elicitation` | `{ timeoutMs?, maxPerToolCall?, maxPerRun?, url?, subagents? }` — defaults `300000` / `5` / `20` / `false` / `false`. Only read with `onElicitation`. |
+| `mcpSkills` | `{ consent?: 'once-per-skill' \| 'ask' \| 'never' }` (**experimental**) — when a person is asked (through `toolApproval.onRequest`) before an MCP server's skill enters the model's context, for the servers whose own `skills: { consent }` does not say. Default `'once-per-skill'`. See [MCP skills](#mcp-skills-experimental). |
 | `mcpInstructions` | `true` (default) \| `false`. Show the model the `instructions` MCP servers return on `initialize` (planner + executor system prompts, marked as third-party text, capped). See [MCP server instructions](#mcp-server-instructions-and-structured-results). |
 | `promptCaching` | `true` (default) \| `false` \| `{ ttl?: '5m' \| '1h', key? }`. See [Prompt caching](#prompt-caching). |
 | `outputSanitizer` | Optional `(toolName, output) => unknown` hook to redact tool results before they reach the LLM. |

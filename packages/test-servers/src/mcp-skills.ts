@@ -19,6 +19,10 @@ import { createHash } from 'node:crypto'
  * - `skill://acme/billing/refunds/SKILL.md` and `skill://acme/support/refunds/SKILL.md`: two
  *   skills of one server that share a name (the specification allows it; a host disambiguates)
  *
+ * And one it never lists but answers `skills/get` and `resources/read` for (a partial listing:
+ * "A skill absent from a partial listing is still retrievable by URI"):
+ * - `skill://internal/release-checklist/SKILL.md` (`SKILL_URIS.unlisted`)
+ *
  * Each body carries a marker (`GIT-WORKFLOW-BODY`, ...) a test can look for.
  */
 
@@ -49,7 +53,27 @@ export interface ISkillFaults {
   changedFile?: boolean
   /** List this many more skills, `extra-1` ... `extra-<n>`. */
   extra?: number
+  /**
+   * List `skill://handbook/SKILL.md`, whose files include `onboarding/SKILL.md`, and that nested
+   * skill's own entry, `skill://handbook/onboarding/SKILL.md` (Nested Skills).
+   */
+  nested?: boolean
+  /**
+   * Answer `skills/list` with no skills at all (a server MAY: "an empty or partial listing"),
+   * while `skills/get` still answers for every skill the listing would hold - the faults' ones
+   * included - and the unlisted one.
+   */
+  emptyListing?: boolean
 }
+
+/** Skill URIs a test asks for by URI. */
+export const SKILL_URIS = {
+  /** Served by `skills/get` and `resources/read`, never listed. */
+  unlisted: 'skill://internal/release-checklist/SKILL.md',
+  /** With `skillFaults.nested`: the enclosing skill and the one nested in it. */
+  handbook: 'skill://handbook/SKILL.md',
+  onboarding: 'skill://handbook/onboarding/SKILL.md',
+} as const
 
 /** The markers of the honest skills' bodies and files. */
 export const SKILL_MARKERS = {
@@ -61,6 +85,9 @@ export const SKILL_MARKERS = {
   supportRefunds: 'SUPPORT-REFUNDS-BODY',
   hostile: 'HOSTILE-SKILL-BODY',
   added: 'ADDED-SKILL-BODY',
+  unlisted: 'RELEASE-CHECKLIST-BODY',
+  handbook: 'HANDBOOK-BODY',
+  onboarding: 'ONBOARDING-BODY',
 } as const
 
 const md = (name: string, description: string, body: string, extra = ''): string =>
@@ -117,18 +144,28 @@ export interface ISkillCatalog {
   faults: ISkillFaults
   /** Every `resources/read` URI a client asked for, in order. */
   reads: string[]
+  /** Every `skills/get` URI a client asked for, in order. */
+  gets: string[]
   /** What `skills/list` lists now (with the faults), for an answer made by hand. */
   listing: () => Promise<Skill[]>
-  /** Serve one more skill from now on. */
-  add: (path: string, description: string, body: string) => Promise<void>
+  /** Serve one more skill from now on (`listed: false`: by `skills/get` only, never listed). */
+  add: (
+    path: string,
+    description: string,
+    body: string,
+    options?: { listed?: boolean },
+  ) => Promise<void>
 }
 
 export const createSkillCatalog = async (): Promise<ISkillCatalog> => {
   const faults: ISkillFaults = {}
   const reads: string[] = []
+  const gets: string[] = []
   const files = new Map<string, string>()
   const entries = new Map<string, Skill>()
   const order: string[] = []
+  // Served by `skills/get` (and their files by `resources/read`), never listed.
+  const unlisted = new Map<string, Skill>()
 
   const put = async (path: string, skillFiles: Files): Promise<Skill> => {
     const entry = await skillEntry(path, skillFiles)
@@ -141,6 +178,36 @@ export const createSkillCatalog = async (): Promise<ISkillCatalog> => {
     const entry = await put(path, skillFiles)
     entries.set(entry.uri, entry)
     order.push(entry.uri)
+  }
+  {
+    const entry = await put('internal/release-checklist', {
+      'SKILL.md': md(
+        'release-checklist',
+        'Check a release before it ships',
+        `# Release checklist\n\nTag the commit, then publish the notes. ${SKILL_MARKERS.unlisted}\n`,
+      ),
+    })
+    unlisted.set(entry.uri, entry)
+  }
+  // `nested`: a skill with a skill inside it, each with an entry of its own.
+  const nestedEntries: Skill[] = []
+  {
+    const onboarding = md(
+      'onboarding',
+      'Welcome a new team member',
+      `# Onboarding\n\nGive them a laptop and a buddy. ${SKILL_MARKERS.onboarding}\n`,
+    )
+    nestedEntries.push(
+      await put('handbook', {
+        'SKILL.md': md(
+          'handbook',
+          "The team's handbook",
+          `# Handbook\n\nSee onboarding/SKILL.md for the first day. ${SKILL_MARKERS.handbook}\n`,
+        ),
+        'onboarding/SKILL.md': onboarding,
+      }),
+      await put('handbook/onboarding', { 'SKILL.md': onboarding }),
+    )
   }
 
   // The entries the faults add, built once and listed while their switch is on.
@@ -227,12 +294,16 @@ export const createSkillCatalog = async (): Promise<ISkillCatalog> => {
       if (faults[key]) out.push(faulty.get(key) as Skill)
     }
     if (faults.extra) out.push(...(await extraOf(faults.extra)))
+    if (faults.nested) out.push(...nestedEntries)
     return out
   }
 
   const source: SkillSource = {
-    list: async () => ({ skills: await listing() }),
-    get: async (uri) => (await listing()).find((s) => s.uri === uri),
+    list: async () => ({ skills: faults.emptyListing ? [] : await listing() }),
+    get: async (uri) => {
+      gets.push(uri)
+      return (await listing()).find((s) => s.uri === uri) ?? unlisted.get(uri)
+    },
     read: async (uri) => {
       reads.push(uri)
       const text = files.get(uri)
@@ -249,7 +320,9 @@ export const createSkillCatalog = async (): Promise<ISkillCatalog> => {
     extension: new SkillsExtension({ source, onWarning: () => {} }),
     faults,
     reads,
+    gets,
     listing: async () => {
+      if (faults.emptyListing) return []
       const out = await listing()
       if (faults.nameMismatch) {
         const text = md('other-name', 'Its directory says another name', '# Other\n')
@@ -267,9 +340,14 @@ export const createSkillCatalog = async (): Promise<ISkillCatalog> => {
       }
       return out
     },
-    add: async (path, description, body) => {
+    add: async (path, description, body, options = {}) => {
       const name = path.split('/').pop() as string
       const entry = await put(path, { 'SKILL.md': md(name, description, body) })
+      if (options.listed === false) {
+        unlisted.set(entry.uri, entry)
+        return
+      }
+      unlisted.delete(entry.uri)
       if (!entries.has(entry.uri)) order.push(entry.uri)
       entries.set(entry.uri, entry)
     },

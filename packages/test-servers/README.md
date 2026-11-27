@@ -175,11 +175,15 @@ side never serves them: the extension is written against 2026-07-28.
 | `skill://pdf-processing/SKILL.md` | `references/FORMS.md`, `scripts/extract.py` (a script its instructions point at) | `PDF-PROCESSING-BODY` (`FORMS-FILE-BODY`, `EXTRACT-SCRIPT-BODY`) |
 | `skill://acme/billing/refunds/SKILL.md` | - | `BILLING-REFUNDS-BODY` |
 | `skill://acme/support/refunds/SKILL.md` | - (the same name, `refunds`, as the one above) | `SUPPORT-REFUNDS-BODY` |
+| `skill://internal/release-checklist/SKILL.md` (`SKILL_URIS.unlisted`) | - NEVER listed: `skills/get` and `resources/read` answer for it (a partial listing) | `RELEASE-CHECKLIST-BODY` |
 
-`mcp.skillReads` lists every skill file a client read (`resources/read`), in order.
-`mcp.addSkill(path, description, body)` serves one more skill from then on and announces a resource
-list change (`notifications/resources/list_changed`, on every listen stream that asked for
-`resourcesListChanged`), which is how a client hears of a change of skills.
+`mcp.skillReads` lists every skill file a client read (`resources/read`), in order, and
+`mcp.skillGets` every `skills/get` URI. `mcp.addSkill(path, description, body)` serves one more
+skill from then on and announces a resource list change (`notifications/resources/list_changed`,
+on every listen stream that asked for `resourcesListChanged`), which is how a client hears of a
+change of skills; with a fourth argument `{ listed: false }` the skill is served by `skills/get`
+only, never listed, and nothing is announced (a URI that belongs to THIS server, for a test whose
+other server must never be asked for it).
 
 ### MCP Apps tools
 
@@ -295,6 +299,8 @@ that is already open is not touched:
 | `longBody` | `skill://long-guide/SKILL.md`, whose instructions are 40 000 characters (ending `END-OF-LONG-GUIDE`) |
 | `changedFile` | (no new skill) `pdf-processing`'s `references/FORMS.md` is served changed, same length: its digest no longer matches |
 | `extra: n` | `skill://extra-1/SKILL.md` ... `skill://extra-<n>/SKILL.md` |
+| `nested` | `skill://handbook/SKILL.md` (its files include `onboarding/SKILL.md`, `HANDBOOK-BODY`) and the nested skill's own entry `skill://handbook/onboarding/SKILL.md` (`ONBOARDING-BODY`) |
+| `emptyListing` | (no new skill) `skills/list` answers with no skills at all; `skills/get` still answers for every skill the listing would hold - the other switches' ones included - and the unlisted one |
 
 **MCP server** — `mcp.elicitationFaults` (with `elicitationTools`), both eras:
 
