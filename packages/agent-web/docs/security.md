@@ -576,7 +576,8 @@ helper may **narrow** what the calling run has and never widen it.
   charged to every run above it as they happen; and a call the parent has no budget for is
   refused even if the helper's own share is not used up. Depth (`maxDepth`, never above 4), the
   number of helpers per run (`maxChildren`, kept across a resume), the number running at once
-  (`maxConcurrent`) and the wall clock of one helper (`timeoutMs`) are capped. A helper at the
+  (`maxConcurrent`) and the time of one helper (`timeoutMs`, which does not run while a person is
+  asked something) are capped. A helper at the
   depth limit is not offered the tool at all.
 - **The notebook stays with the parent.** `save_skill` / `forget_skill` are never given to a
   helper, by name or through `defaultTools: 'all'`. A helper reads the skills (lessons still
@@ -713,7 +714,9 @@ names the helper. A model that can start helpers must not get a second way to th
 `maxPerToolCall` (5) and a run `maxPerRun` (20); a 2026-07-28 call ends after 10
 `input_required` rounds. Past any of them - and when the callback throws - the question is
 cancelled, the tool call fails with a sentence that says why, and nothing is retried: a tool
-that writes runs once.
+that writes runs once. The step's `chatTimeoutMs` does NOT bound a question - it stops while
+one waits - so `timeoutMs` is the bound; keep it (or a stop the user can reach) on every
+connection. The same goes for tool approval, whose `toolApproval.timeoutMs` has no default.
 
 **Off is off.** Without the callback no capability is declared and the wire is what it was. A
 server cannot switch the feature on, and neither can the model.

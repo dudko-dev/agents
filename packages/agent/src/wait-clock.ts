@@ -1,20 +1,23 @@
 // Time limits that do not count the time a HUMAN takes.
 //
-// A step's limit (and a subagent's) is about the latency of models and tools. While a tool call
-// waits for a person - a tool approval, an MCP elicitation - that clock is stopped, and when the
-// person has answered it goes on with the time it had left: never with a full limit again, and
-// never with more than the wait itself added. The wait keeps a bound of its own
-// (`toolApproval.timeoutMs`, `elicitation.timeoutMs`), and a stop of the run still ends
+// A step's limit (`llmTimeoutMs` / `chatTimeoutMs`) and a subagent's (`timeoutMs`) are about the
+// latency of models and tools. While a tool call waits for a person - a tool approval, an MCP
+// elicitation - the clock those limits run on is stopped, and when the person has answered it
+// goes on with the time it had left: never with a full limit again, and never with more than the
+// length of the wait added. The wait keeps a bound of its own (`toolApproval.timeoutMs`,
+// `elicitation.timeoutMs`), which is NOT on this clock, and a stop of the run still ends
 // everything at once: a clock only keeps time, it never holds an abort back.
 //
-// One clock per run. Its deadlines are the run's latency limits; whoever asks a person a
-// question pauses it for the length of the wait. A subagent runs on a clock of its own, and the
-// tool that started it follows its events (`followHumanWaits`), so the caller's clock stops for
-// as long as anything below it waits.
+// One clock per run. Its deadlines are the run's step limit and the time limits of the subagents
+// its tool calls run; whoever asks a person a question pauses it for the length of the wait. A
+// subagent runs on a clock of its own, and the tool that started it follows its events
+// (`followHumanWaits`), so the caller's clock stops for as long as anything below it waits. A
+// subagent waiting on a tool that runs in the calling run follows the caller's clock
+// (`followClock`) for as long as that tool call is in flight.
 //
-// Pure, no imports: this file is a COPY, byte for byte, of the sibling package's
-// `src/wait-clock.ts` (Node: `@dudko.dev/agent`, browser: `@dudko.dev/agent-web`). Change both;
-// `tests/wait-clock.test.ts` of the Node package compares them.
+// Pure, no imports: this file is a COPY, byte for byte, of the sibling package's wait clock
+// (Node: `@dudko.dev/agent` `src/wait-clock.ts`, browser: `@dudko.dev/agent-web`
+// `src/wait-clock.ts`). Change both; `tests/wait-clock.test.ts` of the Node package compares them.
 
 /** One deadline of a clock. */
 export interface IWaitTimer {
@@ -95,6 +98,9 @@ export const createWaitClock = (): IWaitClock => {
       let startedAt = 0
       let handle: ReturnType<typeof setTimeout> | undefined
       let ended = false
+      // Time that ran since the deadline last started (never negative: a wall clock set back
+      // must not give a deadline more time).
+      const ran = (): number => Math.max(0, Date.now() - startedAt)
       const entry: IEntry = {
         start: () => {
           if (ended || handle !== undefined) {
@@ -119,7 +125,7 @@ export const createWaitClock = (): IWaitClock => {
           clearTimeout(handle)
           handle = undefined
           // What is left is what was left when it started, less the time it ran.
-          left = Math.max(0, left - (Date.now() - startedAt))
+          left = Math.max(0, left - ran())
         },
       }
       entries.add(entry)
@@ -138,8 +144,7 @@ export const createWaitClock = (): IWaitClock => {
             entries.delete(entry)
           }
         },
-        left: () =>
-          ended ? 0 : handle === undefined ? left : Math.max(0, left - (Date.now() - startedAt)),
+        left: () => (ended ? 0 : handle === undefined ? left : Math.max(0, left - ran())),
       }
     },
     watch: (listener) => {
@@ -175,7 +180,7 @@ export interface IDeadlineSignal {
  * `outer` with a time limit of `ms` on `clock`: what `AbortSignal.any([outer,
  * AbortSignal.timeout(ms)])` is, except that the limit does not run while the clock is paused.
  * Without a limit (`ms` absent, 0, negative or not finite) the signal is `outer` itself; without
- * a clock the limit is never paused.
+ * a clock the limit is never paused. An abort of `outer` is passed on at once, paused or not.
  */
 export const deadlineSignal = (
   clock: IWaitClock | undefined,
@@ -210,6 +215,29 @@ export const deadlineSignal = (
       timer?.cancel()
       outer?.removeEventListener('abort', onOuter)
     },
+  }
+}
+
+/**
+ * Keep `follower` stopped whenever `leader` is (now, if it already is), until the returned
+ * function is called - which also starts `follower` again if it was holding it.
+ */
+export const followClock = (follower: IWaitClock, leader: IWaitClock): (() => void) => {
+  let resume: (() => void) | undefined = leader.paused ? follower.pause() : undefined
+  const unwatch = leader.watch((waiting) => {
+    if (waiting) {
+      resume ??= follower.pause()
+      return
+    }
+    const r = resume
+    resume = undefined
+    r?.()
+  })
+  return () => {
+    unwatch()
+    const r = resume
+    resume = undefined
+    r?.()
   }
 }
 

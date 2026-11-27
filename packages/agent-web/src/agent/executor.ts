@@ -7,6 +7,7 @@ import { WEB_FETCH_TOOL } from '../tools/egress.js'
 import { renderCatalog } from '../tools/prompted.js'
 import { FIND_TOOLS_NAME } from '../tools/search.js'
 import { renderEarlierAttempts, type IAttemptOutcome, type IEarlierAttempt } from '../tiers.js'
+import { deadlineSignal } from '../wait-clock.js'
 import {
   BLOCKER,
   type IPlanStep,
@@ -146,6 +147,9 @@ export const executeStep = async (
   // Inputs of the calls in flight, by tool name, to pair with their results for `attempt.calls`.
   const inFlight: { name: string; input: unknown }[] = []
 
+  // The step's time limit, on the run's clock: it does not run while a tool call of the step
+  // waits for a person (a tool approval, an MCP elicitation) - see wait-clock.ts.
+  const deadline = deadlineSignal(ctx.clock, ctx.signal, ctx.config.chatTimeoutMs)
   const loop = await runToolLoop(ctx.executorModel, {
     mode: ctx.executorMode,
     ...stageCall(ctx, 'executor', parts.system),
@@ -160,8 +164,7 @@ export const executeStep = async (
     shouldStop: ctx.overBudget,
     ...(ctx.takeRoundUpdates ? { takeUpdates: ctx.takeRoundUpdates } : {}),
     temperature: ctx.config.temperature,
-    abortSignal: ctx.signal,
-    timeoutMs: ctx.config.chatTimeoutMs,
+    abortSignal: deadline.signal,
     caching: ctx.caching,
     ...(ctx.config.compaction.clearToolResultsAfterTokens > 0
       ? {
@@ -198,11 +201,15 @@ export const executeStep = async (
         }
       },
     },
-  }).catch((err: unknown) => {
-    throw (
-      imageRefusal(ctx, err, ctx.executorModel) ?? contextOverflowOf(err, ctx.executorModel) ?? err
-    )
   })
+    .catch((err: unknown) => {
+      throw (
+        imageRefusal(ctx, err, ctx.executorModel) ??
+        contextOverflowOf(err, ctx.executorModel) ??
+        err
+      )
+    })
+    .finally(deadline.done)
   ctx.log.debug('executor text:', loop.text)
   // A step the output cap cut off is silent otherwise: the text just stops, or a tool call's
   // arguments (a file body) end mid-JSON and the call never happens.

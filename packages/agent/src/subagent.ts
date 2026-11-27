@@ -47,7 +47,8 @@ export interface ISubagentToolOptions {
   tools?: ToolSet
   // Parallel calls of this tool beyond this many queue. Default 4.
   maxConcurrent?: number
-  // Abort the child after this many ms. Default: none.
+  // Abort the child after this many ms. Default: none. Time a person takes to answer a question
+  // (a tool approval, an MCP elicitation) of the child or of the calling run does not count.
   timeoutMs?: number
   // The child's final text is clipped to this. Default 8_000.
   outputMaxChars?: number
@@ -73,8 +74,9 @@ export type ParentToWorkerMessage =
   | { type: 'run'; task: string; config: IAgentConfig; proxied: IProxiedToolDescriptor[] }
   | { type: 'abort' }
   | { type: 'tool-result'; callId: string; ok: boolean; output: unknown }
-  // The calling run started (true) / stopped (false) waiting for a person: the proxied host
-  // tools in flight belong to that wait, so the child's own step limit stops with it.
+  // The calling run started (true) / stopped (false) waiting for a person (its clock stopped /
+  // runs again, wait-clock.ts): a proxied host tool call in flight runs in that run, so the
+  // clock of the child run that made it follows.
   | { type: 'tool-wait'; waiting: boolean }
 
 export type WorkerToParentMessage =
@@ -391,14 +393,20 @@ const runInWorker = (
       return
     }
     signal.addEventListener('abort', onAbort, { once: true })
-    // A host tool the child calls runs HERE, in the calling run: when it waits for a person
-    // (an approval, an elicitation) this run's clock stops, and the child is told, so the
-    // step that is waiting for the tool's result does not run out of time meanwhile.
-    unwatch = clock.watch((waiting) => {
+    // A host tool the child calls runs HERE, in the calling run: while that run waits for a
+    // person (an MCP question of the host tool, say) its clock is stopped, and the child is told,
+    // so a step of the child that is waiting for a host tool's result does not run out of time
+    // meanwhile. The worker cannot tell which question is whose: a proxied call in flight
+    // follows every wait of this run - its step is paused at most as long as this run is.
+    const tell = (waiting: boolean): void => {
       if (!settled) {
         worker.postMessage({ type: 'tool-wait', waiting } satisfies ParentToWorkerMessage)
       }
-    })
+    }
+    unwatch = clock.watch(tell)
+    if (clock.paused) {
+      tell(true)
+    }
     worker.postMessage({
       type: 'run',
       task,

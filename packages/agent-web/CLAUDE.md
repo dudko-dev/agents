@@ -168,6 +168,22 @@ behind every decision.
   helper's tool calls on every run above it. OFF without the switch: the same golden fixture as
   the tiers. Privilege boundary: every guard has a test in `tests/subagent-dynamic.test.ts` and a
   mutation check. In-process only.
+- `src/wait-clock.ts` (pure, no imports) — time limits that do not count the time a PERSON takes.
+  One clock per run (made in `agent/runner.ts`, on `AgentContext.clock` and
+  `ToolRunContext.clock`); the executor's step limit (`chatTimeoutMs`, `deadlineSignal` in
+  `agent/executor.ts`, passed to `runToolLoop` as its `abortSignal`) and the `timeoutMs` of every
+  subagent the run's tool calls start (`subagent/tool.ts`, `subagent/dynamic.ts`) are its
+  deadlines. The consent gate (`tools/approval.ts`, `ApprovalEvents.wait`, given by `tools/wrap.ts`)
+  and an MCP question (`call.pause` in `mcp/elicitation.ts`, wired in `mcp/http.ts` from
+  `agentRun.clock`, or `subagentCall.pause` for a worker's host tool) pause it for the wait; it goes
+  on with what it had left - never reset, never extended past the wait. The waits' own bounds
+  (`toolApproval.timeoutMs`, `elicitation.timeoutMs`) are plain timers, NOT on the clock, and a
+  stop is passed on at once. A subagent tool follows its child's events (`followHumanWaits`); a
+  host tool asked about by the PARENT's gate pauses the parent's clock and the child's follows
+  (`followClock`; a worker child by `tool-wait` messages). A COPY of the server's
+  `src/wait-clock.ts`, byte for byte — change both (the server's `tests/wait-clock.test.ts`
+  compares them and tests the clock on mocked timers; `tests/human-wait.test.ts` here drives the
+  whole loop). Every guard has a test and a mutation check. Without a wait nothing changes.
 - `src/{thinking,limits,caching,skills,images}.ts` — see docs/capabilities.md.
 - `src/logger.ts` — `logLevel` / `logger` (leveled, console-like sink; default `warn`).
 - Compaction (`memory/compress.ts`, `context-window.ts`) is judged on prompt + transcript + step log together
@@ -209,7 +225,8 @@ behind every decision.
   that asks (helpers refused unless `elicitation.subagents`, caps per tool call and per run,
   timeout, abort, a failed handler = cancel) and the session that drives a tool call in both
   revisions (2025: the `elicitation/create` handler, calls to that server ONE AT A TIME, the
-  call's own 60 s clock stopped while a question waits; 2026-07-28: `input_required` answered
+  call's own 60 s clock stopped while a question waits - and the run's clock too, see
+  `wait-clock.ts`; 2026-07-28: `input_required` answered
   and the same call sent again, never after an automatic answer). A COPY of the server's
   `src/mcp-elicitation.ts`, byte for byte — change both (the server's
   `tests/mcp-elicitation-shared.test.ts` compares them and tests every guard). `http.ts` wires

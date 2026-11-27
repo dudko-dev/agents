@@ -23,6 +23,7 @@ import { recordWrite, replayOutput, replayedWrite, type IStepWrites } from '../t
 import { isReadOnlyTool, markReadOnly, type ApprovalState } from '../tools/approval.js'
 import type { AgentTool, AgentToolSet } from '../tools/types.js'
 import { toolRunContextOf } from '../tools/wrap.js'
+import { createWaitClock, followHumanWaits, type IWaitTimer } from '../wait-clock.js'
 import {
   adoptSubagentEvent,
   assertSpawnAllowed,
@@ -207,7 +208,11 @@ export const createDynamicSubagentTool = (deps: DynamicSubagentDeps): AgentTool 
       const onParentAbort = (): void => controller.abort()
       let timedOut = false
       let stoppedByUser = false
-      let timer: ReturnType<typeof setTimeout> | undefined
+      let timer: IWaitTimer | undefined
+      // The helper's time limit is a deadline of THIS run's clock, and that clock - with this
+      // run's step limit on it - is stopped while the helper waits for a person.
+      const clock = runCtx.clock ?? createWaitClock()
+      const waits = followHumanWaits(clock)
       let unregister: (() => void) | undefined
       let reservation: ISpawnReservation | undefined
       let spent: IUsage = emptyUsage()
@@ -286,10 +291,10 @@ export const createDynamicSubagentTool = (deps: DynamicSubagentDeps): AgentTool 
         parentSignal?.addEventListener('abort', onParentAbort, { once: true })
         if (parentSignal?.aborted) controller.abort()
         if (settings.timeoutMs > 0) {
-          timer = setTimeout(() => {
+          timer = clock.timer(settings.timeoutMs, () => {
             timedOut = true
             controller.abort()
-          }, settings.timeoutMs)
+          })
         }
         reservation = {
           limits: budget.limits,
@@ -335,6 +340,7 @@ export const createDynamicSubagentTool = (deps: DynamicSubagentDeps): AgentTool 
         const result = await agent.run(renderSubagentTask(input), {
           signal: controller.signal,
           onEvent: (event) => {
+            waits.see(event)
             if (event.type === 'error' && event.phase === 'run') runError = event.error
             if (event.type === 'usage') {
               // Charged to the parent as it happens: the parent's limits see a long-running helper.
@@ -375,7 +381,8 @@ export const createDynamicSubagentTool = (deps: DynamicSubagentDeps): AgentTool 
         throw err
       } finally {
         unregister?.()
-        if (timer !== undefined) clearTimeout(timer)
+        timer?.cancel()
+        waits.end()
         parentSignal?.removeEventListener('abort', onParentAbort)
         if (reservation) {
           const i = scope.running.indexOf(reservation)

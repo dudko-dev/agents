@@ -253,7 +253,9 @@ export interface IToolApprovalConfig {
   rules?: Record<string, ToolPermission>
   // Called for every 'ask'. Without it an 'ask' is a denial.
   onRequest?: (req: IToolApprovalRequest) => ToolApprovalDecision | Promise<ToolApprovalDecision>
-  // No decision within this many ms -> deny. Default: wait forever.
+  // No decision within this many ms -> deny. Default: wait forever (until the run is stopped).
+  // The only bound on the wait: the step's `llmTimeoutMs` (and a subagent's `timeoutMs`) stop
+  // while a person decides.
   timeoutMs?: number
 }
 
@@ -512,8 +514,8 @@ export interface IAgentConfig {
   // sent. A callback that throws or does not answer in time cancels the question and fails the
   // tool call; nothing is retried. See the README, "MCP elicitation".
   onElicitation?: McpElicitationHandler
-  // Its settings: `timeoutMs` (default 300_000: a human is answering; the question still ends
-  // with its step - `llmTimeoutMs`), `maxPerToolCall` (5), `maxPerRun` (20), `url` (also accept
+  // Its settings: `timeoutMs` (default 300_000: a human is answering; the step's `llmTimeoutMs`
+  // stops while a question waits), `maxPerToolCall` (5), `maxPerRun` (20), `url` (also accept
   // URL mode; default false), `subagents` (let a call made by a spawn_subagent helper ask too;
   // default false: a helper's question is cancelled without the callback being called).
   elicitation?: McpElicitationOptions
@@ -526,6 +528,11 @@ export interface IAgentConfig {
   // Provider prompt caching. Default true: run-stable system prompts, an
   // Anthropic cache breakpoint on them, and an OpenAI prompt cache key.
   promptCaching?: PromptCachingSetting
+  // Time limit of one model call - for the executor, of a whole step: its rounds and its tool
+  // calls (default: none). It does not run while a tool call of the step waits for a person (a
+  // tool approval, an MCP elicitation): the step goes on with the time it had left once the
+  // person has answered. Those waits have bounds of their own (`toolApproval.timeoutMs`,
+  // `elicitation.timeoutMs`), and stopping the run ends them at once.
   llmTimeoutMs?: number
   llmMaxRetries?: number
   // Hard cap on the number of concurrent agent.run() calls a single agent

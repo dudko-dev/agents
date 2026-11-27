@@ -25,8 +25,10 @@ import {
 
 // Time spent waiting for a HUMAN - a tool approval, an MCP elicitation - is not the model's or a
 // tool's latency: the step's limit (llmTimeoutMs) and a subagent's timeoutMs stop while a question
-// is with the host and go on with what they had left. Over real sockets, with real (short) timers:
-// each test names the guard it is the check for.
+// is with the host and go on with what they had left (wait-clock.ts; its unit tests, on mocked
+// timers, are in wait-clock.test.ts). Here the whole loop, over real sockets, with real but short
+// timers. The elicitation's own bound past the step's limit is tested with the rest of the
+// elicitation suite (mcp-elicitation-integration.test.ts, "time").
 
 type Stage = 'planner' | 'executor' | 'replanner' | 'synthesizer'
 const stageOf = (req: IChatRequest): Stage => {
@@ -265,6 +267,33 @@ test('approval: stopping the run ends the wait at once', async () => {
   )
 })
 
+test("approval: a time limit the host put on the run's signal is a stop - it is not paused", async () => {
+  // The config has no run-level time limit; a host's own AbortSignal.timeout() on the run is
+  // the only one, and it ends a wait like any stop.
+  await withAgent(
+    { root: [[{ name: 'save_note', args: { text: 'a' } }]] },
+    () => ({
+      tools: noteTool(),
+      toolApproval: { mode: 'ask-all', onRequest: () => new Promise<boolean>(() => {}) },
+      llmTimeoutMs: 5000,
+    }),
+    async (rig) => {
+      // AbortSignal.timeout does not keep Node alive, and nothing else would here.
+      const alive = setTimeout(() => {}, 10_000)
+      const startedAt = Date.now()
+      await rig.agent.run({ input: 'Save it', signal: AbortSignal.timeout(STEP) }).catch(() => {})
+      const took = Date.now() - startedAt
+      clearTimeout(alive)
+      assert.ok(took < STEP + 1500, `the host's limit waited for the person (${took} ms)`)
+      const [resolved] = of(rig.events, 'tool.approval-resolved')
+      assert.deepEqual(
+        [resolved.approved, resolved.automatic, resolved.reason],
+        [false, true, 'aborted'],
+      )
+    },
+  )
+})
+
 test("approval: its own bound (toolApproval.timeoutMs) still ends the wait, past the step's limit", async () => {
   const ran: string[] = []
   await withAgent(
@@ -335,33 +364,6 @@ for (const era of ['legacy', 'modern'] as const) {
         const [answered] = of(rig.events, 'mcp.elicitation-answered')
         assert.deepEqual([answered.action, answered.automatic], ['accept', false])
         assert.equal(JSON.stringify(rig.server.elicitations).includes('"accept"'), true)
-      },
-    )
-  })
-
-  test(`${era} elicitation: its own bound (elicitation.timeoutMs) still ends the wait, past the step's limit`, async () => {
-    let hostSignal: AbortSignal | undefined
-    await withServer(
-      {
-        onElicitation: (_request, ctx) => {
-          hostSignal = ctx.signal
-          return new Promise(() => {})
-        },
-        elicitation: { timeoutMs: HUMAN },
-      },
-      async (rig) => {
-        const result = await rig.agent.run({ input: 'Fill in my profile' })
-        assert.equal(hostSignal?.aborted, true, 'the host was not told the wait is over')
-        const [answered] = of(rig.events, 'mcp.elicitation-answered')
-        assert.deepEqual(
-          [answered.action, answered.automatic, answered.reason],
-          ['cancel', true, 'timeout'],
-        )
-        // The call failed for that reason; the step was not cut and reported it.
-        const [[name, ok, output]] = callsOf(result)
-        assert.deepEqual([name, ok], ['wx__elicit_form', false])
-        assert.match(String(output), /elicitation\.timeoutMs/)
-        assert.equal(result.text, 'All done.')
       },
     )
   })

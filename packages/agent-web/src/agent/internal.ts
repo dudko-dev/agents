@@ -32,6 +32,7 @@ import {
   type RunFile,
 } from '../images.js'
 import type { IResolvedEscalation } from '../tiers.js'
+import type { IWaitClock } from '../wait-clock.js'
 import type { IPlanStep, IUsage, ModelTier } from './loop-types.js'
 
 /** The effective tool-selection strategy of a run ('auto' already resolved). */
@@ -86,6 +87,11 @@ export interface AgentContext {
   /** Leveled logger (config.logLevel over config.logger ?? console). */
   log: AgentLogger
   signal?: AbortSignal
+  /**
+   * The run's clock (wait-clock.ts): the executor's step limit (`chatTimeoutMs`) runs on it, and
+   * it is stopped while a tool call of the run - or of a subagent below it - waits for a person.
+   */
+  clock?: IWaitClock
   /** Current world state for grounding, or undefined when no describeState is configured. */
   state: () => Promise<string | undefined>
   /** Session transcript loaded from memory BEFORE this run's goal was appended. */

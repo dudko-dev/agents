@@ -494,7 +494,7 @@ for (const era of ['legacy', 'modern'] as Era[]) {
 
   // ── time ──────────────────────────────────────────────────────────────────
 
-  test(`${era}: a question does not outlive its step - the step's limit ends it, and says so`, async () => {
+  test(`${era}: the step's limit does not end a question - the question's own bound does, and says so`, async () => {
     let hostSignal: AbortSignal | undefined
     await withAgent(
       era,
@@ -504,24 +504,28 @@ for (const era of ['legacy', 'modern'] as Era[]) {
           hostSignal = ctx.signal
           return new Promise(() => {})
         },
-        // The question would wait five minutes; the step may take 400 ms.
-        config: () => ({ llmTimeoutMs: 400 }),
+        // The step may take 400 ms of its own time; the question waits 1200 ms, and the step's
+        // limit stops meanwhile (wait-clock.ts).
+        config: () => ({ llmTimeoutMs: 400, elicitation: { timeoutMs: 1200 } }),
       },
       async (h) => {
         const startedAt = Date.now()
-        await h.agent.run({ input: 'Fill in my profile' }).catch(() => undefined)
-        assert.ok(Date.now() - startedAt < 10_000, 'the run waited for the question')
+        const result = await h.agent.run({ input: 'Fill in my profile' })
+        assert.ok(Date.now() - startedAt >= 1200, 'the step ended the question')
         assert.equal(hostSignal?.aborted, true, 'the host was not told the wait is over')
         const [answered] = of(h.events, 'mcp.elicitation-answered')
         assert.deepEqual(
           [answered.action, answered.automatic, answered.reason],
-          ['cancel', true, 'step-timeout'],
+          ['cancel', true, 'timeout'],
         )
-        const logs = of(h.events, 'log').map((e) => e.message)
-        assert.ok(
-          logs.some((m) => /the step's time limit ended while the question was waiting/.test(m)),
-          'nothing said why the question ended',
+        // The call failed for that reason, and the step reported it: it was not cut.
+        const [call] = result.trace.flatMap((s) => s.toolCalls)
+        assert.deepEqual([call.name, call.ok], ['wx__elicit_form', false])
+        assert.match(
+          String(call.output),
+          /nobody answered within 1200 ms \(elicitation\.timeoutMs\)/,
         )
+        assert.equal(result.text, 'All done.')
         assert.deepEqual(h.server.calls, [{ name: 'elicit_form', args: {} }])
       },
     )

@@ -54,7 +54,11 @@ export interface ToolApprovalConfig {
   rules?: Record<string, ToolPermission>
   /** Resolves an approval request (a UI prompt, a policy service, …). */
   onRequest?: (req: ToolApprovalRequest) => ToolApprovalDecision | Promise<ToolApprovalDecision>
-  /** No decision within this many ms → deny. Default: wait indefinitely. */
+  /**
+   * No decision within this many ms → deny. Default: wait indefinitely (until the run is
+   * stopped). The only bound on the wait: the step's `chatTimeoutMs` (and a subagent's
+   * `timeoutMs`) stop while a person decides.
+   */
   timeoutMs?: number
 }
 
@@ -164,6 +168,11 @@ export interface ApprovalEvents {
     reason?: string
     automatic: boolean
   }) => void
+  /**
+   * A person is being asked (right after `requested`): stop the run's time limits - the step's,
+   * a subagent's - for the length of the wait. Returns what starts them again (wait-clock.ts).
+   */
+  wait?: () => () => void
 }
 
 /**
@@ -208,15 +217,20 @@ export const gateToolCall = async (
   const req: ToolApprovalRequest = { id, ...call }
   events.requested(req)
   let decision: { approved: boolean; reason?: string; remember?: boolean }
+  // A person is being asked: the step's limit is about models and tools, and does not run
+  // meanwhile. The wait has its own bound, `timeoutMs`, and a stop still ends it at once.
+  const resume = events.wait?.()
   try {
     decision = normalizeDecision(
       await withDeadline(Promise.resolve(onRequest(req)), state.config.timeoutMs, signal),
     )
   } catch (err) {
+    resume?.()
     const reason = err instanceof Error ? err.message : String(err)
     events.resolved({ id, name: call.toolName, approved: false, reason, automatic: true })
     throw new ToolDeniedError(reason)
   }
+  resume?.()
   if (decision.approved && decision.remember) state.remembered.add(call.toolName)
   events.resolved({
     id,

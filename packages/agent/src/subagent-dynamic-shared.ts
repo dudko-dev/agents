@@ -28,7 +28,8 @@ export interface IDynamicSubagentsConfig {
   // A helper is not started with fewer tokens than this (when the parent has a token limit).
   // Default 2000.
   minTokens?: number
-  // Wall-clock limit of one helper, in ms (0 = none). Default 300000.
+  // Time limit of one helper, in ms (0 = none). Default 300000. It does not run while a person
+  // is asked something (a tool approval, an MCP question) in the calling run or below it.
   timeoutMs?: number
   // What a helper gets when the model names no tools. Default 'read-only'.
   defaultTools?: SubagentDefaultTools

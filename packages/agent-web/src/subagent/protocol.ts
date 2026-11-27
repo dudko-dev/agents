@@ -26,6 +26,12 @@ export type ParentToWorker =
     }
   | { type: 'abort' }
   | { type: 'tool-result'; callId: string; ok: boolean; output: unknown }
+  /**
+   * The calling run started (true) / stopped (false) waiting for a person (its clock stopped /
+   * runs again, wait-clock.ts): a host tool call in flight runs in that run, so the clock of the
+   * child run that made it follows.
+   */
+  | { type: 'tool-wait'; waiting: boolean }
 
 export type WorkerToParent =
   | { type: 'event'; event: AgentEvent }
