@@ -3,6 +3,7 @@ import type {
   McpElicitationRequest,
   McpElicitationResult,
 } from '../mcp-elicitation.ts'
+import type { McpSkillConsentView } from '../mcp-skills.ts'
 import type { IToolApprovalContext, IToolApprovalRequest, ToolApprovalDecision } from '../types.ts'
 import { answerElicitationAtPrompt } from './elicit.ts'
 
@@ -66,6 +67,73 @@ export const closedReason = (stopped: boolean, reason: unknown): string => {
 export const approvalClosedLine = (toolName: string, why: string): string =>
   `[approve] closed: ${why} - ${toolName} did not run`
 
+/** The line printed when a question about an MCP server's skill is closed. */
+export const skillClosedLine = (skillName: string, why: string): string =>
+  `[skill]   closed: ${why} - ${skillName} was not loaded`
+
+/** How many lines of a skill's instructions the question shows, and how wide each may be. */
+export const SKILL_PREVIEW_LINES = 12
+export const SKILL_PREVIEW_LINE_CHARS = 160
+
+// The terminal is a boundary of its own: the core already removes control characters from a
+// server's text, and this removes them again - an escape sequence must never reach the screen.
+const plain = (raw: unknown): string =>
+  (typeof raw === 'string' ? raw : '').replace(/[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g, '')
+
+const oneLine = (raw: unknown): string => plain(raw).replace(/\s+/g, ' ').trim()
+
+const clipLine = (line: string, n: number): string =>
+  line.length > n ? `${line.slice(0, n)}...` : line
+
+const bytes = (n: number): string => (n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KB`)
+
+/**
+ * The question put before an MCP server's skill enters the model's context (the request's
+ * `skill`). Everything quoted is the SERVER's text and is captioned so; the instructions are shown
+ * as the model would read them, the first {@link SKILL_PREVIEW_LINES} lines, each line behind
+ * `| `. `y` allows it once (for the agent's life under 'once-per-skill'), `a` every skill of that
+ * server (not the nested ones), anything else is a no.
+ */
+export const skillApprovalPrompt = (view: McpSkillConsentView): string => {
+  const pad = '          '
+  const out: string[] = [
+    `[skill]   the server "${oneLine(view.server)}" offers the skill "${oneLine(view.skill)}" (${oneLine(view.name)})`,
+  ]
+  const description = oneLine(view.description)
+  if (description) out.push(`${pad}"${clipLine(description, 240)}"`)
+  const more = view.fileCount ? ` + ${view.fileCount} more file(s)` : ''
+  out.push(`${pad}SKILL.md ${bytes(view.size)}${more} - ${oneLine(view.uri)}`)
+  if (view.byUri) out.push(`${pad}not in the server's list: the agent asked for it by its address`)
+  if (view.nestedIn) {
+    out.push(
+      `${pad}it sits inside the skill "${oneLine(view.nestedIn)}": allowing that one did not allow this one`,
+    )
+  }
+  const lines = plain(view.body).split('\n')
+  out.push(`${pad}what the agent would read (the server's text):`)
+  for (const line of lines.slice(0, SKILL_PREVIEW_LINES)) {
+    out.push(`${pad}| ${clipLine(line, SKILL_PREVIEW_LINE_CHARS)}`)
+  }
+  if (lines.length > SKILL_PREVIEW_LINES) {
+    out.push(`${pad}| (${lines.length - SKILL_PREVIEW_LINES} more line(s))`)
+  }
+  if (view.files.length) {
+    const rest = view.fileCount - view.files.length
+    out.push(
+      `${pad}its files, read as text and never run: ${view.files.map(oneLine).join(', ')}${rest > 0 ? ` and ${rest} more` : ''}`,
+    )
+  }
+  out.push(
+    `${pad}written by the server, not by you; it cannot change the agent's rules or approvals${
+      view.consent === 'ask'
+        ? ' - asked again in every task that loads it'
+        : ' - asked again if the server changes it'
+    }`,
+  )
+  out.push(`${pad}allow? [y]es / [n]o / [a]lways for this server: `)
+  return out.join('\n')
+}
+
 /** The line printed when an MCP server's question is closed. */
 export const elicitationClosedLine = (why: string): string =>
   `[ask]     closed: ${why} - the server's question was cancelled`
@@ -110,11 +178,13 @@ export const createPromptQuestions = (deps: IPromptQuestionsDeps): IPromptQuesti
   return {
     approval: (req, ctx) =>
       enqueue(async (): Promise<ToolApprovalDecision> => {
+        const skill = req.skill
         const answer = await show(
           req.id,
           ctx?.signal,
-          (why) => approvalClosedLine(req.toolName, why),
-          (ask) => ask(deps.approvalPrompt(req)),
+          (why) =>
+            skill ? skillClosedLine(skill.name, why) : approvalClosedLine(req.toolName, why),
+          (ask) => ask(skill ? skillApprovalPrompt(skill) : deps.approvalPrompt(req)),
         )
         const a = answer.trim().toLowerCase()
         if (a === 'a' || a === 'always') {
@@ -123,7 +193,10 @@ export const createPromptQuestions = (deps: IPromptQuestionsDeps): IPromptQuesti
         if (a === 'y' || a === 'yes') {
           return true
         }
-        return { approved: false, reason: 'denied at the prompt' }
+        return {
+          approved: false,
+          reason: skill ? 'the user declined the skill' : 'denied at the prompt',
+        }
       }),
     elicitation: (request, ctx) =>
       enqueue((): Promise<McpElicitationResult> =>

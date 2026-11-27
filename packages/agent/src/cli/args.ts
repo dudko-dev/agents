@@ -33,7 +33,9 @@ Required env vars (set directly or via --env-file):
   AGENT_API_KEY         provider API key
   AGENT_MODEL           model id
   MCP_SERVERS           JSON: { "<name>": { "url": "...", "headers"?: {...} } | { "command": "...", "args"?: [], "env"?: {} } }
-                        each entry may add "protocol": "legacy" (default) | "auto" | "modern" (the MCP revision: 2026-07-28 when offered / only)
+                        each entry may add "protocol": "legacy" (default) | "auto" | "modern" (the MCP revision: 2026-07-28 when offered / only),
+                        "skills": true | { "consent": "once-per-skill" | "ask" | "never" } (experimental; needs "auto" / "modern")
+                        and "connectTimeoutMs" (default 30000; 0 = no bound)
 
 Optional env vars (see env.example for the full list):
   AGENT_EXECUTOR_LIGHT_MODEL  a cheaper executor model for steps the planner rates "low"
