@@ -15,6 +15,10 @@
 // subagent waiting on a tool that runs in the calling run follows the caller's clock
 // (`followClock`) for as long as that tool call is in flight.
 //
+// The deadlines run on `Date.now` and `setTimeout` - unless a TEST put a time source of its own
+// on `globalThis` (`TEST_TIME`, below): the human-wait tests move the limits themselves that way,
+// so how loaded the machine is never decides a result.
+//
 // Pure, no imports: this file is a COPY, byte for byte, of the sibling package's wait clock
 // (Node: `@dudko.dev/agent` `src/wait-clock.ts`, browser: `@dudko.dev/agent-web`
 // `src/wait-clock.ts`). Change both; `tests/wait-clock.test.ts` of the Node package compares them.
@@ -53,7 +57,43 @@ interface IEntry {
   stop: () => void
 }
 
+/** Where a clock reads the time and sets its timers. */
+interface ITimeSource {
+  now: () => number
+  set: (fire: () => void, ms: number) => unknown
+  clear: (handle: unknown) => void
+}
+
+/** The real time: the globals, looked up at each call (so mocked timers apply). */
+const REAL_TIME: ITimeSource = {
+  now: () => Date.now(),
+  set: (fire, ms) => setTimeout(fire, ms),
+  clear: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+}
+
+/**
+ * A TEST seam, not an API: a test that puts a time source under this key of `globalThis` before
+ * a run moves the deadlines of the clocks made meanwhile itself - the step limits and the
+ * subagents' limits - while everything else (the model, sockets, workers, the waits' own bounds,
+ * a host's `AbortSignal.timeout`) keeps real time. Nothing exports it and nothing documents it
+ * for hosts; it gives no power the globals it stands for do not (whoever can set it can replace
+ * `Date.now` and `setTimeout` as well).
+ */
+const TEST_TIME = Symbol.for('@dudko.dev/agent:wait-clock-test-time')
+
+const timeSource = (): ITimeSource => {
+  const test = (globalThis as unknown as Record<symbol, Partial<ITimeSource> | undefined>)[
+    TEST_TIME
+  ]
+  return typeof test?.now === 'function' &&
+    typeof test.set === 'function' &&
+    typeof test.clear === 'function'
+    ? (test as ITimeSource)
+    : REAL_TIME
+}
+
 export const createWaitClock = (): IWaitClock => {
+  const time = timeSource()
   let waits = 0
   const entries = new Set<IEntry>()
   const watchers = new Set<(waiting: boolean) => void>()
@@ -96,18 +136,18 @@ export const createWaitClock = (): IWaitClock => {
     timer: (ms, onExpire, options) => {
       let left = Math.max(0, ms)
       let startedAt = 0
-      let handle: ReturnType<typeof setTimeout> | undefined
+      let handle: unknown
       let ended = false
       // Time that ran since the deadline last started (never negative: a wall clock set back
       // must not give a deadline more time).
-      const ran = (): number => Math.max(0, Date.now() - startedAt)
+      const ran = (): number => Math.max(0, time.now() - startedAt)
       const entry: IEntry = {
         start: () => {
           if (ended || handle !== undefined) {
             return
           }
-          startedAt = Date.now()
-          handle = setTimeout(() => {
+          startedAt = time.now()
+          handle = time.set(() => {
             handle = undefined
             ended = true
             left = 0
@@ -115,14 +155,14 @@ export const createWaitClock = (): IWaitClock => {
             onExpire()
           }, left)
           if (options?.unref) {
-            ;(handle as { unref?: () => void }).unref?.()
+            ;(handle as { unref?: () => void } | undefined)?.unref?.()
           }
         },
         stop: () => {
           if (handle === undefined) {
             return
           }
-          clearTimeout(handle)
+          time.clear(handle)
           handle = undefined
           // What is left is what was left when it started, less the time it ran.
           left = Math.max(0, left - ran())
@@ -135,7 +175,7 @@ export const createWaitClock = (): IWaitClock => {
       return {
         cancel: () => {
           if (handle !== undefined) {
-            clearTimeout(handle)
+            time.clear(handle)
             handle = undefined
           }
           if (!ended) {

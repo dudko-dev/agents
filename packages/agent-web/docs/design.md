@@ -808,6 +808,13 @@ form is ordinary, and the step used to end under them (the elicitation answered 
   is paused at most as long as the calling run's is.
 - **No wait, no change**: without a question the clock never stops and the deadline is the
   timer it was.
+- **Tested on the test's own time.** The clock reads `Date.now` and sets `setTimeout`s unless a
+  test put a time source of its own on `globalThis` (a `Symbol.for` key read when a clock is
+  made). The tests of the whole loop do (`tests/helpers/virtual-time.ts`): the limits then move
+  only when a test moves them - a person's wait is a tick taken while the question is open - so
+  a loaded machine cannot end a step that real but short limits would, and what a step had left
+  is checked to the millisecond; one test keeps the real timers. It is a test seam, not an API:
+  nothing exports it, and it gives no power that the globals it stands for do not.
 - **Approval's bound is 5 minutes by default**, as an elicitation's is. The step's limit stops
   while a person decides, so without a bound of its own nothing but a stop would end a question
   nobody answers: a run left alone would wait for ever with its tool call half done. Five minutes
