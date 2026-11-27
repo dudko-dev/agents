@@ -1,3 +1,16 @@
+# 0.0.41 / 2026-11-27
+
+### :tada: Enhancements
+- **Breaking for `config.search`:** the Brave, Tavily and SearXNG adapters are gone from the library. `search` takes your own `engine` function (a few lines for any provider), or `provider: 'google'` - Google Search through Gemini grounding, with its tokens reported under the usage phase `'search'`
+- MCP Apps (the `io.modelcontextprotocol/ui` extension): a tool's interactive view, read through the connection (`apps: true` on connect; per server `apps: false`), the event `mcp.app`, and `agent.approveAppToolCall` - an app's tool calls go through the agent's consent gate (writes ask even on autopilot). `agent.sampleForApp` answers an app's `sampling/createMessage` with the synthesizer's model (no tools, no context, consent per request, caps and a rate per app, usage phase `'app'`; `config.appSampling`); a model seen reasoning gets `reasoningTokens` of room on top of the app's `maxTokens`. `apps.readResource` reads a file an app offers for download from its own server
+- Files a run writes are reported: events `file.written` / `file.deleted`
+- MCP 2026-07-28 per server: `protocol: 'legacy' | 'auto' | 'modern'`; when the `subscriptions/listen` stream ends it is opened again with backoff and the tools are re-listed
+- MCP elicitation: `onElicitation(request, { signal })` (form or URL) with limits per call and run; events `mcp.elicitation-requested` / `mcp.elicitation-answered`. Off by default
+- MCP skills (experimental): `skills: true | { consent }` per server, `mcpSkills` agent-wide - namespaced `<server>/<skill>`, verified against the server's digests, loaded as third-party knowledge, `load_skill({ server, uri })` for unlisted ones, and the user asked before a skill's text reaches the model (once per skill by default)
+- MCP OAuth: `registration: 'auto' | 'cimd' | 'dcr'` on `BrowserOAuthProvider`, and `registrationKind()`
+- Approval: a 5-minute default wait (`toolApproval.timeoutMs`; `0` / `Infinity` = until stopped); `onRequest` gets `{ signal }`. Time waiting for a person does not count against the step's or a subagent's limit
+- Sandbox: `timeoutMs` counts from the program's first instruction
+
 # 0.0.40 / 2026-11-26
 
 ### :tada: Enhancements
