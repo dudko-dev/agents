@@ -369,7 +369,11 @@ const namedError = (message: string, name: string): Error =>
   Object.assign(new Error(message), { name })
 
 // `timeoutMs` is resolved (resolveApprovalTimeout): 0 = no bound, else what a timer can hold.
-const withDeadline = <T>(p: Promise<T>, timeoutMs: number, signal?: AbortSignal): Promise<T> => {
+export const withDeadline = <T>(
+  p: Promise<T>,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<T> => {
   if (!(timeoutMs > 0) && !signal) return p
   return new Promise<T>((resolve, reject) => {
     let timer: ReturnType<typeof setTimeout> | undefined

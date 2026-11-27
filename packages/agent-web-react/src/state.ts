@@ -1054,6 +1054,11 @@ const applyEvent = (state: AgentUiState, event: AgentEvent, ctx: EventContext): 
       return { ...state, finalReasoning: state.finalReasoning + event.delta }
 
     case 'usage':
+      // An app's sampling is no run's: it counts in the conversation's total only, never in a
+      // run's usage (nor, through it, on an answer).
+      if (event.phase === 'app') {
+        return { ...state, totalUsage: addUsage(state.totalUsage, event.usage) }
+      }
       return {
         ...state,
         usage: addUsage(state.usage, event.usage),

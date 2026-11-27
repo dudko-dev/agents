@@ -28,6 +28,7 @@ import {
   type ThinkingStage,
 } from './thinking.js'
 import type { ToolApprovalConfig } from './tools/approval.js'
+import type { AppSamplingSettings } from './app-sampling.js'
 import type { AgentToolSet } from './tools/types.js'
 
 /** Force a tool-calling strategy, or let the agent pick per model ('auto'). */
@@ -174,6 +175,14 @@ export interface BrowserAgentConfig {
   toolSearchThreshold?: number
   /** Consent policy for tool calls: autopilot, ask before writes, ask always, read-only. */
   toolApproval?: ToolApprovalConfig
+  /**
+   * MCP Apps asking this agent's model for a completion (`Agent.sampleForApp`, the app's
+   * `sampling/createMessage`): the caps - `maxTokens` per request (1024), `maxRequestsPerMinute`
+   * (5) and `maxRequests` (30) per app, `maxInputChars` (16 000) - or `false` to refuse every
+   * request. Nothing happens unless a host calls `sampleForApp`, and each request is put to the
+   * host's consent callback first. See docs/capabilities.md, "An app asks the model".
+   */
+  appSampling?: false | AppSamplingSettings
 
   /** Reusable instruction bundles (SKILL.md) the planner/executor can pull in. */
   skills?: Skill[]

@@ -10,7 +10,10 @@
  * `ui/resource-teardown`, follows `ui/notifications/host-context-changed` (the theme), and reports
  * its height (`ui/notifications/size-changed`, as the extension's SDK measures it). What the user
  * does becomes the app's requests - `tools/call` (`reshuffle_day`, `book_trip`), `ui/open-link`,
- * `ui/message` - each of which the host may put to the user first.
+ * `ui/message`, and where the host offers them `ui/request-display-mode` (Full screen, Esc back),
+ * `ui/download-file` (the itinerary as a `.txt`, `hostCapabilities.downloadFile`) and
+ * `sampling/createMessage` (a dinner idea from the HOST's model, `hostCapabilities.sampling`) -
+ * each of which the host may put to the user first.
  *
  * Everything the server sends is rendered with `textContent`; the only markup set from script is
  * the constant icons below. No backticks and no backslashes in the script: it lives in a template
@@ -67,6 +70,7 @@ h2{margin:0;color:var(--faint);font-size:12px;font-weight:700;letter-spacing:.07
 .k-walk{--k:var(--walk)}.k-food{--k:var(--food)}.k-culture{--k:var(--culture)}.k-nature{--k:var(--nature)}.k-view{--k:var(--view)}.k-night{--k:var(--night)}.k-travel{--k:var(--travel)}.k-sight{--k:var(--sight)}
 .more{display:inline-flex;align-items:center;gap:6px;min-height:34px;margin-top:8px;padding:0 12px;border:1px solid var(--line-2);border-radius:8px;background:var(--card);font-size:12.5px;font-weight:650;cursor:pointer}
 .more:hover{border-color:var(--accent);color:var(--accent)}
+.more+.more{margin-left:6px}
 .more[aria-disabled=true]{cursor:progress;opacity:.7}
 .more[aria-disabled=true] svg{animation:spin .8s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
@@ -88,6 +92,12 @@ h2{margin:0;color:var(--faint);font-size:12px;font-weight:700;letter-spacing:.07
 .primary{border-color:var(--accent);background:var(--accent);color:var(--on-accent)}
 .primary:hover:not(:disabled){border-color:var(--accent-2);background:var(--accent-2)}
 .primary.done{border-color:var(--ok);background:var(--ok-soft);color:var(--ok);opacity:1}
+.tool{display:inline-flex;align-items:center;gap:5px;min-height:28px;padding:0 9px;border:1px solid var(--line-2);border-radius:999px;background:var(--card);color:var(--muted);font-size:11.5px;font-weight:650;letter-spacing:0;text-transform:none;cursor:pointer}
+.tool:hover{border-color:var(--accent);color:var(--accent)}
+.idea{margin:12px 0 0;padding:10px 12px;border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:10px;background:var(--card)}
+.idea h3{margin:0 0 2px;color:var(--faint);font-size:11px;font-weight:750;letter-spacing:.07em;text-transform:uppercase}
+.idea p{margin:0;font-size:13.5px}
+html[data-display=fullscreen] .board{max-width:1180px}
 .status{min-height:1.45em;margin:8px 0 0;color:var(--muted);font-size:12.5px}
 .status[data-tone=ok]{color:var(--ok)}.status[data-tone=bad]{color:var(--bad)}.status[data-tone=wait]{color:var(--wait)}
 .foot{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:2px 12px;margin:8px 0 0;padding-top:6px;border-top:1px solid var(--line);color:var(--faint);font-size:11.5px}
@@ -101,12 +111,12 @@ h2{margin:0;color:var(--faint);font-size:12px;font-weight:700;letter-spacing:.07
 const BODY = `
 <main class="board" aria-labelledby="dest">
 <header>
-<p class="eyebrow"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 14.5s5-4.3 5-8.2A5 5 0 0 0 3 6.3c0 3.9 5 8.2 5 8.2z"/><circle cx="8" cy="6.3" r="1.8"/></svg>Trip board<span class="tag">demo data</span></p>
+<p class="eyebrow"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 14.5s5-4.3 5-8.2A5 5 0 0 0 3 6.3c0 3.9 5 8.2 5 8.2z"/><circle cx="8" cy="6.3" r="1.8"/></svg>Trip board<span class="tag">demo data</span><button type="button" class="tool" id="full" hidden>Full screen</button></p>
 <h1 id="dest">Planning your trip…</h1>
 <ul class="facts" id="facts" aria-label="The trip"></ul>
 </header>
 <section aria-labelledby="days-h">
-<div class="bar"><h2 id="days-h">Day by day</h2><button type="button" class="link" id="all" aria-controls="days" hidden>Open all days</button></div>
+<div class="bar"><h2 id="days-h">Day by day</h2><span><button type="button" class="link" id="download" disabled hidden>Download itinerary</button><button type="button" class="link" id="all" aria-controls="days" hidden>Open all days</button></span></div>
 <ol class="list" id="days" aria-busy="true"><li class="ghost" aria-hidden="true"></li><li class="ghost" aria-hidden="true"></li><li class="ghost" aria-hidden="true"></li></ol>
 </section>
 <section class="ticket" id="ticket" aria-labelledby="ticket-h" hidden>
@@ -119,6 +129,7 @@ const BODY = `
 <button type="button" class="btn primary" id="book" disabled>Book this trip</button>
 <button type="button" class="btn" id="send" disabled>Send to chat</button>
 </div>
+<section class="idea" id="idea" aria-labelledby="idea-h" hidden><h3 id="idea-h">From the host’s model</h3><p id="idea-text"></p></section>
 <p class="status" id="status" role="status" aria-live="polite"></p>
 <footer class="foot"><span>Made-up plans and prices: nothing is booked, charged or kept.</span><button type="button" class="link" id="docs" disabled>How MCP Apps work<svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 2.5h5v5M9.5 2.5l-7 7"/></svg></button></footer>
 </main>
@@ -171,9 +182,22 @@ const script = (docsUrl: string): string => `
     else if (m.method === 'ui/notifications/host-context-changed') applyContext(p)
   })
 
-  // The host's theme wins; without one, the page follows prefers-color-scheme (the styles).
+  // The host's context, merged as it changes: its theme wins (else prefers-color-scheme), its
+  // display mode and the modes it offers decide the Full screen button.
+  var context = { displayMode: 'inline', availableDisplayModes: ['inline'] }
+  var caps = {}
   var applyContext = function (ctx) {
-    if (ctx && (ctx.theme === 'light' || ctx.theme === 'dark')) document.documentElement.setAttribute('data-theme', ctx.theme)
+    if (!ctx || typeof ctx !== 'object') return
+    if (ctx.theme === 'light' || ctx.theme === 'dark') document.documentElement.setAttribute('data-theme', ctx.theme)
+    if (typeof ctx.displayMode === 'string') context.displayMode = ctx.displayMode
+    if (Array.isArray(ctx.availableDisplayModes)) context.availableDisplayModes = ctx.availableDisplayModes
+    syncMode()
+  }
+  var syncMode = function () {
+    var full = context.displayMode === 'fullscreen'
+    document.documentElement.setAttribute('data-display', full ? 'fullscreen' : 'inline')
+    $('full').hidden = context.availableDisplayModes.indexOf('fullscreen') < 0
+    $('full').textContent = full ? 'Exit full screen' : 'Full screen'
   }
 
   // The height of the content, whenever it changes (measured as the extension's SDK does).
@@ -280,6 +304,7 @@ const script = (docsUrl: string): string => `
     syncAll()
     $('book').disabled = false
     $('send').disabled = false
+    $('download').disabled = false
     renderTicket()
   }
 
@@ -336,7 +361,11 @@ const script = (docsUrl: string): string => `
       type: 'button', class: 'more', 'aria-label': 'Other ideas for day ' + d.day,
       onclick: function () { reshuffle(d.day) },
     }, [icon(SHUFFLE), 'Other ideas'])
-    var body = el('div', { class: 'body', id: id + '-body', hidden: !isOpen }, [el('ol', { class: 'items', 'aria-label': 'Plans for day ' + d.day }, d.items.map(item)), more])
+    var idea = el('button', {
+      type: 'button', class: 'more dinner', 'aria-label': 'Suggest a dinner place for day ' + d.day, hidden: !caps.sampling,
+      onclick: function () { dinner(d.day) },
+    }, ['Dinner idea'])
+    var body = el('div', { class: 'body', id: id + '-body', hidden: !isOpen }, [el('ol', { class: 'items', 'aria-label': 'Plans for day ' + d.day }, d.items.map(item)), more, idea])
     return el('li', { class: 'day', 'data-day': d.day }, [el('h3', {}, [toggle]), body])
   }
 
@@ -442,6 +471,64 @@ const script = (docsUrl: string): string => `
     })
   }
 
+  // Full screen and back: the host decides, and answers the mode the board is in.
+  var setMode = function (mode) {
+    request('ui/request-display-mode', { mode: mode }).then(function (result) {
+      applyContext({ displayMode: result.mode })
+      if (result.mode !== mode) say('The host kept the board ' + result.mode + '.', 'wait')
+    }).catch(function (err) {
+      say('No full screen: ' + err.message, 'bad')
+    })
+  }
+  document.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape' && context.displayMode === 'fullscreen') setMode('inline')
+  })
+
+  var NL = String.fromCharCode(10)
+  var slug = function (text) { return String(text).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'trip' }
+
+  // The plan as a text file the host saves (the board itself can save nothing: it is sandboxed).
+  var download = function () {
+    if (!trip) return
+    var lines = ['Trip board: ' + trip.destination, [plural(trip.nights, 'night'), trip.start ? range() : '', plural(trip.travellers, 'traveller'), capital(trip.budget) + ' budget'].filter(Boolean).join(' · '), '']
+    days.forEach(function (d) {
+      lines.push('Day ' + d.day + (d.date ? ' (' + dayLabel(d.date) + ')' : '') + ': ' + d.theme)
+      d.items.forEach(function (it) { lines.push('  ' + it.time + '  ' + it.title + ' - ' + it.note) })
+    })
+    if (estimate) lines.push('', 'Rough estimate: ' + money(estimate.total) + ' in all (made-up prices).')
+    if (booked) lines.push('Demo booking: ' + booked.confirmation + ' (nothing was booked).')
+    lines.push('', 'Demo data from the trip board: nothing is booked, charged or kept.')
+    var name = slug(trip.destination) + '-itinerary.txt'
+    say('Waiting for your OK…', 'wait')
+    request('ui/download-file', { contents: [{ type: 'resource', resource: { uri: 'file:///' + name, mimeType: 'text/plain', text: lines.join(NL) + NL } }] }).then(function (result) {
+      if (result && result.isError) say('Not saved: you said no.', 'bad')
+      else say('Saved as ' + name + '.', 'ok')
+    }).catch(function (err) {
+      say('Not saved: ' + err.message, 'bad')
+    })
+  }
+
+  // One idea from the HOST's model (sampling): the host asks the user first, and the answer comes
+  // back here only.
+  var dinner = function (day) {
+    if (!trip) return
+    var ask = 'Suggest one place for dinner on the evening of day ' + day + ' of a trip to ' + trip.destination + ' for ' + plural(trip.travellers, 'traveller') + ' on a ' + trip.budget + ' budget. One short sentence: the kind of place and the area.'
+    say('Waiting for your OK…', 'wait')
+    request('sampling/createMessage', {
+      messages: [{ role: 'user', content: { type: 'text', text: ask } }],
+      systemPrompt: 'You suggest one dinner place for a traveller. Answer in one short sentence, with no list.',
+      maxTokens: 120,
+    }).then(function (result) {
+      var text = result && result.content && result.content.type === 'text' ? String(result.content.text || '').trim() : ''
+      if (!text) throw new Error('no answer came back')
+      $('idea-text').textContent = text
+      $('idea').hidden = false
+      say('An idea from the host’s model is below the board.', 'ok')
+    }).catch(function (err) {
+      say(/rejected|denied/i.test(err.message) ? 'No suggestion: you said no.' : 'No suggestion: ' + err.message, 'bad')
+    })
+  }
+
   var docs = function () {
     say('Waiting for your OK…', 'wait')
     request('ui/open-link', { url: DOCS }).then(function () {
@@ -458,13 +545,19 @@ const script = (docsUrl: string): string => `
   $('book').addEventListener('click', book)
   $('send').addEventListener('click', send)
   $('docs').addEventListener('click', docs)
+  $('full').addEventListener('click', function () { setMode(context.displayMode === 'fullscreen' ? 'inline' : 'fullscreen') })
+  $('download').addEventListener('click', download)
 
   request('ui/initialize', {
     appInfo: { name: 'trip-board', version: '1.0.0' },
-    appCapabilities: { availableDisplayModes: ['inline'] },
+    appCapabilities: { availableDisplayModes: ['inline', 'fullscreen'] },
     protocolVersion: '2026-01-26',
   }).then(function (result) {
     applyContext(result.hostContext)
+    // What the host offers besides: a file saved for the user, an answer of its model.
+    caps = (result && result.hostCapabilities) || {}
+    $('download').hidden = !caps.downloadFile
+    Array.prototype.forEach.call(document.querySelectorAll('.dinner'), function (b) { b.hidden = !caps.sampling })
     notify('ui/notifications/initialized', {})
     $('docs').disabled = false
     autoResize()
@@ -474,9 +567,21 @@ const script = (docsUrl: string): string => `
 })()
 `
 
+/**
+ * The script as it is sent: without its indentation and its whole-line comments (they are for the
+ * reader of this file; the answer stays well under half of `DEMO_LIMITS.responseBytes`). Safe for
+ * this script only: no string or template in it spans a line.
+ */
+const shipped = (code: string): string =>
+  code
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('//'))
+    .join('\n')
+
 /** The app's document; `docsUrl` is what "How MCP Apps work" asks the host to open. */
 export const tripBoardHtml = (docsUrl: string): string =>
   '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
   '<meta name="viewport" content="width=device-width, initial-scale=1">' +
   '<meta name="color-scheme" content="light dark"><title>Trip board</title>' +
-  `<style>${STYLE}</style></head><body>${BODY}<script>${script(docsUrl)}</script></body></html>`
+  `<style>${STYLE}</style></head><body>${BODY}<script>${shipped(script(docsUrl))}</script></body></html>`

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { McpAppResource } from '@dudko.dev/agent-web'
 import type { McpAppHost } from '../hooks/use-mcp-app-host.js'
@@ -6,6 +6,7 @@ import { useLabels, type AgentLabelsOverride } from '../labels.js'
 import {
   APP_DEFAULT_HEIGHT,
   APP_MAX_HEIGHT,
+  appGestureOf,
   buildMcpAppDocument,
   buildMcpAppSandboxShell,
   clampAppHeight,
@@ -17,6 +18,7 @@ import {
   McpAppSandboxLink,
   mcpAppSandboxProxyUrl,
   mcpAppSandboxTarget,
+  type McpAppDisplayMode,
   type McpAppSandboxReason,
 } from '../mcp-app.js'
 import type { AppView } from '../types.js'
@@ -29,6 +31,7 @@ import {
   MoreIcon,
   PanelIcon,
   ReloadIcon,
+  ShrinkIcon,
   SpinnerIcon,
   ToolIcon,
   XIcon,
@@ -57,11 +60,30 @@ export interface McpAppFrameProps {
   onClosePanel?: () => void
   /** The tools the app ran, listed under the frame (default true). */
   showCalls?: boolean
+  /**
+   * Offer the app `fullscreen` besides `inline` (`hostContext.availableDisplayModes`), read when
+   * the frame starts. Granted only to an app that declared it, right after the user acted inside
+   * its frame, and not while it waits for the user: it then fills the chat panel (the viewport
+   * on a narrow one) in the host's chrome - "App from server …", Exit full screen, Esc - with the
+   * focus kept inside. Default false: an app stays inline.
+   */
+  allowFullscreen?: boolean
   labels?: AgentLabelsOverride
   className?: string
 }
 
 type Loaded = { resource: McpAppResource } | { error: string } | { unavailable: true }
+
+// useLayoutEffect warns during server rendering; full screen only exists in the browser.
+const useIsoLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect
+
+/** Where a full-screen app is drawn: over the chat panel, or (undefined) the whole viewport. */
+type FullRect = { top: number; left: number; width: number; height: number } | undefined
+
+const userActivation = (): boolean | undefined =>
+  typeof navigator === 'undefined'
+    ? undefined
+    : (navigator as { userActivation?: { isActive?: boolean } }).userActivation?.isActive
 
 /** Where an app runs: an opaque frame of ours, or the sandbox page on its own origin. */
 type Placement =
@@ -109,6 +131,7 @@ export const McpAppFrame = ({
   onOpenPanel,
   onClosePanel,
   showCalls = true,
+  allowFullscreen = false,
   labels,
   className,
 }: McpAppFrameProps) => {
@@ -125,6 +148,17 @@ export const McpAppFrame = ({
   const [broken, setBroken] = useState(false)
   const [onOrigin, setOnOrigin] = useState(false)
   const shellLoaded = useRef<(() => void) | undefined>(undefined)
+  // Full screen: the mode (state for the render, a ref for the bridge), the space it leaves in the
+  // transcript, where it is drawn, and how the host takes it back (Esc, the button, a prompt).
+  const [mode, setMode] = useState<McpAppDisplayMode>('inline')
+  const modeRef = useRef<McpAppDisplayMode>('inline')
+  const [holder, setHolder] = useState(0)
+  const [fullRect, setFullRect] = useState<FullRect>()
+  const leaveRef = useRef<(() => void) | undefined>(undefined)
+  const rootRef = useRef<HTMLDivElement>(null)
+  const exitRef = useRef<HTMLButtonElement>(null)
+  const allowFullscreenRef = useRef(allowFullscreen)
+  allowFullscreenRef.current = allowFullscreen
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const bridgeRef = useRef<McpAppBridge | undefined>(undefined)
   const menuRef = useRef<HTMLDivElement>(null)
@@ -216,6 +250,27 @@ export const McpAppFrame = ({
             post: (message, targetOrigin) => proxyOf()?.postMessage(message, targetOrigin),
           })
         : undefined
+    const fullscreenOffered = allowFullscreenRef.current
+    // The host changes the mode and tells the app (`host-context-changed`); `inline` back is
+    // always allowed, `fullscreen` only right after the user acted inside this frame and not
+    // while the app waits for them (its prompt must never be under it).
+    const show = (next: McpAppDisplayMode) => {
+      if (next === modeRef.current) return
+      if (next === 'fullscreen') {
+        setHolder(Math.round(rootRef.current?.getBoundingClientRect().height ?? 0))
+      }
+      modeRef.current = next
+      setMode(next)
+      bridge.updateContext(
+        next === 'inline'
+          ? { displayMode: 'inline', containerDimensions: { maxHeight: APP_MAX_HEIGHT } }
+          : { displayMode: next },
+      )
+    }
+    leaveRef.current = () => show('inline')
+    // A new bridge (a reload, another placement) is a new start: inline.
+    setMode('inline')
+    const host = hostRef.current
     const bridge = new McpAppBridge({
       post: link
         ? (message) => link.post(message)
@@ -234,11 +289,51 @@ export const McpAppFrame = ({
         openLink: (link) => hostRef.current.openLink(app, link, abort.signal),
         message: (text) => hostRef.current.message(app, text, abort.signal),
         resize: (wish) => {
-          if (variant === 'inline') setHeight(clampAppHeight(wish))
+          if (variant === 'inline' && modeRef.current === 'inline') setHeight(clampAppHeight(wish))
         },
+        displayMode: (requested) => {
+          if (requested === 'inline') {
+            show('inline')
+            return 'inline'
+          }
+          const gesture = appGestureOf({
+            focused: typeof document !== 'undefined' && document.activeElement === frame,
+            activation: userActivation(),
+          })
+          if (
+            requested !== 'fullscreen' ||
+            !fullscreenOffered ||
+            !gesture ||
+            hostRef.current.isWaiting(app)
+          ) {
+            return modeRef.current
+          }
+          show('fullscreen')
+          return 'fullscreen'
+        },
+        ...(host.downloadFile
+          ? {
+              downloadFile: (file) => {
+                // The app waits for the user: their prompt is in the chat, not under the app.
+                leaveRef.current?.()
+                return hostRef.current.downloadFile!(app, file, abort.signal)
+              },
+            }
+          : {}),
+        ...(host.sample
+          ? {
+              sample: (params) => {
+                leaveRef.current?.()
+                return hostRef.current.sample!(app, params, abort.signal)
+              },
+            }
+          : {}),
       },
       hostInfo: HOST_INFO,
-      hostCapabilities: mcpAppHostCapabilities(resource.csp),
+      hostCapabilities: mcpAppHostCapabilities(resource.csp, {
+        downloadFile: Boolean(host.downloadFile),
+        sampling: Boolean(host.sample),
+      }),
       hostContext: {
         toolInfo: {
           tool: {
@@ -249,7 +344,7 @@ export const McpAppFrame = ({
         },
         ...(themeRef.current ? { theme: themeRef.current } : {}),
         displayMode: 'inline',
-        availableDisplayModes: ['inline'],
+        availableDisplayModes: fullscreenOffered ? ['inline', 'fullscreen'] : ['inline'],
         containerDimensions: { maxHeight: APP_MAX_HEIGHT },
         platform: 'web',
         ...(typeof navigator !== 'undefined' && navigator.language
@@ -311,8 +406,76 @@ export const McpAppFrame = ({
       // Whatever the app still waits for (a prompt, a consent) is given up.
       abort.abort()
       bridgeRef.current = undefined
+      leaveRef.current = undefined
+      modeRef.current = 'inline'
     }
   }, [live, resource, reload, variant, app.id, placement, broken, timeoutMs])
+
+  const fullscreen = mode === 'fullscreen' && live && !broken
+  const waitingNow = host.isWaiting(app)
+
+  // While the app waits for the user, it is not shown full screen: the prompt is in the chat.
+  useEffect(() => {
+    if (fullscreen && waitingNow) leaveRef.current?.()
+  }, [fullscreen, waitingNow])
+
+  // Full screen: over the chat panel (or the viewport on a phone), kept in place as the page
+  // moves; Esc takes it back; the focus starts on the way back; the app is told its size.
+  useIsoLayoutEffect(() => {
+    if (!fullscreen) return
+    const place = () => {
+      // The chat panel, whatever its width; the whole viewport on a phone (or outside a chat).
+      const chat = rootRef.current?.closest('.awr-chat')
+      if (chat instanceof HTMLElement && window.innerWidth > 640) {
+        const r = chat.getBoundingClientRect()
+        setFullRect({ top: r.top, left: r.left, width: r.width, height: r.height })
+      } else {
+        setFullRect(undefined)
+      }
+    }
+    place()
+    window.addEventListener('resize', place)
+    window.addEventListener('scroll', place, true)
+    const chat = rootRef.current?.closest('.awr-chat')
+    const ro =
+      typeof ResizeObserver === 'undefined'
+        ? undefined
+        : new ResizeObserver(() => {
+            place()
+            const f = iframeRef.current?.getBoundingClientRect()
+            if (f && f.width > 0 && f.height > 0) {
+              bridgeRef.current?.updateContext({
+                containerDimensions: { width: Math.round(f.width), height: Math.round(f.height) },
+              })
+            }
+          })
+    if (chat) ro?.observe(chat)
+    if (iframeRef.current) ro?.observe(iframeRef.current)
+    return () => {
+      window.removeEventListener('resize', place)
+      window.removeEventListener('scroll', place, true)
+      ro?.disconnect()
+    }
+  }, [fullscreen])
+
+  useEffect(() => {
+    if (!fullscreen) return
+    const before = document.activeElement
+    exitRef.current?.focus()
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        leaveRef.current?.()
+      }
+    }
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('keydown', onKey)
+      // Back where the user was: the app's frame, if they were in it.
+      const frame = iframeRef.current
+      if (frame && (before === frame || document.activeElement === document.body)) frame.focus()
+    }
+  }, [fullscreen])
 
   // A theme switch reaches an app that is running.
   useEffect(() => {
@@ -341,6 +504,7 @@ export const McpAppFrame = ({
 
   const doReload = () => {
     setMenu(false)
+    leaveRef.current?.()
     setHeight(APP_DEFAULT_HEIGHT)
     if (sandboxUrl !== undefined) {
       const target = mcpAppSandboxTarget({ url: sandboxUrl }, app.server, pageOrigin())
@@ -365,7 +529,7 @@ export const McpAppFrame = ({
     )
   }
 
-  const waiting = host.isWaiting(app)
+  const waiting = waitingNow
   const panel = variant === 'panel'
   const sandboxed = placement?.mode === 'origin' && onOrigin
   const sandboxNote =
@@ -410,7 +574,7 @@ export const McpAppFrame = ({
           referrerPolicy="no-referrer"
           srcDoc={doc}
           onLoad={() => shellLoaded.current?.()}
-          style={panel ? undefined : { height }}
+          style={panel || fullscreen ? undefined : { height }}
         />
       ) : (
         <iframe
@@ -422,147 +586,200 @@ export const McpAppFrame = ({
           sandbox="allow-scripts"
           referrerPolicy="no-referrer"
           srcDoc={doc}
-          style={panel ? undefined : { height }}
+          style={panel || fullscreen ? undefined : { height }}
         />
       )}
     </div>
   )
+  const exit = (
+    <button
+      ref={exitRef}
+      type="button"
+      className="awr-btn awr-frame__exit"
+      title={`${L.appFullscreenExit} (${L.appFullscreenKey})`}
+      onClick={() => leaveRef.current?.()}
+    >
+      <ShrinkIcon size={14} /> {L.appFullscreenExit}{' '}
+      <kbd className="awr-frame__key">{L.appFullscreenKey}</kbd>
+    </button>
+  )
+  // The focus stays inside while it is full screen: past either end, it comes round.
+  const guard = (to: 'exit' | 'app') => (
+    <span
+      className="awr-frame__guard"
+      tabIndex={0}
+      aria-hidden="true"
+      onFocus={() => (to === 'exit' ? exitRef.current : iframeRef.current)?.focus()}
+    />
+  )
 
   return (
-    <div
-      className={[
-        'awr-frame awr-frame--app',
-        panel && 'awr-frame--panel',
-        waiting && 'is-waiting',
-        className,
-      ]
-        .filter(Boolean)
-        .join(' ')}
-      data-app={app.id}
-      data-sandbox={
-        placement?.mode === 'origin' ? (onOrigin ? 'origin' : 'connecting') : placement?.mode
-      }
-    >
-      <div className="awr-frame__head">
-        <AppIcon size={14} className="awr-frame__icon" />
-        {panel ? (
-          <div className="awr-frame__label">
-            <span className="awr-frame__titles">
-              <span className="awr-frame__title">{L.appFrom(app.server)}</span>
-              <span className="awr-frame__badges">
-                {badge} · {app.resourceUri}
+    <>
+      {fullscreen && (
+        // The place the app had in the transcript, kept while it is shown full screen.
+        <div className="awr-frame__holder" style={{ height: holder }} aria-hidden="true" />
+      )}
+      <div
+        ref={rootRef}
+        className={[
+          'awr-frame awr-frame--app',
+          panel && 'awr-frame--panel',
+          fullscreen && 'awr-frame--fullscreen',
+          waiting && 'is-waiting',
+          className,
+        ]
+          .filter(Boolean)
+          .join(' ')}
+        style={fullscreen && fullRect ? fullRect : undefined}
+        data-app={app.id}
+        data-display={fullscreen ? 'fullscreen' : 'inline'}
+        data-sandbox={
+          placement?.mode === 'origin' ? (onOrigin ? 'origin' : 'connecting') : placement?.mode
+        }
+        {...(fullscreen
+          ? { role: 'dialog', 'aria-modal': true, 'aria-label': L.appFrom(app.server) }
+          : {})}
+      >
+        {fullscreen ? guard('app') : null}
+        <div className="awr-frame__head">
+          <AppIcon size={14} className="awr-frame__icon" />
+          {fullscreen ? (
+            <div className="awr-frame__label">
+              <span className="awr-frame__titles">
+                <span className="awr-frame__title">{L.appFrom(app.server)}</span>
+                <span className="awr-frame__badges">
+                  {badge} · {L.appFullscreenBadge}
+                </span>
               </span>
-            </span>
-            {waiting && <span className="awr-frame__state">{L.appWaiting}</span>}
-          </div>
-        ) : (
-          <div className="awr-frame__label">
-            <span className="awr-frame__title">{L.appFrom(app.server)}</span>
-            <span className="awr-frame__badges">{badge}</span>
-            {waiting && <span className="awr-frame__state">{L.appWaiting}</span>}
-          </div>
-        )}
-        {panel ? (
-          <>
-            <button
-              type="button"
-              className="awr-frame__btn"
-              aria-label={L.appReload}
-              title={L.appReload}
-              onClick={doReload}
-            >
-              <ReloadIcon size={15} />
-            </button>
-            {onClosePanel && (
+              {waiting && <span className="awr-frame__state">{L.appWaiting}</span>}
+            </div>
+          ) : panel ? (
+            <div className="awr-frame__label">
+              <span className="awr-frame__titles">
+                <span className="awr-frame__title">{L.appFrom(app.server)}</span>
+                <span className="awr-frame__badges">
+                  {badge} · {app.resourceUri}
+                </span>
+              </span>
+              {waiting && <span className="awr-frame__state">{L.appWaiting}</span>}
+            </div>
+          ) : (
+            <div className="awr-frame__label">
+              <span className="awr-frame__title">{L.appFrom(app.server)}</span>
+              <span className="awr-frame__badges">{badge}</span>
+              {waiting && <span className="awr-frame__state">{L.appWaiting}</span>}
+            </div>
+          )}
+          {fullscreen ? (
+            exit
+          ) : panel ? (
+            <>
               <button
                 type="button"
                 className="awr-frame__btn"
-                aria-label={L.appClosePanel}
-                title={L.appClosePanel}
-                onClick={onClosePanel}
+                aria-label={L.appReload}
+                title={L.appReload}
+                onClick={doReload}
               >
-                <XIcon size={15} />
+                <ReloadIcon size={15} />
               </button>
-            )}
-          </>
-        ) : (
-          <>
+              {onClosePanel && (
+                <button
+                  type="button"
+                  className="awr-frame__btn"
+                  aria-label={L.appClosePanel}
+                  title={L.appClosePanel}
+                  onClick={onClosePanel}
+                >
+                  <XIcon size={15} />
+                </button>
+              )}
+            </>
+          ) : (
+            <>
+              {onOpenPanel && (
+                <button
+                  type="button"
+                  className="awr-frame__btn"
+                  aria-label={L.appOpenPanel}
+                  title={L.appOpenPanel}
+                  onClick={onOpenPanel}
+                >
+                  <PanelIcon size={15} />
+                </button>
+              )}
+              <button
+                type="button"
+                className={`awr-frame__btn${menu ? ' is-on' : ''}`}
+                aria-label={L.appMenu}
+                title={L.appMenu}
+                aria-haspopup="menu"
+                aria-expanded={menu}
+                onClick={() => setMenu((m) => !m)}
+              >
+                <MoreIcon size={15} />
+              </button>
+            </>
+          )}
+        </div>
+        {menu && !panel && !fullscreen && (
+          <div className="awr-frame__menu" role="menu" ref={menuRef}>
+            <button
+              type="button"
+              role="menuitem"
+              className="awr-frame__menuitem"
+              onClick={doReload}
+            >
+              <ReloadIcon size={14} /> {L.appReload}
+            </button>
             {onOpenPanel && (
               <button
                 type="button"
-                className="awr-frame__btn"
-                aria-label={L.appOpenPanel}
-                title={L.appOpenPanel}
-                onClick={onOpenPanel}
+                role="menuitem"
+                className="awr-frame__menuitem"
+                onClick={() => {
+                  setMenu(false)
+                  onOpenPanel()
+                }}
               >
-                <PanelIcon size={15} />
+                <PanelIcon size={14} /> {L.appOpenPanel}
               </button>
             )}
-            <button
-              type="button"
-              className={`awr-frame__btn${menu ? ' is-on' : ''}`}
-              aria-label={L.appMenu}
-              title={L.appMenu}
-              aria-haspopup="menu"
-              aria-expanded={menu}
-              onClick={() => setMenu((m) => !m)}
-            >
-              <MoreIcon size={15} />
-            </button>
-          </>
-        )}
-      </div>
-      {menu && !panel && (
-        <div className="awr-frame__menu" role="menu" ref={menuRef}>
-          <button type="button" role="menuitem" className="awr-frame__menuitem" onClick={doReload}>
-            <ReloadIcon size={14} /> {L.appReload}
-          </button>
-          {onOpenPanel && (
             <button
               type="button"
               role="menuitem"
               className="awr-frame__menuitem"
               onClick={() => {
                 setMenu(false)
-                onOpenPanel()
+                setCollapsed(true)
               }}
             >
-              <PanelIcon size={14} /> {L.appOpenPanel}
+              <EyeOffIcon size={14} /> {L.appHide}
             </button>
-          )}
-          <button
-            type="button"
-            role="menuitem"
-            className="awr-frame__menuitem"
-            onClick={() => {
-              setMenu(false)
-              setCollapsed(true)
-            }}
-          >
-            <EyeOffIcon size={14} /> {L.appHide}
-          </button>
-          <div className="awr-frame__menusep" />
-          <p className="awr-frame__menunote">{L.appServedBy(app.server, app.resourceUri)}</p>
-          {sandboxNote && <p className="awr-frame__menunote">{sandboxNote}</p>}
-        </div>
-      )}
-      {body}
-      {panel ? (
-        <div className="awr-frame__foot">
-          <LockIcon size={11} />{' '}
-          <span className="awr-frame__footmeta">{L.appPanelNote(app.server)}</span>
-        </div>
-      ) : showCalls && calls.length > 0 ? (
-        <div className="awr-frame__foot">
-          <ToolIcon size={11} />
-          <span className="awr-frame__footmeta">
-            {L.appRan(
-              calls.map((c) => (c.ok ? c.name : `${c.name} (${L.appRefused})`)).join(' · '),
-            )}
-          </span>
-        </div>
-      ) : null}
-    </div>
+            <div className="awr-frame__menusep" />
+            <p className="awr-frame__menunote">{L.appServedBy(app.server, app.resourceUri)}</p>
+            {sandboxNote && <p className="awr-frame__menunote">{sandboxNote}</p>}
+          </div>
+        )}
+        {body}
+        {panel ? (
+          <div className="awr-frame__foot">
+            <LockIcon size={11} />{' '}
+            <span className="awr-frame__footmeta">{L.appPanelNote(app.server)}</span>
+          </div>
+        ) : showCalls && calls.length > 0 ? (
+          <div className="awr-frame__foot">
+            <ToolIcon size={11} />
+            <span className="awr-frame__footmeta">
+              {L.appRan(
+                calls.map((c) => (c.ok ? c.name : `${c.name} (${L.appRefused})`)).join(' · '),
+              )}
+            </span>
+          </div>
+        ) : null}
+        {fullscreen ? guard('exit') : null}
+      </div>
+    </>
   )
 }
 

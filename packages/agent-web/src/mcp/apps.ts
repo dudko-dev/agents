@@ -316,6 +316,85 @@ export const mcpAppToolResultOf = (
   return size <= maxChars ? shaped : undefined
 }
 
+/**
+ * What MCP Apps are for ONE server, from its own setting (`McpHttpServerConfig.apps`) and the
+ * connection's (`ConnectMcpOptions.apps`); the server's wins when it has one:
+ *
+ * - `'on'`: the extension declared, `_meta.ui` read, the server's apps shown.
+ * - `'declined'` (the server's `apps: false`): its apps are not shown here. Nothing is declared,
+ *   no app is read and no `mcp.app` event is told, and a tool marked for its app only
+ *   (`visibility` without `'model'`) is not mounted - it is for an app that will never run.
+ *   Every other tool is the model's, as a plain tool.
+ * - `'off'` (neither set): MCP Apps unknown - nothing declared, `_meta` not read, every tool
+ *   mounted: the wire and the tools are what they were before the extension.
+ */
+export type McpAppsMode = 'on' | 'declined' | 'off'
+
+export const mcpAppsModeOf = (
+  server: boolean | undefined,
+  connection: boolean | undefined,
+): McpAppsMode =>
+  server === true ? 'on' : server === false ? 'declined' : connection === true ? 'on' : 'off'
+
+/** A file an app asks the host to save, at most this many bytes (`readResource`'s default cap). */
+export const MCP_APP_MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
+
+/** A resource read for a download (`McpAppsConnection.readResource`): its bytes, as sent. */
+export interface McpAppDownloadResource {
+  uri: string
+  /** The type the server gave it, if any (third-party: the host judges it). */
+  mimeType?: string
+  bytes: Uint8Array
+}
+
+const base64Bytes = (blob: string): Uint8Array | undefined => {
+  try {
+    const binary = atob(blob.replace(/\s+/g, ''))
+    const bytes = new Uint8Array(binary.length)
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i)
+    return bytes
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * The bytes of a `resources/read` answer for `uri`, for a file the user is about to be asked to
+ * save: the entry with exactly that URI, `text` (as UTF-8) or base64 `blob`, at most `maxBytes`.
+ * Any MIME type (the host decides what it saves). Throws {@link McpAppResourceError} otherwise.
+ */
+export const mcpAppDownloadOf = (
+  uri: string,
+  result: unknown,
+  maxBytes: number = MCP_APP_MAX_DOWNLOAD_BYTES,
+): McpAppDownloadResource => {
+  const contents = isObj(result) && Array.isArray(result.contents) ? result.contents : []
+  const entry = contents.find((c): c is Obj => isObj(c) && c.uri === uri)
+  if (!entry) {
+    throw new McpAppResourceError(`the server's answer for ${uri} does not contain that resource`)
+  }
+  let bytes: Uint8Array | undefined
+  if (typeof entry.text === 'string') {
+    // UTF-8 is at most 3 bytes per UTF-16 unit: a text that cannot fit is refused before encoding.
+    if (entry.text.length > maxBytes) throw tooLargeBytes(uri, maxBytes)
+    bytes = new TextEncoder().encode(entry.text)
+  } else if (typeof entry.blob === 'string') {
+    if (entry.blob.length > Math.ceil((maxBytes * 4) / 3) + 4) throw tooLargeBytes(uri, maxBytes)
+    bytes = base64Bytes(entry.blob)
+    if (!bytes) throw new McpAppResourceError(`${uri}: its blob is not base64`)
+  }
+  if (!bytes) throw new McpAppResourceError(`${uri} has neither text nor blob`)
+  if (bytes.length > maxBytes) throw tooLargeBytes(uri, maxBytes)
+  return {
+    uri,
+    ...(typeof entry.mimeType === 'string' ? { mimeType: entry.mimeType.slice(0, 200) } : {}),
+    bytes,
+  }
+}
+
+const tooLargeBytes = (uri: string, max: number): McpAppResourceError =>
+  new McpAppResourceError(`${uri} is larger than ${max} bytes`)
+
 /** A one-line summary of a resource's declared policy, for the host's log (the audit trail). */
 export const describeMcpAppPolicy = (resource: McpAppResource): string => {
   const parts = DOMAIN_LISTS.map((list) => {

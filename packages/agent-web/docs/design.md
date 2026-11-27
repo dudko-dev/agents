@@ -1006,6 +1006,25 @@ form is ordinary, and the step used to end under them (the elicitation answered 
   tree-shake into a small Worker; its origin rule is a copy of `mcpAppOrigin`, held to it by a
   test. A per-server origin is a template (`{server}` in the host name, a DNS label), never the
   server's own `_meta.ui.domain`: the host decides origins.
+- **Off for one server is "declined", not "unknown".** `McpHttpServerConfig.apps: false` is a host
+  that knows MCP Apps and will not show that server's - so it reads `_meta.ui.visibility` (a tool
+  for its app only is mounted for nobody: there is no app to call it) and nothing else, and does
+  not declare the extension (the server is told the truth). Leaving both settings out stays the
+  recorded wire of before, every tool mounted: what a host that never heard of apps does.
+- **Downloads: the core reads, the UI judges.** A `resource_link` is read with `resources/read` on
+  the app's own server (`apps.readResource`) - the draft says a host "can retrieve the content
+  directly from the URI", but a fetch to an address an app chose is exactly what its CSP stops; the
+  server it came from is the one place the host already talks to. Which names and types are
+  saved is the UI's rule (a page saves files; the core has no filesystem).
+- **Sampling: one seam, in the agent.** `Agent.sampleForApp` is where the model, the usage counter
+  and the consent timeout already are, so the rules (`app-sampling.ts`, pure) and the order -
+  check, count, ask, send - live there and a Node host gets the same by calling it. The consent is
+  a callback (`approve`), not the `toolApproval` gate: a sampling request is not a tool call (no
+  name for a rule to match, nothing a mode like `'ask-writes'` means for it), and it must always
+  ask. The model is the synthesizer's: a completion with no tools is that stage's work. The rate
+  is counted before the user is asked: a prompt is the scarce resource.
+- **Display modes are the UI's.** Full screen is a layout and a focus rule; nothing of it is in
+  the core.
 - **Node: nothing yet.** The Node agent renders nothing, and an app's requests come from a browser:
   a server-side host would need the bridge in the page and a round trip for every app call. The
   names (`apps`, `mcp.app`, `readUiResource`, `appTool`, `callAppTool`, `approveAppToolCall`) are

@@ -6,6 +6,9 @@ import {
   type IUsage,
   type Agent,
   type AgentEventHandler,
+  type AppSamplingRequest,
+  type AppSamplingResult,
+  type AppSamplingView,
   type AppToolCallRequest,
   type BrowserAgentConfig,
   type CompactResult,
@@ -122,6 +125,19 @@ export interface UseAgentReturn extends AgentUiState {
    * app's frame going away). Resolves when the call may go; throws when it may not.
    */
   approveAppToolCall: (call: AppToolCallRequest, signal?: AbortSignal) => Promise<void>
+  /**
+   * Answer a completion an MCP App asks for (its `sampling/createMessage`) with the agent's model:
+   * the core's `Agent.sampleForApp` - checked, rate-limited per app, put to `approve` (shown
+   * exactly what the model gets), then sent with no tools and none of the conversation. The
+   * tokens count in `totalUsage` (a `usage` event of phase `'app'`, never the run's); the answer
+   * is returned to the caller and never reaches the transcript, the memory or the model's context.
+   * Throws the core's `AppSamplingError` (its `rpcCode` is what the app is told).
+   */
+  sampleForApp: (
+    request: AppSamplingRequest,
+    approve: (view: AppSamplingView) => Promise<boolean>,
+    signal?: AbortSignal,
+  ) => Promise<AppSamplingResult>
   /** Summarise the stored transcript now (needs `config.memory`). */
   compact: () => Promise<CompactResult | undefined>
   /** The memory session runs use (config.sessionId until switched). */
@@ -436,6 +452,35 @@ export const useAgent = (
     [],
   )
 
+  const sampleForApp = useCallback(
+    async (
+      request: AppSamplingRequest,
+      approve: (view: AppSamplingView) => Promise<boolean>,
+      signal?: AbortSignal,
+    ): Promise<AppSamplingResult> => {
+      const agent = agentRef.current
+      if (!agent) throw new Error('The agent is not ready')
+      // An older core cannot: refuse rather than answer without the core's checks.
+      if (typeof agent.sampleForApp !== 'function') {
+        throw new Error('This version of @dudko.dev/agent-web cannot answer an app’s sampling')
+      }
+      return agent.sampleForApp(request, {
+        approve,
+        ...(signal ? { signal } : {}),
+        sessionId: sessionRef.current,
+        // The only event: its tokens (phase 'app'). The answer is never dispatched.
+        onEvent: (event) =>
+          dispatch({
+            type: 'event',
+            event,
+            maxEvents: optionsRef.current.maxEvents,
+            at: Date.now(),
+          }),
+      })
+    },
+    [],
+  )
+
   const compact = useCallback(async (): Promise<CompactResult | undefined> => {
     const agent = agentRef.current
     if (!agent) return undefined
@@ -476,6 +521,7 @@ export const useAgent = (
     approvalMode,
     setApprovalMode,
     approveAppToolCall,
+    sampleForApp,
     compact,
     sessionId,
     loadChat,

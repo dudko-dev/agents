@@ -2746,6 +2746,127 @@
     flex: 1 1 100%;
   }
 }
+/* An app shown full screen: over the chat panel (top/left/width/height set by the frame), or the
+   whole viewport on a phone - always in the host's chrome, with the way back in it. */
+.awr-frame--fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-radius: 0;
+  box-shadow: 0 18px 60px rgb(0 0 0 / 0.45);
+}
+.awr-frame--fullscreen .awr-frame__head {
+  min-height: 46px;
+  padding: 6px 8px 6px 14px;
+  background: var(--awr-subtle);
+}
+.awr-frame--fullscreen .awr-frame__well {
+  flex: 1 1 auto;
+  display: flex;
+  min-height: 0;
+}
+.awr-frame--fullscreen .awr-frame__iframe {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+}
+.awr-frame__holder {
+  flex: none;
+  border: 1px dashed var(--awr-border);
+  border-radius: 10px;
+}
+.awr-frame__exit {
+  flex: none;
+  gap: 6px;
+}
+.awr-frame__key {
+  padding: 0 5px;
+  border: 1px solid var(--awr-border);
+  border-radius: 4px;
+  font: 11px/16px var(--awr-mono);
+  color: var(--awr-muted);
+}
+.awr-frame__guard {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+/* Who asked, in full: the title over the badges, both wrapping instead of being cut. */
+.awr-frame--fullscreen .awr-frame__title,
+.awr-frame--fullscreen .awr-frame__badges {
+  display: block;
+  white-space: normal;
+  overflow: visible;
+  overflow-wrap: anywhere;
+}
+.awr-frame--fullscreen .awr-frame__badges svg {
+  vertical-align: -1px;
+}
+@media (max-width: 480px) {
+  .awr-frame--fullscreen .awr-frame__head {
+    padding-left: 10px;
+  }
+  .awr-frame__key {
+    display: none;
+  }
+}
+/* A file an app asks to save: its name is what the user checks. */
+.awr-approval__file {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 10px;
+  margin: 0;
+  padding: 7px 9px;
+  border-radius: 6px;
+  background: var(--awr-subtle);
+  font-size: 12.5px;
+  min-width: 0;
+}
+.awr-approval__filename {
+  font-family: var(--awr-mono);
+  font-weight: 600;
+  color: var(--awr-fg);
+  overflow-wrap: anywhere;
+  background: color-mix(in srgb, var(--awr-warn) 16%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--awr-warn) 40%, transparent);
+  border-radius: 4px;
+  padding: 1px 3px;
+}
+.awr-approval__filemeta {
+  color: var(--awr-muted);
+}
+/* What an app would send the model: plain text, the app's, scrollable. */
+.awr-approval__sampling {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 260px;
+  overflow-y: auto;
+  min-width: 0;
+}
+.awr-approval__turn {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.awr-approval__role {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--awr-muted);
+}
+.awr-approval__turn .awr-approval__quote {
+  white-space: pre-wrap;
+}
+
 /* The panel rendered into a host's element (`appPanel={element}`): it fills it. */
 .awr-apppanel {
   display: flex;

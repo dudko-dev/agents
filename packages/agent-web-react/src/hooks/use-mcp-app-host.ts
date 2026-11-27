@@ -1,8 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { AppToolCallRequest, McpAppResource, McpAppToolResult } from '@dudko.dev/agent-web'
+import type {
+  AppSamplingRequest,
+  AppSamplingResult,
+  AppSamplingView,
+  AppToolCallRequest,
+  McpAppResource,
+  McpAppToolResult,
+} from '@dudko.dev/agent-web'
 import {
+  appSamplingErrorOf,
   MCP_APP_REFUSED,
   McpAppRpcError,
+  resolveAppDownload,
+  saveAppFile,
+  type AppDownload,
   type AppLink,
   type McpAppSandboxOptions,
 } from '../mcp-app.js'
@@ -30,19 +41,51 @@ export interface McpAppsConnectionLike {
     args: Record<string, unknown>,
     options?: { signal?: AbortSignal },
   ) => Promise<McpAppToolResult>
+  /**
+   * A resource of that server for a file its app asks to save (a `resource_link`): the core's
+   * `ConnectedMcp.apps.readResource` - `resources/read` on that server, never a fetch. Older
+   * cores have none: a linked file is then refused.
+   */
+  readResource?: (
+    server: string,
+    uri: string,
+    options?: { signal?: AbortSignal; maxBytes?: number },
+  ) => Promise<{ uri: string; mimeType?: string; bytes: Uint8Array }>
 }
 
-/** A link or a message an app asks for, waiting for the user (`<AppRequestPrompt>`). */
+/** A file an app asks to save, as the prompt shows it (the bytes stay with the host). */
+export interface AppDownloadView {
+  /** What it will be saved as (sanitized). */
+  name: string
+  /** The declared type, if any (the server's, for a linked file). */
+  mimeType?: string
+  /** Bytes. */
+  size: number
+  /** In the request (`embedded`), or read from the app's server (`link`). */
+  source: 'embedded' | 'link'
+}
+
+/** What an app asks for besides a tool call, waiting for the user (`<AppRequestPrompt>`). */
 export interface AppRequestView {
   id: string
   /** The app (`AppView.id`) that asks. */
   appId: string
   server: string
-  kind: 'link' | 'message'
+  kind: 'link' | 'message' | 'download' | 'sampling'
   /** `kind: 'link'`: the link, taken apart (the host is what the user checks). */
   link?: AppLink
   /** `kind: 'message'`: the app's text, cleaned. */
   text?: string
+  /** `kind: 'download'`: the file. */
+  download?: AppDownloadView
+  /** `kind: 'sampling'`: exactly what the model would get (the core checked and cleaned it). */
+  sampling?: AppSamplingView
+}
+
+/** How the user answered (`answer(id, accept, options)`). */
+export interface AppRequestAnswerOptions {
+  /** A sampling request: allow this app's requests until the page is reloaded. */
+  always?: boolean
 }
 
 /** What `<McpAppFrame>` asks of the host, and what the host shows the user. */
@@ -63,13 +106,26 @@ export interface McpAppHost {
   openLink: (app: AppView, link: AppLink, signal?: AbortSignal) => Promise<boolean>
   /** An app's `ui/message`: true once the user put it in the message box. */
   message: (app: AppView, text: string, signal?: AbortSignal) => Promise<boolean>
-  /** Links and messages waiting for the user. */
+  /**
+   * An app's `ui/download-file` (checked by the bridge): true once the user saved it, false when
+   * they did not. Present only with `downloads` on: absent, the method is not offered.
+   */
+  downloadFile?: (app: AppView, file: AppDownload, signal?: AbortSignal) => Promise<boolean>
+  /**
+   * An app's `sampling/createMessage`: the agent's model answers it (the core's
+   * `Agent.sampleForApp`), after the user said yes. Present only with `sampling` on and a
+   * `sample` given: absent, the method is not offered.
+   */
+  sample?: (app: AppView, params: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown>
+  /** Links, messages, files and sampling requests waiting for the user. */
   requests: AppRequestView[]
   /**
    * The user's answer to a request. Call it from the click: an accepted link is opened right
-   * there (`window.open`, `noopener,noreferrer`) and nowhere else.
+   * there (`window.open`, `noopener,noreferrer`) and an accepted file saved right there
+   * (`saveAppFile`), nowhere else. `always` (a sampling request): this app's next requests are
+   * not asked about until the page is reloaded.
    */
-  answer: (id: string, accept: boolean) => void
+  answer: (id: string, accept: boolean, options?: AppRequestAnswerOptions) => void
   /** The last message the user accepted: the composer appends it as a draft (never sends it). */
   draft?: { id: string; text: string }
   /** Whether the app has something waiting for the user (a link, a message, a tool call). */
@@ -93,6 +149,22 @@ export interface UseMcpAppHostOptions {
    * (`./mcp-app-sandbox`). Without it, apps run in an opaque frame (no storage of their own).
    */
   sandbox?: McpAppSandboxOptions
+  /**
+   * Let apps hand the user a file to save (`ui/download-file`, `hostCapabilities.downloadFile`).
+   * Each file is put to the user (name, type, size) and saved only on their click. Default false.
+   */
+  downloads?: boolean
+  /**
+   * Let apps ask the agent's model for a completion (`sampling/createMessage`,
+   * `hostCapabilities.sampling` - never `sampling.tools`). Needs `sample`. Default false.
+   */
+  sampling?: boolean
+  /** The agent's seam for it: `useAgent().sampleForApp`. */
+  sample?: (
+    request: AppSamplingRequest,
+    approve: (view: AppSamplingView) => Promise<boolean>,
+    signal?: AbortSignal,
+  ) => Promise<AppSamplingResult>
 }
 
 let seq = 0
@@ -110,12 +182,29 @@ export const useMcpAppHost = ({
   approve,
   approvals = [],
   sandbox,
+  downloads = false,
+  sampling = false,
+  sample: sampleFn,
 }: UseMcpAppHostOptions): McpAppHost => {
   const [requests, setRequests] = useState<AppRequestView[]>([])
   const [draft, setDraft] = useState<{ id: string; text: string } | undefined>()
   const waiting = useRef(
-    new Map<string, { request: AppRequestView; resolve: (ok: boolean) => void }>(),
+    new Map<
+      string,
+      {
+        request: AppRequestView
+        resolve: (ok: boolean) => void
+        /** A file to save on the user's Allow (never in state). */
+        file?: { name: string; bytes: Uint8Array }
+        /** A sampling request: the app's key, for "always for this app". */
+        app?: string
+      }
+    >(),
   )
+  // Apps whose sampling the user allowed until the page is reloaded (server + resource).
+  const samplingAllowed = useRef(new Set<string>())
+  const sampleRef = useRef(sampleFn)
+  sampleRef.current = sampleFn
   // Calls of an app that wait in the agent's gate, by app id (for "waiting for you").
   const [gated, setGated] = useState<Record<string, number>>({})
   const connectionRef = useRef(connection)
@@ -133,7 +222,11 @@ export const useMcpAppHost = ({
   )
 
   const ask = useCallback(
-    (request: Omit<AppRequestView, 'id'>, signal?: AbortSignal): Promise<boolean> => {
+    (
+      request: Omit<AppRequestView, 'id'>,
+      signal?: AbortSignal,
+      extra: { file?: { name: string; bytes: Uint8Array }; app?: string } = {},
+    ): Promise<boolean> => {
       // One question per app at a time: an app cannot pile up prompts.
       for (const w of waiting.current.values()) {
         if (w.request.appId === request.appId) {
@@ -152,14 +245,14 @@ export const useMcpAppHost = ({
         }
         const onAbort = () => done(false)
         signal?.addEventListener('abort', onAbort, { once: true })
-        waiting.current.set(full.id, { request: full, resolve: done })
+        waiting.current.set(full.id, { request: full, resolve: done, ...extra })
         setRequests((list) => [...list, full])
       })
     },
     [],
   )
 
-  const answer = useCallback((id: string, accept: boolean) => {
+  const answer = useCallback((id: string, accept: boolean, options?: AppRequestAnswerOptions) => {
     const w = waiting.current.get(id)
     if (!w) return
     if (accept && w.request.kind === 'link' && w.request.link) {
@@ -168,6 +261,22 @@ export const useMcpAppHost = ({
     }
     if (accept && w.request.kind === 'message' && w.request.text) {
       setDraft({ id, text: w.request.text })
+    }
+    if (accept && w.request.kind === 'download' && w.file) {
+      // Only here, on the user's click: a blob of this page, an <a download> of ours.
+      try {
+        saveAppFile(w.file, {
+          document,
+          URL,
+          setTimeout: (fn, ms) => globalThis.setTimeout(fn, ms),
+        })
+      } catch {
+        w.resolve(false)
+        return
+      }
+    }
+    if (accept && options?.always && w.request.kind === 'sampling' && w.app) {
+      samplingAllowed.current.add(w.app)
     }
     w.resolve(accept)
   }, [])
@@ -242,6 +351,57 @@ export const useMcpAppHost = ({
     [ask],
   )
 
+  const downloadFile = useCallback(
+    async (app: AppView, file: AppDownload, signal?: AbortSignal): Promise<boolean> => {
+      const c = connectionRef.current
+      if (file.kind === 'link' && !c) throw refused(`The server “${app.server}” is not connected`)
+      // A linked file is read from the app's OWN server through the connection - never fetched.
+      const ready = await resolveAppDownload(file, app.server, c?.readResource, signal)
+      return ask(
+        {
+          appId: app.id,
+          server: app.server,
+          kind: 'download',
+          download: {
+            name: ready.name,
+            ...(ready.mimeType ? { mimeType: ready.mimeType } : {}),
+            size: ready.bytes.length,
+            source: ready.source,
+          },
+        },
+        signal,
+        { file: { name: ready.name, bytes: ready.bytes } },
+      )
+    },
+    [ask],
+  )
+
+  const sample = useCallback(
+    async (app: AppView, params: Record<string, unknown>, signal?: AbortSignal) => {
+      const fn = sampleRef.current
+      if (!fn) throw refused('This host cannot answer sampling requests')
+      const key = `${app.server}\u0000${app.resourceUri}`
+      try {
+        return await fn(
+          { server: app.server, resourceUri: app.resourceUri, params },
+          (view) =>
+            samplingAllowed.current.has(key)
+              ? Promise.resolve(true)
+              : ask(
+                  { appId: app.id, server: app.server, kind: 'sampling', sampling: view },
+                  signal,
+                  { app: key },
+                ),
+          signal,
+        )
+      } catch (err) {
+        // The core's refusals carry the code the app is told (-1: the user said no).
+        throw appSamplingErrorOf(err)
+      }
+    },
+    [ask],
+  )
+
   const pendingAppServers = useMemo(
     () =>
       new Set(
@@ -273,6 +433,7 @@ export const useMcpAppHost = ({
     [sandboxUrl, sandboxTimeout],
   )
 
+  const samplingOn = sampling && Boolean(sampleFn)
   return useMemo(
     () => ({
       connected: Boolean(connection),
@@ -281,6 +442,8 @@ export const useMcpAppHost = ({
       callTool,
       openLink,
       message,
+      ...(downloads ? { downloadFile } : {}),
+      ...(samplingOn ? { sample } : {}),
       requests,
       answer,
       draft,
@@ -294,6 +457,10 @@ export const useMcpAppHost = ({
       callTool,
       openLink,
       message,
+      downloads,
+      downloadFile,
+      samplingOn,
+      sample,
       requests,
       answer,
       draft,

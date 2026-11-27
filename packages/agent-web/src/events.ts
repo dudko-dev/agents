@@ -24,7 +24,8 @@ export type Phase = 'plan' | 'execute' | 'replan' | 'synthesize'
  * the google provider (`config.search`): the grounding call is a model call, and these are the
  * tokens its API reported.
  */
-export type UsagePhase = Phase | 'compact' | 'subagent' | 'decision' | 'media' | 'search'
+/** `'app'`: a completion an MCP App asked for (`Agent.sampleForApp`), outside any run. */
+export type UsagePhase = Phase | 'compact' | 'subagent' | 'decision' | 'media' | 'search' | 'app'
 
 /**
  * Everything the agent does is streamed as a typed event so any UI (or none)

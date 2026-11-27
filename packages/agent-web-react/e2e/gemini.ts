@@ -25,6 +25,8 @@ export interface GeminiCall {
   modalities?: string[]
   /** generationConfig.thinkingConfig.thinkingLevel, when the call asked for thinking. */
   thinkingLevel?: string
+  /** generationConfig.maxOutputTokens: the call's output cap (an app's sampling is capped). */
+  maxOutputTokens?: number
   streaming: boolean
   /** The model the request was sent to (from its URL): tells the executor tiers apart. */
   model: string
@@ -53,7 +55,11 @@ type Part = {
 type Body = {
   systemInstruction?: { parts?: Part[] }
   contents?: { role: string; parts?: Part[] }[]
-  generationConfig?: { thinkingConfig?: { thinkingLevel?: string }; responseModalities?: string[] }
+  generationConfig?: {
+    thinkingConfig?: { thinkingLevel?: string }
+    responseModalities?: string[]
+    maxOutputTokens?: number
+  }
   tools?: { functionDeclarations?: { name: string }[] }[]
 }
 
@@ -78,8 +84,7 @@ export interface DecisionCall {
 
 /** What the decision model answers: one of the options and how sure it is - or an API error. */
 export type DecisionReply =
-  | { choice: string; confidence: number }
-  | { error: { status: number; message: string } }
+  { choice: string; confidence: number } | { error: { status: number; message: string } }
 
 /** One call to the transcription model (`POST …/v1beta/interactions`). */
 export interface TranscriptionCall {
@@ -232,6 +237,7 @@ export const mockGemini = async (
       tools: (body.tools ?? []).flatMap((t) => (t.functionDeclarations ?? []).map((d) => d.name)),
       modalities: body.generationConfig?.responseModalities,
       thinkingLevel: body.generationConfig?.thinkingConfig?.thinkingLevel,
+      maxOutputTokens: body.generationConfig?.maxOutputTokens,
       streaming: req.url().includes(':streamGenerateContent'),
       model: /\/models\/([^:/?]+)/.exec(req.url())?.[1] ?? '',
     }
@@ -308,6 +314,13 @@ export const TINY_PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAIAAADYYG7QAAAAOklEQVR42u3OQQ0AAAgEoGtkZKsZxRbOBxsBSPW8EiEhISEhISEhISEhISEhISEhISEhISEhISGhOwu8+x7ikHzBkQAAAABJRU5ErkJggg==',
   'base64',
 )
+
+/**
+ * A call an MCP App asked for (`sampling/createMessage`, answered by the agent's model through
+ * `Agent.sampleForApp`): no stage marker - the system instruction is the APP's - and no tools.
+ */
+export const isAppSampling = (c: GeminiCall, systemPrompt: string): boolean =>
+  c.stage === 'other' && c.system.includes(systemPrompt) && c.tools.length === 0
 
 /** A one-step plan, as the planner's JSON. */
 export const plan = (...steps: string[]): GeminiReply => ({

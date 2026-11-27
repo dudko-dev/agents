@@ -444,8 +444,31 @@ const result = await mcp.apps!.callAppTool('travel', 'flights.book', args)
   is remembered for apps only. The request carries `app: { server, tool, resourceUri }`.
   `callAppTool` itself does not ask: call it after the consent.
 
-Everything else an app may ask for - opening a link, putting a message in the chat - is the UI's to
-ask the user about. The whole of it: [docs/capabilities.md](docs/capabilities.md#mcp-apps-a-servers-interface-for-a-tool)
+- **One server's apps off**: `McpHttpServerConfig.apps: false` (over the connection's `apps`) -
+  that server is not told of apps, none of its apps is read, no `mcp.app` is told for it, and a
+  tool it marks for its app only is mounted for nobody; its other tools are plain tools. `apps:
+true` turns them on for that server alone (`mcpAppsModeOf`: `'on' | 'declined' | 'off'`).
+- **A file an app links to** (`ui/download-file` with a `resource_link`):
+  `mcp.apps.readResource(server, uri, { maxBytes })` - `resources/read` on that server only, never a
+  fetch of the URI; its bytes, at most `MCP_APP_MAX_DOWNLOAD_BYTES` (20 MB), not cached. It neither
+  asks the user nor judges the type: the UI does both before it saves anything.
+- **A completion an app asks for** (`sampling/createMessage`) - `agent.sampleForApp({ server,
+resourceUri, params }, { approve, signal?, onEvent?, sessionId? })`: checked (text; images only
+  for a model known to read them; no tools; 16 000 characters; `maxTokens` lowered to 1024), rate
+  limited per app (5 a minute, 30 in all), put to `approve` with exactly what the model will get,
+  then answered by the synthesizer's model with nothing of the agent's context. Its tokens count in
+  `agent.usage` (a `usage` event of phase `'app'`); the answer goes to the caller only - never into
+  memory, an event or a run. Caps: `config.appSampling` (`false` refuses every request).
+
+```ts
+const answer = await agent.sampleForApp(
+  { server: 'demo', resourceUri: 'ui://demo/trip-board.html', params: request.params },
+  { approve: (view) => askTheUser(view) }, // view: { messages, systemPrompt?, maxTokens, … }
+) // { role: 'assistant', content: { type: 'text', text }, model, stopReason } - or AppSamplingError
+```
+
+Everything else an app may ask for - opening a link, putting a message in the chat, full screen,
+saving a file - is the UI's to ask the user about. The whole of it: [docs/capabilities.md](docs/capabilities.md#mcp-apps-a-servers-interface-for-a-tool)
 and [docs/security.md](docs/security.md#mcp-apps-a-servers-html-with-scripts).
 
 ### OAuth 2.1 + Dynamic Client Registration
@@ -848,6 +871,7 @@ Loading a definition someone else wrote: [docs/security.md](docs/security.md#pip
 | `availableTools` / `excludedTools` | — | whitelist / blacklist of tool names mounted from `tools` |
 | `toolMode` | `'auto'` | `native` \| `prompted` \| `auto` (cloud→native, local→prompted) |
 | `toolSelectionStrategy` | `'auto'` | `all` \| `plan-narrowed` \| `search` \| `auto` (search above `toolSearchThreshold`, 40, or once the definitions take ¼ of the window) |
+| `appSampling` | on, with caps | the caps of `agent.sampleForApp` (an MCP App asking the model): `{ maxTokens: 1024, maxRequestsPerMinute: 5, maxRequests: 30, maxInputChars: 16000 }`, per app; `false` refuses every request. Nothing happens unless a host calls it, and every request goes to its `approve` first. See [An app asks the model](docs/capabilities.md#an-app-asks-the-model) |
 | `toolApproval` | autopilot | consent policy: `{ mode, rules, onRequest, timeoutMs }`; `agent.setToolApprovalMode()`. A question waits `timeoutMs` for a decision, then is denied: default 300000 (`TOOL_APPROVAL_TIMEOUT_MS`), `0` or `Infinity` = until the run is stopped (as is a value above 2^31 - 1, the most a timer holds); negative or `NaN` fails `createAgent`. `onRequest(req, { signal })`: the signal aborts when the question ends without an answer (`TimeoutError` for the bound, `AbortError` for a stop). See [Tool consent](docs/capabilities.md#tool-consent-and-autopilot) |
 | `skills` | — | SKILL.md bundles (`defineSkill` / `parseSkillMarkdown` / `loadSkillFromUrl`). An MCP server's skills come with its tools (`skills: true` on the server of `connectMcpHttp`, experimental) and join them as `<server>/<skill>` - see [MCP skills](#mcp-skills-experimental-a-servers-instructions-as-skills) |
 | `egress` | off | what the **model** may fetch (`web_fetch`): `true` = any public host over https, or `{ allow, deny, protocols, allowPrivateNetwork, fetch, ... }`; a browser can't pin DNS, so prefer an `allow` list — see [Egress](docs/capabilities.md#egress-what-the-model-may-fetch) |

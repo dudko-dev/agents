@@ -86,6 +86,9 @@ export const McpPanel = ({
   const [protocol, setProtocol] = useState<McpProtocolMode>('auto')
   const [registration, setRegistration] = useState<McpOAuthRegistration>('auto')
   const [skills, setSkills] = useState(false)
+  // This server's apps: the panel's switch for every server is the default.
+  const [serverApps, setServerApps] = useState(apps !== false)
+  useEffect(() => setServerApps(apps !== false), [apps])
   const [token, setToken] = useState('')
   const [tokens, setTokens] = useState<Record<string, string>>({})
   const [open, setOpen] = useState<Record<string, boolean>>({})
@@ -113,6 +116,8 @@ export const McpPanel = ({
       protocol,
       // Experimental: only when ticked (and never on the 2025 revisions - the core says so).
       ...(skills ? { skills: true } : {}),
+      // Off for this server: none of its apps is read or drawn, its app-only tools are hidden.
+      ...(serverApps ? {} : { apps: false }),
     })
     setUrl('')
     setName('')
@@ -224,6 +229,14 @@ export const McpPanel = ({
                   </span>
                 )}
                 {s.protocolMode && <span>asked for: {s.protocolMode}</span>}
+                {s.apps === false && (
+                  <span
+                    className="mcp__badge mcp__badge--muted"
+                    title="Added with its apps off: none of them is read or shown, and its tools for apps only are hidden"
+                  >
+                    apps off
+                  </span>
+                )}
                 {s.skills && (
                   <span
                     className="mcp__badge mcp__badge--muted"
@@ -385,6 +398,16 @@ export const McpPanel = ({
           </p>
         )}
 
+        {onApps && (
+          <label className="mcp__mock">
+            <input
+              type="checkbox"
+              checked={serverApps}
+              onChange={(e) => setServerApps(e.target.checked)}
+            />
+            Show this server’s apps
+          </label>
+        )}
         {mode === 'bearer' && (
           <label className="settings__field">
             <span className="settings__label">Token</span>
