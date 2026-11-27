@@ -1794,3 +1794,440 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+/* ── Files an answer wrote: chips, inline previews ────────────────────────── */
+.awr-msg__files {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.awr-msg__fileshead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--awr-muted);
+}
+.awr-msg__fileshead .awr-linkbtn {
+  margin-left: auto;
+}
+.awr-msg__files .awr-linkbtn {
+  font-size: 12px;
+  text-underline-offset: 2px;
+}
+.awr-filechips {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 6px;
+}
+.awr-filechips__item {
+  min-width: 0;
+}
+.awr-filechip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 5px 4px 5px 6px;
+  border: 1px solid var(--awr-border);
+  border-radius: 10px;
+  background: var(--awr-bg);
+}
+.awr-filechip.is-open {
+  border-color: color-mix(in srgb, var(--awr-accent) 55%, var(--awr-border));
+  background: color-mix(in srgb, var(--awr-accent) 6%, var(--awr-bg));
+}
+.awr-filechip.is-gone {
+  opacity: 0.6;
+}
+.awr-filechip__thumb {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  border-radius: 7px;
+  border: 1px solid var(--awr-border);
+  background: var(--awr-subtle);
+  color: var(--awr-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.awr-filechip__thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.awr-filechip__text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.3;
+}
+.awr-filechip__name {
+  font-family: var(--awr-mono);
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.awr-filechip__meta {
+  font-size: 11px;
+  color: var(--awr-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.awr-filechip__actions {
+  display: inline-flex;
+  flex: none;
+}
+.awr-filechip.is-open .awr-iconbtn.is-on {
+  color: var(--awr-accent);
+  background: transparent;
+}
+
+/* An inline preview the host renders itself (text, Markdown, a picture): a plain border. */
+.awr-fileview {
+  align-self: stretch;
+  min-width: 0;
+  border: 1px solid var(--awr-border);
+  border-radius: 10px;
+  background: var(--awr-bg);
+  overflow: hidden;
+}
+.awr-fileview__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 3px 4px 3px 10px;
+  border-bottom: 1px solid var(--awr-border);
+  font-size: 12px;
+  color: var(--awr-muted);
+}
+.awr-fileview__name {
+  font-family: var(--awr-mono);
+  color: var(--awr-fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.awr-fileview__kind {
+  white-space: nowrap;
+  flex: none;
+}
+.awr-fileview__actions {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+.awr-fileview__body {
+  position: relative;
+  min-width: 0;
+}
+.awr-fileview__body.is-folded {
+  max-height: 330px;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(#000 calc(100% - 44px), transparent);
+  mask-image: linear-gradient(#000 calc(100% - 44px), transparent);
+}
+.awr-fileview__rendered {
+  padding: 4px 14px 12px;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.awr-fileview__rendered table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+.awr-fileview__image {
+  display: flex;
+  justify-content: center;
+  padding: 8px;
+  background: var(--awr-subtle);
+}
+.awr-fileview__image img {
+  display: block;
+  max-width: 100%;
+  max-height: 420px;
+  border-radius: 6px;
+}
+.awr-fileview__more {
+  display: flex;
+  justify-content: center;
+  padding: 6px;
+  border-top: 1px solid var(--awr-border);
+}
+.awr-fileview__cut,
+.awr-fileview__none {
+  margin: 0;
+  padding: 6px 12px;
+  font-size: 11px;
+  color: var(--awr-muted);
+  border-top: 1px solid var(--awr-border);
+}
+.awr-fileview__none {
+  border-top: 0;
+  font-size: 12px;
+}
+
+/* A file's text with line numbers (always text, never markup). */
+.awr-source {
+  margin: 0;
+  padding: 8px 0;
+  font-family: var(--awr-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-x: auto;
+  color: var(--awr-fg);
+  background: var(--awr-bg);
+  counter-reset: awr-line;
+  tab-size: 2;
+}
+.awr-source__line {
+  display: block;
+  white-space: pre;
+  padding-right: 12px;
+}
+.awr-source__line::before {
+  counter-increment: awr-line;
+  content: counter(awr-line);
+  display: inline-block;
+  width: 34px;
+  padding-right: 10px;
+  text-align: right;
+  color: color-mix(in srgb, var(--awr-muted) 60%, transparent);
+  user-select: none;
+}
+.awr-source__tag {
+  color: var(--awr-accent);
+}
+.awr-source__attr {
+  color: color-mix(in srgb, var(--awr-accent) 45%, var(--awr-danger));
+}
+.awr-source__string {
+  color: var(--awr-ok);
+}
+.awr-source__comment {
+  color: var(--awr-muted);
+}
+
+/* ── The sandboxed frame: host chrome around third-party content ──────────── */
+.awr-frame {
+  align-self: stretch;
+  min-width: 0;
+  border: 1px solid color-mix(in srgb, var(--awr-fg) 14%, var(--awr-border));
+  border-radius: 10px;
+  background: var(--awr-bg);
+  overflow: hidden;
+  position: relative;
+}
+.awr-frame__head {
+  display: flex;
+  align-items: center;
+  gap: 2px 6px;
+  min-height: 34px;
+  padding: 3px 4px 3px 10px;
+  font-size: 12px;
+  color: var(--awr-muted);
+}
+.awr-frame__label {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  line-height: 1.35;
+}
+.awr-frame__icon {
+  flex: none;
+  color: var(--awr-muted);
+}
+.awr-frame__titles {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.awr-frame__title {
+  color: var(--awr-fg);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.awr-frame__badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.awr-frame__badges svg {
+  flex: none;
+}
+.awr-frame__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--awr-muted);
+  cursor: pointer;
+}
+.awr-frame__btn:hover:not(:disabled),
+.awr-frame__btn.is-on {
+  background: var(--awr-subtle);
+  color: var(--awr-fg);
+}
+.awr-frame__btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+/* The well: a hatched gutter the host draws; the third-party document sits inside it. */
+.awr-frame__well {
+  padding: 5px;
+  border-top: 1px solid color-mix(in srgb, var(--awr-fg) 14%, var(--awr-border));
+  background:
+    repeating-linear-gradient(
+      135deg,
+      color-mix(in srgb, var(--awr-muted) 22%, transparent) 0 3px,
+      transparent 3px 8px
+    ),
+    var(--awr-bg);
+}
+.awr-frame__iframe {
+  display: block;
+  width: 100%;
+  height: 300px;
+  border: 0;
+  border-radius: 6px;
+  background: #fff;
+  color-scheme: light;
+}
+.awr-frame__foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 5px;
+  border-top: 1px solid color-mix(in srgb, var(--awr-fg) 14%, var(--awr-border));
+  font-size: 11px;
+  color: var(--awr-muted);
+  min-width: 0;
+}
+.awr-frame__foot svg {
+  flex: none;
+}
+.awr-frame__foot code {
+  font-family: var(--awr-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+.awr-frame__footmeta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1 10 auto;
+}
+/* The source view is host-rendered text: no hatched well. */
+.awr-frame__source {
+  border-top: 1px solid color-mix(in srgb, var(--awr-fg) 14%, var(--awr-border));
+  max-height: 380px;
+  overflow-y: auto;
+}
+
+/* A two-way switch (Preview | Source). */
+.awr-seg {
+  display: inline-flex;
+  padding: 2px;
+  gap: 2px;
+  border: 1px solid var(--awr-border);
+  border-radius: 8px;
+  background: var(--awr-bg);
+  flex: none;
+}
+.awr-seg__opt {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--awr-muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.awr-seg__opt.is-on {
+  background: var(--awr-subtle);
+  color: var(--awr-fg);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--awr-fg) 14%, var(--awr-border));
+}
+
+/* Phones and touch: every new control is at least 40px, and nothing scrolls sideways. */
+@media (max-width: 480px), (pointer: coarse) {
+  .awr-filechip .awr-iconbtn,
+  .awr-fileview .awr-iconbtn,
+  .awr-frame__btn {
+    width: 40px;
+    height: 40px;
+  }
+  .awr-seg {
+    min-height: 40px;
+  }
+  .awr-seg__opt {
+    height: 40px;
+    min-width: 40px;
+    padding: 0 12px;
+  }
+  .awr-msg__files .awr-linkbtn {
+    min-height: 40px;
+  }
+  .awr-frame__head {
+    min-height: 46px;
+  }
+}
+@media (max-width: 480px) {
+  .awr-filechips {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .awr-fileview__kind {
+    display: none;
+  }
+  /* The HTML frame: the view switch takes a row of its own. */
+  .awr-frame--html .awr-frame__head {
+    flex-wrap: wrap;
+    padding: 3px 4px 6px 10px;
+  }
+  .awr-frame--html .awr-seg {
+    order: 9;
+    flex: 1 1 100%;
+    margin-right: 6px;
+  }
+  .awr-frame--html .awr-seg__opt {
+    flex: 1 1 0;
+  }
+}

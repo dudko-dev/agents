@@ -52,6 +52,7 @@ function Assistant() {
 - [Talking to the agent while it works](#talking-to-the-agent-while-it-works)
 - [Subagents and helpers: the tree](#subagents-and-helpers-the-tree)
 - [Generated media and transcripts](#generated-media-and-transcripts)
+- [Files written in a turn: chips, previews, the HTML frame](#files-written-in-a-turn-chips-previews-the-html-frame)
 - [The decision model's note](#the-decision-models-note)
 - [Web search results](#web-search-results)
 - [The agent's notebook, and what it fetched](#the-agents-notebook-and-what-it-fetched)
@@ -93,6 +94,8 @@ full size) and file chips. The header shows the conversation's total.
 | `showThoughts` | `true` | step and answer thoughts |
 | `showSubagents` | `true` | the [subagent tree](#subagents-and-helpers-the-tree) under a step |
 | `showMedia` | `true` | generated images / audio and transcripts in an answer |
+| `showFileChips` | `true` | the [files an answer wrote](#files-written-in-a-turn-chips-previews-the-html-frame), as chips under it |
+| `htmlPreview` | `{}` | how a written `.html` file is previewed: `{ scripts?: boolean, height?: number }`, or `false` for source only |
 | `showDecisions` | `true` | the decision model's note under a step |
 | `showSearchResults` | `true` | a `web_search` call's results under its row |
 | `showStatus` | `true` | the status dot in the header |
@@ -317,6 +320,121 @@ decision call" when there were some (`showCalls={false}` hides them).
 Labels: `mediaImage`, `mediaAudio`, `mediaFile`, `transcriptOf`, `transcriptNote`, `usageMedia`,
 `usageDecisions`.
 
+## Files written in a turn: chips, previews, the HTML frame
+
+When the agent writes files (`createFileTools(files)`: `fs_write`; or `fs.writeFile` from the
+sandbox), the answer shows them as **chips** under its text: name, kind, size, **open** and
+**download**. Which files belong to a turn comes from the core's `file.written` / `file.deleted`
+events, folded by the reducer:
+
+```ts
+agent.writtenFiles // WrittenFileView[] | undefined - { path, mediaType, bytes, writes, stepId?, by? }
+message.writtenFiles // the same, kept on each assistant turn (and in a saved chat)
+```
+
+- a file written several times is **one chip** (`writes` counts them, the size is the last one);
+- a file **deleted later in the turn has no chip**;
+- a file a **subagent** or a helper wrote belongs to the parent's turn and says who wrote it
+  (`by: { id, name, role? }`, shown as "by researcher");
+- what the user uploads, an attachment, and a generated image (`media`, above) are not here:
+  these are the files the run WROTE with the file tools.
+
+The content is never in the state. A chip reads the file from `files` when it is opened; a file
+that has since left the workspace keeps its chip, marked "no longer in the workspace", with
+nothing to open. Without `files` the chips only name the files.
+
+**Open** shows the file right there, one at a time:
+
+- **text, Markdown, CSV, JSON, code** as source with line numbers - always text nodes, never
+  markup. The first `previewChars` (20 000) characters; a longer file says it was cut. A long
+  preview is folded with "Show the rest". Give `renderFileContent(file, text)` and a file you
+  return something for gets a **Rendered / Source** switch - that is where your Markdown renderer
+  goes (the package ships none); return `undefined` for the rest;
+- **a picture** (PNG, JPEG, GIF, WebP - the types the core writes; **never SVG**, which is shown
+  as its source) inline, and as the chip's thumbnail;
+- **an `.html` file** in a sandboxed frame with a **Preview / Source** switch - see below;
+- anything else (a PDF, a binary) has no preview, only the download.
+
+```tsx
+<AgentChat
+  files={vfs}
+  showFileChips            // default true
+  htmlPreview={{ scripts: false }} // the default; { scripts: true } | false
+  renderFileContent={(file, text) =>
+    /\.md$/i.test(file.path) ? <Markdown text={text} /> : undefined}
+  renderFile={(file, message, fallback) => fallback} // a whole chip
+/>
+```
+
+`<FileChips written files />` is the part on its own (`showHeader`, `onShowFiles` for the "Show in
+Files" link - `<AgentChat>` wires it to its Files panel -, `htmlPreview`, `renderFile`,
+`renderFileContent`, `previewChars`, `defaultOpen`); `<FileChip>` is one chip, `<SourceView text
+html? />` the numbered source, `fileKindOf(path, mediaType)` says `'html' | 'markdown' | 'csv' |
+'json' | 'image' | 'code' | 'text' | 'file'`.
+
+### The HTML preview is a security boundary
+
+A page the agent wrote is **untrusted content**: the model may have been told what to write by a
+web page it read, and your page's origin holds the key vault. So the preview never puts the file
+into your document and never opens it by URL. `<SandboxedFrame>` draws it, and every line of the
+following is a guard with a test (`tests/files.test.ts`, and in a real browser
+`e2e/files.spec.ts`):
+
+- **Sandbox, opaque origin.** `<iframe sandbox>` with `""` or `"allow-scripts"` - never
+  `allow-same-origin`. The page cannot read your DOM, `localStorage`, `sessionStorage`, cookies or
+  IndexedDB. No `allow-top-navigation` (it cannot navigate your tab; `<a target=_top>` does
+  nothing), no `allow-popups` (`window.open` and `target=_blank` give nothing), no `allow-forms`,
+  `allow-modals`, `allow-downloads`.
+- **By `srcdoc`, not by URL.** A `blob:` URL made by your page carries your origin: opened
+  outside the frame (a new tab) the same document would run as your application. `srcdoc` has no
+  address to open. A page above 1 000 000 characters is not framed at all - source only.
+- **No network.** A Content-Security-Policy with no network source: `default-src 'none'`, inline
+  styles, `data:` / `blob:` images, `data:` fonts, and inline scripts only with `scripts: true`.
+  `fetch`, XHR, `sendBeacon`, WebSocket, an `<img src=https://…>`, an external script or
+  stylesheet, a form: none of them leaves.
+- **The policy cannot be pre-empted.** It is given twice. Once as the first element of the
+  document itself (right after a leading doctype, otherwise before everything - no `<meta>`,
+  `<base>` or script of the document can come earlier, and a later policy of its own can only
+  narrow ours). And once by inheritance: the document is not framed by your page directly but by
+  a **shell document of ours** inside the outer frame, and a `srcdoc` document takes its parent's
+  policy whatever its own markup says.
+- **No self-navigation.** A frame may always navigate ITSELF - `location = …`, a clicked link,
+  `<meta http-equiv=refresh>` - and neither the sandbox nor the document's own policy stops it;
+  each is a request that can carry data in its URL. The shell's `frame-src 'none'` does: it is the
+  embedding document's policy that governs where a frame may go. (The browser then shows its own
+  error page inside the frame; nothing was requested.)
+- **The host draws the chrome.** The label ("HTML written by the agent · sandboxed · no
+  network"), the Preview / Source switch, the size button and the footer are in your document,
+  outside the frame: the content cannot imitate or cover a control of the chat.
+- **A fixed height.** `htmlPreview.height` (300, clamped to 120 - 800), doubled by the size
+  button. The frame is never resized from inside: the component listens to no message.
+- **Source is text.** Line by line, as text nodes.
+
+**Scripts are off by default** (`htmlPreview={{ scripts: true }}` turns them on): a static render
+is enough to look at a page, and the footer says which it is. With scripts on the page still has
+an opaque origin and no network. `htmlPreview={false}` never renders HTML.
+
+What it does **not** do, in this version:
+
+- **Linked files are not loaded.** An `index.html` that refers to `style.css`, `app.js` or an
+  image next to it is shown without them (the policy refuses anything that is not inline), and
+  the footer names what was left out. One self-contained file previews fully.
+- **A DNS lookup is not a request the policy sees.** A browser may resolve a host named in
+  `<link rel=dns-prefetch>` without fetching anything. What could leak that way is only what the
+  agent itself put into the page it wrote - never anything of your origin.
+- The guards are verified in Chromium (the browser tests). Firefox and Safari implement the same
+  standards but are not in the test run.
+
+`<SandboxedFrame html scripts title label actions footer height>` is exported for anything else
+untrusted you need to draw (the builders are too: `buildSandboxedDocument`, `sandboxedCsp`,
+`sandboxTokens`, `withCspFirst`). Do not weaken it by adding sandbox tokens around it.
+
+Labels: `filesWritten`, `filesCount`, `showInFiles`, `fileKinds`, `fileOpen`, `fileClose`,
+`fileDownload`, `fileBy`, `fileGone`, `fileNoPreview`, `fileCut`, `fileShowRest`, `fileShowLess`,
+`fileRendered`, `fileSource`, `closePreview`, `fileLines`, `htmlFrameTitle`, `htmlSandboxed`,
+`htmlNoNetwork`, `htmlSourceNote`, `htmlScripts`, `htmlLinkedFiles`, `htmlTooLarge`, `htmlTaller`,
+`htmlShorter`, `htmlFrameName`.
+
 ## The decision model's note
 
 With `decisionModel` in the agent's config a small model answers the replanner's continue / finish.
@@ -480,6 +598,8 @@ rendering as `fallback`:
   renderApproval={(req, fallback) => fallback}
   renderSubagent={(node, fallback) => fallback}
   renderMedia={(media, message, fallback) => fallback}
+  renderFile={(file, message, fallback) => fallback}
+  renderFileContent={(file, text) => undefined}
 />
 ```
 
@@ -551,6 +671,14 @@ component or `<AgentLabelsProvider>`); whatever you leave out falls back to `def
   *(fn: reason, detail)*, `decisionReasons` *(map by `low-confidence` / `invalid-choice` /
   `invalid-confidence` / `error` / `timeout` / `needs-model`)*, `searchQuery`, `searchNoResults`,
   `searchFiltered` *(fn: n)*, `searchTruncated`.
+- **Files of a turn:** `filesWritten` *(fn: n)*, `filesCount` *(fn: n)*, `showInFiles`, `fileKinds`
+  *(map by `html` / `markdown` / `csv` / `json` / `image` / `code` / `text` / `file`)*, `fileOpen`
+  *(fn: name)*, `fileClose` *(fn: name)*, `fileDownload` *(fn: name)*, `fileBy` *(fn: name)*,
+  `fileGone`, `fileNoPreview`, `fileCut` *(fn: chars)*, `fileShowRest`, `fileShowLess`,
+  `fileRendered`, `fileSource`, `closePreview`, `fileLines` *(fn: n)*.
+- **HTML preview:** `htmlFrameTitle`, `htmlSandboxed`, `htmlNoNetwork`, `htmlSourceNote`,
+  `htmlScripts` *(fn: on)*, `htmlLinkedFiles` *(fn: names)*, `htmlTooLarge`, `htmlTaller`,
+  `htmlShorter`, `htmlFrameName` *(fn: path)*.
 - **Consent:** `approvalLead`, `approve`, `alwaysAllow`, `deny`, `declinedReason`, `readOnlyTool`,
   `consentWaiting`, `consentAllowed`, `consentDenied` *(fn: reason?)*.
 

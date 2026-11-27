@@ -1,6 +1,7 @@
 import { jsonSchema, tool, type ToolSet } from 'ai'
 import { markReadOnly } from '../tools/approval.js'
-import { isTextMime, type VirtualFileSystem } from './vfs.js'
+import { toolRunContextOf } from '../tools/wrap.js'
+import { isTextMime, normalizePath, type VirtualFileSystem } from './vfs.js'
 
 export interface FileToolsOptions {
   /** Tool-name prefix (default 'fs_' → fs_list, fs_read, fs_write, fs_delete). */
@@ -96,8 +97,17 @@ export const createFileTools = (vfs: VirtualFileSystem, opts: FileToolsOptions =
       required: ['path', 'content'],
       additionalProperties: false,
     }),
-    execute: async ({ path, content, mimeType }) => {
+    execute: async ({ path, content, mimeType }, options) => {
       const info = await vfs.write(path, content, mimeType ? { mimeType } : {})
+      // Tell the run what was written (a UI shows it in the turn). Only after the write succeeded.
+      const run = toolRunContextOf(options)
+      run?.emit({
+        type: 'file.written',
+        path: info.path,
+        mediaType: info.mimeType,
+        bytes: info.size,
+        ...(run.step ? { step: run.step } : {}),
+      })
       return { written: info.path, size: info.size }
     },
   })
@@ -109,7 +119,18 @@ export const createFileTools = (vfs: VirtualFileSystem, opts: FileToolsOptions =
       required: ['path'],
       additionalProperties: false,
     }),
-    execute: async ({ path }) => ({ deleted: await vfs.delete(path) }),
+    execute: async ({ path }, options) => {
+      const deleted = await vfs.delete(path)
+      const run = toolRunContextOf(options)
+      if (deleted) {
+        run?.emit({
+          type: 'file.deleted',
+          path: normalizePath(path),
+          ...(run.step ? { step: run.step } : {}),
+        })
+      }
+      return { deleted }
+    },
   })
   bind(tools[`${p}write`], { vfs, op: 'write' })
   bind(tools[`${p}delete`], { vfs, op: 'delete' })

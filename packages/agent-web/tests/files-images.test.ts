@@ -104,6 +104,38 @@ test('createFileTools: list / read / write / delete, read-only tools marked, bin
   ])
 })
 
+test('file tools tell the run what they wrote and deleted: file.written / file.deleted', async () => {
+  const vfs = new VirtualFileSystem({ memory: true, maxFileBytes: 64 })
+  const tools = createFileTools(vfs)
+  const events: unknown[] = []
+  const step = { id: 's1', description: 'write' }
+  const inRun = (name: string, args: unknown) =>
+    (tools[name] as { execute: (a: unknown, o: unknown) => Promise<unknown> }).execute(args, {
+      agentRun: { emit: (e: unknown) => events.push(e), step },
+    })
+  await inRun('fs_write', { path: 'site/index.html', content: '<p>hi</p>' })
+  assert.deepEqual(events, [
+    { type: 'file.written', path: '/site/index.html', mediaType: 'text/html', bytes: 9, step },
+  ])
+  // A write that fails (here: above the size cap) says nothing.
+  await assert.rejects(() => inRun('fs_write', { path: '/big.txt', content: 'x'.repeat(65) }))
+  assert.equal(events.length, 1)
+  // Reading and listing say nothing.
+  await inRun('fs_read', { path: '/site/index.html' })
+  await inRun('fs_list', {})
+  assert.equal(events.length, 1)
+  // A delete names the normalized path; deleting what is not there says nothing.
+  await inRun('fs_delete', { path: 'site/./index.html' })
+  assert.deepEqual(events[1], { type: 'file.deleted', path: '/site/index.html', step })
+  await inRun('fs_delete', { path: '/site/index.html' })
+  assert.equal(events.length, 2)
+  // Outside a run the tools work as before.
+  assert.deepEqual(await callTool(tools, 'fs_write', { path: '/a.txt', content: 'a' }), {
+    written: '/a.txt',
+    size: 1,
+  })
+})
+
 // ── images ──────────────────────────────────────────────────────────────────
 
 test('supportsImages: local runtimes and text-only families say no, vision providers yes', () => {

@@ -5,6 +5,7 @@ import {
   type Skill,
 } from '@dudko.dev/agent-web'
 import type {
+  WrittenFileView,
   AgentUiState,
   ApprovalView,
   ElicitationView,
@@ -397,6 +398,39 @@ const mediaOf = (
   ...(withStep && event.step ? { stepId: event.step.id } : {}),
 })
 
+type FileWritten = Extract<AgentEvent, { type: 'file.written' }>
+
+/**
+ * A file the run wrote: one entry per path (a second write updates it in place), newest size
+ * and type. `by` is the subagent it came through; its step ids are its own, so no step then.
+ */
+const fileWritten = (
+  state: AgentUiState,
+  event: FileWritten,
+  by?: WrittenFileView['by'],
+): AgentUiState => {
+  const files = state.writtenFiles ?? []
+  const i = files.findIndex((f) => f.path === event.path)
+  const view: WrittenFileView = {
+    path: event.path,
+    mediaType: event.mediaType,
+    bytes: event.bytes,
+    writes: (i >= 0 ? files[i].writes : 0) + 1,
+    ...(!by && event.step ? { stepId: event.step.id } : {}),
+    ...(by ? { by } : {}),
+  }
+  return {
+    ...state,
+    writtenFiles: i >= 0 ? files.map((f, k) => (k === i ? view : f)) : [...files, view],
+  }
+}
+
+/** A file deleted later in the run is not one of its files any more. */
+const fileDeleted = (state: AgentUiState, path: string): AgentUiState =>
+  state.writtenFiles?.some((f) => f.path === path)
+    ? { ...state, writtenFiles: state.writtenFiles.filter((f) => f.path !== path) }
+    : state
+
 const transcriptOf = (
   event: Extract<AgentEvent, { type: 'media.transcribed' }>,
 ): TranscriptView => ({
@@ -511,6 +545,19 @@ const applySubagent = (
           return addMedia(known, mediaOf(inner, false))
         case 'media.transcribed':
           return { ...known, transcripts: [...(known.transcripts ?? []), transcriptOf(inner)] }
+
+        // A subagent works in the same workspace: what it wrote belongs to the turn, and says
+        // who wrote it.
+        case 'file.written': {
+          const node = known.subagents.find((s) => s.id === event.id)
+          return fileWritten(known, inner, {
+            id: event.id,
+            name: node?.name ?? event.name,
+            ...(node?.role ? { role: node.role } : {}),
+          })
+        }
+        case 'file.deleted':
+          return fileDeleted(known, inner.path)
 
         default:
           return {
@@ -901,6 +948,12 @@ const applyEvent = (state: AgentUiState, event: AgentEvent, ctx: EventContext): 
     case 'media.transcribed':
       return { ...state, transcripts: [...(state.transcripts ?? []), transcriptOf(event)] }
 
+    case 'file.written':
+      return fileWritten(state, event)
+
+    case 'file.deleted':
+      return fileDeleted(state, event.path)
+
     case 'message.queued':
       return state.queued.some((q) => q.id === event.id)
         ? state
@@ -1148,6 +1201,8 @@ const syncRunMessage = (state: AgentUiState): AgentUiState => {
   if (state.media && m.media !== state.media) patch.media = state.media
   if (state.transcripts && m.transcripts !== state.transcripts)
     patch.transcripts = state.transcripts
+  if (state.writtenFiles && m.writtenFiles !== state.writtenFiles)
+    patch.writtenFiles = state.writtenFiles
   if (
     (m.approvals?.length ?? 0) !== decided.length ||
     decided.some((a, k) => m.approvals?.[k] !== a)

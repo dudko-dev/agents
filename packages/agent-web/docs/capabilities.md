@@ -1285,6 +1285,17 @@ not; `createFileTools(vfs, { readOnly: true })` mounts only the readers. The
 files live in the shared IndexedDB database (`files` store, schema v2 — an
 existing v1 database is upgraded in place).
 
+**What a run wrote.** A write through `fs_write`, or through the sandbox's `fs.writeFile`, emits
+`file.written` (`path`, `mediaType`, `bytes`, `step?`) once it has succeeded, and `fs_delete` of a
+file that existed emits `file.deleted` (`path`, `step?`). A refused or failed write emits nothing,
+and the content is never in the event - read it with `vfs.read(path)`. A UI uses the two to show
+"the files of this turn" without guessing from tool names (the prefix is configurable) or from
+tool outputs; a subagent's arrive inside its `subagent.event` envelope like its other events. A
+file a media tool wrote is announced by `media.generated` instead, and what the host or the user
+writes into the file system directly (an upload, an attachment) is not announced at all - these
+are the RUN's writes. Browser only: the Node sibling has no virtual file system (its tools work
+on the real one, through MCP).
+
 ## Resuming an interrupted run
 
 A reload, a crashed tab or a killed worker normally loses a run — including the steps
@@ -2137,6 +2148,8 @@ Subscribe with `onEvent` (per run) or the handler you pass to `createAgent`; ren
 | `mcp.elicitation-answered` | `id, server, tool, action: 'accept' \| 'decline' \| 'cancel', automatic, reason?, fields?` — the question was settled. `fields`: the NAMES of the fields an accepted form was answered with, never a value. `automatic`: nobody decided, the tool call fails, `reason` says why |
 | `egress.request` | `url` (origin + path), `allowed`, `status?`, `reason?` — a `web_fetch` request (or `web_search`'s call to its [search API](#search-finding-the-page-to-fetch)), allowed or refused ([egress](#egress-what-the-model-may-fetch)) |
 | `media.generated` | `kind: 'image' \| 'speech'`, `path`, `mediaType`, `bytes`, `model`, `step?` — a media tool wrote a file to the virtual file system; read it with `vfs.readDataUrl(path)` ([media](#media-images-speech-and-transcription)) |
+| `file.written` | `path`, `mediaType`, `bytes`, `step?` — `fs_write` or the sandbox's `fs.writeFile` wrote a file to the virtual file system (after the write succeeded; the content is not in the event) ([virtual file system](#virtual-file-system)) |
+| `file.deleted` | `path`, `step?` — `fs_delete` removed a file that existed |
 | `media.transcribed` | `source: 'attachment' \| 'tool'`, `name`, `text`, `language?`, `durationInSeconds?`, `model` — an audio file became text |
 | `skill.learned` | `name, description, update, chars, sources` — the agent wrote a lesson down ([learning](#learning-lessons-that-outlive-the-task)) |
 | `skill.forgotten` | `name` — a lesson was deleted |
