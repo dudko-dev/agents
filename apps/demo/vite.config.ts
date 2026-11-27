@@ -11,6 +11,7 @@ import {
 import { fileURLToPath } from 'node:url'
 import react from '@vitejs/plugin-react'
 import { defineConfig, type Plugin } from 'vite'
+import { demoMcpMiddleware } from 'worker/node'
 
 const at = (p: string) => fileURLToPath(new URL(p, import.meta.url))
 
@@ -90,6 +91,19 @@ const pipelinePage = (): Plugin => {
   }
 }
 
+// The demo MCP server ("Try the demo server" on the MCP tab) is served at /mcp/demo of the site
+// by a Cloudflare Worker (apps/worker). There is no Worker behind `vite dev` and `vite preview`,
+// so both serve that path with the same code on Node - the browser tests run against it too.
+const demoMcpServer = (): Plugin => ({
+  name: 'demo-mcp-server',
+  configureServer(server) {
+    server.middlewares.use(demoMcpMiddleware())
+  },
+  configurePreviewServer(server) {
+    server.middlewares.use(demoMcpMiddleware())
+  },
+})
+
 // transformers.js loads the ONNX runtime's wasm from jsDelivr at run time (its default in a
 // page), yet the bundler also emits a copy because onnxruntime-web references it by URL. That copy
 // is never requested, and at 25.6 MiB it is over the 25 MiB a Cloudflare Workers asset may be -
@@ -131,7 +145,14 @@ export default defineConfig({
     rollupOptions: { input: { main: at('index.html'), pipeline: at('pipeline/index.html') } },
   },
   // `pipelinePage` before `assetSizeLimit`: the limit is checked on `dist` as it will be served.
-  plugins: [react(), siteRoot(), dropOrtWasm(), pipelinePage(), assetSizeLimit()],
+  plugins: [
+    react(),
+    siteRoot(),
+    dropOrtWasm(),
+    pipelinePage(),
+    assetSizeLimit(),
+    demoMcpServer(),
+  ],
   resolve: {
     // The library's dist sits outside this app; force ONE copy of each (two Reacts break every hook).
     dedupe: ['react', 'react-dom', '@dudko.dev/agent-web', 'ai', 'zod'],

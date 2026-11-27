@@ -24,7 +24,8 @@
     "@astrojs/check": "^0.9.12",
     "demo": "workspace:*",
     "prettier": "^3.10.1",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "worker": "workspace:*"
   },
   "nx": {
     "targets": {

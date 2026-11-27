@@ -688,8 +688,30 @@ be shown has an answered event and no requested one.
 
 **Not done.** The `-32042` "URL elicitation required" error of 2025-11-25 is passed on as the
 tool error it is; `notifications/elicitation/complete` is not surfaced; a resumed run starts its
-`maxPerRun` count again. The React package has the view state (`state.elicitations`) but no
-component yet.
+`maxPerRun` count again. The React package renders the questions (`ElicitationPrompt`; the hooks
+take `elicitation`).
+
+### Try it: the demo server
+
+`https://agent.dudko.dev/mcp/demo` is a small public MCP server to try this against - the
+[demo](https://agent.dudko.dev/demo/)'s "Try the demo server" button on the MCP tab connects it.
+No key, no account; it keeps nothing and fetches nothing. Tools: `echo`, `current_time`,
+`roll_dice` (an `outputSchema` and `structuredContent`), and two that ask the user: `plan_trip`
+(a form: destination, first day, nights, travellers, a budget select, a checkbox) and `open_docs`
+(URL mode: a link to this section, so set `elicitation: { url: true }`). It serves both protocol
+revisions statelessly, so its questions need `protocol: 'auto'` or `'modern'`: on the 2025
+revisions the two asking tools answer with an error that says so.
+
+```ts
+const mcp = await connectMcpHttp(
+  { demo: { url: 'https://agent.dudko.dev/mcp/demo', protocol: 'auto' } },
+  { onElicitation: askTheUser, elicitation: { url: true } },
+)
+```
+
+It answers requests from its own origin and from clients that are not pages (no `Origin`
+header); a page elsewhere gets a 403 and no CORS headers, so from your own site connect from a
+server, or run it yourself (`apps/worker` in the repository).
 
 ## MCP servers behind OAuth
 
