@@ -74,6 +74,10 @@ export type McpProtocol = 'legacy' | 'modern' | 'dual'
 /** How the version probe (`server/discover`) goes wrong (see `ILocalMcpServer.protocolFaults`). */
 export type ProbeFault = 'unauthorized' | 'server_error' | 'garbage' | 'cors'
 
+/** How `subscriptions/listen` is answered instead (see `ILocalMcpServer.listenFaults`). */
+export type ListenFault =
+  'not_found' | 'not_allowed' | 'unauthorized' | 'forbidden' | 'unavailable' | 'silent'
+
 export interface ILocalMcpServerOptions extends IListenOptions {
   /** The protocol revisions to speak. Default `'legacy'`. */
   protocol?: McpProtocol
@@ -195,6 +199,30 @@ export interface ILocalMcpServer {
    * allows (no `Mcp-Method`, no `Mcp-Name`), so a browser blocks the probe.
    */
   protocolFaults: { probe?: ProbeFault }
+  /**
+   * Mutable: answer every `subscriptions/listen` request this way from now on, before
+   * the SDK sees it (a stream that is already open is not touched). `not_found`: 404
+   * with JSON-RPC `-32601`, what a server that does not implement the method answers.
+   * `not_allowed`: 405. `unauthorized`: 401 with the challenge, whatever the token.
+   * `forbidden`: 403. `unavailable`: 503 with a plain-text body. `silent`: no answer
+   * at all, the request is held until the client gives it up (`heldListens()`).
+   */
+  listenFaults: { answer?: ListenFault }
+  /**
+   * End every open `subscriptions/listen` stream abruptly - the connection is cut, no
+   * result is sent: what a client sees when the network or a proxy drops it. Returns
+   * how many there were.
+   */
+  dropListenStreams: () => number
+  /**
+   * End every open `subscriptions/listen` stream with its result, as a server process
+   * that shuts down does, and go on serving from a fresh handler on the same event bus
+   * (another process taking over: a stateless server has nothing else to hand on).
+   * Modern and dual only. Resolves with how many there were.
+   */
+  closeListenStreams: () => Promise<number>
+  /** `subscriptions/listen` requests that `listenFaults.answer = 'silent'` holds right now. */
+  heldListens: () => number
   /** Mutable: make the elicitation tools misbehave (with `elicitationTools`). */
   elicitationFaults: IElicitationFaults
   /** Mutable: make the app resource misbehave (with `appTools`). */
@@ -278,6 +306,11 @@ export const startLocalMcpServer = async (
   const requests: IMcpRequestRecord[] = []
   const structuredFaults: { result?: StructuredFault } = {}
   const protocolFaults: { probe?: ProbeFault } = {}
+  const listenFaults: { answer?: ListenFault } = {}
+  // The answers of the `subscriptions/listen` requests: streams the SDK serves, and
+  // requests the `silent` fault holds.
+  const listenStreams = new Set<ServerResponse>()
+  const heldListens = new Set<ServerResponse>()
   const appFaults: IAppFaults = {}
   const appOptions: ITravelAppOptions | undefined =
     opts.appTools === true ? {} : opts.appTools || undefined
@@ -858,6 +891,10 @@ export const startLocalMcpServer = async (
         },
       })
     }
+    if (method === 'subscriptions/listen') {
+      listenStreams.add(res)
+      res.on('close', () => listenStreams.delete(res))
+    }
     const request: IModernRequest = {
       method,
       tool: typeof params.name === 'string' ? params.name : '',
@@ -915,6 +952,39 @@ export const startLocalMcpServer = async (
     }
   }
 
+  /** Answer `subscriptions/listen` wrongly, if a fault says so. Returns true when it did. */
+  const failListen = (res: ServerResponse, id: unknown): boolean => {
+    switch (listenFaults.answer) {
+      case 'not_found':
+        json(res, 404, {
+          jsonrpc: '2.0',
+          id: id ?? null,
+          error: { code: -32601, message: 'Method not found: subscriptions/listen' },
+        })
+        return true
+      case 'not_allowed':
+        res.writeHead(405, { 'content-type': 'text/plain' })
+        res.end('method not allowed')
+        return true
+      case 'unauthorized':
+        json(res, 401, { error: 'unauthorized' }, challenge())
+        return true
+      case 'forbidden':
+        json(res, 403, { error: 'forbidden' })
+        return true
+      case 'unavailable':
+        res.writeHead(503, { 'content-type': 'text/plain' })
+        res.end('upstream unavailable')
+        return true
+      case 'silent':
+        heldListens.add(res)
+        res.on('close', () => heldListens.delete(res))
+        return true
+      default:
+        return false
+    }
+  }
+
   const serve = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const oldCors = protocolFaults.probe === 'cors' ? CORS_ALLOW_HEADERS_2025 : undefined
     if (applyCors(req, res, opts.cors, oldCors)) {
@@ -944,6 +1014,13 @@ export const startLocalMcpServer = async (
     const message = parse(raw)
     record(message)
     if (isObject(message) && message.method === 'server/discover' && failProbe(res)) {
+      return
+    }
+    if (
+      isObject(message) &&
+      message.method === 'subscriptions/listen' &&
+      failListen(res, message.id)
+    ) {
       return
     }
     // The answer of a legacy client to a request this server sent it.
@@ -990,6 +1067,26 @@ export const startLocalMcpServer = async (
     requests,
     structuredFaults,
     protocolFaults,
+    listenFaults,
+    dropListenStreams: () => {
+      const open = [...listenStreams]
+      for (const res of open) {
+        res.destroy()
+      }
+      return open.length
+    },
+    closeListenStreams: async () => {
+      if (!modern) {
+        throw new Error('closeListenStreams: this server does not speak 2026-07-28')
+      }
+      const open = listenStreams.size
+      const previous = modern
+      modern = createMcpHandler(buildModernServer, { legacy: 'reject', bus })
+      modernNode = toNodeHandler(modern)
+      await previous.close()
+      return open
+    },
+    heldListens: () => heldListens.size,
     elicitationFaults: elicitation.faults,
     appFaults,
     elicitations: elicitation.rounds,

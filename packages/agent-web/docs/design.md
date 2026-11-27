@@ -733,6 +733,61 @@ the same in both. Only the adapter that runs a node with `createAgent` differs.
 - The pure core (`mcp/shared.ts`) is a byte-for-byte copy of the Node package's
   `mcp-shared.ts`, like the pipeline and sandbox engines.
 
+## MCP: the listen stream is opened again
+
+On 2026-07-28 a tool list change reaches a client only on a `subscriptions/listen` stream the
+client opened. The SDK opens it once (`client.listen`) and never again; a stream that is gone
+without anyone noticing reads as "nothing changed", for the life of the connection. So the
+connector keeps it open (`mcp/listen.ts`, a byte-for-byte copy of the Node package's
+`mcp-listen.ts`; pure, so both cores make the same decisions and the rules are tested once, on
+fakes, in the Node package).
+
+- **A dropped stream is retried** - the specification says a transport that closes without the
+  listen result "indicates an unexpected disconnect, which the client MAY treat as a trigger to
+  reconnect" (basic/patterns/subscriptions, "Graceful Closure"). Resumption is no help: the
+  revision has no `Last-Event-ID` (streamable HTTP: "Resumable SSE streams via `Last-Event-ID`
+  are not supported"), so a new stream is a new `subscriptions/listen` request.
+- **So is a stream the server closed with its result.** That result means the server ended the
+  subscription "on its own initiative (for example, during shutdown)", and the SDK's server
+  sends it from `close()`. On a stateless revision the process that shuts down is not the
+  service: no session binds the client to it, and the next request may well reach another
+  process. Not listening again would turn every rolling restart into a connection that never
+  hears of a change again. The specification gives a server that wants no listeners a final
+  answer instead - `404` with `-32601` for a method it does not implement (streamable HTTP,
+  "Request Metadata") - and that answer is final here.
+- **Final errors stop at once**: 401 / 403 belong to the authorization flow (the transport's
+  `authProvider` already refreshed and retried; a loop would only hammer the authorization
+  server), 404 / 405 / `-32601` / `-32602` cannot heal by waiting, and a client that is not
+  connected has nothing to listen on. Everything else - a 5xx, a 429, a missed acknowledgement,
+  the network, the SDK server's "Subscription limit reached" (`-32603`) - can.
+- **Backoff with jitter, reset by stability, not by success.** Attempt n waits at most
+  `min(60 s, 1 s × 2^(n-1))`, less a random share of up to half, so the clients that lost one
+  server do not return in step. The count is NOT reset when a new stream is acknowledged: a
+  server that accepts and then drops at once (a proxy that cuts idle streams, a crash loop)
+  would otherwise be retried every second forever, with a re-list each time. It is reset when a
+  stream stayed up a minute, and a stream lost sooner counts as an attempt - so a flapping
+  server and a dead one are both given up on after 10 attempts in a row (within five minutes),
+  each with one warning per attempt and one on giving up.
+- **The re-list goes through the notice's own path.** Changes made while no stream was open were
+  announced to nobody, so once a stream is back the connector calls `onToolsChanged(server)`
+  once - the callback the `notifications/tools/list_changed` handler calls. A host (or the Node
+  agent's deferred refresh) cannot tell the two apart, which is the point: one way to pick up a
+  new tool list, not two. The connector still never re-lists behind a running agent's back.
+- **Close leaves nothing behind.** `close()` stops every listener before the clients close: the
+  retry timer and the stability timer are taken down, an attempt in flight is given up (its
+  signal), and whatever the SDK reports afterwards is neither logged nor retried. An open
+  stream is left to the client's own close, which ends it without the extra
+  `notifications/cancelled` request an explicit `subscription.close()` would send.
+- **Timers with a seam of their own.** The two timers are `setTimeout`'s, unless a test put a
+  time source under the file's own test key: then the tests run the whole backoff on virtual
+  time against real servers, without a sleep. Not the wait clock's seam (`wait-clock.ts`): that
+  one carries the deadlines of runs, and the human-wait tests ask whether any of them is running
+  while a person is asked - a listen timer is not a run's deadline and must not answer "yes".
+- **No setting.** Turning the retries off would leave a connection that silently stops hearing
+  of changes - the behaviour this replaces. The schedule is bounded and the stream exists only
+  when the host asked for change notices (`onToolsChanged`); a host that wants none passes none.
+  The 2025 revisions are untouched: their GET stream belongs to the transport, which resumes it.
+
 ## MCP elicitation: the host answers, the model never sees the question
 
 - **On the connection, not on the agent.** The capability is declared in the handshake

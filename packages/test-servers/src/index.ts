@@ -75,6 +75,7 @@ export {
   type ILocalMcpServer,
   type ILocalMcpServerOptions,
   type IMcpRequestRecord,
+  type ListenFault,
   type McpProtocol,
   type ProbeFault,
   type StructuredFault,

@@ -165,8 +165,8 @@
     same suite runs each mode against the `legacy` / `dual` / `modern` test servers. On a modern
     connection: `Mcp-Method` / `Mcp-Name` are set by the transport from the message (so
     `client.request` is enough; `Mcp-Param-*` is `callTool`'s own and is not sent), tool list
-    changes need `client.listen` (opened at connect when `onToolsChanged` is given; never opened
-    again), `inputRequired.autoFulfill` is off and an `input_required` answer is a `McpToolError`
+    changes need `client.listen` (opened at connect when `onToolsChanged` is given, and opened
+    again by `mcp-listen.ts` when it ends), `inputRequired.autoFulfill` is off and an `input_required` answer is a `McpToolError`
     unless `onElicitation` is set (then `mcp-elicitation.ts` answers it), a stdio probe runs on a sibling process and is bounded by
     `MCP_STDIO_PROBE_TIMEOUT_MS`. The negotiated revision is in `IConnectedMcp.protocols`. Same
     names and rules in the browser sibling: change both. `mcp.ts` deliberately
@@ -179,6 +179,24 @@
     `redirectUrl`). OAuth guards on this boundary - the `iss` check, the refusal of a callback
     without discovery state, the issuer stamp surviving the store, the scope policy - each have a
     test in `tests/mcp-connect.test.ts` and need a mutation check.
+  - `mcp-listen.ts` (pure, no imports): the 2026-07-28 `subscriptions/listen` stream kept open
+    (`createMcpListenSupervisor`, used by `listenForToolChanges` in `mcp.ts`). A stream that ends
+    while the connection is open - dropped, or closed by the server with its result - is opened
+    again with exponential backoff and jitter (`mcpListenRetryDelay`: 1 s doubled up to 60 s, less
+    up to half), the count reset only by a stream that stayed up `MCP_LISTEN_STABLE_MS`, given up
+    after `MCP_LISTEN_MAX_ATTEMPTS` in a row; final at once on 401 / 403 / 404 / 405 / -32601 /
+    -32602 (`mcpListenFinalReason`). Once a stream is back it calls the SAME `onToolsChanged` the
+    notice calls (the agent re-lists as after a notice). `close()` stops every listener BEFORE the
+    clients close (and so does every failed-connect path). Its timers (`setTimeout`) have a test
+    seam of their OWN (`Symbol.for('@dudko.dev/agent:mcp-listen-test-time')`, driven by
+    `tests/helpers/listen-time.ts`, the same file in both packages) - never the wait clock's: the
+    agent always passes `onToolsChanged`, and a listen timer on that seam made the human-wait
+    tests see a run deadline running while a person was asked. A COPY of the browser sibling's
+    `src/mcp/listen.ts`, byte for byte: change both (`tests/mcp-listen.test.ts` compares them and
+    tests every rule on fakes; `tests/mcp-protocol.test.ts` drives it against the test server's
+    `listenFaults` / `dropListenStreams` / `closeListenStreams` on virtual time, and a child
+    process, `tests/fixtures/mcp-listen-exit.ts`, proves close leaves no timer). Every rule needs
+    a mutation check. No setting, by design (the browser's `docs/design.md` says why).
   - `pipeline-engine.ts` + `pipeline.ts` (`createPipeline`: a graph of agents with conditions and
     loops, described in plain JSON). The engine (definition types, `validatePipeline`, the conditions
     with the non-backtracking `matches` matcher, the wave scheduler; pure, no imports) is a COPY of
