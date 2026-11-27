@@ -1,15 +1,24 @@
-// Cloudflare Workers (static assets) for https://agent.dudko.dev: `pnpm nx build site` builds the
-// libraries, the demo and the site, and writes everything into apps/site/dist - the landing page
-// and the docs at the root, the demo under /demo/. The build runs on Cloudflare (Workers Builds);
-// there is no Worker script, only files.
+// Cloudflare Workers for https://agent.dudko.dev: `pnpm nx build site` builds the libraries, the
+// demo, the site and the Worker, and writes the site into apps/site/dist - the landing page and
+// the docs at the root, the demo under /demo/. The build runs on Cloudflare (Workers Builds).
+//
+// The site is static assets and is served without any script. The Worker script
+// (apps/worker, bundled to apps/worker/dist/index.js) runs ONLY for /mcp/* (`run_worker_first`),
+// where it serves the demo MCP server at /mcp/demo and hands any other /mcp/ path back to the
+// assets - so every path outside /mcp/ is answered exactly as before the Worker existed.
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "agents",
   "compatibility_date": "2026-11-01",
+  "main": "./apps/worker/dist/index.js",
   "assets": {
     "directory": "./apps/site/dist",
     // An unknown path answers 404 with the site's own 404 page, not a soft 200.
-    "not_found_handling": "404-page"
+    "not_found_handling": "404-page",
+    // How the Worker hands a path it does not serve back to the static assets.
+    "binding": "ASSETS",
+    // The Worker runs for these paths only; everything else never reaches it.
+    "run_worker_first": ["/mcp/*"]
   },
   // Pull requests get a preview: Workers Builds runs `npx wrangler preview` for them, and that
   // command refuses to run without this block (it may stay empty).
