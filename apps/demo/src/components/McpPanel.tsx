@@ -74,6 +74,7 @@ export const McpPanel = ({
   const [name, setName] = useState('')
   const [mode, setMode] = useState<McpAuthMode>('none')
   const [protocol, setProtocol] = useState<McpProtocolMode>('auto')
+  const [skills, setSkills] = useState(false)
   const [token, setToken] = useState('')
   const [tokens, setTokens] = useState<Record<string, string>>({})
   const [open, setOpen] = useState<Record<string, boolean>>({})
@@ -96,6 +97,8 @@ export const McpPanel = ({
       auth: mode,
       token: mode === 'bearer' ? token.trim() : undefined,
       protocol,
+      // Experimental: only when ticked (and never on the 2025 revisions - the core says so).
+      ...(skills ? { skills: true } : {}),
     })
     setUrl('')
     setName('')
@@ -199,6 +202,14 @@ export const McpPanel = ({
                   MCP {s.protocol.version}
                 </span>
                 {s.protocolMode && <span>asked for: {s.protocolMode}</span>}
+                {s.skills && (
+                  <span
+                    className="mcp__badge mcp__badge--muted"
+                    title="Its skills (if it serves any) are in the agent's skills catalog, as <server>/<skill>: third-party text, knowledge only"
+                  >
+                    skills · experimental
+                  </span>
+                )}
               </div>
             )}
             {s.auth === 'bearer' && s.status !== 'connected' && (
@@ -306,6 +317,18 @@ export const McpPanel = ({
             ))}
           </select>
         </label>
+
+        <label className="mcp__mock">
+          <input type="checkbox" checked={skills} onChange={(e) => setSkills(e.target.checked)} />
+          Load skills from this server (experimental)
+        </label>
+        {skills && (
+          <p className="settings__note">
+            Its skills join the agent’s as <code>server/skill</code> and are read only when needed,
+            checked against the server’s digests - third-party knowledge that cannot approve a call,
+            reach the web or execute anything. Needs the 2026-07-28 revision (Auto or 2026-07-28).
+          </p>
+        )}
 
         {mode === 'bearer' && (
           <label className="settings__field">

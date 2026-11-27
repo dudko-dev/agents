@@ -428,3 +428,39 @@ test('protocol: the core takes the field of McpHttpServerConfig and reports prot
     await server.close()
   }
 })
+
+test("skills: the core takes McpHttpServerConfig.skills - the mounted tools carry the server's skills, off without it", async () => {
+  // `skills: true` (mcp-types) reaches the core's connector, whose tools then carry the server's
+  // skills to the agent (`<server>/<skill>`); without it nothing of the extension is there.
+  const { startLocalMcpServer } = await import('@dudko.dev/test-servers')
+  const mod = (await import('@dudko.dev/agent-web/mcp')) as unknown as {
+    connectMcpHttp: (servers: Record<string, unknown>) => Promise<{
+      tools: Record<string, object>
+      close: () => Promise<void>
+    }>
+  }
+  const MARK = Symbol.for('@dudko.dev/agent:mcp-skills')
+  const server = await startLocalMcpServer({ protocol: 'modern', skills: true })
+  try {
+    const on = await mod.connectMcpHttp({
+      docs: { url: server.url, protocol: 'modern', skills: true },
+    })
+    const off = await mod.connectMcpHttp({ docs: { url: server.url, protocol: 'modern' } })
+    const source = (on.tools.docs__echo as Record<symbol, { skills: { uri: string }[] }>)[MARK]
+    assert.deepEqual(
+      source.skills.map((k) => k.uri),
+      [
+        'skill://git-workflow/SKILL.md',
+        'skill://pdf-processing/SKILL.md',
+        'skill://acme/billing/refunds/SKILL.md',
+        'skill://acme/support/refunds/SKILL.md',
+      ],
+    )
+    assert.equal((off.tools.docs__echo as Record<symbol, unknown>)[MARK], undefined)
+    assert.deepEqual(server.skillReads, [], 'nothing of a skill is read at connect')
+    await on.close()
+    await off.close()
+  } finally {
+    await server.close()
+  }
+})

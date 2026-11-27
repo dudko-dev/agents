@@ -36,6 +36,14 @@ import {
   type McpElicitationOptions,
   type McpElicitationSession,
 } from './elicitation.js'
+import { createMcpListenSupervisor, type McpListenSupervisor } from './listen.js'
+import {
+  createMcpSkillCatalog,
+  markMcpSkills,
+  MCP_SKILLS_EXTENSION,
+  type McpSkillSource,
+  type McpSkillsClientLike,
+} from './skills.js'
 import { assertSecureOAuthUrl } from './oauth.js'
 import {
   cleanMcpInstructions,
@@ -103,11 +111,23 @@ export interface McpHttpServerConfig {
    * 2025 revisions with a warning that names the headers. See the README, "CORS".
    *
    * On 2026-07-28 there is no session; a tool-list change arrives over a
-   * `subscriptions/listen` stream this connector opens (it is not opened again
-   * when it drops), and an `input_required` result fails the call unless the
-   * connection was given `onElicitation` (see `ConnectMcpOptions`).
+   * `subscriptions/listen` stream this connector opens - and opens again, with
+   * backoff, when it ends while the connection is open (then `onToolsChanged`
+   * fires once: a change in the gap was announced to nobody) - and an
+   * `input_required` result fails the call unless the connection was given
+   * `onElicitation` (see `ConnectMcpOptions`).
    */
   protocol?: McpProtocolMode
+  /**
+   * EXPERIMENTAL (the Skills extension is Beta): load the skills this server serves
+   * (`io.modelcontextprotocol/skills`) into the agent's skills catalog, as `<server>/<skill>`.
+   * Off by default: without it the extension is not declared and nothing of it is sent. Needs
+   * the 2026-07-28 revision (`protocol: 'auto'` or `'modern'`): the extension is written against
+   * it. The skills come with the server's tools (each mounted tool carries them, like the
+   * server's instructions), so merging `tools` into the agent's config is all a host does. Their
+   * text is third-party - knowledge only, never policy; see the README, "MCP skills".
+   */
+  skills?: boolean
 }
 
 export interface McpCatalogEntry {
@@ -161,6 +181,8 @@ export interface ConnectedMcp {
    * Re-list one server's tools and rewrite its entries in `tools`/`catalog`.
    * Both are mutated in place, so anything holding a reference (including a
    * live agent config) sees the new set. Throws if the server isn't connected.
+   * With `skills: true` it lists the server's skills again too (an agent built
+   * after the refresh has the new ones; one built before keeps what it read).
    */
   refreshServer: (name: string) => Promise<void>
   close: () => Promise<void>
@@ -224,7 +246,13 @@ export interface ConnectMcpOptions {
    * `refreshServer(name)` from a point where no run is reading `tools` — this
    * connector deliberately does not refresh behind a running agent's back.
    * On a 2026-07-28 connection (`protocol`) the notice arrives over a
-   * `subscriptions/listen` stream, opened only when this callback is given.
+   * `subscriptions/listen` stream, opened only when this callback is given and
+   * opened again when it ends (backoff from 1 s to 60 s, at most 10 attempts in
+   * a row; never after a 401 / 403 / 404 / 405). Once a stream is back this
+   * callback fires as for a notice, since a change in the gap was not announced.
+   * On a server with `skills: true` it also fires for a resource list change
+   * (`notifications/resources/list_changed`): that is how a change of its
+   * skills is announced, and `refreshServer` lists them again.
    */
   onToolsChanged?: (server: string) => void
   /**
@@ -477,6 +505,10 @@ interface ServerConnect {
   /** The revision the connection negotiated. */
   protocol?: Omit<McpServerProtocol, 'server'>
   listed?: McpToolDescriptor[]
+  /** 2026-07-28 with `onToolsChanged`: what keeps the listen stream open. */
+  listener?: McpListenSupervisor
+  /** `skills: true` on a 2026-07-28 connection to a server that offers the extension. */
+  skills?: { source: McpSkillSource; refresh: () => Promise<void> }
   error?: string
   needsAuthorization?: boolean
 }
@@ -736,10 +768,10 @@ const openConnection = async (
   cfg: McpHttpServerConfig,
   opts: ConnectMcpOptions,
   log: NonNullable<ConnectMcpOptions['onLog']>,
-  isClosing: () => boolean,
   elicitation: McpElicitationSession | undefined,
 ): Promise<ServerConnect> => {
   let client: Client | undefined
+  let listener: McpListenSupervisor | undefined
   let timedOut = false
   const timeoutMs = cfg.connectTimeoutMs ?? opts.connectTimeoutMs ?? 30_000
   // What the version probe (`protocol: 'auto' | 'modern'`) ran into.
@@ -750,18 +782,23 @@ const openConnection = async (
     opts,
     log,
     probe,
-    isClosing,
     (c) => {
       client = c
       // Created after the deadline already passed: nobody will ever use it.
       if (timedOut) void c.close().catch(() => {})
+    },
+    (l) => {
+      listener = l
+      if (timedOut) l.stop()
     },
     elicitation,
   )
   // A handshake that completes after the deadline must not leave a live session behind.
   attempt.then(
     (r) => {
-      if (timedOut) void r.client?.close().catch(() => {})
+      if (!timedOut) return
+      r.listener?.stop()
+      void r.client?.close().catch(() => {})
     },
     () => {},
   )
@@ -771,7 +808,9 @@ const openConnection = async (
     if (err instanceof ConnectTimeoutError) timedOut = true
     // The client may be live even though we ended up here (listTools() failing
     // after a successful connect, or the deadline passing mid-listing). Close
-    // it, or the SSE stream leaks for the lifetime of the tab.
+    // it, or the SSE stream leaks for the lifetime of the tab - and its listen
+    // stream first, or a retry outlives it.
+    listener?.stop()
     if (client) await client.close().catch(() => {})
     const needsAuthorization = err instanceof UnauthorizedError
     let message = err instanceof Error ? err.message : String(err)
@@ -817,45 +856,41 @@ interface ProbeState {
 }
 
 /**
- * 2026-07-28: ask the server for tool-list change notices. Best effort - a
- * server that does not announce them, or a stream that cannot be opened, leaves
- * a connection whose tools still work; `refreshServer` still re-lists.
+ * 2026-07-28: ask the server for tool-list change notices, and ask again while the
+ * connection is open (`./listen`: backoff, final errors, the re-list once a stream
+ * is back). Best effort - a server that does not announce them, or a stream that
+ * cannot be opened, leaves a connection whose tools still work; `refreshServer`
+ * still re-lists.
  */
 const listenForToolChanges = async (
   name: string,
   client: Client,
   log: NonNullable<ConnectMcpOptions['onLog']>,
-  isClosing: () => boolean,
+  announce: () => void,
+  onListener: (listener: McpListenSupervisor) => void,
+  skills: boolean,
 ): Promise<void> => {
   if (!client.getServerCapabilities()?.tools?.listChanged) {
     log('info', `[mcp] ${name}: the server does not announce tool list changes`)
     return
   }
-  try {
-    const subscription = await client.listen(
-      { toolsListChanged: true },
-      { timeout: MCP_LISTEN_ACK_TIMEOUT_MS },
-    )
-    // The SDK does not open the stream again, and neither does this connector:
-    // say so, or the silence reads as "nothing changed".
-    void subscription.closed.then((cause) => {
-      if (!isClosing()) {
-        log(
-          'warn',
-          `[mcp] ${name}: the tool list change stream ended (${
-            cause === 'graceful' ? 'closed by the server' : 'dropped'
-          }); changes are not announced until the server is connected again`,
-        )
-      }
-    })
-  } catch (err) {
-    log(
-      'warn',
-      `[mcp] ${name}: could not subscribe to tool list changes - ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    )
-  }
+  // `skills: true`: a change of the server's skills comes as a resource list change (the
+  // extension is built on resources), on the same stream.
+  const resources = skills && client.getServerCapabilities()?.resources?.listChanged === true
+  const listener = createMcpListenSupervisor({
+    server: name,
+    listen: (signal) =>
+      client.listen(
+        { toolsListChanged: true, ...(resources ? { resourcesListChanged: true } : {}) },
+        { timeout: MCP_LISTEN_ACK_TIMEOUT_MS, signal },
+      ),
+    log,
+    // Changes made while no stream was open: the path a notice takes, so the host
+    // sees what a notice causes.
+    onResubscribed: announce,
+  })
+  onListener(listener)
+  await listener.start()
 }
 
 const connectAndList = async (
@@ -864,8 +899,8 @@ const connectAndList = async (
   opts: ConnectMcpOptions,
   log: NonNullable<ConnectMcpOptions['onLog']>,
   probe: ProbeState,
-  isClosing: () => boolean,
   onClient: (client: Client) => void,
+  onListener: (listener: McpListenSupervisor) => void,
   elicitation: McpElicitationSession | undefined,
 ): Promise<ServerConnect> => {
   // Read first: a `protocol` that is none of the three names is a
@@ -930,22 +965,32 @@ const connectAndList = async (
   // built with exactly the options it always had.
   const negotiation = mcpVersionNegotiation(mode)
   const apps = opts.apps === true
+  // `skills: true` (experimental): the Skills extension is written against 2026-07-28, so it is
+  // declared only where that revision may be spoken; never on a 'legacy' connection.
+  const skillsWanted = cfg.skills === true && mode !== 'legacy'
+  if (cfg.skills === true && mode === 'legacy') {
+    log(
+      'warn',
+      `[mcp] ${name}: skills: true needs protocol 'auto' or 'modern' (the Skills extension is written against 2026-07-28); no skills are requested`,
+    )
+  }
   const clientOptions: ClientOptions | undefined =
-    enterprise || negotiation || elicitation || apps
+    enterprise || negotiation || elicitation || apps || skillsWanted
       ? {
           // An extension is opt-in: it is declared only by the client that uses
           // it. So is elicitation: without `onElicitation` no capability is
           // declared, and a server cannot ask. MCP Apps: only with `apps`.
-          ...(enterprise || elicitation || apps
+          ...(enterprise || elicitation || apps || skillsWanted
             ? {
                 capabilities: {
-                  ...(enterprise || apps
+                  ...(enterprise || apps || skillsWanted
                     ? {
                         extensions: {
                           ...(enterprise ? { [enterprise.extension]: {} } : {}),
                           ...(apps
                             ? { [MCP_APPS_EXTENSION]: { mimeTypes: [MCP_APP_MIME_TYPE] } }
                             : {}),
+                          ...(skillsWanted ? { [MCP_SKILLS_EXTENSION]: {} } : {}),
                         },
                       }
                     : {}),
@@ -1005,16 +1050,56 @@ const connectAndList = async (
     }
   }
 
+  // `skills: true`: only on 2026-07-28 (the revision the extension is written against), and only
+  // from a server that declares it. Listed here; nothing of a skill is read yet. The SDK's skills
+  // client is loaded only then: a connection without skills does not carry it.
+  let skills: ServerConnect['skills']
+  if (skillsWanted) {
+    if (era !== 'modern') {
+      log(
+        'info',
+        `[mcp] ${name}: skills: true, but the connection uses ${version} - the Skills extension needs 2026-07-28; no skills`,
+      )
+    } else if (!client.getServerCapabilities()?.extensions?.[MCP_SKILLS_EXTENSION]) {
+      log('info', `[mcp] ${name}: the server does not offer skills (${MCP_SKILLS_EXTENSION})`)
+    } else {
+      const { SkillsClient } = await import('@modelcontextprotocol/client/ext/skills')
+      skills = createMcpSkillCatalog(
+        name,
+        new SkillsClient(client, { skipInvalid: true }) as unknown as McpSkillsClientLike,
+        (level, message) => log(level, message),
+      )
+      await skills.refresh()
+    }
+  }
+
   // Subscribe BEFORE the first list call: a server that mutates its tool set
   // during init would otherwise lose the notification in the window between
   // connect() and listTools().
+  let listener: McpListenSupervisor | undefined
   if (opts.onToolsChanged) {
     const notify = opts.onToolsChanged
-    client.setNotificationHandler('notifications/tools/list_changed', () => notify(name))
+    const announce = (): void => notify(name)
+    client.setNotificationHandler('notifications/tools/list_changed', announce)
+    // A change of the server's skills is a resource list change: the refresh re-lists both.
+    if (skills) client.setNotificationHandler('notifications/resources/list_changed', announce)
     // 2026-07-28 has no stream a server may write to unasked: the notice above
-    // arrives only on a `subscriptions/listen` stream the client opens. (The
-    // 2025 revisions send it on the GET stream the transport opens by itself.)
-    if (era === 'modern') await listenForToolChanges(name, client, log, isClosing)
+    // arrives only on a `subscriptions/listen` stream the client opens, and
+    // opens again when it ends. (The 2025 revisions send it on the GET stream
+    // the transport opens, and resumes, by itself.)
+    if (era === 'modern') {
+      await listenForToolChanges(
+        name,
+        client,
+        log,
+        announce,
+        (l) => {
+          listener = l
+          onListener(l)
+        },
+        Boolean(skills),
+      )
+    }
   }
 
   const listed = await listAllTools(client, () => warnTruncated(log, name))
@@ -1023,8 +1108,10 @@ const connectAndList = async (
     name,
     client,
     listed,
+    ...(listener ? { listener } : {}),
     instructions: cleanMcpInstructions(client.getInstructions()),
     protocol: { version, era },
+    ...(skills ? { skills } : {}),
   }
 }
 
@@ -1062,10 +1149,14 @@ export const connectMcpHttp = async (
   const instructions: McpServerInstructions[] = []
   const instructionsOf = new Map<string, string>()
   const protocols: McpServerProtocol[] = []
-  let closing = false
+  // 2026-07-28, with `onToolsChanged`: per connected server, what keeps its
+  // listen stream open (`./listen`). Stopped before the clients are closed.
+  const listeners = new Map<string, McpListenSupervisor>()
   // server name → the tool keys it currently owns, so a refresh can remove
   // exactly its own entries.
   const mountedKeys = new Map<string, string[]>()
+  // server name → its skills (`skills: true`, 2026-07-28, the server offers the extension).
+  const skillCatalogs = new Map<string, NonNullable<ServerConnect['skills']>>()
   // MCP Apps (`apps: true`): per server, the tools as an app sees them (every listed tool, by
   // its own name) and the app documents read so far (by URI; a failed read is not kept).
   const appsOn = opts.apps === true
@@ -1342,6 +1433,9 @@ export const connectMcpHttp = async (
       // Which server the tool came from, and that server's instructions: the
       // agent shows the notes of the servers whose tools it actually mounts.
       markMcpTool(tools[key], name, instructionsOf.get(name))
+      // And its skills (`skills: true`): they come with its tools, like its instructions.
+      const skillSource = skillCatalogs.get(name)?.source
+      if (skillSource) markMcpSkills(tools[key], skillSource)
       catalog.push({
         name: key,
         description,
@@ -1363,7 +1457,7 @@ export const connectMcpHttp = async (
 
   const connects = await Promise.all(
     Object.entries(servers).map(([name, cfg]) =>
-      openConnection(name, cfg, opts, log, () => closing, elicitationSessionOf(name)),
+      openConnection(name, cfg, opts, log, elicitationSessionOf(name)),
     ),
   )
 
@@ -1378,6 +1472,7 @@ export const connectMcpHttp = async (
       continue
     }
     clients.set(server.name, server.client)
+    if (server.listener) listeners.set(server.name, server.listener)
     if (server.instructions) {
       log(
         'info',
@@ -1387,6 +1482,7 @@ export const connectMcpHttp = async (
       instructionsOf.set(server.name, server.instructions)
     }
     if (server.protocol) protocols.push({ server: server.name, ...server.protocol })
+    if (server.skills) skillCatalogs.set(server.name, server.skills)
     mountTools(server.name, server.client, server.listed)
     results.push({ name: server.name, connected: true })
   }
@@ -1484,10 +1580,15 @@ export const connectMcpHttp = async (
     refreshServer: async (name: string) => {
       const client = clients.get(name)
       if (!client) throw new Error(`MCP server "${name}" is not connected`)
+      // Its skills too (`skills: true`): a change of them reaches here the way a tool change does.
+      await skillCatalogs.get(name)?.refresh()
       mountTools(name, client, await listAllTools(client, () => warnTruncated(log, name)))
     },
     close: async () => {
-      closing = true
+      // The listen streams first: a pending retry or an attempt in flight must not
+      // outlive (or be logged against) a client that is going away.
+      for (const listener of listeners.values()) listener.stop()
+      listeners.clear()
       appResources.clear()
       await Promise.allSettled([...clients.values()].map((c) => c.close()))
     },

@@ -22,8 +22,12 @@ import type { StoredMessage } from '../memory/store.js'
 import { buildModelFromStage, resolveStage } from '../providers/registry.js'
 import { defaultPrompts, type Prompts } from '../prompts.js'
 import {
+  createMcpSkills,
   createSkillTools,
   defineSkill,
+  isMcpSkill,
+  isMcpSkillLoaded,
+  prepareMcpSkills,
   renderActiveSkills,
   renderSkillIndex,
   SKILL_TOOL_NAMES,
@@ -91,6 +95,7 @@ import {
   type IStepWrites,
 } from '../tiers.js'
 import { collectMcpInstructions, renderMcpInstructions } from '../mcp/shared.js'
+import { collectMcpSkillSources, isMcpSkillName } from '../mcp/skills.js'
 import {
   AttachmentsNotSupportedError,
   attachmentKind,
@@ -216,7 +221,7 @@ export interface Agent {
    */
   readonly contextWindowTokens: number
   /** Skills (name + description) - the host's, and the agent's own lessons, marked `learned`. Live. */
-  readonly skills: { name: string; description: string; learned?: true }[]
+  readonly skills: { name: string; description: string; learned?: true; server?: string }[]
   /** The agent's own lessons (`config.learning`), with where each came from. Empty without it. */
   listLearnedSkills(): Skill[]
   /**
@@ -413,7 +418,9 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
   // fixed order (so the cached prefix is stable), and a server's own order is
   // what small models were measured against (see the Node sibling's live gate).
   const log = createLogger(cfg.logLevel, config.logger)
-  const skills: Skill[] = (config.skills ?? []).map(defineSkill)
+  // A helper the model started is given its caller's skills as they are - an MCP server's
+  // among them (`isMcpSkill`: made by `createMcpSkills` only, never by a config).
+  const skills: Skill[] = (config.skills ?? []).map((s) => (isMcpSkill(s) ? s : defineSkill(s)))
   const seenSkills = new Set<string>()
   for (const s of skills) {
     if (seenSkills.has(s.name)) throw new Error(`duplicate skill name "${s.name}"`)
@@ -509,6 +516,18 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
   // a host that reconnects mid-run cannot change a prompt under a run.
   const mcpInstructions =
     config.mcpInstructions === false ? '' : renderMcpInstructions(collectMcpInstructions(baseTools))
+  // The skills of the MCP servers with `skills: true` (experimental), read from the mounted tools
+  // the same way and at the same time: named `<server>/<skill>`, capped, loaded on demand. A
+  // helper has its caller's (above), not a second copy.
+  if (!seed) {
+    skills.push(
+      ...createMcpSkills(
+        collectMcpSkillSources(baseTools),
+        skills.map((s) => s.name),
+        (m) => log.warn(m),
+      ),
+    )
+  }
 
   const catalog = toolCatalogOf(baseTools)
   // 'auto' searches instead of listing once the catalogue is long, or once its
@@ -650,15 +669,37 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
     // ── per-run tool state: skills, discovered tools, call budget, current step
     // Restored silently: `skill.activated` already fired in the run that activated them.
     const activeSkillNames = new Set<string>((resumed?.skills ?? []).filter(hasSkill))
+    // A resumed run's MCP skills are read again (and verified) before they are active again; one
+    // that cannot be is left out.
+    if ([...activeSkillNames].some(isMcpSkillName)) {
+      await prepareMcpSkills(skills, activeSkillNames, (m) => log.warn(m), opts.signal)
+      for (const name of [...activeSkillNames]) {
+        const skill = skills.find((s) => s.name === name)
+        if (skill && isMcpSkill(skill) && !isMcpSkillLoaded(skill)) activeSkillNames.delete(name)
+      }
+    }
     result.skills = [...activeSkillNames]
     // Pages web_fetch reads in this run: provenance for any lesson the run writes.
     const fetched: string[] = []
     const activateSkill = (name: string, by: 'plan' | 'tool'): void => {
       if (activeSkillNames.has(name) || !hasSkill(name)) return
+      const skill = skills.find((s) => s.name === name) as Skill
+      // An MCP skill is active only once its instructions were read and verified.
+      if (isMcpSkill(skill) && !isMcpSkillLoaded(skill)) return
       activeSkillNames.add(name)
       result.skills = [...activeSkillNames]
-      emit({ type: 'skill.activated', name, by })
+      emit({
+        type: 'skill.activated',
+        name,
+        by,
+        ...(skill.mcp ? { server: skill.mcp.server } : {}),
+      })
     }
+    // The MCP skills this run acts on, and those of the run that started it (a helper works for
+    // its caller's skill too): while there is one, a tool that runs code is always asked.
+    const mcpSkillsActing = (): string[] => [
+      ...new Set([...[...activeSkillNames].filter(isMcpSkillName), ...(seed?.mcpSkills?.() ?? [])]),
+    ]
     const discovered: string[] = [...(resumed?.discovered ?? [])]
     // What the user said mid-run (`control.send`), and whether the replanner has weighed it.
     const userUpdates: { text: string; reconciled: boolean }[] = (resumed?.userUpdates ?? []).map(
@@ -735,6 +776,7 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
         fetched,
         stepWrites: () => stepWrites,
         clock,
+        mcpSkills: mcpSkillsActing,
       },
     )
     // Take what the user sent since the last boundary and hand it to the model: recorded (a
@@ -968,6 +1010,8 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
         : planned.plan
       emit({ type: 'plan.created', plan: announced })
       announced.steps.forEach((step, index) => emit({ type: 'plan.step-added', step, index }))
+      // An MCP server's skill is read (and verified) before it is activated.
+      await prepareMcpSkills(skills, planned.skills, (m) => log.warn(m), opts.signal)
       for (const name of planned.skills) activateSkill(name, 'plan')
 
       // 2) EXECUTE → REPLAN
@@ -1495,6 +1539,7 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
         name: s.name,
         description: s.description,
         ...(s.origin?.kind === 'learned' ? { learned: true as const } : {}),
+        ...(s.mcp ? { server: s.mcp.server } : {}),
       }))
     },
     listLearnedSkills: () => (learning ? learning.learned().map((s) => ({ ...s })) : []),

@@ -38,6 +38,7 @@ import {
   type IToolResult,
   type IUrlElicitation,
 } from './mcp-elicitation.ts'
+import { createSkillCatalog, type ISkillFaults } from './mcp-skills.ts'
 import {
   TRAVEL_APP_URI,
   TRAVEL_BAD_APP_URI,
@@ -73,6 +74,10 @@ export type McpProtocol = 'legacy' | 'modern' | 'dual'
 
 /** How the version probe (`server/discover`) goes wrong (see `ILocalMcpServer.protocolFaults`). */
 export type ProbeFault = 'unauthorized' | 'server_error' | 'garbage' | 'cors'
+
+/** How `subscriptions/listen` is answered instead (see `ILocalMcpServer.listenFaults`). */
+export type ListenFault =
+  'not_found' | 'not_allowed' | 'unauthorized' | 'forbidden' | 'unavailable' | 'silent'
 
 export interface ILocalMcpServerOptions extends IListenOptions {
   /** The protocol revisions to speak. Default `'legacy'`. */
@@ -123,6 +128,14 @@ export interface ILocalMcpServerOptions extends IListenOptions {
    * plain `text/html`). An object configures the app (`ITravelAppOptions`). Default: off.
    */
   appTools?: boolean | ITravelAppOptions
+  /**
+   * Also serve skills (the `io.modelcontextprotocol/skills` extension, SEP-2640) through the 2.x
+   * SDK's `SkillsExtension`: `git-workflow`, `pdf-processing` (with `references/FORMS.md` and
+   * `scripts/extract.py`), `acme/billing/refunds` and `acme/support/refunds` (one name, two
+   * skills). 2026-07-28 only (`modern`, and the modern side of `dual`): the extension is written
+   * against that revision. `skillFaults` adds the misbehaving ones. Default: off.
+   */
+  skills?: boolean
 }
 
 /**
@@ -195,10 +208,44 @@ export interface ILocalMcpServer {
    * allows (no `Mcp-Method`, no `Mcp-Name`), so a browser blocks the probe.
    */
   protocolFaults: { probe?: ProbeFault }
+  /**
+   * Mutable: answer every `subscriptions/listen` request this way from now on, before
+   * the SDK sees it (a stream that is already open is not touched). `not_found`: 404
+   * with JSON-RPC `-32601`, what a server that does not implement the method answers.
+   * `not_allowed`: 405. `unauthorized`: 401 with the challenge, whatever the token.
+   * `forbidden`: 403. `unavailable`: 503 with a plain-text body. `silent`: no answer
+   * at all, the request is held until the client gives it up (`heldListens()`).
+   */
+  listenFaults: { answer?: ListenFault }
+  /**
+   * End every open `subscriptions/listen` stream abruptly - the connection is cut, no
+   * result is sent: what a client sees when the network or a proxy drops it. Returns
+   * how many there were.
+   */
+  dropListenStreams: () => number
+  /**
+   * End every open `subscriptions/listen` stream with its result, as a server process
+   * that shuts down does, and go on serving from a fresh handler on the same event bus
+   * (another process taking over: a stateless server has nothing else to hand on).
+   * Modern and dual only. Resolves with how many there were.
+   */
+  closeListenStreams: () => Promise<number>
+  /** `subscriptions/listen` requests that `listenFaults.answer = 'silent'` holds right now. */
+  heldListens: () => number
   /** Mutable: make the elicitation tools misbehave (with `elicitationTools`). */
   elicitationFaults: IElicitationFaults
   /** Mutable: make the app resource misbehave (with `appTools`). */
   appFaults: IAppFaults
+  /** Mutable (with `skills`): the misbehaving skills the listing gets from now on. */
+  skillFaults: ISkillFaults
+  /** Every skill file (`resources/read` of a skill URI) a client read, in order (with `skills`). */
+  skillReads: string[]
+  /**
+   * Serve one more skill (with `skills`) - `path` is its skill path, its last segment its name -
+   * and announce a resource list change (`notifications/resources/list_changed`) to every
+   * listening client, which is how a skills change reaches one.
+   */
+  addSkill: (path: string, description: string, body: string) => Promise<void>
   /** Every round of every elicitation tool: what the client declared, answered and echoed. */
   elicitations: IElicitationRound[]
   /** The pages URL-mode elicitations pointed at. `POST` to a page's `url` submits it. */
@@ -278,10 +325,17 @@ export const startLocalMcpServer = async (
   const requests: IMcpRequestRecord[] = []
   const structuredFaults: { result?: StructuredFault } = {}
   const protocolFaults: { probe?: ProbeFault } = {}
+  const listenFaults: { answer?: ListenFault } = {}
+  // The answers of the `subscriptions/listen` requests: streams the SDK serves, and
+  // requests the `silent` fault holds.
+  const listenStreams = new Set<ServerResponse>()
+  const heldListens = new Set<ServerResponse>()
   const appFaults: IAppFaults = {}
   const appOptions: ITravelAppOptions | undefined =
     opts.appTools === true ? {} : opts.appTools || undefined
   const extraTools: string[] = []
+  // Modern only: the SDK's skills extension over a source of ours (see `mcp-skills.ts`).
+  const skillCatalog = opts.skills ? await createSkillCatalog() : undefined
   let instructions = opts.instructions
   let mcpOrigin = ''
   const elicitation = createElicitation({
@@ -807,6 +861,8 @@ export const startLocalMcpServer = async (
         },
       )
     }
+    // Before the handler connects it: the capability is declared by `attach`.
+    skillCatalog?.extension.attach(server)
     return server
   }
 
@@ -857,6 +913,10 @@ export const startLocalMcpServer = async (
           },
         },
       })
+    }
+    if (method === 'subscriptions/listen') {
+      listenStreams.add(res)
+      res.on('close', () => listenStreams.delete(res))
     }
     const request: IModernRequest = {
       method,
@@ -915,6 +975,39 @@ export const startLocalMcpServer = async (
     }
   }
 
+  /** Answer `subscriptions/listen` wrongly, if a fault says so. Returns true when it did. */
+  const failListen = (res: ServerResponse, id: unknown): boolean => {
+    switch (listenFaults.answer) {
+      case 'not_found':
+        json(res, 404, {
+          jsonrpc: '2.0',
+          id: id ?? null,
+          error: { code: -32601, message: 'Method not found: subscriptions/listen' },
+        })
+        return true
+      case 'not_allowed':
+        res.writeHead(405, { 'content-type': 'text/plain' })
+        res.end('method not allowed')
+        return true
+      case 'unauthorized':
+        json(res, 401, { error: 'unauthorized' }, challenge())
+        return true
+      case 'forbidden':
+        json(res, 403, { error: 'forbidden' })
+        return true
+      case 'unavailable':
+        res.writeHead(503, { 'content-type': 'text/plain' })
+        res.end('upstream unavailable')
+        return true
+      case 'silent':
+        heldListens.add(res)
+        res.on('close', () => heldListens.delete(res))
+        return true
+      default:
+        return false
+    }
+  }
+
   const serve = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const oldCors = protocolFaults.probe === 'cors' ? CORS_ALLOW_HEADERS_2025 : undefined
     if (applyCors(req, res, opts.cors, oldCors)) {
@@ -944,6 +1037,35 @@ export const startLocalMcpServer = async (
     const message = parse(raw)
     record(message)
     if (isObject(message) && message.method === 'server/discover' && failProbe(res)) {
+      return
+    }
+    if (
+      isObject(message) &&
+      message.method === 'subscriptions/listen' &&
+      failListen(res, message.id)
+    ) {
+      return
+    }
+    // `skillFaults.nameMismatch`: the SDK drops an entry whose URI and name disagree, so the
+    // listing that carries one is answered here, before the SDK sees the request.
+    if (
+      skillCatalog?.faults.nameMismatch &&
+      isObject(message) &&
+      message.method === 'skills/list' &&
+      isObject(message.params) &&
+      isObject(message.params._meta) &&
+      message.params._meta[PROTOCOL_VERSION_KEY] !== undefined
+    ) {
+      json(res, 200, {
+        jsonrpc: '2.0',
+        id: message.id ?? null,
+        result: {
+          resultType: 'complete',
+          skills: await skillCatalog.listing(),
+          ttlMs: 0,
+          cacheScope: 'private',
+        },
+      })
       return
     }
     // The answer of a legacy client to a request this server sent it.
@@ -990,8 +1112,37 @@ export const startLocalMcpServer = async (
     requests,
     structuredFaults,
     protocolFaults,
+    listenFaults,
+    dropListenStreams: () => {
+      const open = [...listenStreams]
+      for (const res of open) {
+        res.destroy()
+      }
+      return open.length
+    },
+    closeListenStreams: async () => {
+      if (!modern) {
+        throw new Error('closeListenStreams: this server does not speak 2026-07-28')
+      }
+      const open = listenStreams.size
+      const previous = modern
+      modern = createMcpHandler(buildModernServer, { legacy: 'reject', bus })
+      modernNode = toNodeHandler(modern)
+      await previous.close()
+      return open
+    },
+    heldListens: () => heldListens.size,
     elicitationFaults: elicitation.faults,
     appFaults,
+    skillFaults: skillCatalog?.faults ?? {},
+    skillReads: skillCatalog?.reads ?? [],
+    addSkill: async (path, description, body) => {
+      if (!skillCatalog) {
+        throw new Error('addSkill: this server was started without `skills`')
+      }
+      await skillCatalog.add(path, description, body)
+      modern?.notify.resourcesChanged()
+    },
     elicitations: elicitation.rounds,
     urlElicitations: elicitation.urlElicitations,
     setInstructions: (next) => {
@@ -1048,6 +1199,8 @@ export interface ILocalMcpOptions extends Pick<IListenOptions, 'host' | 'cors'> 
   cacheHint?: { ttlMs: number; cacheScope: 'public' | 'private' }
   /** Also mount the MCP Apps tools and resources (see `ILocalMcpServerOptions.appTools`). */
   appTools?: boolean | ITravelAppOptions
+  /** Also serve skills, 2026-07-28 only (see `ILocalMcpServerOptions.skills`). */
+  skills?: boolean
 }
 
 export interface ILocalMcp extends ILocalMcpServer {
@@ -1105,6 +1258,7 @@ export const startLocalMcp = async (opts: ILocalMcpOptions = {}): Promise<ILocal
       urlElicitationWaitMs: opts.urlElicitationWaitMs,
       cacheHint: opts.cacheHint,
       appTools: opts.appTools,
+      skills: opts.skills,
     })
   } catch (err) {
     await as.close()
