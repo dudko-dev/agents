@@ -1,4 +1,5 @@
 import type { AgentToolSet } from '@dudko.dev/agent-web'
+import type { McpAppsConnectionLike } from './hooks/use-mcp-app-host.js'
 
 /**
  * Structural types for the core's OPTIONAL `@dudko.dev/agent-web/mcp` subpath.
@@ -17,6 +18,8 @@ export interface McpCatalogEntry {
   server: string
   /** The server marked the tool read-only (newer cores). */
   readOnly?: boolean
+  /** With `apps: true`: the MCP App (`ui://…`) the tool declares (newer cores). */
+  app?: string
 }
 
 export interface McpServerResult {
@@ -63,6 +66,8 @@ export interface ConnectedMcp {
   protocols?: McpServerProtocol[]
   refreshServer?: (name: string) => Promise<void>
   close: () => Promise<void>
+  /** MCP Apps, on a connection made with `apps: true` (newer cores; absent otherwise). */
+  apps?: McpAppsConnectionLike
 }
 
 export interface McpHttpServerConfig {
@@ -197,6 +202,8 @@ export interface McpModule {
        */
       onElicitation?: McpElicitationHandler
       elicitation?: McpElicitationOptions
+      /** MCP Apps (cores with the extension; an older core ignores it and declares nothing). */
+      apps?: boolean
     },
   ) => Promise<ConnectedMcp>
   BrowserOAuthProvider?: new (opts: BrowserOAuthProviderOptions) => BrowserOAuthProvider

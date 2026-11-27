@@ -16,6 +16,9 @@ export interface McpPanelProps {
   /** Tools the agent can see in total, and whether tool search is active. */
   toolCount: number
   searchMode: boolean
+  /** MCP Apps: whether the servers' apps are shown in the chat, and the switch (absent: none). */
+  apps?: boolean
+  onApps?: (on: boolean) => void
   /** The page shows the servers' questions to the user (MCP elicitation): say so in the notes. */
   elicitation?: boolean
 }
@@ -63,6 +66,8 @@ export const McpPanel = ({
   onMockCatalog,
   toolCount,
   searchMode,
+  apps,
+  onApps,
   elicitation,
 }: McpPanelProps) => {
   const [url, setUrl] = useState('')
@@ -216,6 +221,7 @@ export const McpPanel = ({
                 <pre className="mcp__instructions-text">{s.instructions}</pre>
               </details>
             )}
+            {s.status === 'connected' && <ServerApps catalog={s.catalog} shown={apps} />}
             {s.catalog.length > 0 && (
               <details
                 open={open[s.name] ?? false}
@@ -335,6 +341,19 @@ export const McpPanel = ({
         </div>
       </form>
 
+      {onApps && (
+        <label className="mcp__mock">
+          <input
+            type="checkbox"
+            checked={apps ?? false}
+            onChange={(e) => onApps(e.target.checked)}
+          />
+          Show the servers’ apps in the chat (MCP Apps). Each app runs in a sandboxed frame with no
+          access to this page, your keys or your files, and whatever it asks for - a tool call, a
+          link, a message - waits for you.
+        </label>
+      )}
+
       {onMockCatalog && (
         <label className="mcp__mock">
           <input
@@ -358,6 +377,31 @@ export const McpPanel = ({
         {elicitation &&
           ' In the chat, a server may ask you something in the middle of a tool call — a form, or a page to open: the question is shown as the server’s own text, and your answer goes to that server only.'}
       </p>
+    </div>
+  )
+}
+
+/** The apps a server's tools declare (MCP Apps), as the panel lists them. */
+const ServerApps = ({
+  catalog,
+  shown,
+}: {
+  catalog: UseMcpServersReturn['catalog']
+  shown?: boolean
+}) => {
+  const uris = [...new Set(catalog.map((t) => t.app).filter((u): u is string => Boolean(u)))]
+  if (uris.length === 0) return null
+  return (
+    <div className="mcp__apps">
+      <span className="settings__label">Apps</span>
+      {uris.map((uri) => (
+        <code key={uri} className="mcp__app">
+          {uri}
+        </code>
+      ))}
+      <span className="mcp__badge mcp__badge--muted">
+        {shown ? 'shown in the chat · sandboxed' : 'not shown'}
+      </span>
     </div>
   )
 }

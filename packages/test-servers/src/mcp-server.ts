@@ -38,6 +38,13 @@ import {
   type IToolResult,
   type IUrlElicitation,
 } from './mcp-elicitation.ts'
+import {
+  TRAVEL_APP_URI,
+  TRAVEL_BAD_APP_URI,
+  TRAVEL_FLIGHTS,
+  travelAppHtml,
+  type ITravelAppOptions,
+} from './mcp-app.ts'
 
 /**
  * A real MCP server and a real OAuth authorization server, both on loopback.
@@ -108,6 +115,26 @@ export interface ILocalMcpServerOptions extends IListenOptions {
    * Default: the SDK's `ttlMs: 0`, `cacheScope: 'private'`.
    */
   cacheHint?: { ttlMs: number; cacheScope: 'public' | 'private' }
+  /**
+   * Also mount the MCP Apps tools (the `io.modelcontextprotocol/ui` extension) and their
+   * resources: `flights.search` (read-only, with the app `ui://travel/results.html`),
+   * `flights.book` (writes; model and app), `flights.refresh` (read-only, app only),
+   * `flights.admin` (model only) and `flights.bad` (points at `ui://travel/bad.html`, which is
+   * plain `text/html`). An object configures the app (`ITravelAppOptions`). Default: off.
+   */
+  appTools?: boolean | ITravelAppOptions
+}
+
+/**
+ * How the app resource goes wrong (see `ILocalMcpServer.appFaults`): `mime` answers with that
+ * MIME type, `padTo` pads the HTML to that many characters, `otherUri` answers for another URI,
+ * `cspInjection` adds entries to the declared CSP that are not origins.
+ */
+export interface IAppFaults {
+  mime?: string
+  padTo?: number
+  otherUri?: boolean
+  cspInjection?: boolean
 }
 
 /** How the structured tools go wrong (see `ILocalMcpServer.structuredFaults`). */
@@ -170,6 +197,8 @@ export interface ILocalMcpServer {
   protocolFaults: { probe?: ProbeFault }
   /** Mutable: make the elicitation tools misbehave (with `elicitationTools`). */
   elicitationFaults: IElicitationFaults
+  /** Mutable: make the app resource misbehave (with `appTools`). */
+  appFaults: IAppFaults
   /** Every round of every elicitation tool: what the client declared, answered and echoed. */
   elicitations: IElicitationRound[]
   /** The pages URL-mode elicitations pointed at. `POST` to a page's `url` submits it. */
@@ -211,6 +240,8 @@ interface IPlainTool {
   input: Record<string, z.ZodType>
   output?: Record<string, z.ZodType>
   annotations?: { readOnlyHint: boolean }
+  /** The tool's `_meta` (MCP Apps: `ui.resourceUri`, `ui.visibility`). */
+  meta?: JsonObject
   run: (args: JsonObject) => IToolResult
 }
 
@@ -247,6 +278,9 @@ export const startLocalMcpServer = async (
   const requests: IMcpRequestRecord[] = []
   const structuredFaults: { result?: StructuredFault } = {}
   const protocolFaults: { probe?: ProbeFault } = {}
+  const appFaults: IAppFaults = {}
+  const appOptions: ITravelAppOptions | undefined =
+    opts.appTools === true ? {} : opts.appTools || undefined
   const extraTools: string[] = []
   let instructions = opts.instructions
   let mcpOrigin = ''
@@ -343,6 +377,87 @@ export const startLocalMcpServer = async (
         },
       )
     }
+    if (appOptions) {
+      const flightsResult = (route: JsonObject): IToolResult =>
+        ({
+          content: [
+            {
+              type: 'text',
+              text: `Three flights ${String(route.from)} → ${String(route.to)}: ${TRAVEL_FLIGHTS.map(
+                (f) => `${f.flight} ${f.depart} €${f.price}`,
+              ).join(', ')}`,
+            },
+          ],
+          structuredContent: { route, flights: TRAVEL_FLIGHTS },
+        }) as IToolResult
+      const app = (visibility?: string[]): JsonObject => ({
+        ui: { resourceUri: TRAVEL_APP_URI, ...(visibility ? { visibility } : {}) },
+      })
+      tools.push(
+        {
+          name: 'flights.search',
+          description: 'Search flights between two airports on a date; shows them in an app',
+          input: { from: z.string(), to: z.string(), date: z.string().optional() },
+          annotations: { readOnlyHint: true },
+          meta: app(),
+          run: (args) => {
+            calls.push({ name: 'flights.search', args })
+            return flightsResult({
+              from: args.from,
+              to: args.to,
+              date: args.date ?? '2026-12-12',
+            })
+          },
+        },
+        {
+          name: 'flights.book',
+          description: 'Book a flight',
+          input: {
+            flight: z.string(),
+            date: z.string().optional(),
+            fare: z.string().optional(),
+            passengers: z.number().optional(),
+          },
+          meta: app(['model', 'app']),
+          run: (args) => {
+            calls.push({ name: 'flights.book', args })
+            return { content: [{ type: 'text', text: `booked:${String(args.flight)}` }] }
+          },
+        },
+        {
+          name: 'flights.refresh',
+          description: 'Fetch the flights again (for the app)',
+          input: {},
+          annotations: { readOnlyHint: true },
+          meta: app(['app']),
+          run: () => {
+            calls.push({ name: 'flights.refresh', args: {} })
+            return flightsResult({ from: 'LIS', to: 'VIE', date: '2026-12-12' })
+          },
+        },
+        {
+          name: 'flights.admin',
+          description: 'An administrative tool for the model only',
+          input: {},
+          meta: { ui: { visibility: ['model'] } },
+          run: () => {
+            calls.push({ name: 'flights.admin', args: {} })
+            return { content: [{ type: 'text', text: 'admin:ok' }] }
+          },
+        },
+        {
+          name: 'flights.bad',
+          description: 'A tool whose app is not an app',
+          input: {},
+          annotations: { readOnlyHint: true },
+          meta: { ui: { resourceUri: TRAVEL_BAD_APP_URI } },
+          run: () => {
+            calls.push({ name: 'flights.bad', args: {} })
+            return { content: [{ type: 'text', text: 'bad:ok' }] }
+          },
+        },
+      )
+    }
     for (const name of extraTools) {
       tools.push({
         name,
@@ -355,6 +470,61 @@ export const startLocalMcpServer = async (
       })
     }
     return tools
+  }
+
+  /** The app resources (`appTools`): the travel app, and one that is plain HTML. */
+  const appResources = (): {
+    name: string
+    uri: string
+    mimeType: string
+    read: () => { contents: JsonObject[] }
+  }[] => {
+    if (!appOptions) {
+      return []
+    }
+    return [
+      {
+        name: 'travel-results',
+        uri: TRAVEL_APP_URI,
+        mimeType: 'text/html;profile=mcp-app',
+        read: () => {
+          let html = travelAppHtml(appOptions)
+          if (appFaults.padTo && html.length < appFaults.padTo) {
+            html += `<!--${'x'.repeat(appFaults.padTo - html.length - 7)}-->`
+          }
+          const connectDomains = [
+            ...(appOptions.connectDomains ?? []),
+            ...(appFaults.cspInjection
+              ? ['https://ok.example; script-src *', '*', "'unsafe-eval'", 'data:', 'https://*.com']
+              : []),
+          ]
+          return {
+            contents: [
+              {
+                uri: appFaults.otherUri ? 'ui://travel/other.html' : TRAVEL_APP_URI,
+                mimeType: appFaults.mime ?? 'text/html;profile=mcp-app',
+                text: html,
+                _meta: {
+                  ui: {
+                    csp: { connectDomains, resourceDomains: [] },
+                    permissions: { camera: {} },
+                    prefersBorder: true,
+                  },
+                },
+              },
+            ],
+          }
+        },
+      },
+      {
+        name: 'travel-bad',
+        uri: TRAVEL_BAD_APP_URI,
+        mimeType: 'text/html',
+        read: () => ({
+          contents: [{ uri: TRAVEL_BAD_APP_URI, mimeType: 'text/html', text: '<p>not an app</p>' }],
+        }),
+      },
+    ]
   }
 
   const elicitationTools = (): IElicitationTool[] =>
@@ -477,8 +647,17 @@ export const startLocalMcpServer = async (
           inputSchema: tool.input,
           ...(tool.output ? { outputSchema: tool.output } : {}),
           ...(tool.annotations ? { annotations: tool.annotations } : {}),
+          ...(tool.meta ? { _meta: tool.meta } : {}),
         },
         (args: JsonObject) => tool.run(args),
+      )
+    }
+    for (const resource of appResources()) {
+      server.registerResource(
+        resource.name,
+        resource.uri,
+        { mimeType: resource.mimeType },
+        () => resource.read() as never,
       )
     }
     for (const tool of elicitationTools()) {
@@ -586,8 +765,17 @@ export const startLocalMcpServer = async (
           inputSchema: z.object(tool.input),
           ...(tool.output ? { outputSchema: z.object(tool.output) } : {}),
           ...(tool.annotations ? { annotations: tool.annotations } : {}),
+          ...(tool.meta ? { _meta: tool.meta } : {}),
         },
         (args) => tool.run(args as JsonObject),
+      )
+    }
+    for (const resource of appResources()) {
+      server.registerResource(
+        resource.name,
+        resource.uri,
+        { mimeType: resource.mimeType },
+        () => resource.read() as never,
       )
     }
     for (const tool of elicitationTools()) {
@@ -803,6 +991,7 @@ export const startLocalMcpServer = async (
     structuredFaults,
     protocolFaults,
     elicitationFaults: elicitation.faults,
+    appFaults,
     elicitations: elicitation.rounds,
     urlElicitations: elicitation.urlElicitations,
     setInstructions: (next) => {
@@ -857,6 +1046,8 @@ export interface ILocalMcpOptions extends Pick<IListenOptions, 'host' | 'cors'> 
   urlElicitationWaitMs?: number
   /** The cache hint on the modern `server/discover` and `tools/list` results. */
   cacheHint?: { ttlMs: number; cacheScope: 'public' | 'private' }
+  /** Also mount the MCP Apps tools and resources (see `ILocalMcpServerOptions.appTools`). */
+  appTools?: boolean | ITravelAppOptions
 }
 
 export interface ILocalMcp extends ILocalMcpServer {
@@ -913,6 +1104,7 @@ export const startLocalMcp = async (opts: ILocalMcpOptions = {}): Promise<ILocal
       elicitationTools: opts.elicitationTools,
       urlElicitationWaitMs: opts.urlElicitationWaitMs,
       cacheHint: opts.cacheHint,
+      appTools: opts.appTools,
     })
   } catch (err) {
     await as.close()

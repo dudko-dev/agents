@@ -741,6 +741,67 @@ question. The same goes for tool approval: `toolApproval.timeoutMs` is 5 minutes
 **Off is off.** Without the callback no capability is declared and the wire is what it was. A
 server cannot switch the feature on, and neither can the model.
 
+## MCP Apps: a server's HTML, with scripts
+
+With `apps: true` on a connection a tool's server can ship an interface - third-party HTML and
+JavaScript - that a UI shows next to the tool's result and that can ask the host to act: call a
+tool, open a link, put a message in the chat. Everything below is a guard with a test
+(`tests/mcp-apps.test.ts` here; the frame and the bridge in the React package's
+`tests/apps.test.ts` and, in a real browser against a hostile app, `e2e/apps.spec.ts`).
+
+**What this package guarantees.**
+
+- **The app never reaches the model.** Its HTML is in no tool result, event, log line or run
+  checkpoint; the model's tool result is what it would be without apps. An app cannot put text
+  into a prompt through this package (`ui/update-model-context` is not offered; a `ui/message` is
+  a draft the user sends, see the React package).
+- **An app is read from the server that declared it, and nowhere else.** Only a `ui://` URI that a
+  tool of that server declares in its current listing; nothing is requested otherwise. The answer
+  must be that exact URI, the extension's MIME type and at most 2 000 000 characters; anything
+  else is refused and not cached.
+- **The policy comes from the resource's metadata only, and only as origins.** A declared CSP
+  entry that is not an origin (`'unsafe-eval'`, `*`, `data:`, `https:`, a path, an entry with `;`
+  that would add a directive, a `*.tld` wildcard, plain `http:` off loopback) is refused and
+  logged. Nothing declared = no network. Frames, `<base>`, workers and plugins are not granted
+  in the React frame whatever is declared. Permissions (camera, microphone, geolocation,
+  clipboard) are never granted.
+- **An app calls only its own server's tools that let it.** A tool whose `visibility` leaves
+  out `'app'`, or that the server does not list, is refused before a request is sent; a tool for
+  its app only is not given to the model.
+- **An app never writes without the user.** `agent.approveAppToolCall` is the agent's gate with
+  `'autopilot'` raised to `'ask-writes'` for apps; "always allow" given to an app is the app's
+  alone. Read-only tools of its server run without a prompt (as for the model under
+  `'ask-writes'`) - a host that wants every call asked sets a rule (`'travel__*': 'ask'`).
+
+**What the host must do** (the React package does all of it; do the same if you draw apps
+yourself):
+
+- Frame the app in an `<iframe sandbox>` WITHOUT `allow-same-origin` (and without top
+  navigation, popups, forms, modals, downloads), by `srcdoc`, never by a URL of your origin.
+  `allow-same-origin` on a `srcdoc` frame gives it YOUR origin - your storage and the key vault.
+- Put the policy where the document cannot pre-empt it, and stop the frame navigating itself
+  (the embedding document's `frame-src` is the only thing that does).
+- Accept messages only from the frame you drew (`event.source`), answer an allow-list of
+  methods, cap what is in flight, and put every request that acts to the user - with the app
+  named as the one asking. Open a link only on the user's click, with the host shown.
+- Draw your controls outside the frame: an app can paint anything inside its box, including a
+  fake "Allow" button.
+
+**Deviation from the specification.** The 2026-01-26 revision wants a web host to frame apps in a
+sandbox proxy on a DIFFERENT ORIGIN with `allow-scripts allow-same-origin`, served by a server
+the host controls. A library in a page has no second origin to give, and `allow-same-origin` on a
+`srcdoc` frame would be the page's own origin. So the frame has an opaque origin instead -
+stricter: an app gets no `localStorage`, `sessionStorage`, IndexedDB or cookies, its requests go
+out with `Origin: null` (a server must answer `Access-Control-Allow-Origin: *` or `null` to it),
+and `_meta.ui.domain` is not honoured. The draft of the specification no longer prescribes the
+framing.
+
+**Known gaps.** WebRTC is not governed by `connect-src` in Chromium (`webrtc 'block'` is set for
+browsers that implement it): an app with scripts can reach a STUN/TURN server it names. What it
+can send that way is what it already has - the tool's input and result, and what the user types
+into it - never anything of the page. A DNS lookup (`<link rel=dns-prefetch>`) is not a request
+the policy sees. Resource use (CPU, memory) of an app is not limited.
+
 ## Pipelines: a definition is data
 
 A pipeline definition is meant to be saved, shared and loaded - including one that

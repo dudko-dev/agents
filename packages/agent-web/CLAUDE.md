@@ -255,6 +255,27 @@ behind every decision.
   (`tests/mcp-elicitation-agent.test.ts` looks for it in each); every guard has a test and
   needs a mutation check. Docs: README (MCP), `docs/capabilities.md`, `docs/security.md`,
   `docs/design.md`.
+- `src/mcp/apps.ts` (pure, no imports; `ConnectMcpOptions.apps`) — MCP Apps (the
+  `io.modelcontextprotocol/ui` extension, 2026-01-26): the guards on what a server declares - a
+  tool's `_meta.ui` (`mcpAppToolMeta`: a `ui://` URI or nothing, `visibility`), the
+  `resources/read` answer (`mcpAppResourceOf`: the exact URI, the MIME type
+  `text/html;profile=mcp-app`, `MCP_APP_MAX_HTML_CHARS`, text or base64), the declared CSP cleaned
+  to ORIGINS (`mcpAppOrigin` / `mcpAppCspOf`: a keyword, scheme, path, `*`, `;` never passes; the
+  React frame re-checks with the same function), the result an app is given
+  (`mcpAppToolResultOf`, capped). `http.ts` wires it: the extension in the handshake, `_meta.ui`
+  read at list time (a tool whose `visibility` leaves out `'model'` is not mounted), the
+  `mcp.app` event from `execute` (input + result, NEVER the HTML), and `ConnectedMcp.apps`
+  (`readUiResource` - only a URI a tool of THAT server declares in its current listing, cached
+  per connection, a refused read not kept; `appTool`; `callAppTool` - through the elicitation
+  session when there is one; it does not ask the user). The gate is the agent's:
+  `Agent.approveAppToolCall` (`agent/runner.ts`): `toolApproval` with `'autopilot'` raised to
+  `'ask-writes'` and "always allow" kept in a set of its own (`ToolApprovalRequest.app`); its wait
+(and a question during `callAppTool`) is on NO run's clock (`wait-clock.ts`): the run is not
+waiting for it. OFF
+  without `apps`: no capability, no `_meta` read, every tool mounted - `tests/mcp-apps.test.ts`
+  compares the wire with the fixture. Security boundary: every guard has a test there and needs a
+  mutation check. The Node sibling has none of it (it renders nothing): keep the names for when
+  it does. Docs: README (MCP Apps), `docs/capabilities.md`, `docs/security.md`, `docs/design.md`.
 - The MCP client is the official 2.x SDK, `@modelcontextprotocol/client` (the optional peer of
   `./mcp`; `@modelcontextprotocol/sdk` 1.x is gone from this package - the test servers and the
   React package's e2e servers keep it, as real 1.x SERVERS). The JSON Schema validator is imported

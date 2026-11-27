@@ -9,8 +9,10 @@ import type {
 } from './agent/loop-types.js'
 import type { IDecisionEvent } from './decision.js'
 import type { LimitKind } from './limits.js'
+import type { McpAppToolResult } from './mcp/apps.js'
 import type { McpElicitationReason, McpElicitationSchema } from './mcp/elicitation.js'
 import type { PipelineEvent } from './pipeline/engine.js'
+import type { ToolApprovalApp } from './tools/approval.js'
 
 export type ReplanMode = 'continue' | 'revise' | 'finish'
 export type Phase = 'plan' | 'execute' | 'replan' | 'synthesize'
@@ -177,6 +179,11 @@ type AgentEventBody =
       step?: IPlanStep
       /** Set when a helper the model started is asking (see `ToolApprovalRequest.subagent`). */
       subagent?: { id: string; depth: number }
+      /**
+       * Set when an MCP App asks (`Agent.approveAppToolCall`), not the model: the app's server,
+       * the tool's own name there and the app's `ui://` resource (see `ToolApprovalRequest.app`).
+       */
+      app?: ToolApprovalApp
     }
   /** A consent decision: from the user, or `automatic` (policy denial). */
   | {
@@ -221,6 +228,25 @@ type AgentEventBody =
       automatic: boolean
       reason?: McpElicitationReason
       fields?: string[]
+    }
+  /**
+   * A tool that declares an MCP App (`_meta.ui.resourceUri`) returned a result, on a connection
+   * made with `apps: true` (`./mcp`): a UI can show the app next to the call. `tool` is the name
+   * the model called, `toolName` the server's own; `input` the call's arguments; `result` what
+   * the app is given (`content`, `structuredContent`, `isError`, `_meta`), absent when it was
+   * larger than `MCP_APP_MAX_RESULT_CHARS`. The app's HTML is never in an event: read it with
+   * the connection's `apps.readUiResource(server, resourceUri)`.
+   */
+  | {
+      type: 'mcp.app'
+      id: string
+      server: string
+      tool: string
+      toolName: string
+      resourceUri: string
+      input: Record<string, unknown>
+      result?: McpAppToolResult
+      step?: IPlanStep
     }
   /**
    * `profile` is set when the parent chose one of the subagent's named profiles for this call.

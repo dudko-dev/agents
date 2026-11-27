@@ -55,10 +55,21 @@ export {
   type IUrlElicitation,
 } from './mcp-elicitation.ts'
 export {
+  TRAVEL_APP_URI,
+  TRAVEL_BAD_APP_URI,
+  TRAVEL_CHECKOUT_URL,
+  TRAVEL_FLIGHTS,
+  TRAVEL_MESSAGE,
+  travelAppHtml,
+  type ITravelAppOptions,
+  type ITravelFlight,
+} from './mcp-app.ts'
+export {
   REPORT_IMAGE_BASE64,
   REPORT_VALUE,
   startLocalMcp,
   startLocalMcpServer,
+  type IAppFaults,
   type ILocalMcp,
   type ILocalMcpOptions,
   type ILocalMcpServer,

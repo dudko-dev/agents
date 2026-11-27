@@ -671,6 +671,18 @@ Stopping the run (`signal`) cancels a pending question: `reason: 'aborted'`, and
 
 **Not done.** The `-32042` "URL elicitation required" error of the 2025-11-25 revision is passed on as the tool error it is (the call is not repeated after the user visits the link); `notifications/elicitation/complete` is not surfaced. A resumed run starts its `maxPerRun` count again.
 
+## MCP Apps: not in this package
+
+[MCP Apps](https://github.com/modelcontextprotocol/ext-apps) (the extension
+`io.modelcontextprotocol/ui`: a tool's server ships an HTML interface for its result) is a host
+feature of the BROWSER packages: `@dudko.dev/agent-web` reads the declarations and gates an app's
+calls (`connectMcpHttp(servers, { apps: true })`, the `mcp.app` event,
+`agent.approveAppToolCall`), and `@dudko.dev/agent-web-react` draws the app in a sandboxed frame.
+This package renders nothing, declares no extension and mounts every tool as before - a tool's
+`_meta.ui` is not read, and its result reaches the model as it always did. A server-side host that
+streams the events to a browser would need the bridge in the page and a round trip for every call
+an app makes; the names above are kept for when it is added here.
+
 ## Prompt caching
 
 `promptCaching` is on by default. Every stage keeps its **system** prompt run-stable — role instructions, domain context (`systemPrompt`), the skills index, the tool catalogue where the stage shows one, and the active skills — and puts everything that changes (history, request, plan, trace) in the user message. That alone lets OpenAI and Gemini implicit caches hit. On top of it the system prompt is sent as a system message with an Anthropic ephemeral cache breakpoint, and each call carries an OpenAI `promptCacheKey` (`${clientName}:${stage}`). Unknown provider keys are ignored by other providers.

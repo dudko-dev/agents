@@ -5,6 +5,7 @@ import {
   type Skill,
 } from '@dudko.dev/agent-web'
 import type {
+  AppView,
   WrittenFileView,
   AgentUiState,
   ApprovalView,
@@ -168,6 +169,8 @@ const resetRun = (state: AgentUiState): AgentUiState => ({
   totalUsage: state.totalUsage,
   seq: state.seq,
   learned: state.learned,
+  // An MCP App's request is the user's, not the run's: it waits across runs.
+  approvals: state.approvals.filter((a) => a.app && a.status === 'pending'),
 })
 
 /** Apply `fn` to the step whose id matches, leaving the rest untouched. */
@@ -398,6 +401,40 @@ const mediaOf = (
   ...(withStep && event.step ? { stepId: event.step.id } : {}),
 })
 
+type McpAppEvent = Extract<AgentEvent, { type: 'mcp.app' }>
+
+/**
+ * An MCP App joins the run's view, once, and the tool call it came with is tagged. `by` is the
+ * subagent the call came through (its step ids are its own: no step then).
+ */
+const addApp = (state: AgentUiState, event: McpAppEvent, by?: AppView['by']): AgentUiState => {
+  if (state.apps?.some((a) => a.id === event.id)) return state
+  const view: AppView = {
+    id: event.id,
+    server: event.server,
+    tool: event.tool,
+    toolName: event.toolName,
+    resourceUri: event.resourceUri,
+    input: event.input,
+    ...(event.result ? { result: event.result } : {}),
+    ...(!by && event.step ? { stepId: event.step.id } : {}),
+    ...(by ? { by } : {}),
+  }
+  const steps =
+    !by && event.step
+      ? patchStep(state.steps, event.step.id, (s) => {
+          // The event comes while its call is still running: the newest untagged call of it.
+          let i = s.toolCalls.length - 1
+          while (i >= 0 && !(s.toolCalls[i].name === event.tool && !s.toolCalls[i].app)) i -= 1
+          if (i < 0) return s
+          const toolCalls = s.toolCalls.slice()
+          toolCalls[i] = { ...toolCalls[i], app: event.id }
+          return { ...s, toolCalls }
+        })
+      : state.steps
+  return { ...state, steps, apps: [...(state.apps ?? []), view] }
+}
+
 type FileWritten = Extract<AgentEvent, { type: 'file.written' }>
 
 /**
@@ -558,6 +595,15 @@ const applySubagent = (
         }
         case 'file.deleted':
           return fileDeleted(known, inner.path)
+        // An app a subagent's call came with is shown in the turn too, and says whose call it was.
+        case 'mcp.app': {
+          const node = known.subagents.find((s) => s.id === event.id)
+          return addApp(known, inner, {
+            id: event.id,
+            name: node?.name ?? event.name,
+            ...(node?.role ? { role: node.role } : {}),
+          })
+        }
 
         default:
           return {
@@ -787,12 +833,21 @@ const applyEvent = (state: AgentUiState, event: AgentEvent, ctx: EventContext): 
       }
 
     case 'step.tool-call': {
+      // An app can be told before its call is (the tool runs while the stream is read): the
+      // call then takes the app of this step and tool that no call has yet.
+      const tagged = new Set(
+        state.steps.flatMap((s) => s.toolCalls.map((c) => c.app).filter(Boolean)),
+      )
+      const early = state.apps?.find(
+        (a) => a.stepId === event.step.id && a.tool === event.name && !tagged.has(a.id),
+      )
       const call: ToolCallView = {
         name: event.name,
         input: event.input,
         status: 'calling',
         inputTokens: approxTokens(event.input),
         ...(ctx.at !== undefined ? { startedAt: ctx.at } : {}),
+        ...(early ? { app: early.id } : {}),
       }
       return {
         ...state,
@@ -877,6 +932,8 @@ const applyEvent = (state: AgentUiState, event: AgentEvent, ctx: EventContext): 
                 // With tiers the list holds every attempt's calls, in the order they were made.
                 ...(streamed?.attempt !== undefined ? { attempt: streamed.attempt } : {}),
                 ...(isReplayedToolOutput(c.output) ? { replayed: true } : {}),
+                // The MCP App the call came with (only the stream told it).
+                ...(streamed?.app !== undefined ? { app: streamed.app } : {}),
               }
             })
           })(),
@@ -954,6 +1011,9 @@ const applyEvent = (state: AgentUiState, event: AgentEvent, ctx: EventContext): 
     case 'file.deleted':
       return fileDeleted(state, event.path)
 
+    case 'mcp.app':
+      return addApp(state, event)
+
     case 'message.queued':
       return state.queued.some((q) => q.id === event.id)
         ? state
@@ -1021,6 +1081,7 @@ const applyEvent = (state: AgentUiState, event: AgentEvent, ctx: EventContext): 
             readOnly: event.readOnly,
             stepId: event.step?.id,
             ...(event.subagent ? { subagent: event.subagent } : {}),
+            ...(event.app ? { app: event.app } : {}),
             status: 'pending',
           },
         ],
@@ -1125,9 +1186,12 @@ const applyEvent = (state: AgentUiState, event: AgentEvent, ctx: EventContext): 
       return {
         ...state,
         stopped: true,
-        // Nothing is waiting any more once the run has stopped.
+        // Nothing of the run is waiting any more once it has stopped (an app's request is not
+        // the run's).
         approvals: state.approvals.map((a) =>
-          a.status === 'pending' ? { ...a, status: 'denied' as const, reason: 'stopped' } : a,
+          a.status === 'pending' && !a.app
+            ? { ...a, status: 'denied' as const, reason: 'stopped' }
+            : a,
         ),
         ...(state.elicitations
           ? {
@@ -1187,7 +1251,8 @@ const syncRunMessage = (state: AgentUiState): AgentUiState => {
   const i = state.messages.findIndex((m) => m.id === id)
   if (i < 0) return state
   const m = state.messages[i]
-  const decided = state.approvals.filter((a) => a.status !== 'pending')
+  // An app's requests are not the run's decisions: they are never kept on its message.
+  const decided = state.approvals.filter((a) => a.status !== 'pending' && !a.app)
   const patch: Partial<ChatMessage> = {}
   if (m.steps !== state.steps) patch.steps = state.steps
   if (m.subagents !== state.subagents) patch.subagents = state.subagents
@@ -1203,6 +1268,7 @@ const syncRunMessage = (state: AgentUiState): AgentUiState => {
     patch.transcripts = state.transcripts
   if (state.writtenFiles && m.writtenFiles !== state.writtenFiles)
     patch.writtenFiles = state.writtenFiles
+  if (state.apps && m.apps !== state.apps) patch.apps = state.apps
   if (
     (m.approvals?.length ?? 0) !== decided.length ||
     decided.some((a, k) => m.approvals?.[k] !== a)
