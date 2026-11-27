@@ -10,6 +10,7 @@ import type {
 import { defaultNoticeTexts, type NoticeTexts } from './composer.js'
 import type { ElicitationIssueKind, ElicitationOutcomeReason } from './elicitation.js'
 import type { FileKind } from './file-kinds.js'
+import type { McpAppSandboxReason } from './mcp-app.js'
 import type { AgentStatus } from './types.js'
 
 /**
@@ -317,6 +318,16 @@ export interface AgentLabels {
   appFrom: (server: string) => string
   /** The badge beside it. */
   appSandboxed: string
+  /** The badge when the app runs on an origin of its own (the sandbox page answered). */
+  appSandboxedOrigin: string
+  /** The note (menu, badge title) for that: the sandbox origin. */
+  appSandboxOrigin: (origin: string) => string
+  /** A sandbox URL is set, and the app runs in the opaque frame all the same: why. */
+  appSandboxFallback: (reason: string) => string
+  /** The reasons, by `McpAppSandboxReason`. */
+  appSandboxReasons: Record<McpAppSandboxReason, string>
+  /** The app loaded its sandbox page again (navigated it) and was stopped. */
+  appSandboxBroken: string
   /** The badge while a request of the app waits for the user. */
   appWaiting: string
   /** The tag on the tool call an app came with, and the activity summary's count. */
@@ -668,6 +679,21 @@ export const defaultLabels: AgentLabels = {
 
   appFrom: (server) => `App from server “${server}”`,
   appSandboxed: 'sandboxed',
+  appSandboxedOrigin: 'sandboxed on its own origin',
+  appSandboxOrigin: (origin) =>
+    `Runs on its own origin, ${origin}: its storage is its own, never this page's.`,
+  appSandboxFallback: (reason) =>
+    `Not on an origin of its own (${reason}): it runs in an opaque sandbox, with no storage of its own.`,
+  appSandboxReasons: {
+    invalid: 'the sandbox URL is not valid',
+    insecure: 'the sandbox URL is not https',
+    'same-origin': "the sandbox URL is on this page's origin",
+    'no-page-origin': 'this page has no origin of its own',
+    'server-name': "the server's name is not a DNS label",
+    'too-many-origins': 'it declares too many origins',
+    'no-answer': 'the sandbox page did not answer',
+  },
+  appSandboxBroken: 'The app reloaded its frame, so it was stopped. Reload it to start again.',
   appWaiting: 'waiting for you',
   appTag: 'app',
   appsCount: (n) => plural(n, 'app', 'apps'),
@@ -723,6 +749,7 @@ export type AgentLabelsOverride = Partial<
     | 'elicitationErrors'
     | 'elicitationReasons'
     | 'fileKinds'
+    | 'appSandboxReasons'
   >
 > & {
   status?: Partial<AgentLabels['status']>
@@ -739,6 +766,7 @@ export type AgentLabelsOverride = Partial<
   elicitationErrors?: Partial<AgentLabels['elicitationErrors']>
   elicitationReasons?: Partial<AgentLabels['elicitationReasons']>
   fileKinds?: Partial<AgentLabels['fileKinds']>
+  appSandboxReasons?: Partial<AgentLabels['appSandboxReasons']>
 }
 
 const NESTED = [
@@ -756,6 +784,7 @@ const NESTED = [
   'elicitationErrors',
   'elicitationReasons',
   'fileKinds',
+  'appSandboxReasons',
 ] as const
 
 /** `base` with `over` applied (nested groups merged, not replaced). */

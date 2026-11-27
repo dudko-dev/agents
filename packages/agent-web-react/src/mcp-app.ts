@@ -1,5 +1,12 @@
 import { mcpAppOrigin, type McpAppCsp } from '@dudko.dev/agent-web'
-import { escapeAttribute, withPolicyFirst } from './html-preview.js'
+import { cspMetaTag, escapeAttribute, withPolicyFirst } from './html-preview.js'
+import {
+  isMcpAppSandboxMessage,
+  MCP_APP_SANDBOX_PROXY_READY,
+  MCP_APP_SANDBOX_RESOURCE_READY,
+  mcpAppPolicy,
+  mcpAppPolicyToken,
+} from './mcp-app-policy.js'
 
 /**
  * MCP Apps, the host's side: the security core of `<McpAppFrame>`, as pure code - no React, no
@@ -26,6 +33,10 @@ import { escapeAttribute, withPolicyFirst } from './html-preview.js'
  *  4. The bridge (`McpAppBridge`) answers the app: a method allow-list, checked parameters, a
  *     cap on requests in flight, and every request that DOES something (a tool call, a link, a
  *     message) handed to the host, which asks the user.
+ *
+ * That is the default. Opt-in, the app runs on an origin of its own instead, behind a sandbox
+ * page the host serves on another origin (the specification's "sandbox proxy"): 1 - 3 change
+ * (see "An app on an origin of its own" below and `mcp-app-policy.ts`), 4 does not.
  */
 
 /** The revision of the extension this host speaks. */
@@ -70,27 +81,8 @@ const origins = (list: readonly string[] | undefined): string[] => {
  * (`frameDomains` / `baseUriDomains` are not granted: a frame the app may embed would also be a
  * place it may navigate itself to). Each entry is checked again with the core's `mcpAppOrigin`.
  */
-export const mcpAppCsp = (csp?: Partial<McpAppCsp>): string => {
-  const resources = origins(csp?.resourceDomains)
-  const connect = origins(csp?.connectDomains)
-  const from = resources.length > 0 ? ` ${resources.join(' ')}` : ''
-  return [
-    "default-src 'none'",
-    `script-src 'unsafe-inline'${from}`,
-    `style-src 'unsafe-inline'${from}`,
-    `img-src data: blob:${from}`,
-    `font-src data:${from}`,
-    `media-src data: blob:${from}`,
-    connect.length > 0 ? `connect-src ${connect.join(' ')}` : "connect-src 'none'",
-    "frame-src 'none'",
-    "child-src 'none'",
-    "worker-src 'none'",
-    "object-src 'none'",
-    "form-action 'none'",
-    "base-uri 'none'",
-    "webrtc 'block'",
-  ].join('; ')
-}
+export const mcpAppCsp = (csp?: Partial<McpAppCsp>): string =>
+  mcpAppPolicy({ connect: origins(csp?.connectDomains), resources: origins(csp?.resourceDomains) })
 
 /** The origins the policy actually grants: what the app is told in `hostCapabilities.sandbox`. */
 export const grantedAppCsp = (
@@ -480,3 +472,258 @@ export const mcpAppHostCapabilities = (csp?: Partial<McpAppCsp>): Record<string,
   // What the frame grants: the declared origins it kept; no permission at all.
   sandbox: { permissions: {}, csp: grantedAppCsp(csp) },
 })
+
+// ── An app on an origin of its own: the sandbox proxy (opt-in) ──────────────────────────────
+//
+// The specification's web-host model: the app is not framed by a `srcdoc` of ours but by a page
+// the host serves on ANOTHER origin (`./mcp-app-sandbox`), so the app gets that origin - storage,
+// cookies, a real `Origin` on its requests - and never the page's. From the page down:
+//
+//   your page ── <iframe sandbox="allow-scripts allow-same-origin" srcdoc=SHELL>  (your origin)
+//     SHELL: no script (`script-src 'none'`); `frame-src` = the proxy's exact URL
+//       └─ <iframe sandbox="allow-scripts allow-same-origin" src=PROXY>           (the sandbox origin)
+//            PROXY: the app's policy as a header; relays messages
+//              └─ the app, written into a frame of the proxy                       (the sandbox origin)
+//
+// The app is same-origin with the proxy and can reach into it - make it navigate, run code in it.
+// So the guards are what the app cannot reach: the frames' sandbox flags (drawn on YOUR side,
+// cross-origin to the app), the shell's `frame-src`, which pins the proxy's frame to its one URL
+// (any other navigation of it is refused, so nothing leaves for an origin the app did not
+// declare), the policy in that URL's PATH (which the pin covers; a query would not be), and the
+// page's checks below: messages only from the proxy's window AND the sandbox origin, posted to
+// that origin only, one handshake. A second `sandbox-proxy-ready` means the proxy was loaded again
+// - by the app - and the app is stopped. Without a sandbox URL, or when its page does not answer,
+// the app runs in the opaque frame above: the stricter of the two.
+
+/** `<AgentChat appSandbox>` / `useMcpAppHost({ sandbox })`. */
+export interface McpAppSandboxOptions {
+  /**
+   * The sandbox page's base URL on another origin you serve (`mcpAppSandboxResponse` of the
+   * `./mcp-app-sandbox` entry), e.g. `https://apps.example.com/sandbox/v1`; an app's frame loads
+   * `<url>/<policy>`. `{server}` in the host name gives each server an origin of its own
+   * (`https://{server}.apps.example.com/sandbox/v1`; the server's name must be a DNS label - it
+   * needs a wildcard certificate). `https://` only; `http://` on `localhost` / `127.0.0.1`.
+   */
+  url: string
+  /** How long a frame waits for the page's handshake before it falls back (default 5000 ms). */
+  timeoutMs?: number
+}
+
+/** Why an app runs in the opaque frame although a sandbox URL is set. */
+export type McpAppSandboxReason =
+  | 'invalid'
+  | 'insecure'
+  | 'same-origin'
+  | 'no-page-origin'
+  | 'server-name'
+  | 'too-many-origins'
+  | 'no-answer'
+
+export type McpAppSandboxTarget =
+  { ok: true; origin: string; base: string } | { ok: false; reason: McpAppSandboxReason }
+
+/** The placeholder for the server's name in `McpAppSandboxOptions.url`. */
+export const MCP_APP_SANDBOX_SERVER = '{server}'
+export const MCP_APP_SANDBOX_TIMEOUT_MS = 5000
+/** After the shell has loaded (the proxy loaded or failed), the handshake gets this much longer. */
+export const MCP_APP_SANDBOX_GRACE_MS = 1000
+/**
+ * The sandbox flags of the shell's frame and of the proxy's: scripts and an origin - the shell
+ * must keep YOUR origin (else the proxy below it would get an opaque one) and runs no script; the
+ * proxy is on the sandbox origin. Nothing else: no navigation, popup, form, modal, download.
+ */
+export const MCP_APP_SANDBOX_FRAME_TOKENS = 'allow-scripts allow-same-origin'
+
+const DNS_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
+// CSP cannot name an IPv6 literal (`[::1]`): the proxy's frame could not be pinned.
+const LOOPBACK_HOSTS = ['localhost', '127.0.0.1']
+// What a `frame-src` source expression's path may hold, and a URL keeps as it is.
+const SAFE_PATH = /^\/[A-Za-z0-9\-._~/%]*$/
+
+const no = (reason: McpAppSandboxReason): McpAppSandboxTarget => ({ ok: false, reason })
+
+/**
+ * Where an app of `server` runs, for a page on `pageOrigin`: the sandbox's origin and base URL,
+ * or why not. Refused: not a URL; credentials, a query or a fragment; not `https://` (`http://`
+ * only on `localhost` / `127.0.0.1`); a path a policy cannot name; `{server}` anywhere but the
+ * host name, more than once, or a server name that is not a lowercase DNS label; a page without
+ * an origin; and the sandbox on the PAGE'S OWN origin - `allow-same-origin` there would hand the
+ * app your storage and the key vault.
+ */
+export const mcpAppSandboxTarget = (
+  options: McpAppSandboxOptions | undefined,
+  server: string,
+  pageOrigin: string | undefined,
+): McpAppSandboxTarget => {
+  const template = options?.url
+  if (typeof template !== 'string' || template.length === 0 || template.length > 2048) {
+    return no('invalid')
+  }
+  const parts = template.split(MCP_APP_SANDBOX_SERVER)
+  if (parts.length > 2) return no('invalid')
+  let raw = template
+  if (parts.length === 2) {
+    const authority = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i.exec(template)?.[1] ?? ''
+    if (!authority.replace(/:\d*$/, '').includes(MCP_APP_SANDBOX_SERVER)) return no('invalid')
+    if (typeof server !== 'string' || !DNS_LABEL.test(server)) return no('server-name')
+    raw = template.replace(MCP_APP_SANDBOX_SERVER, server)
+  }
+  if (/[?#\s]/.test(raw)) return no('invalid')
+  let url: URL
+  try {
+    url = new URL(raw)
+  } catch {
+    return no('invalid')
+  }
+  const loopback = LOOPBACK_HOSTS.includes(url.hostname)
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback)) return no('insecure')
+  if (url.username || url.password || !url.hostname) return no('invalid')
+  if (!url.hostname.split('.').every((label) => DNS_LABEL.test(label))) {
+    return no(parts.length === 2 ? 'server-name' : 'invalid')
+  }
+  if (!SAFE_PATH.test(url.pathname)) return no('invalid')
+  if (!pageOrigin || pageOrigin === 'null') return no('no-page-origin')
+  if (url.origin === pageOrigin) return no('same-origin')
+  return { ok: true, origin: url.origin, base: `${url.origin}${url.pathname.replace(/\/+$/, '')}` }
+}
+
+/** The proxy page's URL for an app's declared origins (`<base>/<policy>`), or none if too long. */
+export const mcpAppSandboxProxyUrl = (
+  base: string,
+  csp?: Partial<McpAppCsp>,
+): string | undefined => {
+  const granted = grantedAppCsp(csp)
+  const token = mcpAppPolicyToken({
+    connect: granted.connectDomains,
+    resources: granted.resourceDomains,
+  })
+  return token ? `${base}/${token}` : undefined
+}
+
+const PROXY_URL = /^https?:\/\/[A-Za-z0-9.-]+(?::\d{1,5})?\/[A-Za-z0-9\-._~/%]*$/
+
+/**
+ * The policy of the shell: no script at all, and frames from the proxy's exact URL only - a
+ * `frame-src` with a path matches that path and nothing else (the query is not part of the
+ * match), so the proxy's frame can never be navigated anywhere else.
+ */
+export const mcpAppSandboxShellCsp = (proxyUrl: string): string =>
+  [
+    "default-src 'none'",
+    "script-src 'none'",
+    "style-src 'unsafe-inline'",
+    `frame-src ${proxyUrl}`,
+    "child-src 'none'",
+    "worker-src 'none'",
+    "object-src 'none'",
+    "form-action 'none'",
+    "base-uri 'none'",
+  ].join('; ')
+
+/**
+ * What goes into the OUTER frame's `srcdoc` in sandbox mode: the shell - its policy first, one
+ * frame of the proxy page, no script, nothing of the app. Give the outer `<iframe>`
+ * `sandbox={MCP_APP_SANDBOX_FRAME_TOKENS}` and nothing else. Throws on a URL that is not a proxy
+ * URL this package builds (`mcpAppSandboxProxyUrl`).
+ */
+export const buildMcpAppSandboxShell = (proxyUrl: string): string => {
+  if (!PROXY_URL.test(proxyUrl)) throw new Error('not a sandbox proxy URL')
+  return (
+    '<!doctype html><html><head>' +
+    cspMetaTag(mcpAppSandboxShellCsp(proxyUrl)) +
+    '<style>html,body{margin:0;height:100%;overflow:hidden;background:transparent}' +
+    'iframe{display:block;border:0;width:100%;height:100%}</style></head><body>' +
+    `<iframe id="proxy" sandbox="${MCP_APP_SANDBOX_FRAME_TOKENS}" referrerpolicy="no-referrer" ` +
+    `src="${escapeAttribute(proxyUrl)}"></iframe></body></html>`
+  )
+}
+
+/** What one message from the proxy's frame is, for the page (`McpAppSandboxLink.receive`). */
+export type McpAppSandboxInput = 'drop' | 'ready' | 'broken' | 'app'
+
+export interface McpAppSandboxLinkOptions {
+  /** The sandbox origin (`mcpAppSandboxTarget(…).origin`). */
+  origin: string
+  /** The app, as read from its server: sent once, on the proxy's first ready. */
+  html: string
+  csp?: Partial<McpAppCsp>
+  /** Post to the proxy's window. Always called with the sandbox origin as the target - never `*`. */
+  post: (message: unknown, targetOrigin: string) => void
+}
+
+/**
+ * The page's side of the sandbox proxy, without the DOM: which messages are the proxy's, the
+ * handshake, and every post to the sandbox origin. A message is the proxy's only when it comes
+ * from the proxy's window (`event.source`) AND from the sandbox origin (`event.origin`). The
+ * first `sandbox-proxy-ready` is answered with the app (`sandbox-resource-ready`); another one
+ * means the proxy page was loaded again - by the app - and the link breaks (`'broken'`: stop the
+ * app). Every other `ui/notifications/sandbox-*` message is dropped; nothing reaches the bridge
+ * (`'app'`) before the app was handed over.
+ */
+export class McpAppSandboxLink {
+  private readonly o: McpAppSandboxLinkOptions
+  private state: 'waiting' | 'loaded' | 'broken' | 'closed' = 'waiting'
+
+  constructor(options: McpAppSandboxLinkOptions) {
+    this.o = options
+  }
+
+  /** The proxy answered and was given the app. */
+  get ready(): boolean {
+    return this.state === 'loaded'
+  }
+
+  /** The proxy page was loaded a second time: the app must be stopped. */
+  get broken(): boolean {
+    return this.state === 'broken'
+  }
+
+  /** Whether a message event is the proxy's: its window, and the sandbox origin. */
+  accepts(event: { source: unknown; origin: string }, proxy: unknown): boolean {
+    return (
+      proxy !== null &&
+      proxy !== undefined &&
+      event.source === proxy &&
+      event.origin === this.o.origin
+    )
+  }
+
+  receive(
+    event: { source: unknown; origin: string; data: unknown },
+    proxy: unknown,
+  ): McpAppSandboxInput {
+    if (this.state === 'broken' || this.state === 'closed' || !this.accepts(event, proxy)) {
+      return 'drop'
+    }
+    const data = event.data
+    if (isMcpAppSandboxMessage(data)) {
+      const d = data as { jsonrpc?: unknown; method: string }
+      if (d.jsonrpc !== '2.0' || d.method !== MCP_APP_SANDBOX_PROXY_READY) return 'drop'
+      if (this.state === 'loaded') {
+        this.state = 'broken'
+        return 'broken'
+      }
+      this.state = 'loaded'
+      const granted = grantedAppCsp(this.o.csp)
+      this.o.post(
+        {
+          jsonrpc: '2.0',
+          method: MCP_APP_SANDBOX_RESOURCE_READY,
+          params: { html: this.o.html, csp: granted },
+        },
+        this.o.origin,
+      )
+      return 'ready'
+    }
+    return this.state === 'loaded' ? 'app' : 'drop'
+  }
+
+  /** Send a message to the app, through the proxy, to the sandbox origin. Nothing once broken. */
+  post(message: unknown): void {
+    if (this.state === 'loaded') this.o.post(message, this.o.origin)
+  }
+
+  close(): void {
+    if (this.state !== 'broken') this.state = 'closed'
+  }
+}

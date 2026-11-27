@@ -1,0 +1,27 @@
+{
+  "name": "app-sandbox",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "The Cloudflare Worker that serves the demo's MCP Apps sandbox page on its own host (agent-demo-apps.dudko.workers.dev, never under dudko.dev): /sandbox/v1/<policy>, and nothing else. Deployed by a Workers Builds project of its own, not with the site.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --experimental-strip-types --disable-warning=ExperimentalWarning tests/*.test.ts",
+    "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\" \"scripts/*.mjs\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\" \"scripts/*.mjs\""
+  },
+  "devDependencies": {
+    "@dudko.dev/agent-web-react": "workspace:*",
+    "@types/node": "^22.9.0",
+    "esbuild": "^0.28.2",
+    "prettier": "^3.10.1",
+    "typescript": "^6.0.3"
+  },
+  "engines": {
+    "node": ">=22.6.0"
+  }
+}

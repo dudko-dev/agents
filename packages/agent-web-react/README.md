@@ -675,6 +675,31 @@ const agent = useAgent({ model, tools: mcp.tools }, { deps: [mcp.tools] })
 Off by default (the hooks declare nothing and every tool is mounted as before). Needs a core with
 MCP Apps. See [docs/chat.md](docs/chat.md#mcp-apps-a-servers-interface-in-the-chat).
 
+**An origin of its own (opt-in).** By default an app runs in an opaque frame: no storage or
+cookies of its own, requests with `Origin: null`. Serve the sandbox page of
+`@dudko.dev/agent-web-react/mcp-app-sandbox` on ANOTHER origin and pass its URL, and apps run on
+that origin instead - the specification's sandbox proxy:
+
+```tsx
+<AgentChat controller={agent} mcpApps={mcp.apps} appSandbox={{ url: 'https://apps.example.com/sandbox/v1' }} />
+// or one origin per server (needs a wildcard certificate): 'https://{server}.apps.example.com/sandbox/v1'
+```
+
+```ts
+// A Cloudflare Worker on apps.example.com (or Node / Deno / Bun: Request in, Response out)
+import { mcpAppSandboxResponse } from '@dudko.dev/agent-web-react/mcp-app-sandbox'
+export default {
+  fetch: (request: Request) =>
+    mcpAppSandboxResponse(request, { path: '/sandbox/v1', hosts: 'https://chat.example.com' }),
+}
+```
+
+A URL on your page's own origin, or not `https://` (`http://` only on `localhost` / `127.0.0.1`), is
+refused; a sandbox page that does not answer in `timeoutMs` (5 s) is given up for the page's life.
+Either way the app runs in the opaque frame - the stricter of the two - and its header says
+"sandboxed" instead of "sandboxed on its own origin". The headers, the hosts setting and the
+trade-offs: [docs/chat.md](docs/chat.md#an-app-on-an-origin-of-its-own).
+
 ## Components
 
 All components are optional and styled by `styles.css` (class-prefixed `awr-`,
@@ -694,7 +719,7 @@ use them standalone. The full guide: [docs/chat.md](docs/chat.md).
 | `<SandboxedFrame>` / `<SourceView>` | Untrusted HTML inside chrome the host draws: `<iframe sandbox>` without `allow-same-origin`, by `srcdoc`, no network, fixed height (`html`, `scripts`, `title`, `label`, `actions`, `footer`, `height`) / a file's text with line numbers, never markup. See [the boundary](#the-html-preview-is-a-security-boundary). |
 | `<ToolApprovalPrompt>` | Consent cards (Allow once / Always / Deny); a helper's request says which helper asks (`showHelper`); an MCP App's says the APP asks, with the server's own tool name. |
 | `<ElicitationPrompt>` | A question an MCP server puts to the user during a tool call: a form (Submit / Decline / Cancel, checked by the core's rules) or a link opened only by a click, one at a time with a count, the time left, and the questions nobody answered (`elicitations`, `onAnswer`, `outcomes`, `showOutcomes`, `showExpiry`, `showHelper`, `renderElicitation`). See [MCP elicitation](#mcp-elicitation--a-server-asks-the-user). |
-| `<McpAppFrame>` / `<McpAppLine>` | An MCP App in host-drawn chrome ("App from server “travel” · sandboxed", panel, menu: reload / open in panel / hide): an opaque-origin frame, network only to the origins its resource declared, a bridge with an allow-list; inline, folded or in a panel (`app`, `host`, `variant`, `theme`, `defaultCollapsed`, `onOpenPanel`, `onClosePanel`, `showCalls`). `<AgentChat mcpApps>` places them under the answer. See [the boundary](#an-mcp-app-is-a-security-boundary). |
+| `<McpAppFrame>` / `<McpAppLine>` | An MCP App in host-drawn chrome ("App from server “travel” · sandboxed", panel, menu: reload / open in panel / hide): an opaque-origin frame - or, with `host.sandbox` (`useMcpAppHost({ sandbox })`, `<AgentChat appSandbox>`), an origin of its own behind your sandbox page ("· sandboxed on its own origin") - network only to the origins its resource declared, a bridge with an allow-list; inline, folded or in a panel (`app`, `host`, `variant`, `theme`, `defaultCollapsed`, `onOpenPanel`, `onClosePanel`, `showCalls`). `<AgentChat mcpApps>` places them under the answer. See [the boundary](#an-mcp-app-is-a-security-boundary). |
 | `<AppRequestPrompt>` | What an MCP App asks for besides a tool call: a link (its host highlighted, opened only on the user's click) or a message (put in the message box as a draft, never sent for the user). |
 | `<ApprovalModeSwitch>` | Segmented consent-mode switch. |
 | `<ChatHistoryList>` | Saved chats (from `useChatHistory`). |
@@ -748,11 +773,24 @@ HTML preview's boundary and adds a bridge:
 | tool calls through the agent's consent gate (writes always ask, "always allow" is the app's alone), only tools of its own server that let apps call them; links only on the user's click; messages only as a draft | an app acting with the user's authority, silently |
 | the label, the controls, the menu and every prompt drawn by the host outside the frame; the height clamped to 120 - 800 px | an app imitating or covering a control of the chat |
 
-The specification asks a web host for a sandbox proxy on a second origin with `allow-same-origin`;
-a library in your page has no second origin, so an app gets an opaque one (no storage or cookies
-of its own; its requests carry `Origin: null`). WebRTC is not governed by `connect-src` in
-Chromium. Every guard has a test in `tests/apps.test.ts` and, in a real browser against a hostile
-app, in `e2e/apps.spec.ts`. Details: [docs/chat.md](docs/chat.md#an-app-is-a-security-boundary).
+That is the default: an opaque origin (no storage or cookies of its own; its requests carry
+`Origin: null`) - stricter than the specification, which asks a web host for a sandbox proxy on a
+second origin with `allow-same-origin`. With `appSandbox` (above) you give it that second origin,
+and the guards that change are these:
+
+| Guard (`appSandbox`) | What it stops |
+| --- | --- |
+| a sandbox URL on your page's origin, or plain `http://` off loopback, is refused (opaque) | `allow-same-origin` handing the app your storage and the key vault |
+| the sandbox page's response carries the app's policy (from its URL's path) and `frame-ancestors` = your hosts; the app's frame inherits it | the app's network beyond what it declared, through its own frame or through the sandbox page (same origin, so it can reach it); other sites framing the page |
+| a shell of ours (your origin, no script) whose `frame-src` is the sandbox page's exact URL | the app navigating the sandbox page away (it can: same origin) - a request to an undeclared origin |
+| messages only from the sandbox page's window AND origin, posted to that origin only; one handshake, a second one stops the app | anything else posting to your page; the app reloading its frame |
+
+Its cost: the app is same-origin with every other app on the same sandbox origin (one origin for
+all servers shares storage between them) - `{server}` in the URL gives each server its own.
+WebRTC is not governed by `connect-src` in Chromium. Every guard has a test in
+`tests/apps.test.ts` / `tests/apps-sandbox.test.ts` and, in a real browser against a hostile app,
+in `e2e/apps.spec.ts` / `e2e/apps-sandbox.spec.ts`. Details:
+[docs/chat.md](docs/chat.md#an-app-is-a-security-boundary).
 
 ### Build your own UI
 

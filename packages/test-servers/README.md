@@ -203,7 +203,14 @@ result, calls `flights.book` / `flights.refresh` / `flights.admin`, asks for a l
 "Run probes", "Talk to the page", "Leave" - tries the page's DOM, `top.location`, storage,
 cookies, IndexedDB, a popup, navigating the top window, `fetch` and an image to the undeclared
 URL, `fetch` to the declared one, `postMessage` straight to the top window, and navigating
-itself. Each probe writes `blocked` or `allowed: …` into `[data-probe=<name>]`.
+itself. Each probe writes `blocked`, `allowed: …` or `attempted` into `[data-probe=<name>]`; the
+`origin` probe writes `origin: <self.origin> <location.origin>`. For a host that frames apps in a
+sandbox page of the app's own origin (a sandbox proxy), the probes also use THAT page from inside
+(`parent-fetch`, `parent-image`, `parent-frame`; `top-dom`, `grandparent-dom`, `host-secret` read
+what is above it), two buttons navigate it with a link in its document: "Leave through the
+frame" (to the undeclared URL) and "Reload the frame" (to its own URL again), and "Lift its
+sandbox" takes the `sandbox` attribute off its own `<iframe>` and loads a document into it that
+tries to navigate the top window and to fetch the undeclared URL.
 
 | Option (object form) | |
 | --- | --- |

@@ -233,3 +233,71 @@ test('pipeline.css stands on its own and stays inside the package’s names', ()
   assert.match(css, /prefers-reduced-motion: reduce/)
   assert.match(css, /touch-action: none/)
 })
+
+// ── The MCP Apps sandbox page: for a SERVER ──────────────────────────────────
+// `./mcp-app-sandbox` is what a Worker (or Node, Deno, Bun) serves on another origin: it must load
+// without React, without the core (whose main entry does not tree-shake into a small Worker) and
+// without anything else - its chunks included.
+
+const graphOf = (entry: string): string[] => {
+  const seen = new Set<string>([entry])
+  const queue = [entry]
+  while (queue.length) {
+    for (const [, chunk] of read(queue.pop() as string).matchAll(/from\s*["']\.\/([^"']+)["']/g)) {
+      if (!seen.has(chunk)) {
+        seen.add(chunk)
+        queue.push(chunk)
+      }
+    }
+  }
+  return [...seen]
+}
+
+test('the mcp-app-sandbox entry imports nothing but its own chunks (ESM and CJS)', async () => {
+  const statements = /^(?:import|export)\b[^;'"]*?from\s*["']([^"']+)["']/gm
+  for (const file of graphOf('mcp-app-sandbox.js')) {
+    for (const [, target] of read(file).matchAll(statements)) {
+      assert.match(target, /^\.\/chunk-[\w-]+\.js$/, `${file} imports ${target}`)
+    }
+    assert.doesNotMatch(read(file), /import\(/, `${file} has no dynamic import`)
+  }
+  const required = [...read('mcp-app-sandbox.cjs').matchAll(/require\(["']([^"']+)["']\)/g)]
+  assert.deepEqual(
+    required.map((m) => m[1]).filter((t) => !t.startsWith('./')),
+    [],
+    'the CJS build requires nothing',
+  )
+  const esm = (await import('../dist/mcp-app-sandbox.js')) as Record<string, unknown>
+  const require = createRequire(import.meta.url)
+  const cjs = require('../dist/mcp-app-sandbox.cjs') as Record<string, unknown>
+  for (const name of [
+    'mcpAppSandboxResponse',
+    'mcpAppSandboxPage',
+    'mcpAppSandboxHeaders',
+    'parseMcpAppSandboxHosts',
+    'mcpAppPolicyOfToken',
+  ]) {
+    assert.equal(typeof esm[name], 'function', name)
+    assert.equal(typeof cjs[name], 'function', `${name} (CJS)`)
+  }
+  assert.equal(typeof esm.MCP_APP_SANDBOX_SCRIPT, 'string')
+})
+
+test('package.json exposes ./mcp-app-sandbox with types for both module systems', () => {
+  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+    exports: Record<
+      string,
+      { import: { types: string; default: string }; require: { types: string; default: string } }
+    >
+  }
+  const entry = pkg.exports['./mcp-app-sandbox']
+  assert.ok(entry, './mcp-app-sandbox is declared')
+  for (const target of [
+    entry.import.types,
+    entry.import.default,
+    entry.require.types,
+    entry.require.default,
+  ]) {
+    assert.ok(readFileSync(new URL(`../${target}`, import.meta.url)), `${target} exists`)
+  }
+})

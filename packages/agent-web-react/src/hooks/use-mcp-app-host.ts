@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { AppToolCallRequest, McpAppResource, McpAppToolResult } from '@dudko.dev/agent-web'
-import { MCP_APP_REFUSED, McpAppRpcError, type AppLink } from '../mcp-app.js'
+import {
+  MCP_APP_REFUSED,
+  McpAppRpcError,
+  type AppLink,
+  type McpAppSandboxOptions,
+} from '../mcp-app.js'
 import type { AppView, ApprovalView } from '../types.js'
 
 /**
@@ -69,6 +74,11 @@ export interface McpAppHost {
   draft?: { id: string; text: string }
   /** Whether the app has something waiting for the user (a link, a message, a tool call). */
   isWaiting: (app: AppView) => boolean
+  /**
+   * Where apps run: on an origin of their own, through the sandbox page at this URL - or, when
+   * absent (the default), in an opaque frame. See `McpAppSandboxOptions`.
+   */
+  sandbox?: McpAppSandboxOptions
 }
 
 export interface UseMcpAppHostOptions {
@@ -78,6 +88,11 @@ export interface UseMcpAppHostOptions {
   approve?: (call: AppToolCallRequest, signal?: AbortSignal) => Promise<void>
   /** The pending consent requests (`useAgent().pendingApprovals`): an app's are its "waiting". */
   approvals?: ApprovalView[]
+  /**
+   * Run apps on an origin of their own: the URL of a sandbox page you serve on ANOTHER origin
+   * (`./mcp-app-sandbox`). Without it, apps run in an opaque frame (no storage of their own).
+   */
+  sandbox?: McpAppSandboxOptions
 }
 
 let seq = 0
@@ -94,6 +109,7 @@ export const useMcpAppHost = ({
   connection,
   approve,
   approvals = [],
+  sandbox,
 }: UseMcpAppHostOptions): McpAppHost => {
   const [requests, setRequests] = useState<AppRequestView[]>([])
   const [draft, setDraft] = useState<{ id: string; text: string } | undefined>()
@@ -243,6 +259,20 @@ export const useMcpAppHost = ({
     [requests, gated, pendingAppServers],
   )
 
+  // A new object each render (an inline prop) is the same setting.
+  const sandboxUrl = sandbox?.url
+  const sandboxTimeout = sandbox?.timeoutMs
+  const sandboxSetting = useMemo<McpAppSandboxOptions | undefined>(
+    () =>
+      sandboxUrl === undefined
+        ? undefined
+        : {
+            url: sandboxUrl,
+            ...(sandboxTimeout !== undefined ? { timeoutMs: sandboxTimeout } : {}),
+          },
+    [sandboxUrl, sandboxTimeout],
+  )
+
   return useMemo(
     () => ({
       connected: Boolean(connection),
@@ -255,7 +285,20 @@ export const useMcpAppHost = ({
       answer,
       draft,
       isWaiting,
+      ...(sandboxSetting ? { sandbox: sandboxSetting } : {}),
     }),
-    [connection, read, tool, callTool, openLink, message, requests, answer, draft, isWaiting],
+    [
+      connection,
+      read,
+      tool,
+      callTool,
+      openLink,
+      message,
+      requests,
+      answer,
+      draft,
+      isWaiting,
+      sandboxSetting,
+    ],
   )
 }

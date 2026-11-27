@@ -303,17 +303,39 @@ export {
   MCP_APP_REFUSED,
   MCP_APP_RELAY,
   MCP_APP_REQUESTS,
+  MCP_APP_SANDBOX_FRAME_TOKENS,
+  MCP_APP_SANDBOX_GRACE_MS,
+  MCP_APP_SANDBOX_SERVER,
+  MCP_APP_SANDBOX_TIMEOUT_MS,
   McpAppBridge,
   mcpAppCsp,
   mcpAppHostCapabilities,
   McpAppRpcError,
+  // An app on an origin of its own (the sandbox proxy; the page itself is `./mcp-app-sandbox`).
+  buildMcpAppSandboxShell,
+  McpAppSandboxLink,
+  mcpAppSandboxProxyUrl,
+  mcpAppSandboxShellCsp,
+  mcpAppSandboxTarget,
 } from './mcp-app.js'
 export type {
   AppLink,
   McpAppBridgeHandlers,
   McpAppBridgeOptions,
   McpAppRpcMessage,
+  McpAppSandboxInput,
+  McpAppSandboxLinkOptions,
+  McpAppSandboxOptions,
+  McpAppSandboxReason,
+  McpAppSandboxTarget,
 } from './mcp-app.js'
+export {
+  isMcpAppSandboxMessage,
+  MCP_APP_POLICY_TOKEN_MAX_CHARS,
+  MCP_APP_SANDBOX_PROXY_READY,
+  MCP_APP_SANDBOX_RESOURCE_READY,
+  mcpAppPolicyToken,
+} from './mcp-app-policy.js'
 export type { AppView } from './types.js'
 export type {
   AppToolCallRequest,

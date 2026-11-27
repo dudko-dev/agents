@@ -12,6 +12,24 @@ importers:
         specifier: ^24.0.7
         version: 24.0.7(typescript@6.0.3)
 
+  apps/app-sandbox:
+    devDependencies:
+      '@dudko.dev/agent-web-react':
+        specifier: workspace:*
+        version: link:../../packages/agent-web-react
+      '@types/node':
+        specifier: ^22.9.0
+        version: 22.20.7
+      esbuild:
+        specifier: ^0.28.2
+        version: 0.28.2
+      prettier:
+        specifier: ^3.10.1
+        version: 3.10.1
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+
   apps/demo:
     dependencies:
       '@ai-sdk/anthropic':
