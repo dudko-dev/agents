@@ -170,3 +170,19 @@ export const DownloadIcon = ({ size, className }: IconProps) => (
     <path d="M12 3v12m-5-5 5 5 5-5M5 21h14" />
   </svg>
 )
+
+export const QuestionIcon = ({ size, className }: IconProps) => (
+  <svg {...base(size)} className={className}>
+    <path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z" />
+    <path d="M9.6 8a2.5 2.5 0 0 1 4.8.8c0 1.7-2.4 2-2.4 3.4" />
+    <path d="M12 14.6h.01" />
+  </svg>
+)
+
+export const ExternalIcon = ({ size, className }: IconProps) => (
+  <svg {...base(size)} className={className}>
+    <path d="M15 3h6v6" />
+    <path d="M10 14 21 3" />
+    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+  </svg>
+)

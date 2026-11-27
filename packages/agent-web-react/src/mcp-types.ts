@@ -73,9 +73,9 @@ export interface McpHttpServerConfig {
   connectTimeoutMs?: number
   /**
    * The MCP protocol revisions this connection may use (newer cores; an older one ignores the
-   * field and speaks the 2025 revisions). The hooks do not set it: it is here for a host that
-   * calls the core's `connectMcpHttp` through these types. From a page, `'auto'` and `'modern'`
-   * need `Mcp-Method` and `Mcp-Name` in the server's `Access-Control-Allow-Headers`.
+   * field and speaks the 2025 revisions). The hooks set it only for a server that was given a
+   * `protocol`. From a page, `'auto'` and `'modern'` need `Mcp-Method` and `Mcp-Name` in the
+   * server's `Access-Control-Allow-Headers`.
    */
   protocol?: McpProtocolMode
 }
@@ -192,8 +192,8 @@ export interface McpModule {
       connectTimeoutMs?: number
       /**
        * Answer a server's question to the user (cores with MCP elicitation; an older core
-       * ignores both fields and declares no capability). The hooks do not set them yet: they
-       * are here for a host that calls `connectMcpHttp` through these types.
+       * ignores both fields and declares no capability). The hooks set them only when their
+       * `elicitation` option is on.
        */
       onElicitation?: McpElicitationHandler
       elicitation?: McpElicitationOptions

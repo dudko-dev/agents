@@ -8,6 +8,7 @@ import type {
   ToolApprovalMode,
 } from '@dudko.dev/agent-web'
 import { defaultNoticeTexts, type NoticeTexts } from './composer.js'
+import type { ElicitationIssueKind } from './elicitation.js'
 import type { AgentStatus } from './types.js'
 
 /**
@@ -211,6 +212,51 @@ export interface AgentLabels {
   searchFiltered: (n: number) => string
   /** The list was cut to the cap. */
   searchTruncated: string
+
+  // ── a question from an MCP server (elicitation) ────────────────────────────
+  /** The accessible name of the prompt. */
+  elicitationTitle: string
+  /** The host's own line: which server asks. */
+  elicitationLead: (server: string) => string
+  /** The same when the call that asks is a helper's; `role` is what the model wrote for it. */
+  elicitationLeadHelper: (server: string, role: string | undefined) => string
+  /** Before the tool's name: "during". */
+  elicitationDuring: string
+  /** "1 of 3" - several questions are waiting. */
+  elicitationCount: (index: number, total: number) => string
+  /** The caption over the server's own words. */
+  elicitationFrom: (server: string) => string
+  /** The meaning of the mark on a required field. */
+  elicitationRequired: string
+  /** The empty choice of a select. */
+  elicitationChoose: string
+  elicitationSubmit: string
+  elicitationDecline: string
+  elicitationCancel: string
+  /** Why a field's value does not fit; `field` is its label, `limit` the rule's number. */
+  elicitationErrors: Record<ElicitationIssueKind, (field: string, limit?: number) => string>
+  /** Over the buttons, after a submit that was refused. */
+  elicitationFix: (n: number) => string
+  /** The host's line of a link request; the host name follows. */
+  elicitationUrlLead: (server: string) => string
+  /** The caption over the whole address. */
+  elicitationUrlFull: string
+  elicitationOpen: string
+  /** After the link was opened. */
+  elicitationOpened: string
+  /** "I have finished there" - the accept of a link request. */
+  elicitationUrlDone: string
+  /** A link that will not be opened from here. */
+  elicitationUrlRefused: string
+  /** "Expires in 4:05". */
+  elicitationExpiresIn: (time: string) => string
+  /** The same note when the time left is not known. */
+  elicitationExpires: string
+  /** A question nobody answered: the server, and why (one of `elicitationReasons`). */
+  elicitationAutomatic: (server: string, reason: string) => string
+  /** Why a question was answered without anybody deciding, by the core's reason. */
+  elicitationReasons: Record<string, string>
+  elicitationDismiss: string
 }
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`
@@ -415,6 +461,67 @@ export const defaultLabels: AgentLabels = {
   searchNoResults: 'no results',
   searchFiltered: (n) => `${n} left out by the web access policy`,
   searchTruncated: 'list cut short',
+
+  elicitationTitle: 'A question from an MCP server',
+  elicitationLead: (server) => `The MCP server “${server}” asks for your input`,
+  elicitationLeadHelper: (server, role) =>
+    role
+      ? `The MCP server “${server}” asks for your input (a call by the helper “${role}”)`
+      : `The MCP server “${server}” asks for your input (a call by a helper)`,
+  elicitationDuring: 'during',
+  elicitationCount: (index, total) => `${index} of ${total}`,
+  elicitationFrom: (server) => `Written by ${server}, not by this app`,
+  elicitationRequired: 'required',
+  elicitationChoose: 'Choose…',
+  elicitationSubmit: 'Submit',
+  elicitationDecline: 'Decline',
+  elicitationCancel: 'Cancel',
+  elicitationErrors: {
+    required: (field) => `${field} is required.`,
+    tooShort: (field, limit) => `${field} must be at least ${limit} characters.`,
+    tooLong: (field, limit) => `${field} must be at most ${limit} characters.`,
+    email: (field) => `${field} must be an email address.`,
+    uri: (field) => `${field} must be a full address, such as https://example.com.`,
+    date: (field) => `${field} must be a date.`,
+    dateTime: (field) => `${field} must be a date and a time.`,
+    notNumber: (field) => `${field} must be a number.`,
+    notInteger: (field) => `${field} must be a whole number.`,
+    belowMinimum: (field, limit) => `${field} must be ${limit} or more.`,
+    aboveMaximum: (field, limit) => `${field} must be ${limit} or less.`,
+    notAnOption: (field) => `${field} must be one of the options.`,
+    tooFew: (field, limit) => `${field}: choose at least ${limit}.`,
+    tooMany: (field, limit) => `${field}: choose at most ${limit}.`,
+  },
+  elicitationFix: (n) => `${plural(n, 'field needs', 'fields need')} a correction.`,
+  elicitationUrlLead: (server) => `The MCP server “${server}” asks you to open a page on`,
+  elicitationUrlFull: 'Full address',
+  elicitationOpen: 'Open in a new tab',
+  elicitationOpened: 'Opened in a new tab. Finish there, then confirm here.',
+  elicitationUrlDone: 'I have finished there',
+  elicitationUrlRefused:
+    'This link is not a secure (https) address, so it is not opened from here.',
+  elicitationExpiresIn: (time) => `Cancelled automatically in ${time}`,
+  elicitationExpires: 'Cancelled automatically if it is left unanswered',
+  elicitationAutomatic: (server, reason) =>
+    `A question from the MCP server “${server}” was answered automatically, and its tool call did not finish: ${reason}.`,
+  elicitationReasons: {
+    timeout: 'nobody answered in time',
+    'step-timeout': 'the step ran out of time while the question was waiting',
+    aborted: 'the run was stopped',
+    stopped: 'the run was stopped',
+    'cap-per-call': 'the tool call had already asked too many questions',
+    'cap-per-run': 'too many questions had already been asked in this run',
+    'unsupported-schema': 'the form it sent cannot be shown',
+    'unsupported-mode': 'it asked in a way this app does not offer',
+    'insecure-url': 'the link it sent was refused',
+    'invalid-request': 'its request was malformed',
+    subagent: 'a helper is not allowed to ask you',
+    'handler-error': 'the question could not be shown',
+    'invalid-answer': 'the answer did not fit the form and was not sent',
+    'after-failure': 'an earlier question of the same call had already failed',
+    'no-tool-call': 'no tool call was in progress',
+  },
+  elicitationDismiss: 'Dismiss',
 }
 
 /** Overrides: any label, with the nested groups merged key by key. */
@@ -432,6 +539,8 @@ export type AgentLabelsOverride = Partial<
     | 'escalationReasons'
     | 'subagentStatus'
     | 'decisionReasons'
+    | 'elicitationErrors'
+    | 'elicitationReasons'
   >
 > & {
   status?: Partial<AgentLabels['status']>
@@ -445,6 +554,8 @@ export type AgentLabelsOverride = Partial<
   escalationReasons?: Partial<AgentLabels['escalationReasons']>
   subagentStatus?: Partial<AgentLabels['subagentStatus']>
   decisionReasons?: Partial<AgentLabels['decisionReasons']>
+  elicitationErrors?: Partial<AgentLabels['elicitationErrors']>
+  elicitationReasons?: Partial<AgentLabels['elicitationReasons']>
 }
 
 const NESTED = [
@@ -459,6 +570,8 @@ const NESTED = [
   'escalationReasons',
   'subagentStatus',
   'decisionReasons',
+  'elicitationErrors',
+  'elicitationReasons',
 ] as const
 
 /** `base` with `over` applied (nested groups merged, not replaced). */

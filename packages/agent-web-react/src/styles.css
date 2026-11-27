@@ -1794,3 +1794,262 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+/* ── A question from an MCP server (elicitation) ──────────────────────────── */
+.awr-elicits {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.awr-elicit {
+  border: 1px solid color-mix(in srgb, var(--awr-accent) 45%, var(--awr-border));
+  background: color-mix(in srgb, var(--awr-accent) 7%, var(--awr-bg));
+  border-radius: 10px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  color: var(--awr-fg);
+  font-family: var(--awr-font);
+  font-size: 13px;
+}
+/* The host's own line: who asks, during what. */
+.awr-elicit__head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+.awr-elicit__icon {
+  color: var(--awr-accent);
+  flex: none;
+  margin-top: 1px;
+}
+.awr-elicit__lead {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.awr-elicit__during {
+  font-weight: 400;
+  color: var(--awr-muted);
+}
+.awr-elicit__count {
+  flex: none;
+  font-weight: 500;
+  font-size: 12px;
+  color: var(--awr-muted);
+  border: 1px solid var(--awr-border);
+  border-radius: 999px;
+  padding: 1px 8px;
+  white-space: nowrap;
+}
+.awr-elicit__form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+/* Everything inside is the server's text: set apart from the app's own, as consent sets
+ * apart a tool's input. */
+.awr-elicit__server {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border-left: 3px solid var(--awr-warn);
+  background: var(--awr-subtle);
+}
+.awr-elicit__from {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--awr-warn);
+  overflow-wrap: anywhere;
+}
+.awr-elicit__message {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}
+.awr-elicit__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.awr-elicit__label {
+  font-weight: 600;
+  padding: 0;
+  overflow-wrap: anywhere;
+}
+.awr-elicit__req {
+  color: var(--awr-danger);
+  margin-left: 2px;
+}
+.awr-elicit__sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.awr-elicit__hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--awr-muted);
+  overflow-wrap: anywhere;
+}
+.awr-elicit__input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  padding: 8px 10px;
+  border: 1px solid var(--awr-border);
+  border-radius: 8px;
+  background: var(--awr-bg);
+  color: var(--awr-fg);
+  font: inherit;
+  font-size: 14px;
+}
+.awr-elicit__input:focus-visible {
+  outline: 2px solid var(--awr-accent);
+  outline-offset: 1px;
+  border-color: var(--awr-accent);
+}
+.awr-elicit__field.is-invalid .awr-elicit__input {
+  border-color: var(--awr-danger);
+}
+.awr-elicit__check {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.awr-elicit__check input {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--awr-accent);
+}
+.awr-elicit__field--checkbox .awr-elicit__check {
+  font-weight: 600;
+}
+.awr-elicit__error,
+.awr-elicit__fix {
+  margin: 0;
+  font-size: 12px;
+  color: var(--awr-danger);
+  overflow-wrap: anywhere;
+}
+.awr-elicit__fix {
+  font-weight: 600;
+}
+/* A link request: the host first, the whole address as text. */
+.awr-elicit__link {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.awr-elicit__linklead,
+.awr-elicit__urllabel {
+  font-size: 12px;
+  color: var(--awr-muted);
+}
+.awr-elicit__urllabel {
+  margin-top: 6px;
+}
+.awr-elicit__host {
+  font-family: var(--awr-mono);
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+.awr-elicit__url {
+  display: block;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--awr-subtle);
+  font-family: var(--awr-mono);
+  font-size: 12px;
+  word-break: break-all;
+  user-select: all;
+}
+.awr-elicit__opened {
+  margin: 0;
+  color: var(--awr-ok);
+  font-size: 12px;
+}
+.awr-elicit__actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.awr-elicit__actions .awr-btn {
+  min-height: 40px;
+  padding-left: 14px;
+  padding-right: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.awr-elicit__expiry {
+  margin: 0;
+  font-size: 12px;
+  color: var(--awr-muted);
+  font-variant-numeric: tabular-nums;
+}
+/* A question nobody answered. */
+.awr-elicit-outcome {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 8px 8px 12px;
+  border: 1px solid color-mix(in srgb, var(--awr-warn) 45%, var(--awr-border));
+  background: color-mix(in srgb, var(--awr-warn) 8%, var(--awr-bg));
+  border-radius: 10px;
+  color: var(--awr-fg);
+  font-family: var(--awr-font);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.awr-elicit-outcome__icon {
+  color: var(--awr-warn);
+  flex: none;
+  margin-top: 11px;
+}
+.awr-elicit-outcome__text {
+  flex: 1;
+  min-width: 0;
+  padding: 9px 0;
+  overflow-wrap: anywhere;
+}
+.awr-elicit-outcome__dismiss {
+  flex: none;
+  width: 40px;
+  height: 40px;
+}
+@media (pointer: coarse) {
+  /* 16px keeps iOS from zooming into the field on focus. */
+  .awr-elicit__input {
+    font-size: 16px;
+  }
+}

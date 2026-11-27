@@ -218,7 +218,9 @@ export const App = () => {
 
   // ── Tab 2: any number of MCP servers (+ an optional mock catalogue) ────────
   const [view, setView] = useState<View>(initialView)
-  const mcp = useMcpServers({ clientName: 'agent-web-demo' })
+  // Elicitation on, links included: a server may ask the visitor something in the middle of a
+  // tool call, and the chat below shows the question.
+  const mcp = useMcpServers({ clientName: 'agent-web-demo', elicitation: { url: true } })
   const [mockCatalog, setMockCatalog] = useState(false)
   const mcpTools = useMemo<AgentToolSet>(
     () => ({ ...mcp.tools, ...fileTools, ...(mockCatalog ? buildMockCatalog() : {}) }),
@@ -230,6 +232,9 @@ export const App = () => {
       model: resolvedModel as ModelInput,
       tools: mcpTools,
       systemPrompt: MCP_PROMPT,
+      // A server's question waits no longer than the step it belongs to: leave a person the
+      // five minutes the question itself allows.
+      chatTimeoutMs: 360_000,
     },
     { deps: [...deps, mcpTools, skillsByTab.mcp] },
   )
@@ -556,6 +561,8 @@ export const App = () => {
                   emptyState="Your servers' tools are loaded — ask for something that uses them."
                   history={settings.history ? histories.mcp : false}
                   composer={composer('e.g. What can you do? Then ask it to actually do it.')}
+                  elicitations={mcp.pendingElicitations}
+                  onElicitationAnswer={mcp.answerElicitation}
                   {...chatCommon}
                 />
               ) : (

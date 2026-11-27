@@ -9,6 +9,7 @@ import { AgentLabelsProvider, useLabels, type AgentLabelsOverride } from '../lab
 import { AgentComposer, type AgentComposerProps } from './AgentComposer.js'
 import { ChatHistoryList, type ChatHistoryListProps } from './ChatHistoryList.js'
 import { ContextMeter } from './ContextMeter.js'
+import { ElicitationPrompt, type ElicitationPromptProps } from './ElicitationPrompt.js'
 import { FilesPanel, type FilesPanelProps } from './FilesPanel.js'
 import { AlertIcon, FileIcon, HistoryIcon } from './icons.js'
 import { MessageList, type MessageListProps } from './MessageList.js'
@@ -42,6 +43,7 @@ export interface AgentChatComponents {
   HistoryList?: ComponentType<ChatHistoryListProps>
   FilesPanel?: ComponentType<FilesPanelProps>
   ApprovalPrompt?: ComponentType<ToolApprovalPromptProps>
+  ElicitationPrompt?: ComponentType<ElicitationPromptProps>
 }
 
 /** Extra class names per part (added to the built-in `awr-` ones). */
@@ -119,6 +121,11 @@ export interface AgentChatProps {
   showContext?: boolean | number
   /** Keep finished answers' activity expanded (default false). */
   activityOpen?: boolean
+  /**
+   * Questions MCP servers put to the user (MCP elicitation), beside the consent prompts
+   * (default true). Shown once `elicitations` and `onElicitationAnswer` are given.
+   */
+  showElicitation?: boolean
 
   // ── features ───────────────────────────────────────────────────────────────
   /**
@@ -143,6 +150,13 @@ export interface AgentChatProps {
   narrowWidth?: number
   /** Composer options (model / thinking chips, commands, convertFile, speech…), or `false` to hide it. */
   composer?: Partial<Omit<AgentComposerProps, 'controller'>> | false
+  /**
+   * The questions MCP servers are waiting on: `pendingElicitations` of `useMcp` /
+   * `useMcpServers` (from `@dudko.dev/agent-web-react/mcp`, with their `elicitation` option on).
+   */
+  elicitations?: ElicitationPromptProps['elicitations']
+  /** The user's answer to one of them: the hook's `answerElicitation`. */
+  onElicitationAnswer?: ElicitationPromptProps['onAnswer']
 
   // ── how it is rendered ─────────────────────────────────────────────────────
   /** A message's text — plug in your markdown renderer here. */
@@ -155,6 +169,8 @@ export interface AgentChatProps {
   /** A generated image / audio file. */
   renderMedia?: MessageListProps['renderMedia']
   renderApproval?: ToolApprovalPromptProps['renderApproval']
+  /** A server's question (gets the built-in card as `fallback`, and `answer`). */
+  renderElicitation?: ElicitationPromptProps['renderElicitation']
   slots?: AgentChatSlots
   components?: AgentChatComponents
   /** Override any text (i18n); applies to every part inside. */
@@ -220,6 +236,10 @@ const AgentChatInner = ({
   showApprovalMode = true,
   showContext = false,
   activityOpen = false,
+  showElicitation = true,
+  elicitations,
+  onElicitationAnswer,
+  renderElicitation,
   history,
   defaultHistoryOpen,
   files,
@@ -292,7 +312,14 @@ const AgentChatInner = ({
   useEffect(() => {
     const el = bodyRef.current
     if (el && stickRef.current) el.scrollTop = el.scrollHeight
-  }, [agent.messages, agent.steps, agent.finalText, agent.modelLoad, agent.pendingApprovals])
+  }, [
+    agent.messages,
+    agent.steps,
+    agent.finalText,
+    agent.modelLoad,
+    agent.pendingApprovals,
+    elicitations,
+  ])
 
   const [compacting, setCompacting] = useState(false)
   const compact = () => {
@@ -305,6 +332,7 @@ const AgentChatInner = ({
   const HistoryList = components.HistoryList ?? ChatHistoryList
   const Files = components.FilesPanel ?? FilesPanel
   const Approvals = components.ApprovalPrompt ?? ToolApprovalPrompt
+  const Elicitations = components.ElicitationPrompt ?? ElicitationPrompt
 
   const loading = agent.modelLoad && agent.modelLoad.progress < 1
   const showReplan = agent.replan && agent.replan.mode !== 'continue'
@@ -469,6 +497,14 @@ const AgentChatInner = ({
             onDeny={agent.deny}
             renderApproval={renderApproval}
           />
+          {showElicitation && elicitations && onElicitationAnswer && (
+            <Elicitations
+              elicitations={elicitations}
+              onAnswer={onElicitationAnswer}
+              outcomes={agent.elicitations}
+              renderElicitation={renderElicitation}
+            />
+          )}
           {agent.modelLoad && loading && <ModelLoadBar load={agent.modelLoad} />}
           {slots.afterMessages}
         </div>
