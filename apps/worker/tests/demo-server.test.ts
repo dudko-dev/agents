@@ -79,7 +79,11 @@ test('2026-07-28: server/discover names the revision, the instructions and no li
     const result = answer.message.result
     assert.deepEqual(result.supportedVersions, [MODERN])
     assert.equal(result.instructions, DEMO_INSTRUCTIONS)
-    assert.deepEqual(result.capabilities, CAPABILITIES)
+    // ...and, on this revision only, the Skills extension (tests/skills.test.ts).
+    assert.deepEqual(result.capabilities, {
+      ...CAPABILITIES,
+      extensions: { 'io.modelcontextprotocol/skills': {} },
+    })
     assert.deepEqual(result._meta['io.modelcontextprotocol/serverInfo'], DEMO_SERVER_INFO)
   })
 })

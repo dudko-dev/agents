@@ -9,6 +9,7 @@ import {
 } from '@dudko.dev/agent-web/mcp'
 import { DEMO_INSTRUCTIONS } from '../src/demo-server.ts'
 import { demoMcpMiddleware } from '../src/node.ts'
+import { DEMO_SKILL_FILES, DEMO_SKILL_URIS } from '../src/skills.ts'
 import { DEMO_TOOL_NAMES, DOCS_PATH } from '../src/tools.ts'
 import { APP_ONLY_TOOLS, bookingCode, TRIP_BOARD_URI } from '../src/trip-board.ts'
 
@@ -232,3 +233,127 @@ for (const protocol of ['auto', 'legacy'] as const) {
     }
   })
 }
+
+// ── skills (`skills: true`, experimental) ───────────────────────────────────
+
+/** A server's skills as the agent finds them on its tools (`collectMcpSkillSources` reads this). */
+interface SkillSourceOnTool {
+  server: string
+  skills: { uri: string; name: string; description: string; path: string[]; files: string[] }[]
+  load: (uri: string) => Promise<{ uri: string; body: string; files: readonly string[] }>
+  readFile: (loaded: { uri: string }, path: string) => Promise<string>
+}
+
+// The mark is a symbol of the global registry (so that it holds across bundles): `markMcpSkills`
+// in @dudko.dev/agent-web's `mcp/skills.ts`.
+const SKILLS_MARK = Symbol.for('@dudko.dev/agent:mcp-skills')
+
+const connectWithSkills = async (protocol: 'auto' | 'legacy') => {
+  const server = await listen()
+  const logs: string[] = []
+  const methods: string[] = []
+  const recording: typeof fetch = (input, init) => {
+    if (typeof init?.body === 'string') {
+      try {
+        methods.push(String(JSON.parse(init.body).method))
+      } catch {
+        /* not JSON */
+      }
+    }
+    return fetch(input, init)
+  }
+  const mcp = await connectMcpHttp(
+    { demo: { url: server.url, protocol, skills: true, fetch: recording } },
+    { clientName: 'worker-test', onLog: (level, message) => logs.push(`${level} ${message}`) },
+  )
+  const source = (mcp.tools.demo__echo as unknown as Record<symbol, unknown>)[SKILLS_MARK] as
+    SkillSourceOnTool | undefined
+  return {
+    mcp,
+    logs,
+    methods,
+    source,
+    close: async () => {
+      await mcp.close()
+      await server.close()
+    },
+  }
+}
+
+test('skills: true (auto): the demo client lists both skills, loads one and reads its file, verified', async () => {
+  const demo = await connectWithSkills('auto')
+  try {
+    assert.equal(demo.mcp.protocols[0]?.era, 'modern')
+    // Every entry accepted: no refusal, no failed read.
+    assert.ok(demo.logs.includes('info [mcp] demo: 2 skills listed'), demo.logs.join('\n'))
+    assert.deepEqual(
+      demo.logs.filter((l) => !l.startsWith('info')),
+      [],
+    )
+    // Listed, nothing read yet (lazy retrieval).
+    assert.ok(demo.methods.includes('skills/list'))
+    assert.ok(!demo.methods.includes('resources/read'))
+    const source = demo.source
+    assert.ok(source, 'the tools carry the server skills')
+    assert.equal(source.server, 'demo')
+    assert.deepEqual(
+      source.skills.map((s) => [s.uri, s.name, s.path.join('/'), s.files]),
+      [
+        [DEMO_SKILL_URIS[0], 'trip-planning', 'demo/trip-planning', ['references/checklist.md']],
+        [DEMO_SKILL_URIS[1], 'dice-games', 'demo/dice-games', []],
+      ],
+    )
+    // Loaded as the agent loads it: read and verified (size, digest, the frontmatter field by
+    // field) by the SDK's skills client. A mismatch would throw here.
+    const trip = await source.load(DEMO_SKILL_URIS[0] as string)
+    const files = DEMO_SKILL_FILES['demo/trip-planning'] as Record<string, string>
+    assert.ok(
+      files['SKILL.md']?.endsWith(trip.body),
+      'the body is the SKILL.md after its frontmatter',
+    )
+    assert.match(trip.body, /^\n# Trip planning with the demo server\n/)
+    assert.deepEqual(trip.files, ['references/checklist.md'])
+    assert.equal(
+      await source.readFile(trip, 'references/checklist.md'),
+      files['references/checklist.md'],
+    )
+    // Only a file the entry lists.
+    await assert.rejects(source.readFile(trip, 'references/other.md'), /has no file/)
+    const dice = await source.load(DEMO_SKILL_URIS[1] as string)
+    assert.match(dice.body, /## Pig/)
+    assert.match(dice.body, /## Yacht-lite/)
+    assert.deepEqual(
+      demo.logs.filter((l) => !l.startsWith('info')),
+      [],
+    )
+  } finally {
+    await demo.close()
+  }
+})
+
+test('skills: true (legacy): the client asks for no skills, and none come with the tools', async () => {
+  const demo = await connectWithSkills('legacy')
+  try {
+    assert.equal(demo.mcp.protocols[0]?.era, 'legacy')
+    assert.equal(demo.source, undefined)
+    assert.ok(!demo.methods.includes('skills/list'))
+    assert.deepEqual(
+      demo.mcp.catalog.map((t) => t.name),
+      DEMO_TOOL_NAMES.map((n) => `demo__${n}`),
+    )
+  } finally {
+    await demo.close()
+  }
+})
+
+test('skills off (the default, auto): nothing of the extension is listed or read', async () => {
+  const demo = await connect('auto')
+  try {
+    assert.equal(demo.mcp.protocols[0]?.era, 'modern')
+    const marked = (demo.mcp.tools.demo__echo as unknown as Record<symbol, unknown>)[SKILLS_MARK]
+    assert.equal(marked, undefined)
+    assert.ok(!demo.logs.some((l) => l.includes('skills')), demo.logs.join('\n'))
+  } finally {
+    await demo.close()
+  }
+})

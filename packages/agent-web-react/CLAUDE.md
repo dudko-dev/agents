@@ -127,7 +127,7 @@ against its production build.
   servers' `appSandbox` plugin).
 - `apps/demo/src/components/McpPanel.tsx` (monorepo root) — the demo's "bring your own MCP" panel,
   and its "Try the demo server" (adds `${location.origin}/mcp/demo`, protocol `auto`: the site's
-  own MCP server, `apps/worker`).
+  own MCP server, `apps/worker`) and "Try it with its skills" (the same, with `skills: true`).
 - `src/html-preview.ts` — the sandboxed frame's security core as pure strings: `sandboxTokens`
   (never `allow-same-origin`), `sandboxedCsp` (no network source), `withCspFirst`,
   `buildSandboxedDocument` (the SHELL: the untrusted document is framed by a document of ours
@@ -234,6 +234,11 @@ appFullscreen appDownloads appSampling>`, `useMcpAppHost({ downloads, sampling, 
   demo - the model is never offered its two app-only tools, the board renders and grows, its
   read-only app tool runs without a prompt, its `book_trip` waits for consent (Deny sends nothing,
   Allow once sends one call), its link and message prompts, the phone sheet without sideways scroll.
+  `demo-server-skills.spec.ts`: the same server's two skills (the MCP Skills extension) - "Try it
+  with its skills" adds it with `skills: true`, the planner's catalog names `demo/trip-planning`
+  and `demo/dice-games` with their origin, the planner's pick reaches the executor under the
+  third-party preamble, `read_skill_file` reads `references/checklist.md` from the server and the
+  skill's tool is called (only the picked skill's files are read); "Try the demo server" lists none.
   `agent.spec.ts`, `steering.spec.ts`, `learning.spec.ts`: the agent end to end
   (a run, typing to it while it works, the notebook and the fetched pages) against a scripted Gemini
   endpoint (`gemini.ts`, routed by the stage markers; it can script tool calls and the notebook's
