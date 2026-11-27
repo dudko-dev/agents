@@ -340,10 +340,12 @@ pending.get(id)?.({ action: 'accept', content: { name: 'Ada' } })
   (`elicitation: { subagents: true }`): a helper the model started, and a
   subagent tool's child that was handed these tools, have their questions
   cancelled without the callback being called.
-- **Time.** A question waits `timeoutMs` (5 minutes) at most, **and no longer
-  than the step it belongs to**: `chatTimeoutMs` (default 120 s) ends the step
-  and the question with it (`mcp.elicitation-answered`, `reason: 'step-timeout'`,
-  and a warning). Raise `chatTimeoutMs` on an agent whose servers may ask.
+- **Time.** A question waits `timeoutMs` (5 minutes) at most. The step it
+  belongs to does not run out of time meanwhile: `chatTimeoutMs` (default
+  120 s) **is stopped while a question waits** - like the `timeoutMs` of a
+  subagent the question holds up - and goes on with the time it had left. The
+  same holds while a person decides a tool approval (whose own bound is
+  `toolApproval.timeoutMs`). Stopping the run ends a wait at once.
 - **Events** inside a run: `mcp.elicitation-requested` and
   `mcp.elicitation-answered` (field names, never a value).
 
@@ -750,7 +752,7 @@ Loading a definition someone else wrote: [docs/security.md](docs/security.md#pip
 | `sessionId` | — | names the stored conversation in `memory`, and the bucket `agent.sessionUsage()` counts into |
 | `persistence` | — | checkpoint runs (`IndexedDBRunStore` / `MemoryRunStore`) so `run(goal, { resumeFromRunId })` continues after a reload — see [Resuming](docs/capabilities.md#resuming-an-interrupted-run) |
 | `maxIterations` / `maxStepsPerTask` / `maxRevisions` | 8 / 4 / 2 | loop caps |
-| `chatTimeoutMs` | 120000 | per-call watchdog |
+| `chatTimeoutMs` | 120000 | per-call watchdog; for the executor, the whole step (its tool calls included). Stopped while a tool call waits for a person (an approval, an MCP question): the step goes on with the time it had left - see [Tool consent](docs/capabilities.md#tool-consent-and-autopilot) |
 | `temperature` | provider default | sampling temperature for every stage |
 | `budgets` | — | legacy per-phase output caps; `limits.perCall` wins, `0` = no cap, and the defaults are shares of the model's window (none for a phase that thinks) |
 | `clientName` | — | sent as the openai-compatible provider name and the MCP client name |

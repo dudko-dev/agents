@@ -49,6 +49,7 @@ import {
 } from '../tools/search.js'
 import type { AgentToolSet } from '../tools/types.js'
 import { createCallCounter, schemaHintOf, wrapToolsForRun } from '../tools/wrap.js'
+import { createWaitClock } from '../wait-clock.js'
 import { portOf, type RunControl, type RunControlPort } from './control.js'
 import { executeStep, replanWanted } from './executor.js'
 import type {
@@ -635,6 +636,9 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
     // flight while it may be escalated (the tool wrapper reads them: see `tiers.ts`).
     let escalationCount = resumed?.escalations ?? 0
     let stepWrites: IStepWrites | undefined
+    // The run's clock: its step limit and the time limits of its subagents are deadlines of it,
+    // and it stops while a tool call of the run (or of a subagent below it) waits for a person.
+    const clock = createWaitClock()
     const counter = createCallCounter(cfg.maxToolCalls, resumed?.toolCalls)
     // A helper's call also counts on the run that started it, all the way up: it cannot make a
     // call its parent has no budget left for.
@@ -697,6 +701,7 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
         runId,
         fetched,
         stepWrites: () => stepWrites,
+        clock,
       },
     )
     // Take what the user sent since the last boundary and hand it to the model: recorded (a
@@ -834,6 +839,7 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
       emit,
       log,
       signal: opts.signal,
+      clock,
       state,
       history,
       strategy,

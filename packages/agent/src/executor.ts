@@ -20,7 +20,8 @@ import type { IAttemptOutcome, IEarlierAttempt } from './tiers.ts'
 import { MAX_CARRIED_DISCOVERED_TOOLS } from './tool-search.ts'
 import { ATTR, withSpan } from './tracing.ts'
 import type { IConversationTurn, IPlan, IPlanStep, IStepResult, IUsage } from './types.ts'
-import { emptyUsage, normalizeUsage, withRetry, withTimeout } from './utils.ts'
+import { emptyUsage, normalizeUsage, withRetry } from './utils.ts'
+import { deadlineSignal } from './wait-clock.ts'
 
 // The host + MCP tools a step may use under 'all' / 'plan-narrowed' (the
 // 'search' strategy builds its active set per LLM step instead; built-in
@@ -322,145 +323,152 @@ const runOnce = async (
   const editMessages = caching.enabled || Boolean(clear)
   const steered = ctx.takeRoundUpdates
 
-  const result = streamText({
-    model: attempt.model ?? ctx.executorModel,
-    tools,
-    ...(activeTools ? { activeTools } : {}),
-    ...(active || editMessages || steered
-      ? {
-          prepareStep: ({
-            messages,
-            stepNumber,
-          }: {
-            messages: ModelMessage[]
-            stepNumber: number
-          }) => {
-            // What the user said since the last round goes in as a user turn after the tool
-            // results (providers fold it into the same turn as the results). A messages
-            // override carries forward to the later rounds, so it is added once.
-            const said = steered && stepNumber > 0 ? steered() : []
-            const base: ModelMessage[] = said.length
-              ? [...messages, { role: 'user', content: renderUserMessages(said) }]
-              : messages
-            const next = withRollingBreakpoint(clear ? clear(base) : base, caching)
-            return {
-              ...(active ? { activeTools: [...active].filter((name) => name in tools) } : {}),
-              ...(editMessages || said.length ? { messages: next } : {}),
-            }
-          },
-        }
-      : {}),
-    stopWhen,
-    ...call,
-    prompt: buildExecutorUserPrompt(
-      input,
-      plan,
-      step,
-      trace,
-      history,
-      view,
-      run?.userUpdates.map((u) => u.text),
-      attempt.earlier,
-    ),
-    abortSignal: withTimeout(signal, ctx.config.llmTimeoutMs ?? 0),
-  })
+  // The step's time limit, on the run's clock: it does not run while a tool call of the step
+  // waits for a person (a tool approval, an MCP elicitation) - see wait-clock.ts.
+  const deadline = deadlineSignal(run?.clock, signal, ctx.config.llmTimeoutMs ?? 0)
+  try {
+    const result = streamText({
+      model: attempt.model ?? ctx.executorModel,
+      tools,
+      ...(activeTools ? { activeTools } : {}),
+      ...(active || editMessages || steered
+        ? {
+            prepareStep: ({
+              messages,
+              stepNumber,
+            }: {
+              messages: ModelMessage[]
+              stepNumber: number
+            }) => {
+              // What the user said since the last round goes in as a user turn after the tool
+              // results (providers fold it into the same turn as the results). A messages
+              // override carries forward to the later rounds, so it is added once.
+              const said = steered && stepNumber > 0 ? steered() : []
+              const base: ModelMessage[] = said.length
+                ? [...messages, { role: 'user', content: renderUserMessages(said) }]
+                : messages
+              const next = withRollingBreakpoint(clear ? clear(base) : base, caching)
+              return {
+                ...(active ? { activeTools: [...active].filter((name) => name in tools) } : {}),
+                ...(editMessages || said.length ? { messages: next } : {}),
+              }
+            },
+          }
+        : {}),
+      stopWhen,
+      ...call,
+      prompt: buildExecutorUserPrompt(
+        input,
+        plan,
+        step,
+        trace,
+        history,
+        view,
+        run?.userUpdates.map((u) => u.text),
+        attempt.earlier,
+      ),
+      abortSignal: deadline.signal ?? new AbortController().signal,
+    })
 
-  for await (const part of result.fullStream) {
-    switch (part.type) {
-      case 'text-delta':
-        if (part.text) {
-          ctx.emit({ type: 'step.text-delta', step, delta: part.text })
-        }
-        break
-      case 'reasoning-delta':
-        if (part.text && emitThoughts) {
-          ctx.emit({ type: 'step.reasoning-delta', step, delta: part.text })
-        }
-        break
-      case 'tool-call': {
-        const sanitizedInput = await sanitizeForEvent(part.toolName, part.input)
-        toolInputs.set(part.toolCallId, { name: part.toolName, input: sanitizedInput })
-        ctx.emit({ type: 'step.tool-call', step, name: part.toolName, input: sanitizedInput })
-        break
-      }
-      case 'tool-result': {
-        // A streaming tool's intermediate values; only the final one counts.
-        if ((part as { preliminary?: boolean }).preliminary) {
+    for await (const part of result.fullStream) {
+      switch (part.type) {
+        case 'text-delta':
+          if (part.text) {
+            ctx.emit({ type: 'step.text-delta', step, delta: part.text })
+          }
+          break
+        case 'reasoning-delta':
+          if (part.text && emitThoughts) {
+            ctx.emit({ type: 'step.reasoning-delta', step, delta: part.text })
+          }
+          break
+        case 'tool-call': {
+          const sanitizedInput = await sanitizeForEvent(part.toolName, part.input)
+          toolInputs.set(part.toolCallId, { name: part.toolName, input: sanitizedInput })
+          ctx.emit({ type: 'step.tool-call', step, name: part.toolName, input: sanitizedInput })
           break
         }
-        const known = toolInputs.get(part.toolCallId)
-        // Fallback path is defensive (tool-result before tool-call should
-        // not happen). Sanitize the raw fallback input so an out-of-order
-        // event still doesn't leak secrets.
-        const recordedInput = known?.input ?? (await sanitizeForEvent(part.toolName, part.input))
-        record({
-          name: part.toolName,
-          input: recordedInput,
-          output: part.output,
-          ok: true,
-        })
-        ctx.emit({
-          type: 'step.tool-result',
-          step,
-          name: part.toolName,
-          output: part.output,
-          ok: true,
-        })
-        toolInputs.delete(part.toolCallId)
-        break
-      }
-      case 'tool-error': {
-        const known = toolInputs.get(part.toolCallId)
-        const recordedInput = known?.input ?? (await sanitizeForEvent(part.toolName, part.input))
-        record({
-          name: part.toolName,
-          input: recordedInput,
-          output: part.error,
-          ok: false,
-        })
-        ctx.emit({
-          type: 'step.tool-result',
-          step,
-          name: part.toolName,
-          output: part.error,
-          ok: false,
-        })
-        toolInputs.delete(part.toolCallId)
-        break
-      }
-      case 'error': {
-        const error = part.error
-        throw error instanceof Error ? error : new Error(String(error))
+        case 'tool-result': {
+          // A streaming tool's intermediate values; only the final one counts.
+          if ((part as { preliminary?: boolean }).preliminary) {
+            break
+          }
+          const known = toolInputs.get(part.toolCallId)
+          // Fallback path is defensive (tool-result before tool-call should
+          // not happen). Sanitize the raw fallback input so an out-of-order
+          // event still doesn't leak secrets.
+          const recordedInput = known?.input ?? (await sanitizeForEvent(part.toolName, part.input))
+          record({
+            name: part.toolName,
+            input: recordedInput,
+            output: part.output,
+            ok: true,
+          })
+          ctx.emit({
+            type: 'step.tool-result',
+            step,
+            name: part.toolName,
+            output: part.output,
+            ok: true,
+          })
+          toolInputs.delete(part.toolCallId)
+          break
+        }
+        case 'tool-error': {
+          const known = toolInputs.get(part.toolCallId)
+          const recordedInput = known?.input ?? (await sanitizeForEvent(part.toolName, part.input))
+          record({
+            name: part.toolName,
+            input: recordedInput,
+            output: part.error,
+            ok: false,
+          })
+          ctx.emit({
+            type: 'step.tool-result',
+            step,
+            name: part.toolName,
+            output: part.error,
+            ok: false,
+          })
+          toolInputs.delete(part.toolCallId)
+          break
+        }
+        case 'error': {
+          const error = part.error
+          throw error instanceof Error ? error : new Error(String(error))
+        }
       }
     }
-  }
 
-  const [text, usage, finishReason] = await Promise.all([
-    result.text,
-    result.usage,
-    result.finishReason,
-  ])
-  const cut = outputCapNotice(ctx.config, 'executor', finishReason)
-  if (cut) {
-    ctx.emit({ type: 'log', level: 'warn', message: cut })
-  }
-  const { summary: cleaned, blocked } = splitBlockerSentinel(text.trim())
-  const summary =
-    cleaned.length > 0
-      ? truncateForTrace(cleaned)
-      : stoppedBy
-        ? `Stopped early: the run's ${stoppedBy === 'tokens' ? 'token' : 'tool-call'} budget was reached after ${toolCalls.length} tool call(s).`
-        : toolCalls.length > 0
-          ? `Executed ${toolCalls.length} tool call(s) without producing a final message; consider raising maxStepsPerTask.`
-          : 'Step produced no output.'
+    const [text, usage, finishReason] = await Promise.all([
+      result.text,
+      result.usage,
+      result.finishReason,
+    ])
+    const cut = outputCapNotice(ctx.config, 'executor', finishReason)
+    if (cut) {
+      ctx.emit({ type: 'log', level: 'warn', message: cut })
+    }
+    const { summary: cleaned, blocked } = splitBlockerSentinel(text.trim())
+    const summary =
+      cleaned.length > 0
+        ? truncateForTrace(cleaned)
+        : stoppedBy
+          ? `Stopped early: the run's ${stoppedBy === 'tokens' ? 'token' : 'tool-call'} budget was reached after ${toolCalls.length} tool call(s).`
+          : toolCalls.length > 0
+            ? `Executed ${toolCalls.length} tool call(s) without producing a final message; consider raising maxStepsPerTask.`
+            : 'Step produced no output.'
 
-  return {
-    summary,
-    toolCalls,
-    blocked,
-    usage: usage ? normalizeUsage(usage) : emptyUsage(),
-    empty: cleaned.length === 0,
-    cut: finishReason === 'length',
-    stopped: stoppedBy !== undefined,
+    return {
+      summary,
+      toolCalls,
+      blocked,
+      usage: usage ? normalizeUsage(usage) : emptyUsage(),
+      empty: cleaned.length === 0,
+      cut: finishReason === 'length',
+      stopped: stoppedBy !== undefined,
+    }
+  } finally {
+    deadline.done()
   }
 }

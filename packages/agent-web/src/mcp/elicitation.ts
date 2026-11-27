@@ -738,6 +738,12 @@ export interface McpElicitationCall {
   failure?: string
   /** Called around the wait for the host (true: waiting), so a call's own clock can stop. */
   onWait?: (waiting: boolean) => void
+  /**
+   * Stops the time limits of the run the call belongs to (its step's, and those of the subagent
+   * tools above it) for the length of the wait for the host; returns what starts them again.
+   * The wait keeps its own bound, `timeoutMs`, and a stop of the run still ends it at once.
+   */
+  pause?: () => () => void
 }
 
 export interface McpElicitationDeps {
@@ -785,7 +791,7 @@ export const mcpElicitationFailure = (
     timeout: `nobody answered within ${options.timeoutMs} ms (elicitation.timeoutMs)`,
     'invalid-answer': `the answer did not fit the form (${detail ?? 'invalid'}) and was not sent`,
     aborted: 'the run was stopped',
-    'step-timeout': "the step's time limit ended while the question was waiting for an answer",
+    'step-timeout': "the tool call's time limit ended before the question was answered",
     'after-failure': 'an earlier question of the same call had already failed',
     'no-tool-call': 'no tool call was in progress',
   }
@@ -806,8 +812,10 @@ type WireAnswer = { action: 'accept' | 'decline' | 'cancel'; content?: McpElicit
  * returned. In every other case the answer is made here (`decline` for a request that cannot be
  * shown, `cancel` otherwise), `call.failure` is set, and the caller fails the tool call with it.
  *
- * Throws only when the call's own signal aborted (the run was stopped, or its step ran out of
- * time): the reason is rethrown, as for any aborted tool call.
+ * Throws only when the call's own signal aborted (the run was stopped, or its time was already
+ * spent when the question came): the reason is rethrown, as for any aborted tool call. While
+ * the host is asked, the limits of the run are stopped (`call.pause`): the wait is bounded by
+ * `timeoutMs` and by a stop of the run, not by the step it belongs to.
  */
 export const answerMcpElicitation = async (
   deps: McpElicitationDeps,
@@ -908,6 +916,9 @@ export const answerMcpElicitation = async (
     | { kind: 'timeout' }
     | { kind: 'aborted' }
   call.onWait?.(true)
+  // A person is being asked: the step's limit is about models and tools, and does not run
+  // meanwhile. It goes on, with the time it had left, the moment the wait is over.
+  const resume = call.pause?.()
   const outcome = await new Promise<Outcome>((resolve) => {
     if (options.timeoutMs > 0) {
       timer = setTimeout(() => resolve({ kind: 'timeout' }), options.timeoutMs)
@@ -921,6 +932,7 @@ export const answerMcpElicitation = async (
         (error: unknown) => resolve({ kind: 'error', error }),
       )
   })
+  resume?.()
   call.onWait?.(false)
   if (timer) {
     clearTimeout(timer)
@@ -934,9 +946,11 @@ export const answerMcpElicitation = async (
     const reason: McpElicitationReason = isTimeoutAbort(call.signal) ? 'step-timeout' : 'aborted'
     call.failure ??= mcpElicitationFailure(call.tool, reason, options)
     if (reason === 'step-timeout') {
+      // Not the step's own limit, which does not run while the host is asked (`call.pause`): a
+      // time limit put on the call's signal from outside, the run's signal included.
       log(
         'warn',
-        `${where}: the step's time limit ended while the question was waiting for an answer; a question waits no longer than the step it belongs to`,
+        `${where}: a time limit on the tool call's signal ended while the question was waiting for an answer; only the step's own limit stops while a person is asked, not a limit on the run's signal`,
       )
     }
     answered('cancel', true, reason)
@@ -1039,6 +1053,8 @@ export interface McpElicitationCallInfo {
   subagent?: { id: string; depth: number }
   /** The run's counter; absent outside a run (the call then counts alone). */
   run?: { count: number }
+  /** Stops the run's time limits while the host is asked; returns what starts them again. */
+  pause?: () => () => void
 }
 
 export interface McpElicitationSession {
@@ -1118,6 +1134,7 @@ export const createMcpElicitationSession = (
     ...(info.emit ? { emit: info.emit } : {}),
     ...(info.runId ? { runId: info.runId } : {}),
     ...(info.subagent ? { subagent: info.subagent } : {}),
+    ...(info.pause ? { pause: info.pause } : {}),
     run: info.run ?? { count: 0 },
     asked: 0,
   })

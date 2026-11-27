@@ -225,7 +225,13 @@ export interface BrowserAgentConfig {
   maxToolCalls?: number
   /** Cap on the steps of one plan (default 8). */
   maxPlanSteps?: number
-  /** Per-call timeout so a hang can't freeze a run (default 120000). */
+  /**
+   * Per-call timeout so a hang can't freeze a run (default 120000) - for the executor, of a
+   * whole step: its rounds and its tool calls. It does not run while a tool call of the step
+   * waits for a person (a tool approval, an MCP elicitation): the step goes on with the time it
+   * had left once the person has answered. Those waits have bounds of their own
+   * (`toolApproval.timeoutMs`, `elicitation.timeoutMs`), and stopping the run ends them at once.
+   */
   chatTimeoutMs?: number
   /** Legacy per-phase output caps; `limits.perCall` wins when both are set. */
   budgets?: PhaseBudgets

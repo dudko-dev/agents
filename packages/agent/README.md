@@ -572,6 +572,8 @@ A tool is read-only when its MCP descriptor says `annotations.readOnlyHint: true
 
 A denied call throws `ToolDeniedError` inside the tool, so the step records `ok: false` and the model reads *"Tool call denied by the user… Do not retry it; continue without it, or report what is blocked."* — the replanner sees it as any failed call. Events: `tool.approval-requested` (only when actually asking) and `tool.approval-resolved` (`automatic: true` for rule / mode / timeout denials; automatic allows emit nothing). The gate runs inside every tool's `execute` — MCP, native and subagent tools alike.
 
+**Time a person takes does not count.** From `tool.approval-requested` until the decision, the step's `llmTimeoutMs` is stopped, and so are the limits above it that the decision holds up: the `timeoutMs` of the subagent the call runs in, and the step of the run that called that subagent. When the decision is in they go on with the time they had left - not with a fresh limit, and with no more than the wait added. The same holds for an [MCP elicitation](#mcp-elicitation-a-server-asks-the-user). The wait's own bound is `timeoutMs` here; without it a question waits until the run is stopped. Stopping the run (`signal`, `control.stopSubagent`) still ends a wait at once, and token and tool-call budgets are not affected. There is no run-level time limit in the config; a limit you put on the run's `signal` yourself (`AbortSignal.timeout()`) is a stop like any other and is not paused.
+
 ## Large MCP catalogs
 
 **Tool search.** `toolSelectionStrategy` now defaults to `'auto'`: the executor gets every tool (`'all'`, exactly as before) while the filtered catalogue has at most `toolSearchThreshold` (default 40) tools, and switches to `'search'` above that. In `'search'` mode each step starts with the built-in tools, the step's `suggestedTools` and the tools discovered earlier in the run (the 16 most recent), plus `find_tools({ query, server?, limit? })`. It ranks the whole catalogue and **activates** the matches: they become callable from the model's next LLM step and stay active for the rest of the run (`tools.discovered` event). The planner sees an abridged catalogue grouped by server and treats `suggestedTools` as hints. The ranking is the exported pure `searchTools(catalog, query, { server?, limit? })` — terms matched in the name score 3, in the server 2, in the description 1, prefix-matched for terms of 3+ chars. `'all'` and `'plan-narrowed'` behave as before.
@@ -654,7 +656,7 @@ const agent = await createAgent({
 **Time.** Three clocks are involved, and none of them ends a question silently:
 
 - The question's own: `elicitation.timeoutMs` (5 minutes).
-- The step's: a question belongs to a tool call, and a tool call to a step. If you set `llmTimeoutMs`, the step - and the question with it - ends there: `mcp.elicitation-answered` says `reason: 'step-timeout'` and a warning is logged. Leave `llmTimeoutMs` unset (the default), or above `elicitation.timeoutMs`, when servers may ask.
+- The step's: a question belongs to a tool call, and a tool call to a step. The step's `llmTimeoutMs` **does not run while a question waits** - nor the `timeoutMs` of a subagent the question holds up, nor the step of the run above it - and goes on with the time it had left once the question is settled (as for [tool approval](#tool-approval-and-autopilot)). `reason: 'step-timeout'` remains for a question that arrives when the step's time is already spent, and for a time limit you put on the run's `signal` yourself, which is not stopped (a warning is logged then).
 - The MCP SDK's request timeout (60 s). On the 2025 revisions the tool call is one request that stays open while the user answers, so with `onElicitation` the connector keeps that minute itself and **stops it while a question waits**: a call may take 60 s of its own time, however long the user takes. (On 2026-07-28 every leg is a request of its own and nothing needs stopping.)
 
 Stopping the run (`signal`) cancels a pending question: `reason: 'aborted'`, and `ctx.signal` aborts.
@@ -721,7 +723,7 @@ const agent = await createAgent({ ...config, tools: { researcher } })
 - **`'worker'`** runs each call in its own `worker_thread` (terminated afterwards), so the child's CPU work and crashes stay off the parent's event loop. Its config must be structured-cloneable — a function anywhere (`getHeaders`, `authProvider`, `fetch`, sanitizers, `persistence`, `onRequest`, native `tools`) throws, naming the field. Host tools passed as `tools` are **proxied**: the child sees their schemas, every call runs on the parent thread.
 - **`'in-process'`** builds the child on this thread; `tools` are merged into its config.
 
-Several calls in one model step run in parallel (bounded by `maxConcurrent`). The parent's abort aborts the child. The child's usage is emitted on the parent as `usage` with `phase: 'subagent'` as it happens, so it counts against the parent's limits. Parent events: `subagent.start`, `subagent.event` (each child event, long strings clipped), `subagent.complete` (`text`, `usage`), `subagent.error`.
+Several calls in one model step run in parallel (bounded by `maxConcurrent`). The parent's abort aborts the child. `timeoutMs` does not count the time a person takes to answer the child's questions (an approval, an MCP elicitation) or the calling run's: while one waits, the subagent's limit and the calling step's `llmTimeoutMs` are stopped, and a worker child whose proxied host tool call is in flight stops its own step limit too. The child's usage is emitted on the parent as `usage` with `phase: 'subagent'` as it happens, so it counts against the parent's limits. Parent events: `subagent.start`, `subagent.event` (each child event, long strings clipped), `subagent.complete` (`text`, `usage`), `subagent.error`.
 
 The worker entry ships as `dist/subagent-worker.js` and is resolved next to the bundle, from the ESM and the CJS build alike.
 
@@ -794,7 +796,7 @@ There is no parameter for a model, a provider, a limit, a timeout or an approval
 | `maxConcurrent` | `3` | Helpers of one parent running at once; further calls wait their turn. |
 | `budgetShare` | `0.5` | The share of what is **left** of the caller's run limits one helper may take: each of `limits.maxTotalTokens` / `maxInputTokens` / `maxOutputTokens` / `maxReasoningTokens` the caller has, and `maxToolCalls`. "Left" is after what the caller has spent and what its running helpers may still spend. Also the helper's `maxIterations` (that share of the caller's cap, at least 1). |
 | `minTokens` | `2000` | A helper is not started with a smaller total or input share (a quarter of it for the output cap; one tool call) - the call is refused with the numbers. |
-| `timeoutMs` | `300000` | Wall clock of one helper (`0` = none). The run itself has no wall-clock limit to share; `llmTimeoutMs` applies to each of the helper's calls as to the caller's. |
+| `timeoutMs` | `300000` | Time limit of one helper (`0` = none). It stops while a person is asked something (an approval, an MCP question) in the helper or in the run that called it, and goes on with what it had left. The run itself has no time limit to share; `llmTimeoutMs` applies to each of the helper's calls as to the caller's. |
 
 A helper's tokens are charged to the caller as they are spent (`usage` events with `phase: 'subagent'`), all the way up, so they count against the run's limits and in `agent.usage` once. Its tool calls count on the caller's `maxToolCalls` as well as its own share: a helper cannot make a call its parent has no budget left for. Token limits are soft, as everywhere: a helper stops at the next boundary after crossing its share and writes its answer. A caller without a limit of some kind gives its helpers none of that kind.
 
@@ -1367,7 +1369,7 @@ Consent is the host's job ([tool approval](#tool-approval-and-autopilot)) — th
 | `compaction` | `{ auto?, contextWindowTokens?, thresholdTokens?, keepRecentTurns?, keepRecentSteps?, summaryMaxTokens?, maxToolOutputChars? }`. See [Compaction](#compaction). |
 | `skills` | `ISkill[]` — see [Skills](#skills). |
 | `toolApproval` | `{ mode?, rules?, onRequest?, timeoutMs? }` — default autopilot. See [Tool approval](#tool-approval-and-autopilot). |
-| `llmTimeoutMs` / `llmMaxRetries` | Per-LLM-call timeout and retry budget. |
+| `llmTimeoutMs` / `llmMaxRetries` | Per-LLM-call timeout (for the executor: the whole step, its tool calls included; stopped while a tool call waits for a person - see [Tool approval](#tool-approval-and-autopilot)) and retry budget. |
 | `toolSelectionStrategy` | `'auto'` (default: `'all'` up to `toolSearchThreshold` tools, `'search'` above), `'all'` (every tool each step), `'plan-narrowed'` (only `step.suggestedTools`), `'search'` (built-ins + suggested + discovered, plus `find_tools`). |
 | `toolSearchThreshold` | Catalogue size above which `'auto'` switches to `'search'`. Default `40`. |
 | `mcpConnectTimeoutMs` | Connect + `tools/list` budget per MCP server (each server's `connectTimeoutMs` wins). Default `30000`; `0` disables. |
@@ -1587,7 +1589,7 @@ The CLI source lives in [`src/cli`](./src/cli) — [`env.example`](./env.example
 | `AGENT_ESCALATION`, `AGENT_ESCALATION_MAX_PER_STEP`, `AGENT_ESCALATION_MAX_PER_RUN` | `off` keeps a failed step on its tier (with tier models the default is to retry it on a stronger one); the caps on those retries (default 1 / 3). Setting them without a tier model is an error. |
 | `AGENT_PROVIDER_OPTIONS` | JSON spread into the provider factory (`{"region":"us-east-1"}`, Azure's `resourceName`, …). |
 | `AGENT_MAX_ITERATIONS`, `AGENT_MAX_STEPS_PER_TASK`, `AGENT_MAX_REVISIONS` | Loop caps: plan/execute/replan rounds, LLM steps inside one executor call, replanner "revise" decisions. |
-| `AGENT_LLM_TIMEOUT_MS`, `AGENT_LLM_MAX_RETRIES` | Per-call timeout (`0` = off) and retries on 5xx / 429 / network errors (default 2). |
+| `AGENT_LLM_TIMEOUT_MS`, `AGENT_LLM_MAX_RETRIES` | Per-call timeout (`0` = off; it stops while you answer an approval or an MCP question at the prompt) and retries on 5xx / 429 / network errors (default 2). |
 | `AGENT_AVAILABLE_TOOLS`, `AGENT_EXCLUDED_TOOLS` | Comma lists of MCP tool names to offer / withhold (available wins). |
 | `AGENT_CLIENT_NAME`, `AGENT_LOG_LEVEL` | The `User-Agent` sent on MCP / provider requests; `none \| error \| warn \| info \| debug`. |
 

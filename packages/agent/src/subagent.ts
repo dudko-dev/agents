@@ -9,6 +9,7 @@ import { runContext } from './context.ts'
 import { adoptSubagentEvent } from './subagent-dynamic-shared.ts'
 import type { AgentEvent, EventHandler, IAgentConfig, IUsage } from './types.ts'
 import { clipText, emptyUsage, errorMessage, normalizeUsage } from './utils.ts'
+import { createWaitClock, followHumanWaits, type IWaitClock } from './wait-clock.ts'
 
 export type SubagentIsolation = 'worker' | 'in-process'
 
@@ -46,7 +47,8 @@ export interface ISubagentToolOptions {
   tools?: ToolSet
   // Parallel calls of this tool beyond this many queue. Default 4.
   maxConcurrent?: number
-  // Abort the child after this many ms. Default: none.
+  // Abort the child after this many ms. Default: none. Time a person takes to answer a question
+  // (a tool approval, an MCP elicitation) of the child or of the calling run does not count.
   timeoutMs?: number
   // The child's final text is clipped to this. Default 8_000.
   outputMaxChars?: number
@@ -72,6 +74,10 @@ export type ParentToWorkerMessage =
   | { type: 'run'; task: string; config: IAgentConfig; proxied: IProxiedToolDescriptor[] }
   | { type: 'abort' }
   | { type: 'tool-result'; callId: string; ok: boolean; output: unknown }
+  // The calling run started (true) / stopped (false) waiting for a person (its clock stopped /
+  // runs again, wait-clock.ts): a proxied host tool call in flight runs in that run, so the
+  // clock of the child run that made it follows.
+  | { type: 'tool-wait'; waiting: boolean }
 
 export type WorkerToParentMessage =
   | { type: 'event'; event: AgentEvent }
@@ -305,11 +311,13 @@ const runInWorker = (
   task: string,
   signal: AbortSignal,
   onEvent: EventHandler,
+  clock: IWaitClock,
 ): Promise<IChildOutcome> =>
   new Promise<IChildOutcome>((resolve, reject) => {
     const hostTools = opts.tools ?? {}
     let settled = false
     let worker: Worker
+    let unwatch: (() => void) | undefined
     try {
       const execArgv = workerExecArgv()
       worker = new Worker(subagentWorkerUrl(), {
@@ -325,6 +333,7 @@ const runInWorker = (
         return
       }
       settled = true
+      unwatch?.()
       signal.removeEventListener('abort', onAbort)
       fn()
       void worker.terminate().catch(() => {})
@@ -384,6 +393,20 @@ const runInWorker = (
       return
     }
     signal.addEventListener('abort', onAbort, { once: true })
+    // A host tool the child calls runs HERE, in the calling run: while that run waits for a
+    // person (an MCP question of the host tool, say) its clock is stopped, and the child is told,
+    // so a step of the child that is waiting for a host tool's result does not run out of time
+    // meanwhile. The worker cannot tell which question is whose: a proxied call in flight
+    // follows every wait of this run - its step is paused at most as long as this run is.
+    const tell = (waiting: boolean): void => {
+      if (!settled) {
+        worker.postMessage({ type: 'tool-wait', waiting } satisfies ParentToWorkerMessage)
+      }
+    }
+    unwatch = clock.watch(tell)
+    if (clock.paused) {
+      tell(true)
+    }
     worker.postMessage({
       type: 'run',
       task,
@@ -488,15 +511,20 @@ export const createSubagentTool = (opts: ISubagentToolOptions): Tool => {
       let timedOut = false
       let stoppedByUser = false
       let unregister: (() => void) | undefined
+      // The child's time limit is a deadline of the calling run's clock, and that clock - with
+      // the caller's step limit on it - is stopped while the child waits for a person.
+      const clock = store?.state?.clock ?? createWaitClock()
+      const waits = followHumanWaits(clock)
       const timer =
         typeof opts.timeoutMs === 'number' && opts.timeoutMs > 0
-          ? setTimeout(() => {
+          ? clock.timer(opts.timeoutMs, () => {
               timedOut = true
               ac.abort(new Error(`subagent "${name}" timed out after ${opts.timeoutMs}ms`))
-            }, opts.timeoutMs)
+            })
           : undefined
       let childUsage: IUsage = emptyUsage()
       const onChildEvent: EventHandler = (event) => {
+        waits.see(event)
         if (event.type === 'usage') {
           // Counted on the parent as it happens, so the parent's limits
           // see a long-running child.
@@ -539,7 +567,7 @@ export const createSubagentTool = (opts: ISubagentToolOptions): Tool => {
         )
         const out =
           isolation === 'worker'
-            ? await runInWorker(opts, config, task, ac.signal, onChildEvent)
+            ? await runInWorker(opts, config, task, ac.signal, onChildEvent, clock)
             : await runInProcess(opts, config, task, ac.signal, onChildEvent)
         childUsage = normalizeUsage(out.usage)
         const text = clipText(out.text, outputMaxChars)
@@ -565,9 +593,8 @@ export const createSubagentTool = (opts: ISubagentToolOptions): Tool => {
         throw err
       } finally {
         unregister?.()
-        if (timer) {
-          clearTimeout(timer)
-        }
+        timer?.cancel()
+        waits.end()
         abortSignal?.removeEventListener('abort', onParentAbort)
         sem.release()
       }

@@ -12,6 +12,7 @@ import {
 import { recordWrite, replayOutput, replayedWrite, type IStepWrites } from '../tiers.js'
 import { promptHintOf } from './types.js'
 import type { SpawnRun } from '../subagent/dynamic.js'
+import type { IWaitClock } from '../wait-clock.js'
 
 /**
  * What a tool's `execute` can reach of the run that called it, passed as
@@ -55,6 +56,12 @@ export interface ToolRunContext {
    * shared with the helpers it starts (`elicitation.maxPerRun`).
    */
   elicitations?: { count: number }
+  /**
+   * Internal - the run's clock (wait-clock.ts): the step's `chatTimeoutMs` and the time limits
+   * of the subagents the run's tool calls start are deadlines of it, and whoever asks a person
+   * something on the run's behalf (the consent gate, an MCP question) pauses it for the wait.
+   */
+  clock?: IWaitClock
 }
 
 /** Read the run context the agent passes to a tool's execute (undefined outside a run). */
@@ -133,6 +140,8 @@ export interface WrapToolsOptions {
   subagent?: { id: string; depth: number }
   /** The run's count of questions asked of the user, handed to tools through their run context. */
   elicitations?: { count: number }
+  /** The run's clock: the gate pauses it while a person decides; handed to tools too. */
+  clock?: IWaitClock
 }
 
 const isAsyncIterable = (v: unknown): v is AsyncIterable<unknown> =>
@@ -190,6 +199,7 @@ export const wrapToolsForRun = (tools: ToolSet, o: WrapToolsOptions): ToolSet =>
             ...(req.subagent ? { subagent: req.subagent } : {}),
           }),
         resolved: (r) => o.emit({ type: 'tool.approval-resolved', ...r }),
+        ...(o.clock ? { wait: o.clock.pause } : {}),
       },
       signal ?? o.signal,
     )
@@ -223,6 +233,7 @@ export const wrapToolsForRun = (tools: ToolSet, o: WrapToolsOptions): ToolSet =>
             ...(o.spawn ? { spawn: o.spawn } : {}),
             ...(o.subagent ? { subagent: o.subagent } : {}),
             ...(o.elicitations ? { elicitations: o.elicitations } : {}),
+            ...(o.clock ? { clock: o.clock } : {}),
           }
           return execute.call(t, input, { ...(options as object), agentRun })
         }
