@@ -715,7 +715,8 @@ the call was cancelled).
 a UI passes the app's own) whose `visibility` includes `'app'` (the default) and that the server
 lists; anything else is refused before a request is sent. `callAppTool` goes through the
 connection's elicitation session when there is one (a 2025 server's question must not be put to
-the wrong call). It does not ask the user: consent is the agent's.
+the wrong call: on those revisions an app's call waits for the server's other calls, a question
+included; on 2026-07-28 it does not). It does not ask the user: consent is the agent's.
 
 **Consent: `agent.approveAppToolCall`.** The agent's own gate - `toolApproval.rules`, `onRequest`,
 `timeoutMs` - with two differences:
@@ -730,6 +731,13 @@ The request (`ToolApprovalRequest`, and the `tool.approval-requested` event) car
 `app: { server, tool, resourceUri }`: a UI says the APP asks. `name` is the key the rules match
 (`server__tool`, also for a tool not mounted). `onEvent` gets the two events (there may be no run);
 `signal` gives up (the app's frame went away).
+
+The wait is on no run's clock (see [tool consent](#tool-consent-and-autopilot), "Time a person
+takes"): an app's request may come while no run goes, and when one does, that run is not waiting
+for it - its step's `chatTimeoutMs` runs on, and the run's own approvals and questions still stop
+it. The wait's bound is `toolApproval.timeoutMs`. A question the server asks during an app's call
+(`callAppTool`, with `onElicitation`) is put to the host like any other, bounded by
+`elicitation.timeoutMs` and counted on its own (there is no run to count it on).
 
 **Not here.** Links and messages an app asks for are the UI's to put to the user (the React package
 asks for both). `ui/update-model-context`, `resources/read` for an app, `ui/download-file`,

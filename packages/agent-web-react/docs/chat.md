@@ -487,7 +487,10 @@ What the user sees:
   order: tool calls (the agent's and the apps'), then what apps ask besides (links, messages),
   then the servers' [questions](#questions-from-mcp-servers-elicitation). An app's prompt does not
   stop the run's step clock: the run is not waiting for it. A question the server asks during an
-  app's tool call (with `elicitation` on) is shown like any other.
+  app's tool call (with `elicitation` on) is shown like any other. With `elicitation` on, a server
+  on the 2025 revisions gets its calls one at a time (its question does not say which call it is
+  about): an app's call the user allowed waits while a question of that server is open, and the
+  app gets its answer once the question is settled; on 2026-07-28 it goes at once.
 
 ```ts
 message.apps // AppView[] | undefined - { id, server, tool, toolName, resourceUri, input, result?, stepId?, by? }

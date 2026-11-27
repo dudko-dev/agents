@@ -258,7 +258,9 @@ behind every decision.
   per connection, a refused read not kept; `appTool`; `callAppTool` - through the elicitation
   session when there is one; it does not ask the user). The gate is the agent's:
   `Agent.approveAppToolCall` (`agent/runner.ts`): `toolApproval` with `'autopilot'` raised to
-  `'ask-writes'` and "always allow" kept in a set of its own (`ToolApprovalRequest.app`). OFF
+  `'ask-writes'` and "always allow" kept in a set of its own (`ToolApprovalRequest.app`); its wait
+(and a question during `callAppTool`) is on NO run's clock (`wait-clock.ts`): the run is not
+waiting for it. OFF
   without `apps`: no capability, no `_meta` read, every tool mounted - `tests/mcp-apps.test.ts`
   compares the wire with the fixture. Security boundary: every guard has a test there and needs a
   mutation check. The Node sibling has none of it (it renders nothing): keep the names for when

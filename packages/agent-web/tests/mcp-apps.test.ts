@@ -2,6 +2,7 @@ import 'fake-indexeddb/auto'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
+import { z } from 'zod'
 import {
   startLocalMcpServer,
   TRAVEL_APP_URI,
@@ -11,6 +12,7 @@ import {
 } from '@dudko.dev/test-servers'
 import {
   createAgent,
+  defineTool,
   ToolDeniedError,
   type Agent,
   type AgentEvent,
@@ -35,6 +37,7 @@ import {
   mcpAppToolResultOf,
   type ConnectedMcp,
   type ConnectMcpOptions,
+  type McpElicitationRequest,
 } from '../dist/mcp.js'
 import { captureMcpWire, type IWireRequest } from './helpers/mcp-wire.ts'
 import { scriptedModel, stageOf, type CallInfo, type Reply } from './helpers/scripted-model.ts'
@@ -737,4 +740,193 @@ test('agent: guard - an app request waits for no stopped page: the signal ends i
   const pending = rig.agent.approveAppToolCall(bookCall(), undefined, controller.signal)
   controller.abort()
   await assert.rejects(pending, ToolDeniedError)
+})
+
+// ── with elicitation, and the time a person takes ────────────────────────────
+
+for (const era of ERAS) {
+  test(`${era}: an app's call goes through the elicitation session - the question reaches the host, no run needed`, async () => {
+    const server = await startLocalMcpServer({
+      protocol: era,
+      appTools: true,
+      elicitationTools: true,
+    })
+    const asked: McpElicitationRequest[] = []
+    const mcp = await connectMcpHttp(
+      { wx: { url: server.url, ...(era === 'modern' ? { protocol: 'modern' as const } : {}) } },
+      {
+        apps: true,
+        onElicitation: (request) => {
+          asked.push(request)
+          const fields = request.requestedSchema?.properties ?? {}
+          return { action: 'accept', content: fields.name ? { name: 'Ada' } : { color: 'green' } }
+        },
+      },
+    )
+    try {
+      // Both are declared, side by side (the 2025 handshake; on 2026-07-28 the same capability
+      // object travels with each request).
+      if (era === 'legacy') {
+        const declared = server.initializeCapabilities.at(-1) as {
+          extensions?: Record<string, unknown>
+          elicitation?: unknown
+        }
+        assert.deepEqual(declared.extensions?.[EXTENSION], {
+          mimeTypes: ['text/html;profile=mcp-app'],
+        })
+        assert.ok(declared.elicitation, 'elicitation declared next to the extension')
+      }
+      // A tool without `_meta.ui` has the default visibility: its app - any app of the server -
+      // may call it. Called the way a UI calls it, after its consent: outside any run.
+      const out = await mcp.apps!.callAppTool('wx', 'elicit_twice', {})
+      assert.deepEqual(out.content, [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            tool: 'elicit_twice',
+            action: 'accept',
+            name: 'Ada',
+            color: 'green',
+          }),
+        },
+      ])
+      assert.equal(out.isError, undefined)
+      assert.equal(asked.length, 2)
+      assert.deepEqual(
+        asked.map((r) => [r.server, r.tool, r.subagent ?? null]),
+        [
+          ['wx', 'wx__elicit_twice', null],
+          ['wx', 'wx__elicit_twice', null],
+        ],
+      )
+      assert.deepEqual(server.calls, [{ name: 'elicit_twice', args: {} }])
+    } finally {
+      await mcp.close()
+      await server.close()
+    }
+  })
+}
+
+const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
+  new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, ms)
+    signal?.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(timer)
+        reject(signal.reason ?? new Error('aborted'))
+      },
+      { once: true },
+    )
+  })
+
+/** A person who decides an app's request only when the test says so. */
+const heldDecision = () => {
+  let release: (approved: boolean) => void = () => {}
+  const decided = new Promise<boolean>((resolve) => {
+    release = resolve
+  })
+  return { decided, release: (approved = true) => release(approved) }
+}
+
+test("agent: an app's request waits outside the run's clock - the step's limit runs on", async () => {
+  // The run is not waiting for the person an app asks: a step that hangs still ends at its
+  // limit while the app's request - made while that step runs - is open, and the request is
+  // decided after the run.
+  const times = { startedAt: 0, endedAt: 0 }
+  const held = heldDecision()
+  const appEvents: AgentEvent[] = []
+  let appCall: Promise<void> | undefined
+  const model = scriptedModel(actor([{ name: 'hang', args: {} }]))
+  const agent: Agent = await createAgent({
+    model: model.model,
+    toolMode: 'native',
+    chatTimeoutMs: 300,
+    tools: {
+      hang: defineTool({
+        description: 'Never returns',
+        inputSchema: z.object({}),
+        execute: async (_input, { abortSignal }) => {
+          times.startedAt = Date.now()
+          appCall ??= agent.approveAppToolCall(bookCall(), (e) => appEvents.push(e))
+          await sleep(60_000, abortSignal).catch((err: unknown) => {
+            times.endedAt = Date.now()
+            throw err
+          })
+          return 'never'
+        },
+      }),
+    },
+    toolApproval: {
+      mode: 'ask-writes',
+      rules: { hang: 'allow' },
+      onRequest: (req) => (req.app ? held.decided : true),
+    },
+  })
+  const runEvents: AgentEvent[] = []
+  await agent.run('Do the work', { onEvent: (e) => runEvents.push(e) })
+  assert.ok(times.endedAt > 0, 'the step never ended')
+  const took = times.endedAt - times.startedAt
+  assert.ok(took < 1500, `the app's open request held the step's clock (${took} ms)`)
+  // Each side has its own events: the app's request is not the run's.
+  assert.equal(
+    runEvents.some((e) => e.type === 'tool.approval-requested'),
+    false,
+  )
+  assert.ok(appCall, 'the app never asked')
+  held.release(true)
+  await appCall
+  assert.deepEqual(
+    appEvents.map((e) => e.type),
+    ['tool.approval-requested', 'tool.approval-resolved'],
+  )
+})
+
+test("agent: the run's own wait still stops its clock while an app's request is open", async () => {
+  // Both are with the person at once: the model's write (decided after longer than the step's
+  // limit - the step must not end under it) and the app's (open all along). Deciding one never
+  // starts the clock the other stopped, nor the reverse.
+  const ran: string[] = []
+  const held = heldDecision()
+  let appCall: Promise<void> | undefined
+  const model = scriptedModel(actor([{ name: 'save_note', args: { text: 'a' } }]))
+  const agent: Agent = await createAgent({
+    model: model.model,
+    toolMode: 'native',
+    chatTimeoutMs: 300,
+    tools: {
+      save_note: defineTool({
+        description: 'Save a note',
+        inputSchema: z.object({ text: z.string() }),
+        execute: async ({ text }) => {
+          ran.push(text)
+          return `saved ${text}`
+        },
+      }),
+    },
+    toolApproval: {
+      mode: 'ask-writes',
+      onRequest: async (req) => {
+        if (req.app) return held.decided
+        // The app asks while the model's request is with the person.
+        appCall ??= agent.approveAppToolCall(bookCall())
+        await sleep(800)
+        return true
+      },
+    },
+  })
+  const events: AgentEvent[] = []
+  const result = await agent.run('Do the work', { onEvent: (e) => events.push(e) })
+  assert.deepEqual(ran, ['a'], "the step ended under the run's own approval")
+  assert.deepEqual(
+    result.trace.flatMap((st) => st.toolCalls.map((c) => [c.name, c.ok])),
+    [['save_note', true]],
+  )
+  assert.deepEqual(
+    events.filter((e) => e.type === 'error'),
+    [],
+  )
+  assert.ok(appCall, 'the app never asked')
+  held.release(false)
+  await assert.rejects(appCall, ToolDeniedError)
 })
