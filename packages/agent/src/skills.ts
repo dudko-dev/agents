@@ -21,9 +21,11 @@ import {
   mcpSkillUriRefusal,
   recordMcpSkillConsent,
   resolveMcpSkillConsent,
-  resolveMcpSkillFile,
+  resolveMcpSkillPath,
   resolveMcpSkillServer,
   selectMcpSkills,
+  skillDirectoryListing,
+  skillDirectoryOf,
   type McpSkillConsent,
   type McpSkillConsentView,
   type McpSkillGrants,
@@ -31,6 +33,7 @@ import {
   type McpSkillRecord,
   type McpSkillRunConsent,
   type McpSkillSource,
+  type SkillDirectoryListing,
 } from './mcp-skills.ts'
 import type { ISkill } from './types.ts'
 
@@ -486,23 +489,34 @@ export const prepareMcpSkills = async (
   }
 }
 
-// One file of an MCP skill, as text under its own header. The skill is let in first (asked about
-// if need be): a file of a skill the person refused is not read.
+// One file of an MCP skill, as text under its own header - or, for a directory of it, its listing
+// from the entry the skill was loaded with. The skill is let in first (asked about if need be): a
+// file or a directory of a skill the person refused is not read. A path that is a listed file is
+// that file. The server's live view of the directory is asked only when it declared
+// `directoryRead` (`source.readDirectory`), and only to say whether the skill changed there.
 const readMcpSkillFile = async (
   skill: ISkill,
   skills: readonly ISkill[],
   requested: string,
   scope: IMcpSkillConsentScope | undefined,
   signal?: AbortSignal,
-): Promise<string> => {
+): Promise<string | SkillDirectoryListing> => {
   if (!isMcpSkillAllowed(skill, scope?.run)) {
     await acquireMcpSkill(skill, skills, scope, { input: { name: skill.name }, signal })
   }
   const state = mcpSkillStates.get(skill) as IMcpSkillState
   const loaded = state.loaded as McpSkillLoaded
-  const target = resolveMcpSkillFile(loaded.files, requested)
+  const target = resolveMcpSkillPath(loaded.files, requested)
   if ('refused' in target) {
     throw new Error(`Skill "${skill.name}": ${target.refused}`)
+  }
+  if ('dir' in target) {
+    const drift = await state.source.readDirectory?.(
+      loaded,
+      target.dir,
+      signal ? { signal } : undefined,
+    )
+    return skillDirectoryListing(skill.name, target.dir, target, drift)
   }
   const text = await state.source.readFile(loaded, target.path, signal ? { signal } : undefined)
   return mcpSkillFileText(state.source.server, state.record.uri, target.path, text)
@@ -915,10 +929,12 @@ export const createSkillTools = (
     [READ_SKILL_FILE_TOOL]: markReadOnly(
       tool({
         description:
-          'Read a file bundled with a skill (paths are listed by load_skill). Returns the file content.',
+          'Read a file bundled with a skill (paths are listed by load_skill). Returns the file content; a directory path ("templates/", "." for the root) returns its listing.',
         inputSchema: z.object({
           name: z.string().describe('Skill name'),
-          path: z.string().describe('Skill-relative file path, as listed by load_skill'),
+          path: z
+            .string()
+            .describe('Skill-relative file path, as listed by load_skill, or a directory to list'),
         }),
         execute: async ({ name, path: filePath }, options) => {
           const skill = find(name)
@@ -927,17 +943,26 @@ export const createSkillTools = (
           if (isMcpSkill(skill)) {
             return readMcpSkillFile(skill, skills, filePath, mcp?.scope(), options?.abortSignal)
           }
+          const paths = (skill.files ?? []).map((f) => f.path)
           let wanted: string
           try {
             wanted = normalizeSkillPath(filePath)
           } catch (err) {
+            // Not a file path - perhaps the root (".", "/") or another directory of the skill.
+            const directory = skillDirectoryOf(paths, filePath)
+            if (directory) {
+              return skillDirectoryListing(skill.name, directory.dir, directory)
+            }
             throw new Error((err as Error).message)
           }
           const file = (skill.files ?? []).find((f) => f.path === wanted)
           if (!file) {
-            const listed = (skill.files ?? []).map((f) => f.path)
+            const directory = skillDirectoryOf(paths, filePath)
+            if (directory) {
+              return skillDirectoryListing(skill.name, directory.dir, directory)
+            }
             throw new Error(
-              `Skill "${skill.name}" has no file "${filePath}". Files: ${listed.length ? listed.join(', ') : '(none)'}`,
+              `Skill "${skill.name}" has no file "${filePath}". Files: ${paths.length ? paths.join(', ') : '(none)'}`,
             )
           }
           return file.content

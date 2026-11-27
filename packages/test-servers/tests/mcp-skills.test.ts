@@ -244,3 +244,143 @@ test('skills: `emptyListing` lists nothing; skills/get still answers, faults inc
     await mcp.close()
   }
 })
+
+// `skillDirectoryRead`: `resources/directory/read` (the extension's optional method), on the wire.
+
+const directory = async (url: string, uri: string, cursor?: string) =>
+  rpc(url, 'resources/directory/read', { uri, ...(cursor === undefined ? {} : { cursor }) })
+const childrenOf = (answer: { result?: { resources: { uri: string; mimeType?: string }[] } }) =>
+  (answer.result?.resources ?? []).map((r) => `${r.uri} ${r.mimeType}`)
+
+test('directory reads: off by default - no directoryRead declared, the method unknown', async () => {
+  const mcp = await startLocalMcpServer({ protocol: 'modern', skills: true })
+  try {
+    const discover = await rpc(mcp.url, 'server/discover')
+    assert.deepEqual(discover.result.capabilities.extensions[EXT], {})
+    const read = await directory(mcp.url, 'skill://pdf-processing')
+    assert.ok(read.error, 'not served')
+    assert.notEqual(read.error.code, -32602, 'an unknown method, not a refused directory')
+    assert.deepEqual(mcp.skillDirectoryReads, [])
+  } finally {
+    await mcp.close()
+  }
+})
+
+test('directory reads: declared; the direct children, subdirectories as inode/directory', async () => {
+  const mcp = await startLocalMcpServer({
+    protocol: 'modern',
+    skills: true,
+    skillDirectoryRead: true,
+  })
+  try {
+    const discover = await rpc(mcp.url, 'server/discover')
+    assert.deepEqual(discover.result.capabilities.extensions[EXT], { directoryRead: true })
+    const root = await directory(mcp.url, 'skill://pdf-processing')
+    assert.equal(root.result.resultType, 'complete')
+    assert.equal(typeof root.result.ttlMs, 'number')
+    assert.equal(typeof root.result.cacheScope, 'string')
+    assert.equal(root.result.nextCursor, undefined)
+    assert.deepEqual(childrenOf(root), [
+      'skill://pdf-processing/SKILL.md text/markdown',
+      'skill://pdf-processing/references inode/directory',
+      'skill://pdf-processing/scripts inode/directory',
+    ])
+    for (const r of root.result.resources) assert.equal(typeof r.name, 'string')
+    assert.deepEqual(childrenOf(await directory(mcp.url, 'skill://pdf-processing/references')), [
+      'skill://pdf-processing/references/FORMS.md text/markdown',
+    ])
+    // A prefix above the skills is a directory too; the listing is not recursive.
+    assert.deepEqual(childrenOf(await directory(mcp.url, 'skill://acme')), [
+      'skill://acme/billing inode/directory',
+      'skill://acme/support inode/directory',
+    ])
+    // Not a directory: a file, a trailing slash, nothing at all - -32602.
+    for (const uri of [
+      'skill://pdf-processing/SKILL.md',
+      'skill://pdf-processing/',
+      'skill://nope',
+      'https://example.com/x',
+    ]) {
+      assert.equal((await directory(mcp.url, uri)).error?.code, -32602, uri)
+    }
+    assert.equal(mcp.skillDirectoryReads[0], 'skill://pdf-processing')
+    assert.equal(mcp.skillDirectoryReads.length, 7)
+    assert.ok(
+      mcp.requests.some((r) => r.method === 'resources/directory/read'),
+      'in the request log',
+    )
+  } finally {
+    await mcp.close()
+  }
+})
+
+test('directory reads: `pageSize` pages the children with nextCursor; a bad cursor is -32602', async () => {
+  const mcp = await startLocalMcpServer({
+    protocol: 'modern',
+    skills: true,
+    skillDirectoryRead: { pageSize: 2 },
+  })
+  try {
+    const first = await directory(mcp.url, 'skill://pdf-processing')
+    assert.equal(first.result.resources.length, 2)
+    assert.equal(typeof first.result.nextCursor, 'string')
+    const second = await directory(mcp.url, 'skill://pdf-processing', first.result.nextCursor)
+    assert.equal(second.result.nextCursor, undefined)
+    assert.deepEqual(
+      [...childrenOf(first), ...childrenOf(second)],
+      [
+        'skill://pdf-processing/SKILL.md text/markdown',
+        'skill://pdf-processing/references inode/directory',
+        'skill://pdf-processing/scripts inode/directory',
+      ],
+    )
+    assert.equal((await directory(mcp.url, 'skill://pdf-processing', 'nope')).error?.code, -32602)
+    assert.deepEqual(mcp.skillDirectoryReads, [
+      'skill://pdf-processing',
+      'skill://pdf-processing',
+      'skill://pdf-processing',
+    ])
+  } finally {
+    await mcp.close()
+  }
+})
+
+test('directory reads: the faults - an extra file, an omitted one, an error', async () => {
+  const mcp = await startLocalMcpServer({
+    protocol: 'modern',
+    skills: true,
+    skillDirectoryRead: true,
+  })
+  try {
+    const references = 'skill://pdf-processing/references'
+    const scripts = 'skill://pdf-processing/scripts'
+    mcp.skillFaults.directoryExtra = true
+    assert.deepEqual(childrenOf(await directory(mcp.url, references)), [
+      'skill://pdf-processing/references/FORMS.md text/markdown',
+      `${SKILL_URIS.newFile} text/markdown`,
+    ])
+    const extra = await rpc(mcp.url, 'resources/read', { uri: SKILL_URIS.newFile })
+    assert.ok((extra.result.contents[0].text as string).includes(SKILL_MARKERS.newFile))
+    // The entry is unchanged: the server's listing is ahead of it.
+    const pdf = await rpc(mcp.url, 'skills/get', { uri: 'skill://pdf-processing/SKILL.md' })
+    assert.ok(!JSON.stringify(pdf.result.skill).includes('NEW.md'))
+    mcp.skillFaults.directoryExtra = false
+    assert.deepEqual(childrenOf(await directory(mcp.url, references)), [
+      'skill://pdf-processing/references/FORMS.md text/markdown',
+    ])
+
+    mcp.skillFaults.directoryOmit = true
+    const omitted = await directory(mcp.url, scripts)
+    assert.deepEqual(omitted.result.resources, [], 'still a directory, now empty')
+    mcp.skillFaults.directoryOmit = false
+    assert.deepEqual(childrenOf(await directory(mcp.url, scripts)), [
+      'skill://pdf-processing/scripts/extract.py text/plain',
+    ])
+
+    mcp.skillFaults.directoryError = true
+    assert.equal((await directory(mcp.url, references)).error?.code, -32603)
+    mcp.skillFaults.directoryError = false
+  } finally {
+    await mcp.close()
+  }
+})

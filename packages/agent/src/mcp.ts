@@ -1070,11 +1070,16 @@ export const connectMcpServers = async (
           if (!skillsClient.supported) {
             log('info', `[mcp] ${name}: the server does not offer skills (${MCP_SKILLS_EXTENSION})`)
           } else {
+            // A directory read that shows a skill changed on the server (`directoryRead`) asks
+            // for the same deferred refresh a resource list change does: between runs.
             skills = createMcpSkillCatalog(
               name,
               skillsClient as unknown as McpSkillsClientLike,
               (level, message) => log(level, message),
-              skillsSetting.consent ? { consent: skillsSetting.consent } : {},
+              {
+                ...(skillsSetting.consent ? { consent: skillsSetting.consent } : {}),
+                ...(onToolsChanged ? { onChanged: () => onToolsChanged(name) } : {}),
+              },
             )
             await skills.refresh()
             await bail()

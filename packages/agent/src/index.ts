@@ -33,6 +33,7 @@ export {
   MCP_SKILL_CONSENTS,
   MCP_SKILL_CONSENT_DEFAULT,
   MCP_SKILL_URI_MAX_CHARS,
+  MCP_SKILL_DIRECTORY_ENTRIES_MAX,
   mcpSkillEntryRefusal,
   mcpSkillPreamble,
   mcpSkillUriRefusal,
@@ -40,6 +41,7 @@ export {
   type McpSkillConsentView,
   type McpSkillsOptions,
   type McpSkillsSetting,
+  type SkillDirectoryListing,
 } from './mcp-skills.ts'
 export {
   MCP_ELICITATION_MAX_PER_RUN,

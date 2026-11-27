@@ -891,6 +891,32 @@ source of the agent's skills, beside the host's and the lessons. The choices:
   third-party text, and `skill://` is what the extension's servers use. What comes back is an
   entry like a listed one - the same rules, cap, verification, preamble and consent - and it stays
   in the catalog (on the connection's source) so the next run, and the planner, see it.
+- **A directory is listed from the entry; the server is asked only for staleness.** A skill's
+  instructions name directories ("pick a template from `templates/`"), and the model needs to see
+  what is in one. The entry the skill was loaded with already lists every file (it MUST be
+  complete), and it is what the person approved - so the listing comes from it, and a host "MAY
+  answer from the entry alone". `read_skill_file` takes the directory rather than a new tool: one
+  tool that reads what a skill holds, a path the model already has, no new name in every prompt,
+  and the same consent path as a file (a directory of a skill nobody allowed lists nothing). The
+  server's own view (`resources/directory/read`, only where it declared `directoryRead`) is ahead
+  of or behind the entry, and nothing ties the two to one snapshot - so it can never extend what
+  may be read under the approval ("MUST NOT treat the directory result as extending the
+  manifest"), and a child it adds must not reach the model as a file of the skill. What it can
+  tell is that the skill changed: the listing says so with a count in a sentence of ours (nothing
+  of the server's text), the log says so, and the server's skills are listed again between runs -
+  through the same `onToolsChanged` path a resource list change takes, never behind a running
+  agent, because re-reading a held entry mid-run would swap what a person approved for what the
+  server says now. A changed entry is a new consent key, so the person is asked again: the spec's
+  "a skill that has changed and needs re-approval". A child of the entry the server no longer
+  lists is the entry's own path, so it is named (`notServed`). A failed directory read costs
+  nothing but a log line: the entry is enough. The work is bounded - the SDK walks at most
+  `listMaxPages` pages, and at most 640 entries of the answer are looked at.
+- **`"dynamic"` skills stay declined.** The extension lets a host decline them. A directory read
+  is the only way to find their files, and it verifies nothing: no digest, no size, nothing a
+  consent could bind to, so a yes would cover whatever the server serves next. Admitting them
+  through directory reads would turn the one surface where the extension's integrity is weakest
+  into the one that discovers files - for a feature (instructions as skills) that works without
+  it.
 
 ## MCP elicitation: the host answers, the model never sees the question
 

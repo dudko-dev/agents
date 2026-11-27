@@ -282,7 +282,10 @@ export interface ConnectMcpOptions {
    * callback fires as for a notice, since a change in the gap was not announced.
    * On a server with `skills: true` it also fires for a resource list change
    * (`notifications/resources/list_changed`): that is how a change of its
-   * skills is announced, and `refreshServer` lists them again.
+   * skills is announced, and `refreshServer` lists them again. It fires too,
+   * once per loaded skill, when a directory read (`resources/directory/read`,
+   * a server that declared `directoryRead`) shows that a skill changed on the
+   * server since it was loaded.
    */
   onToolsChanged?: (server: string) => void
   /**
@@ -1097,11 +1100,17 @@ const connectAndList = async (
       log('info', `[mcp] ${name}: the server does not offer skills (${MCP_SKILLS_EXTENSION})`)
     } else {
       const { SkillsClient } = await import('@modelcontextprotocol/client/ext/skills')
+      // A directory read that shows a skill changed on the server (`directoryRead`) is announced
+      // the way a resource list change is: `onToolsChanged`, for a refresh between runs.
+      const notify = opts.onToolsChanged
       skills = createMcpSkillCatalog(
         name,
         new SkillsClient(client, { skipInvalid: true }) as unknown as McpSkillsClientLike,
         (level, message) => log(level, message),
-        skillsSetting.consent ? { consent: skillsSetting.consent } : {},
+        {
+          ...(skillsSetting.consent ? { consent: skillsSetting.consent } : {}),
+          ...(notify ? { onChanged: () => notify(name) } : {}),
+        },
       )
       await skills.refresh()
     }

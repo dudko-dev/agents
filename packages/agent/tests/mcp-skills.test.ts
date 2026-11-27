@@ -118,10 +118,14 @@ interface IStack {
 }
 
 const withStack = async (
-  opts: { protocol?: McpProtocol },
+  opts: { protocol?: McpProtocol; directoryRead?: boolean | { pageSize?: number } },
   body: (s: IStack) => Promise<void>,
 ): Promise<void> => {
-  const srv = await startLocalMcpServer({ protocol: opts.protocol ?? 'modern', skills: true })
+  const srv = await startLocalMcpServer({
+    protocol: opts.protocol ?? 'modern',
+    skills: true,
+    ...(opts.directoryRead ? { skillDirectoryRead: opts.directoryRead } : {}),
+  })
   const state: { scenario: IScenario } = { scenario: {} }
   const llm = await startLocalOpenAI(scripted(() => state.scenario))
   const wire = recorder()
@@ -205,6 +209,7 @@ test('mcp skills: OFF by default - the extension is not declared, nothing of it 
     assert.ok(!methodsOf(wire).some((m) => m.startsWith('skills/')))
     assert.ok(!srv.requests.some((r) => r.method.startsWith('skills/')))
     assert.ok(!methodsOf(wire).includes('resources/read'))
+    assert.ok(!methodsOf(wire).includes('resources/directory/read'))
   })
 })
 
@@ -1325,5 +1330,322 @@ test("mcp skills consent: 'ask' - a skill let in by an earlier run is not active
     const executor = executorRequests(s.llm).slice(before)
     assert.ok(executor.length > 0)
     assert.ok(executor.every((r) => !systemOf(r).includes(SKILL_MARKERS.gitWorkflow)))
+  })
+})
+
+// ── a directory of a skill: read_skill_file on a directory; resources/directory/read ─────────
+
+const directoryReadsOn = (wire: IWire) =>
+  wire.bodies.filter((b) => b.method === 'resources/directory/read')
+
+test('mcp skills directories: listed from the held entry; no directoryRead - never asked on the wire', async () => {
+  await withStack({}, async (s) => {
+    const agent = await s.open()
+    const read = (path: string) => ({
+      name: 'read_skill_file',
+      args: { name: 'docs/pdf-processing', path },
+    })
+    s.scenario = {
+      calls: [
+        { name: 'load_skill', args: { name: 'docs/pdf-processing' } },
+        read('.'),
+        read('references/'),
+        read('./scripts'),
+        read('nope'),
+        read('../git-workflow'),
+      ],
+    }
+    const result = await agent.run({ input: 'fill the form' })
+    const [, root, references, scripts, nope, up] = callsOf(result)
+    assert.deepEqual(root.output, {
+      name: 'docs/pdf-processing',
+      directory: '.',
+      files: [],
+      directories: ['references', 'scripts'],
+    })
+    assert.deepEqual(references.output, {
+      name: 'docs/pdf-processing',
+      directory: 'references',
+      files: ['references/FORMS.md'],
+      directories: [],
+    })
+    assert.deepEqual((scripts.output as { files: string[] }).files, ['scripts/extract.py'])
+    // Neither a file nor a directory of it: the error it always was.
+    assert.equal(nope.ok, false)
+    assert.match(errorText(nope.output), /has no file "nope"; its files: references\/FORMS.md/)
+    assert.equal(up.ok, false)
+    assert.match(errorText(up.output), /not a path inside the skill/)
+    // The server did not declare directoryRead: the method is never called - not even tried.
+    assert.deepEqual(directoryReadsOn(s.wire), [])
+    assert.deepEqual(s.srv.skillDirectoryReads, [])
+    assert.ok(!s.logs.some((l) => l.includes('resources/directory/read')), s.logs.join('\n'))
+    // A listing reads no file.
+    assert.deepEqual(s.srv.skillReads, ['skill://pdf-processing/SKILL.md'])
+  })
+})
+
+test("mcp skills directories: with directoryRead the skill's own server is asked, by the directory URI, page by page", async () => {
+  const other = await startLocalMcpServer({
+    protocol: 'modern',
+    skills: true,
+    skillDirectoryRead: true,
+  })
+  try {
+    await withStack({ directoryRead: { pageSize: 1 } }, async (s) => {
+      const agent = await s.open(
+        {},
+        {
+          mcpServers: {
+            docs: {
+              url: s.srv.url,
+              protocol: 'modern',
+              skills: { consent: 'never' },
+              fetch: s.wire.fetch,
+            },
+            other: { url: other.url, protocol: 'modern', skills: { consent: 'never' } },
+          },
+        },
+      )
+      s.scenario = {
+        calls: [
+          { name: 'read_skill_file', args: { name: 'docs/pdf-processing', path: '/' } },
+          { name: 'read_skill_file', args: { name: 'docs/pdf-processing', path: 'references' } },
+        ],
+      }
+      const result = await agent.run({ input: 'fill the form' })
+      const [root, references] = callsOf(result)
+      assert.deepEqual(root.output, {
+        name: 'docs/pdf-processing',
+        directory: '.',
+        files: [],
+        directories: ['references', 'scripts'],
+      })
+      assert.deepEqual((references.output as { files: string[] }).files, ['references/FORMS.md'])
+      assert.equal((references.output as { note?: string }).note, undefined, 'the views agree')
+      // The root has three children (SKILL.md, references, scripts): three pages of one.
+      assert.deepEqual(s.srv.skillDirectoryReads, [
+        'skill://pdf-processing',
+        'skill://pdf-processing',
+        'skill://pdf-processing',
+        'skill://pdf-processing/references',
+      ])
+      const sent = directoryReadsOn(s.wire).map((b) => b.params as Record<string, unknown>)
+      assert.deepEqual(
+        sent.map((p) => [p.uri, p.cursor]),
+        [
+          ['skill://pdf-processing', undefined],
+          ['skill://pdf-processing', '1'],
+          ['skill://pdf-processing', '2'],
+          ['skill://pdf-processing/references', undefined],
+        ],
+      )
+      // Never another server: the skill's own only.
+      assert.deepEqual(other.skillDirectoryReads, [])
+      assert.ok(!other.requests.some((r) => r.method === 'resources/directory/read'))
+    })
+  } finally {
+    await other.close()
+  }
+})
+
+test('mcp skills directories: what the server lists beyond the entry never reaches the model - a note, a warning, a refresh', async () => {
+  await withStack({ directoryRead: true }, async (s) => {
+    s.srv.skillFaults.directoryExtra = true
+    const agent = await s.open()
+    const lists = () => s.srv.requests.filter((r) => r.method === 'skills/list').length
+    const listedAtConnect = lists()
+    s.scenario = {
+      calls: [
+        { name: 'load_skill', args: { name: 'docs/pdf-processing' } },
+        { name: 'read_skill_file', args: { name: 'docs/pdf-processing', path: 'references/' } },
+      ],
+    }
+    const result = await agent.run({ input: 'fill the form' })
+    const listing = callsOf(result)[1].output as Record<string, unknown>
+    assert.deepEqual(listing.files, ['references/FORMS.md'])
+    assert.equal(listing.notServed, undefined)
+    assert.match(
+      String(listing.note),
+      /^The server now lists 1 more item\(s\) here than the approved entry of this skill: the skill changed on the server\./,
+    )
+    // Not its name, URI or anything of it: in the result, and in everything the model was sent.
+    assert.ok(!JSON.stringify(listing).includes('NEW'))
+    assert.ok(!seenByModel(s.llm).includes('NEW.md'))
+    assert.ok(!seenByModel(s.llm).includes(SKILL_MARKERS.newFile))
+    assert.ok(!s.srv.skillReads.includes(SKILL_URIS.newFile), 'never read')
+    assert.ok(
+      s.logs.some((l) =>
+        /^warn \[mcp\] docs: the skill "pdf-processing" \(skill:\/\/pdf-processing\/SKILL.md\) changed on the server - its directory "references" lists 1 item\(s\) its entry does not/.test(
+          l,
+        ),
+      ),
+    )
+    assert.ok(!s.logs.some((l) => l.includes('NEW.md')), 'counts only, in the log too')
+    // The server's skills are listed again - between runs, not behind this one.
+    const deadline = Date.now() + 10_000
+    while (lists() === listedAtConnect && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 25))
+    }
+    assert.equal(lists(), listedAtConnect + 1, 'one refresh after the run')
+    // The entry did not change (only the directory did): the file still cannot be read.
+    s.scenario = {
+      calls: [
+        {
+          name: 'read_skill_file',
+          args: { name: 'docs/pdf-processing', path: 'references/NEW.md' },
+        },
+      ],
+    }
+    const again = await agent.run({ input: 'read the new one' })
+    assert.equal(callsOf(again)[0].ok, false)
+    assert.match(errorText(callsOf(again)[0].output), /has no file "references\/NEW.md"/)
+    assert.ok(!s.srv.skillReads.includes(SKILL_URIS.newFile))
+  })
+})
+
+test('mcp skills directories: what the entry holds and the server no longer lists is marked notServed', async () => {
+  await withStack({ directoryRead: true }, async (s) => {
+    s.srv.skillFaults.directoryOmit = true
+    const agent = await s.open()
+    s.scenario = {
+      calls: [{ name: 'read_skill_file', args: { name: 'docs/pdf-processing', path: 'scripts' } }],
+    }
+    const result = await agent.run({ input: 'run it' })
+    const listing = callsOf(result)[0].output as Record<string, unknown>
+    assert.deepEqual(listing.files, ['scripts/extract.py'], 'kept: the entry is authoritative')
+    assert.deepEqual(listing.notServed, ['scripts/extract.py'])
+    assert.match(String(listing.note), /1 item\(s\) listed here \(notServed\) are no longer listed/)
+    assert.ok(s.logs.some((l) => /warn .*its entry does not and not 1 it does/.test(l)))
+  })
+})
+
+test('mcp skills directories: a directory read that fails - the listing from the entry, no note, a log line', async () => {
+  await withStack({ directoryRead: true }, async (s) => {
+    s.srv.skillFaults.directoryError = true
+    const agent = await s.open()
+    s.scenario = {
+      calls: [
+        { name: 'read_skill_file', args: { name: 'docs/pdf-processing', path: 'references' } },
+      ],
+    }
+    const result = await agent.run({ input: 'fill the form' })
+    const [call] = callsOf(result)
+    assert.equal(call.ok, true)
+    assert.deepEqual(call.output, {
+      name: 'docs/pdf-processing',
+      directory: 'references',
+      files: ['references/FORMS.md'],
+      directories: [],
+    })
+    assert.deepEqual(s.srv.skillDirectoryReads, ['skill://pdf-processing/references'])
+    assert.ok(
+      s.logs.some((l) =>
+        /^warn \[mcp\] docs: resources\/directory\/read of skill:\/\/pdf-processing\/references failed - .*\(-32603\); the directory is listed from the skill's entry alone/.test(
+          l,
+        ),
+      ),
+    )
+  })
+})
+
+test('mcp skills directories: before consent a directory is refused exactly like a file - nothing asked of the server', async () => {
+  await withStack({ directoryRead: true }, async (s) => {
+    const asked: IToolApprovalRequest[] = []
+    const agent = await s.open(
+      { skills: true },
+      {
+        toolApproval: {
+          onRequest: (req) => {
+            asked.push(req)
+            return { approved: false, reason: 'no' }
+          },
+        },
+      },
+    )
+    s.scenario = {
+      calls: [
+        { name: 'read_skill_file', args: { name: 'docs/pdf-processing', path: 'references' } },
+        {
+          name: 'read_skill_file',
+          args: { name: 'docs/pdf-processing', path: 'references/FORMS.md' },
+        },
+      ],
+    }
+    const result = await agent.run({ input: 'fill the form' })
+    const [directory, file] = callsOf(result)
+    assert.equal(directory.ok, false)
+    assert.match(
+      errorText(directory.output),
+      /The user did not allow the skill "docs\/pdf-processing" of the MCP server "docs" to be loaded \(no\)/,
+    )
+    assert.equal(file.ok, false)
+    assert.match(errorText(file.output), /already refused the skill "docs\/pdf-processing"/)
+    assert.deepEqual(
+      skillAsks(asked).map((r) => r.skill?.name),
+      ['docs/pdf-processing'],
+    )
+    assert.deepEqual(s.srv.skillDirectoryReads, [], 'no directory read before a yes')
+    assert.deepEqual(s.srv.skillReads, ['skill://pdf-processing/SKILL.md'])
+  })
+  // Nobody to ask: not loaded, the directory not listed.
+  await withStack({ directoryRead: true }, async (s) => {
+    const agent = await s.open({ skills: true })
+    s.scenario = {
+      calls: [
+        { name: 'read_skill_file', args: { name: 'docs/pdf-processing', path: 'references' } },
+      ],
+    }
+    const result = await agent.run({ input: 'fill the form' })
+    assert.equal(callsOf(result)[0].ok, false)
+    assert.match(errorText(callsOf(result)[0].output), /no one can be asked/)
+    assert.deepEqual(s.srv.skillDirectoryReads, [])
+  })
+})
+
+test("mcp skills directories: the host's skills list their directories too", async () => {
+  await withStack({ directoryRead: true }, async (s) => {
+    const agent = await s.open(
+      { skills: undefined },
+      {
+        skills: [
+          {
+            name: 'invoices',
+            description: 'Invoice rules',
+            content: 'Pick a template from templates/.',
+            files: [
+              { path: 'rates.json', content: '{}' },
+              { path: 'templates/eu.md', content: 'EU' },
+              { path: 'templates/regional/nordics.md', content: 'N' },
+            ],
+          },
+        ],
+      },
+    )
+    s.scenario = {
+      calls: [
+        { name: 'read_skill_file', args: { name: 'invoices', path: '.' } },
+        { name: 'read_skill_file', args: { name: 'invoices', path: 'templates/' } },
+        { name: 'read_skill_file', args: { name: 'invoices', path: 'templates/eu.md' } },
+        { name: 'read_skill_file', args: { name: 'invoices', path: 'nope' } },
+      ],
+    }
+    const result = await agent.run({ input: 'invoice it' })
+    const [root, templates, file, nope] = callsOf(result)
+    assert.deepEqual(root.output, {
+      name: 'invoices',
+      directory: '.',
+      files: ['rates.json'],
+      directories: ['templates'],
+    })
+    assert.deepEqual(templates.output, {
+      name: 'invoices',
+      directory: 'templates',
+      files: ['templates/eu.md'],
+      directories: ['templates/regional'],
+    })
+    assert.equal(file.output, 'EU')
+    assert.equal(nope.ok, false)
+    assert.match(errorText(nope.output), /has no file "nope"/)
+    assert.deepEqual(s.srv.skillDirectoryReads, [], 'a host skill asks no server')
   })
 })

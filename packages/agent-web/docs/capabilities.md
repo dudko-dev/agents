@@ -337,7 +337,13 @@ Progressive disclosure:
 2. The planner lists the skills that apply (`plan.skills`); their full
    instructions enter the executor, replanner and synthesizer prompts.
 3. The executor can pull one in later with the built-in `load_skill` tool and
-   read bundled files with `read_skill_file` (both read-only, never gated).
+   read bundled files with `read_skill_file` (both read-only, never gated). Given a directory of
+   the skill instead of a file (`templates/`, `./templates`, `.` / `''` / `/` for the root),
+   `read_skill_file` returns its listing: `{ name, directory, files, directories, more? }`
+   (`SkillDirectoryListing`) - the direct children, by their paths inside the skill, sorted,
+   subdirectories first, at most 64 together (`more` counts the rest). A file of that name wins;
+   a path that is neither keeps the "no file" error; `..`, a URI or scheme, a query, a fragment or
+   a backslash is never a directory.
 
 `skill.activated { name, by: 'plan' | 'tool' }` is emitted; `RunResult.skills`
 lists the skills used; `agent.skills` lists the configured ones (and, with
@@ -381,7 +387,8 @@ What happens, in order:
    follows the Agent Skills rules, there is a description, `resources` is the complete list of its
    files - each inside the skill's directory, listed once, with a `sha256:` digest and a size -
    within the extension's limits (512 files, 16 MiB). A `"dynamic"` entry (no digests) is
-   declined. A refused entry is a `warn` line naming why. Nothing is read: lazy retrieval.
+   declined - deliberately, also where the server serves directory reads (step 5a). A refused
+   entry is a `warn` line naming why. Nothing is read: lazy retrieval.
 3. **The catalog.** The skills join `skills` as `<server>/<skill>`, the server by its key in the
    connection (the host's label). Host skills and lessons cannot hold a `/`, so no name is ever
    shared: a server cannot shadow one of yours or another server's skill, and a clash of bare
@@ -435,6 +442,31 @@ What happens, in order:
    read at another skill or another server), from its own server, verified the same way, text only,
    cut at `MCP_SKILL_FILE_MAX_CHARS` (32 000), under a header that says it is text to read, never a
    program to run. A script a skill bundles is shown as text; nothing runs it.
+   5a. **Directories.** `read_skill_file` with a directory of a loaded skill (step 3) lists it
+   from the entry it was LOADED with - the held entry is authoritative for what may be read - after
+   the same consent as a file (a refused skill lists nothing). When the server declared
+   `directoryRead` (the SDK's `SkillsClient.directoryRead`, on the 2026-07-28 connection), the
+   agent also sends `resources/directory/read` for that directory - the skill's root URI, or
+   `<root>/<dir>`, without a trailing slash, every page walked (bounded by the client's
+   `listMaxPages`), with the tool call's abort signal - to THAT server only, and only to see
+   whether the skill changed there (`compareMcpSkillDirectory`: a live entry counts only as a
+   direct child of that directory, its name compared with its percent escapes decoded, at most
+   `MCP_SKILL_DIRECTORY_ENTRIES_MAX` (640) looked at):
+   - a child the server lists and the entry does not is NEVER shown - not its name, URI,
+     description or MIME type - and cannot be read; the listing gets `note`, a fixed sentence
+     with the count ("The server now lists 1 more item(s) here than the approved entry of this
+     skill: the skill changed on the server. They are not shown and cannot be read under the
+     current approval. The skill is read again, and asked about again, when the server's skills
+     are refreshed."), a `warn` names the server, the skill and the counts, and `onToolsChanged`
+     fires once for that loaded skill, so the host lists the server's skills again between runs
+     (`refreshServer`): never behind a run;
+   - a child of the entry the server no longer lists stays in `files` / `directories` and is also
+     named in `notServed` (a read of it will fail), with a `note`;
+   - a directory read that fails (`-32602`, the SDK's capability error, a bad result) leaves the
+     listing to the entry alone: no note, a `warn` line; a stop of the run still stops it.
+   Without `directoryRead` the method is never called; without `skills` nothing of it exists.
+   `"dynamic"` skills stay declined (step 2): a directory read is the only way to find their
+   files, and it verifies nothing - a consent could not bind to what the model would read.
 6. **Changes.** The extension has no notice of its own: a server announces a change of its skills
    as a resource list change. With `onToolsChanged`, the connection listens for
    `notifications/resources/list_changed` too (on 2026-07-28, `resourcesListChanged` on the same
@@ -468,9 +500,7 @@ rule or an earlier "always allow" say; the request carries `mcpSkills` (the skil
 with no `onRequest` the call is refused. The extension requires it: a server's skill must not lead
 to code running here without a person's approval. Nothing else about consent changes.
 
-Not done (yet): `resources/directory/read` is never called (a skill's files are known from its
-entry, which the extension allows a host to answer from). A skill whose listing changed is re-read
-on the next refresh, not with `skills/get`.
+A skill whose listing changed is re-read on the next refresh, not with `skills/get`.
 
 A server's skills come with its tools, like its instructions (each mounted tool carries them): a
 server none of whose tools is mounted offers none. `RunResult.skills`, `agent.skills` (with

@@ -6,9 +6,11 @@
  * (`selectMcpSkills`), the files of a loaded skill the model may read (`resolveMcpSkillFile`),
  * the preamble a skill's text is loaded under, the mark that carries a server's skills on its
  * tools (`markMcpSkills` / `collectMcpSkillSources`), a skill the model names by URI
- * (`mcpSkillUriRefusal`, `resolveMcpSkillServer`: `skills/get` to that one server only) and the
+ * (`mcpSkillUriRefusal`, `resolveMcpSkillServer`: `skills/get` to that one server only), the
  * person's consent before a skill's text enters the model's context (`decideMcpSkillConsent`,
- * `mcpSkillConsentView`). Pure, no imports.
+ * `mcpSkillConsentView`) and a directory of a skill (`skillDirectoryOf`, `resolveMcpSkillPath`,
+ * `skillDirectoryListing` - for every kind of skill - and, for a server that serves
+ * `resources/directory/read`, `compareMcpSkillDirectory`). Pure, no imports.
  *
  * A server's skills are third-party text. They reach the model only as knowledge, under
  * `mcpSkillPreamble`, and - unless the host vetted the server (`consent: 'never'`) - only after a
@@ -119,7 +121,10 @@ export const mcpSkillFilePath = (skillUri: string, fileUri: unknown): string | u
  *   naming rules;
  * - a description to show in the catalog;
  * - `resources` is the complete list of its files (Resources): `"dynamic"` content is declined
- *   (a host MAY: there is nothing to verify it against), anything else is invalid;
+ *   (a host MAY: there is nothing to verify it against, and a consent could not bind to its
+ *   content - a deliberate choice: `resources/directory/read`, the only way to find such a
+ *   skill's files, gives no integrity either, so it is never used to let one in), anything else
+ *   is invalid;
  * - every file is `SKILL.md` or a file inside the skill's directory, listed once, with a
  *   `sha256:` digest and a byte size, and `SKILL.md` is listed;
  * - at most {@link MCP_SKILL_MAX_RESOURCES} files and {@link MCP_SKILL_MAX_TOTAL_BYTES} bytes
@@ -355,6 +360,292 @@ export const resolveMcpSkillFile = (
     return { refused: `the skill has no file "${oneLine(requested)}"; its files: ${listed}` }
   }
   return { path }
+}
+
+// ── a directory of a skill (`read_skill_file` on a directory) ─────────────────
+//
+// A skill's instructions often name a directory ("pick a template from templates/"). The entry a
+// skill was loaded with lists all its files (Resources: the array "MUST be complete"), so a
+// directory is listed from that entry alone - for every kind of skill: the host's, a lesson, an
+// MCP server's ("it MAY answer from the entry alone"). For an MCP skill whose server declared
+// `directoryRead`, the server's live view (`resources/directory/read`) is asked too, ONLY to tell
+// whether the skill changed on the server since (Directory Reads and the Held Entry): what the
+// server lists beyond the entry is counted and never named - a host "MUST NOT surface it to the
+// model as a file of the skill" and "MUST NOT treat the directory result as extending the
+// manifest" - and what the entry holds and the server no longer lists is marked.
+
+/**
+ * The most entries of one `resources/directory/read` answer looked at: the specification's 512
+ * files per skill, and room for the directories among them. The rest are not looked at.
+ */
+export const MCP_SKILL_DIRECTORY_ENTRIES_MAX = MCP_SKILL_MAX_RESOURCES + 128
+
+/** The MIME type of a directory resource. */
+export const MCP_SKILL_DIRECTORY_MIME_TYPE = 'inode/directory'
+
+/**
+ * The directory of a skill that `requested` names, as `read_skill_file` takes it: `''` for the
+ * skill's root (`''`, `.`, `./`, `/`), else its path inside the skill without a leading `./` or a
+ * trailing `/` (`templates`, `templates/`, `./templates/` - all `templates`). Never a URI or a
+ * scheme, an absolute path, a `.`, `..` or empty segment, a query, a fragment or a backslash -
+ * those name no directory of the skill (the same spirit as {@link resolveMcpSkillFile}).
+ */
+export const skillDirectoryRef = (requested: unknown): { dir: string } | { refused: string } => {
+  if (typeof requested !== 'string') return { refused: 'no directory path given' }
+  const raw = requested.trim()
+  if (raw === '' || raw === '.' || raw === './' || raw === '/') return { dir: '' }
+  const refused = { refused: `"${oneLine(requested)}" is not a directory inside the skill` }
+  if (/^[a-z][a-z0-9+.-]*:/i.test(raw) || raw.startsWith('/') || /[?#\\]/.test(raw)) {
+    return refused
+  }
+  const dir = raw.replace(/^\.\/+/, '').replace(/\/+$/, '')
+  if (!dir) return { dir: '' }
+  if (dir.split('/').some((s) => !s || s === '.' || s === '..')) return refused
+  return { dir }
+}
+
+const isPlainPath = (path: string): boolean =>
+  path.split('/').every((s) => s !== '' && s !== '.' && s !== '..')
+
+/**
+ * The direct children of the directory `dir` ({@link skillDirectoryRef}) among a skill's file
+ * paths - its files and its subdirectories, each by its path inside the skill, sorted - or
+ * `undefined` when `dir` is no directory of the skill (no file under it; the root always is one).
+ * Not recursive, as the specification's listing is not. A path with an empty, `.` or `..`
+ * segment is no file of any directory.
+ */
+export const skillDirectoryChildren = (
+  paths: readonly string[],
+  dir: string,
+): { files: string[]; directories: string[] } | undefined => {
+  const prefix = dir ? `${dir}/` : ''
+  const files = new Set<string>()
+  const directories = new Set<string>()
+  for (const path of paths) {
+    if (typeof path !== 'string' || !isPlainPath(path) || !path.startsWith(prefix)) continue
+    const rest = path.slice(prefix.length)
+    const cut = rest.indexOf('/')
+    if (cut < 0) files.add(path)
+    else directories.add(`${prefix}${rest.slice(0, cut)}`)
+  }
+  if (dir && !files.size && !directories.size) return undefined
+  return { files: [...files].sort(), directories: [...directories].sort() }
+}
+
+/**
+ * The directory of a skill that `requested` names among its file paths, with its direct children
+ * ({@link skillDirectoryRef}, {@link skillDirectoryChildren}), or `undefined` when it names none.
+ * For a host's skill or a lesson, asked only once `requested` is none of its files.
+ */
+export const skillDirectoryOf = (
+  paths: readonly string[],
+  requested: unknown,
+): { dir: string; files: string[]; directories: string[] } | undefined => {
+  const ref = skillDirectoryRef(requested)
+  if ('refused' in ref) return undefined
+  const children = skillDirectoryChildren(paths, ref.dir)
+  return children ? { dir: ref.dir, ...children } : undefined
+}
+
+/**
+ * What `read_skill_file` names in a loaded MCP skill whose entry lists `files`: a file it lists -
+ * a file always wins ({@link resolveMcpSkillFile}) - else a directory of it
+ * ({@link skillDirectoryOf}), else the file rule's refusal, as it always was.
+ */
+export const resolveMcpSkillPath = (
+  files: readonly string[],
+  requested: unknown,
+):
+  | { path: string }
+  | { dir: string; files: string[]; directories: string[] }
+  | { refused: string } => {
+  const file = resolveMcpSkillFile(files, requested)
+  if ('path' in file) return file
+  return skillDirectoryOf(files, requested) ?? file
+}
+
+/**
+ * What a server's live view of a directory says against the entry a skill was loaded with
+ * ({@link compareMcpSkillDirectory}): a count and paths of that entry - nothing of the server's
+ * own listing.
+ */
+export interface McpSkillDirectoryDrift {
+  /** Children the server lists that the entry does not hold: counted, never named. */
+  extra: number
+  /** Children the entry holds (paths inside the skill) that the server does not list, sorted. */
+  notServed: string[]
+  /**
+   * The server listed more than {@link MCP_SKILL_DIRECTORY_ENTRIES_MAX} entries: only those were
+   * looked at - `extra` is at least what it says, and `notServed` is left empty (unknown).
+   */
+  truncated: boolean
+}
+
+// A URI as the WHATWG parser writes it, without its fragment; `undefined` when it does not parse.
+const canonicalUriOf = (uri: string): string | undefined => {
+  try {
+    const url = new URL(uri)
+    url.hash = ''
+    return url.href
+  } catch {
+    return undefined
+  }
+}
+
+// A path segment, its percent escapes decoded - every valid UTF-8 run, an escape that is not one
+// kept as it is - so that the ways of writing one name compare equal (`Q&A.md`, `Q%26A.md`), the
+// way the SDK keys a skill's files (`skillFileKey`).
+const decodedSegment = (segment: string): string =>
+  segment.replace(/(?:%[0-9A-Fa-f]{2})+/g, (run) => {
+    let out = ''
+    for (let at = 0; at < run.length;) {
+      const lead = Number.parseInt(run.slice(at + 1, at + 3), 16)
+      const width = 3 * (lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc0 ? 2 : 1)
+      try {
+        out += decodeURIComponent(run.slice(at, at + width))
+        at += width
+      } catch {
+        out += run.slice(at, at + 3)
+        at += 3
+      }
+    }
+    return out
+  })
+
+const isPlainName = (name: string): boolean =>
+  name !== '' && name !== '.' && name !== '..' && !name.includes('/') && !name.includes('\0')
+
+/**
+ * The server's live view of a directory of a skill (`resources/directory/read`) against the entry
+ * the skill was loaded with. `manifest`: every file of that entry by its path inside the skill,
+ * `SKILL.md` included; `dir`: the directory ({@link skillDirectoryRef}); `root`: the skill's root
+ * directory URI (its `SKILL.md` URI without `/SKILL.md`); `live`: what the server answered.
+ *
+ * Only a live entry with a `uri` naming a DIRECT child of that directory counts - inside the root
+ * once parsed, no query, no segment that decodes to nothing, `.`, `..` or a `/`; anything else is
+ * ignored. Names are compared with their percent escapes decoded (two spellings of one name are
+ * one child). A child the server marks `inode/directory` matches a directory of the entry, one
+ * with another MIME type a file, one without a MIME type either. At most
+ * {@link MCP_SKILL_DIRECTORY_ENTRIES_MAX} live entries are looked at.
+ */
+export const compareMcpSkillDirectory = (o: {
+  manifest: readonly string[]
+  dir: string
+  root: string
+  live: readonly unknown[]
+}): McpSkillDirectoryDrift => {
+  const own = skillDirectoryChildren(o.manifest, o.dir) ?? { files: [], directories: [] }
+  const root = canonicalUriOf(o.root)
+  if (!root) return { extra: 0, notServed: [], truncated: false }
+  const at = o.dir ? o.dir.split('/').map(decodedSegment) : []
+  const nameOf = (path: string): string => decodedSegment(path.slice(path.lastIndexOf('/') + 1))
+  const ownFiles = new Map(own.files.map((p) => [nameOf(p), p]))
+  const ownDirectories = new Map(own.directories.map((p) => [nameOf(p), p]))
+  const truncated = o.live.length > MCP_SKILL_DIRECTORY_ENTRIES_MAX
+  const seen = new Set<string>()
+  const extra = new Set<string>()
+  for (const item of o.live.slice(0, MCP_SKILL_DIRECTORY_ENTRIES_MAX)) {
+    if (!isRecord(item) || typeof item.uri !== 'string') continue
+    const uri = canonicalUriOf(item.uri)
+    if (!uri || uri.includes('?') || !uri.startsWith(`${root}/`)) continue
+    const segments = uri
+      .slice(root.length + 1)
+      .split('/')
+      .map(decodedSegment)
+    if (segments.length !== at.length + 1 || !segments.every(isPlainName)) continue
+    if (at.some((s, i) => segments[i] !== s)) continue
+    const name = segments[segments.length - 1]
+    const kind =
+      typeof item.mimeType !== 'string'
+        ? 'any'
+        : item.mimeType === MCP_SKILL_DIRECTORY_MIME_TYPE
+          ? 'directory'
+          : 'file'
+    const file = kind !== 'directory' ? ownFiles.get(name) : undefined
+    const directory = kind !== 'file' ? ownDirectories.get(name) : undefined
+    if (file !== undefined) seen.add(file)
+    if (directory !== undefined) seen.add(directory)
+    if (file === undefined && directory === undefined) extra.add(`${kind} ${name}`)
+  }
+  const notServed = truncated
+    ? []
+    : [...own.directories, ...own.files].filter((p) => !seen.has(p)).sort()
+  return { extra: extra.size, notServed, truncated }
+}
+
+/**
+ * The fixed sentence a directory listing of an MCP skill carries when the server's live view
+ * disagrees with the entry the skill was loaded with: counts only, nothing the server wrote.
+ * `undefined` when they agree.
+ */
+export const mcpSkillDirectoryNote = (
+  extra: number,
+  notServed: number,
+  truncated = false,
+): string | undefined => {
+  const parts: string[] = []
+  if (extra > 0) {
+    parts.push(
+      `The server now lists ${truncated ? 'at least ' : ''}${extra} more item(s) here than the approved entry of this skill: the skill changed on the server. They are not shown and cannot be read under the current approval.`,
+    )
+  }
+  if (notServed > 0) {
+    parts.push(
+      `${notServed} item(s) listed here (notServed) are no longer listed by the server: a read of them will fail - the skill changed on the server.`,
+    )
+  }
+  if (!parts.length) return undefined
+  return `${parts.join(' ')} The skill is read again, and asked about again, when the server's skills are refreshed.`
+}
+
+/** What `read_skill_file` answers for a directory of a skill (every path inside the skill). */
+export interface SkillDirectoryListing {
+  /** The skill's name in the catalog. */
+  name: string
+  /** The directory: `.` for the skill's root, else its path inside the skill. */
+  directory: string
+  /** Its files (each read with `read_skill_file`), sorted. */
+  files: string[]
+  /** Its subdirectories (each listed the same way), sorted. */
+  directories: string[]
+  /** How many more it holds than the two lists show ({@link MCP_SKILL_FILES_SHOWN_MAX} in all). */
+  more?: number
+  /** Shown above, but no longer listed by the skill's MCP server: a read of them will fail. */
+  notServed?: string[]
+  /** The skill changed on its MCP server since it was loaded ({@link mcpSkillDirectoryNote}). */
+  note?: string
+}
+
+/**
+ * A directory listing for the model: its subdirectories first, then its files, together at most
+ * {@link MCP_SKILL_FILES_SHOWN_MAX} (`more` counts the rest). With `drift` (an MCP skill whose
+ * server serves directory reads), `notServed` names those shown that the server no longer lists,
+ * and `note` says the skill changed - by counts only.
+ */
+export const skillDirectoryListing = (
+  name: string,
+  dir: string,
+  children: { files: readonly string[]; directories: readonly string[] },
+  drift?: McpSkillDirectoryDrift,
+): SkillDirectoryListing => {
+  const directories = children.directories.slice(0, MCP_SKILL_FILES_SHOWN_MAX)
+  const files = children.files.slice(0, MCP_SKILL_FILES_SHOWN_MAX - directories.length)
+  const more =
+    children.files.length + children.directories.length - files.length - directories.length
+  const shown = new Set([...directories, ...files])
+  const notServed = drift ? drift.notServed.filter((p) => shown.has(p)) : []
+  const note = drift
+    ? mcpSkillDirectoryNote(drift.extra, notServed.length, drift.truncated)
+    : undefined
+  return {
+    name,
+    directory: dir || '.',
+    files,
+    directories,
+    ...(more > 0 ? { more } : {}),
+    ...(notServed.length ? { notServed } : {}),
+    ...(note ? { note } : {}),
+  }
 }
 
 // ── a skill a server names by its URI (`skills/get`) ──────────────────────────
@@ -777,6 +1068,19 @@ export interface McpSkillSource {
     path: string,
     options?: { signal?: AbortSignal },
   ) => Promise<string>
+  /**
+   * Only for a server that declared `directoryRead`: its live view of a directory of a loaded
+   * skill (`resources/directory/read` to THIS server, of the skill's root or `<root>/<dir>`),
+   * compared with the entry the skill was loaded with ({@link compareMcpSkillDirectory}) - a
+   * count and paths of that entry, nothing of the server's listing. `undefined` when the read
+   * failed (logged): the directory is then listed from the entry alone. Throws when `dir` is no
+   * directory of that entry (before any request), or when `options.signal` aborted the read.
+   */
+  readDirectory?: (
+    loaded: McpSkillLoaded,
+    dir: string,
+    options?: { signal?: AbortSignal },
+  ) => Promise<McpSkillDirectoryDrift | undefined>
 }
 
 // A symbol from the global registry, so the mark survives between bundles of the same package
@@ -846,6 +1150,13 @@ export interface McpSkillsClientLike {
     ref?: string,
     options?: { signal?: AbortSignal },
   ): Promise<{ text?: string; body?: string }>
+  /** The server declared `directoryRead`: it serves `resources/directory/read`. */
+  readonly directoryRead?: boolean
+  /**
+   * `resources/directory/read` of a directory URI, every page walked (bounded by the client's
+   * `listMaxPages`); throws on a server that did not declare `directoryRead`.
+   */
+  readDirectory?(uri: string, options?: { signal?: AbortSignal }): Promise<{ resources: unknown[] }>
 }
 
 /** The most of a server's error message a log line or a refusal quotes. */
@@ -884,12 +1195,18 @@ export const mcpSkillGetFailure = (err: unknown): string => {
  * (SKILL.md, verified) and `readFile` (a file the entry the skill was LOADED with lists, verified
  * against that entry; text only; kept once read). Nothing is read at listing time: a file is read
  * when it is needed. `options.consent` is the server's config (`skills: { consent }`), passed on.
+ *
+ * Only when the client says the server declared `directoryRead`, `source.readDirectory` too: the
+ * server's live view of a directory of a loaded skill, compared with the held entry. When it
+ * disagrees, a warning is logged (counts only) and `options.onChanged` is called - once per held
+ * entry - for the host to list the server's skills again between runs: the held entry is never
+ * re-read behind a run.
  */
 export const createMcpSkillCatalog = (
   server: string,
   client: McpSkillsClientLike,
   log: (level: 'info' | 'warn', message: string) => void,
-  options: { consent?: McpSkillConsent } = {},
+  options: { consent?: McpSkillConsent; onChanged?: () => void } = {},
 ): { source: McpSkillSource; refresh: () => Promise<void> } => {
   let records: McpSkillRecord[] = []
   let entries = new Map<string, McpSkillEntryLike>()
@@ -901,6 +1218,56 @@ export const createMcpSkillCatalog = (
   const held = new WeakMap<McpSkillLoaded, McpSkillEntryLike>()
   // Per held entry: the files read so far, by path.
   const files = new WeakMap<McpSkillEntryLike, Map<string, string>>()
+  // Held entries a directory read showed changed on the server (announced once each).
+  const changed = new WeakSet<McpSkillEntryLike>()
+
+  const readDirectory: NonNullable<McpSkillSource['readDirectory']> = async (loaded, dir, opts) => {
+    const entry = held.get(loaded)
+    if (!entry) {
+      throw new Error(`the skill ${loaded.uri} was not loaded from the MCP server "${server}"`)
+    }
+    const ownFiles = mcpSkillRecordOf(entry).files
+    const ref = skillDirectoryRef(dir)
+    if ('refused' in ref || ref.dir !== dir || !skillDirectoryChildren(ownFiles, dir)) {
+      throw new Error(`the skill ${shownUri(entry.uri)} has no directory "${oneLine(dir)}"`)
+    }
+    const root = entry.uri.slice(0, -'/SKILL.md'.length)
+    const uri = dir ? `${root}/${dir}` : root
+    let live: unknown
+    try {
+      live = (
+        await (client.readDirectory as NonNullable<McpSkillsClientLike['readDirectory']>)(uri, opts)
+      )?.resources
+    } catch (err) {
+      if (opts?.signal?.aborted) throw err
+      const code = (err as { code?: unknown } | undefined)?.code
+      log(
+        'warn',
+        `[mcp] ${server}: resources/directory/read of ${shownUri(uri)} failed - ${messageOf(err)}${typeof code === 'number' ? ` (${code})` : ''}; the directory is listed from the skill's entry alone`,
+      )
+      return undefined
+    }
+    if (!Array.isArray(live)) {
+      log(
+        'warn',
+        `[mcp] ${server}: resources/directory/read of ${shownUri(uri)} gave no list of resources; the directory is listed from the skill's entry alone`,
+      )
+      return undefined
+    }
+    const manifest = ['SKILL.md', ...ownFiles]
+    const drift = compareMcpSkillDirectory({ manifest, dir, root, live })
+    if (drift.extra > 0 || drift.notServed.length > 0) {
+      log(
+        'warn',
+        `[mcp] ${server}: the skill "${oneLine(entry.frontmatter.name)}" (${shownUri(entry.uri)}) changed on the server - its directory "${oneLine(dir) || '.'}" lists ${drift.truncated ? 'at least ' : ''}${drift.extra} item(s) its entry does not and not ${drift.notServed.length} it does; only the files of the entry it was loaded with are read until the server's skills are listed again`,
+      )
+      if (!changed.has(entry)) {
+        changed.add(entry)
+        options.onChanged?.()
+      }
+    }
+    return drift
+  }
 
   const refresh = async (): Promise<void> => {
     let listing: Awaited<ReturnType<McpSkillsClientLike['list']>>
@@ -1037,6 +1404,11 @@ export const createMcpSkillCatalog = (
       read.set(target.path, file.text)
       return file.text
     },
+    // Never called on a server that did not declare it (Capability Negotiation: a client "MUST
+    // NOT call resources/directory/read" there).
+    ...(client.directoryRead === true && typeof client.readDirectory === 'function'
+      ? { readDirectory }
+      : {}),
   }
   return { source, refresh }
 }

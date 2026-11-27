@@ -1,3 +1,4 @@
+import { ProtocolError, ProtocolErrorCode, type Resource } from '@modelcontextprotocol/server'
 import {
   skillEntry,
   SkillsExtension,
@@ -24,6 +25,10 @@ import { createHash } from 'node:crypto'
  * - `skill://internal/release-checklist/SKILL.md` (`SKILL_URIS.unlisted`)
  *
  * Each body carries a marker (`GIT-WORKFLOW-BODY`, ...) a test can look for.
+ *
+ * With `directoryRead` the source also serves `resources/directory/read` (the extension's optional
+ * method), which makes the SDK declare `directoryRead: true` and route the method here: the direct
+ * children of a directory of the served files, by hand (see `readDirectory` below).
  */
 
 /** What the skills listing gets besides the honest skills (see `ILocalMcpServer.skillFaults`). */
@@ -64,6 +69,26 @@ export interface ISkillFaults {
    * included - and the unlisted one.
    */
   emptyListing?: boolean
+  /**
+   * (with `skillDirectoryRead`; no new skill) `resources/directory/read` of
+   * `skill://pdf-processing/references` also lists `NEW.md` (`SKILL_URIS.newFile`), which the
+   * skill's entry does not hold, and `resources/read` serves it: the skill changed on the server
+   * after a client read its entry.
+   */
+  directoryExtra?: boolean
+  /**
+   * (with `skillDirectoryRead`) `skill://pdf-processing/scripts` is listed without `extract.py`,
+   * which the entry holds: a file the server no longer lists (its read still answers).
+   */
+  directoryOmit?: boolean
+  /** (with `skillDirectoryRead`) every `resources/directory/read` answers -32603. */
+  directoryError?: boolean
+}
+
+/** `resources/directory/read` (with `skillDirectoryRead`): served, and how many children a page holds. */
+export interface ISkillDirectoryRead {
+  /** Children per page; more are offered with `nextCursor`. Default: all on one page. */
+  pageSize?: number
 }
 
 /** Skill URIs a test asks for by URI. */
@@ -73,6 +98,8 @@ export const SKILL_URIS = {
   /** With `skillFaults.nested`: the enclosing skill and the one nested in it. */
   handbook: 'skill://handbook/SKILL.md',
   onboarding: 'skill://handbook/onboarding/SKILL.md',
+  /** With `skillFaults.directoryExtra`: the file the directory lists and the entry does not. */
+  newFile: 'skill://pdf-processing/references/NEW.md',
 } as const
 
 /** The markers of the honest skills' bodies and files. */
@@ -88,6 +115,7 @@ export const SKILL_MARKERS = {
   unlisted: 'RELEASE-CHECKLIST-BODY',
   handbook: 'HANDBOOK-BODY',
   onboarding: 'ONBOARDING-BODY',
+  newFile: 'NEW-FILE-BODY',
 } as const
 
 const md = (name: string, description: string, body: string, extra = ''): string =>
@@ -146,6 +174,8 @@ export interface ISkillCatalog {
   reads: string[]
   /** Every `skills/get` URI a client asked for, in order. */
   gets: string[]
+  /** Every `resources/directory/read` URI a client asked for, one per page, in order. */
+  directoryReads: string[]
   /** What `skills/list` lists now (with the faults), for an answer made by hand. */
   listing: () => Promise<Skill[]>
   /** Serve one more skill from now on (`listed: false`: by `skills/get` only, never listed). */
@@ -157,10 +187,13 @@ export interface ISkillCatalog {
   ) => Promise<void>
 }
 
-export const createSkillCatalog = async (): Promise<ISkillCatalog> => {
+export const createSkillCatalog = async (
+  options: { directoryRead?: boolean | ISkillDirectoryRead } = {},
+): Promise<ISkillCatalog> => {
   const faults: ISkillFaults = {}
   const reads: string[] = []
   const gets: string[] = []
+  const directoryReads: string[] = []
   const files = new Map<string, string>()
   const entries = new Map<string, Skill>()
   const order: string[] = []
@@ -298,6 +331,71 @@ export const createSkillCatalog = async (): Promise<ISkillCatalog> => {
     return out
   }
 
+  const newFile = `# New\n\nAdded after the entry was read. ${SKILL_MARKERS.newFile}\n`
+  const mimeOf = (uri: string): string => (uri.endsWith('.md') ? 'text/markdown' : 'text/plain')
+
+  // Every file the server serves now, by URI (`directoryExtra` adds one no entry lists).
+  const served = (): string[] => [
+    ...files.keys(),
+    ...(faults.directoryExtra ? [SKILL_URIS.newFile] : []),
+  ]
+
+  // The direct children of the directory at `uri` (written without a trailing slash), sorted:
+  // files with their MIME type, subdirectories as `inode/directory`; `undefined` when `uri` is not
+  // a directory of the served files - a file, a trailing slash, or nothing at all.
+  const childrenOf = (uri: string): Resource[] | undefined => {
+    if (!uri.startsWith('skill://') || uri.endsWith('/')) return undefined
+    const prefix = `${uri}/`
+    const children = new Map<string, Resource>()
+    for (const file of served()) {
+      if (!file.startsWith(prefix)) continue
+      if (faults.directoryOmit && file === 'skill://pdf-processing/scripts/extract.py') continue
+      const rest = file.slice(prefix.length)
+      const cut = rest.indexOf('/')
+      const name = cut < 0 ? rest : rest.slice(0, cut)
+      const child = `${prefix}${name}`
+      if (children.has(child)) continue
+      children.set(
+        child,
+        cut < 0
+          ? { uri: child, name, mimeType: mimeOf(child) }
+          : { uri: child, name, mimeType: 'inode/directory' },
+      )
+    }
+    if (!children.size) {
+      // A directory that only `directoryOmit` emptied is still one.
+      return served().some((f) => f.startsWith(prefix)) ? [] : undefined
+    }
+    return [...children.values()].sort((a, b) => (a.uri < b.uri ? -1 : a.uri > b.uri ? 1 : 0))
+  }
+
+  const pageSize =
+    typeof options.directoryRead === 'object' && options.directoryRead.pageSize
+      ? Math.max(1, Math.floor(options.directoryRead.pageSize))
+      : Number.POSITIVE_INFINITY
+
+  const readDirectory: NonNullable<SkillSource['readDirectory']> = async (uri, params) => {
+    directoryReads.push(uri)
+    if (faults.directoryError) {
+      throw new ProtocolError(
+        ProtocolErrorCode.InternalError,
+        'the directory could not be listed (skillFaults.directoryError)',
+      )
+    }
+    const children = childrenOf(uri)
+    // The SDK answers -32602 ("not a directory resource").
+    if (!children) return undefined
+    const start = params.cursor === undefined ? 0 : Number(params.cursor)
+    if (!Number.isSafeInteger(start) || start < 0 || start > children.length) {
+      throw new ProtocolError(ProtocolErrorCode.InvalidParams, `unknown cursor for ${uri}`)
+    }
+    const end = Math.min(children.length, start + pageSize)
+    return {
+      resources: children.slice(start, end),
+      ...(end < children.length ? { nextCursor: String(end) } : {}),
+    }
+  }
+
   const source: SkillSource = {
     list: async () => ({ skills: faults.emptyListing ? [] : await listing() }),
     get: async (uri) => {
@@ -306,14 +404,18 @@ export const createSkillCatalog = async (): Promise<ISkillCatalog> => {
     },
     read: async (uri) => {
       reads.push(uri)
-      const text = files.get(uri)
+      const text =
+        files.get(uri) ??
+        (faults.directoryExtra && uri === SKILL_URIS.newFile ? newFile : undefined)
       if (text === undefined) return undefined
       const served =
         faults.changedFile && uri === 'skill://pdf-processing/references/FORMS.md'
           ? changed(text)
           : text
-      return { text: served, mimeType: uri.endsWith('.md') ? 'text/markdown' : 'text/plain' }
+      return { text: served, mimeType: mimeOf(uri) }
     },
+    // Implementing it is what declares `directoryRead`: only with the option.
+    ...(options.directoryRead ? { readDirectory } : {}),
   }
 
   return {
@@ -321,6 +423,7 @@ export const createSkillCatalog = async (): Promise<ISkillCatalog> => {
     faults,
     reads,
     gets,
+    directoryReads,
     listing: async () => {
       if (faults.emptyListing) return []
       const out = await listing()

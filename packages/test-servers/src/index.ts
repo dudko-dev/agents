@@ -80,5 +80,10 @@ export {
   type ProbeFault,
   type StructuredFault,
 } from './mcp-server.ts'
-export { SKILL_MARKERS, SKILL_URIS, type ISkillFaults } from './mcp-skills.ts'
+export {
+  SKILL_MARKERS,
+  SKILL_URIS,
+  type ISkillDirectoryRead,
+  type ISkillFaults,
+} from './mcp-skills.ts'
 export { parseCliArgs, startFromCli, type ICliArgs, type ICliServers } from './cli.ts'

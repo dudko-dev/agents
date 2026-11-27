@@ -554,7 +554,7 @@ Progressive disclosure keeps them cheap:
 
 1. The planner and executor system prompts carry only an index: `- name: description`.
 2. The planner's plan has an optional `skills` field naming the skills that apply (unknown names are dropped with a warning). Their instructions are injected into the executor, replanner and synthesizer system prompts for the rest of the run (24k chars in total, clipped beyond that).
-3. The executor gets two read-only built-in tools: `load_skill({ name })` returns `{ name, content, files }` and activates the skill for later steps; `read_skill_file({ name, path })` returns a bundled file. Both always run without approval (an MCP server's skill is the one exception: a person sees it first - [MCP skills](#mcp-skills-experimental)).
+3. The executor gets two read-only built-in tools: `load_skill({ name })` returns `{ name, content, files }` and activates the skill for later steps; `read_skill_file({ name, path })` returns a bundled file - or, when `path` names a directory of the skill (`templates/`, `.` for the root), its listing: `{ name, directory, files, directories, more? }`, the direct children by their paths inside the skill, sorted, at most 64 (`more` counts the rest; a file of that name wins). Both always run without approval (an MCP server's skill is the one exception: a person sees it first - [MCP skills](#mcp-skills-experimental)).
 
 Every activation emits `skill.activated` (`by: 'plan' | 'tool'`). A host or MCP tool named `load_skill` / `read_skill_file` is a configuration error. `parseSkillMarkdown(markdown, files?)` and `defineSkill(skill)` validate skills you build yourself (names match `[a-z0-9-]{1,64}`). `loadSkillsFromDir` bundles text files (`.md .txt .json .yaml .yml .csv .ts .js .py .sh .html .css .xml .toml`, up to 256 KB each).
 
@@ -608,6 +608,20 @@ agent.listSkills()
   whose URI and frontmatter name disagree are refused, with a warning.
 - **Changes.** A change of a server's skills is announced as a resource list change: the agent
   re-lists them the way it re-lists tools after a `tools/list_changed` (between runs).
+- **Directories.** `read_skill_file` with a directory of an MCP skill (`templates/`, `.`) lists
+  it from the entry the skill was loaded and approved with - the held entry is authoritative, and
+  the same consent comes first as for a file. When the server declared `directoryRead`, the agent
+  also sends `resources/directory/read` for that directory (`skill://<path>/<dir>`, no trailing
+  slash) to THAT server, only to see whether the skill changed there: a child the server lists and
+  the entry does not is never shown - not its name, URI or type; the listing gets a fixed `note`
+  ("The server now lists 1 more item(s) here than the approved entry of this skill: the skill
+  changed on the server ..."), a warning is logged (counts only) and the server's skills are
+  listed again between runs (as after a resource list change; a changed entry is asked about
+  again). A child of the entry the server no longer lists stays in the listing and is also named
+  in `notServed` (a read of it will fail). If the directory read fails, the listing comes from the
+  entry alone (a log line); a stop of the run still stops it. Without `directoryRead` the method
+  is never called. `"dynamic"` skills stay declined: a directory read is the only way to find
+  their files and verifies nothing, so a consent could not bind to what the model would read.
 - **Consent: a person sees a skill before the model does.** The first time a server's skill would
   enter the model's context - `load_skill`, the planner picking it, a resumed run, or
   `read_skill_file` of one of its files - its `SKILL.md` is read and verified, then put to
@@ -640,8 +654,8 @@ agent.listSkills()
 [security notes](https://github.com/dudko-dev/agents/blob/main/packages/agent-web/docs/security.md#mcp-skills-third-party-instructions)
 say what a server's skill can and cannot do; its
 [design notes](https://github.com/dudko-dev/agents/blob/main/packages/agent-web/docs/design.md#mcp-skills-one-catalog-namespaced-under-a-preamble-opt-in)
-why it is namespaced, loaded under a preamble and opt-in, and why the consent is what it is. Not
-done (yet): `resources/directory/read`.
+why it is namespaced, loaded under a preamble and opt-in, why the consent is what it is, and why
+a directory is listed from the entry with the server asked only for staleness.
 
 ## Tool approval and autopilot
 
