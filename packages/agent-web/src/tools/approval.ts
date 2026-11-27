@@ -41,6 +41,13 @@ export interface ToolApprovalRequest {
    * agent's rules match (`server__tool`), `app.tool` the server's own name for it.
    */
   app?: ToolApprovalApp
+  /**
+   * Set when the call runs code (`run_js`, or a tool marked with `markCodeExecution`) while the
+   * run acts on skills an MCP server served: those skills, by name. Such a call is ALWAYS asked,
+   * whatever the mode, a rule or an earlier "always allow" say (the Skills extension: a server's
+   * skill must not lead to code running here without a person's approval).
+   */
+  mcpSkills?: string[]
 }
 
 /** Who asks when an MCP App asks (see `ToolApprovalRequest.app`). */
@@ -136,6 +143,18 @@ export const markReadOnly = <T extends object>(tool: T, readOnly = true): T => {
   return tool
 }
 
+/**
+ * Mark a tool as one that runs code (the sandbox's `run_js` is): while a run acts on an MCP
+ * server's skill, every call of it is asked (`decideToolPermission`).
+ */
+export const markCodeExecution = <T extends object>(tool: T, codeExecution = true): T => {
+  ;(tool as { codeExecution?: boolean }).codeExecution = codeExecution
+  return tool
+}
+
+export const isCodeExecutionTool = (tool: unknown): boolean =>
+  (tool as { codeExecution?: unknown } | undefined)?.codeExecution === true
+
 export const isReadOnlyTool = (tool: Tool | undefined): boolean =>
   (tool as { readOnly?: unknown } | undefined)?.readOnly === true
 
@@ -167,8 +186,24 @@ export const matchRule = (
 /**
  * What the gate does for one call, before any human is involved. Order:
  * remembered "always allow" → most specific rule → mode default. Pure.
+ * Then one rule that only ever tightens: a call that runs code (`codeExecution`) while the run
+ * acts on an MCP server's skill (`mcpSkills`) is asked when it would have been allowed - by the
+ * mode, a rule or an "always allow" alike. A deny stays a deny.
  */
 export const decideToolPermission = (opts: {
+  toolName: string
+  readOnly: boolean
+  mode: ToolApprovalMode
+  rules?: Record<string, ToolPermission>
+  remembered?: ReadonlySet<string>
+  codeExecution?: boolean
+  mcpSkills?: readonly string[]
+}): ToolPermission => {
+  const permission = decideByPolicy(opts)
+  return permission === 'allow' && opts.codeExecution && opts.mcpSkills?.length ? 'ask' : permission
+}
+
+const decideByPolicy = (opts: {
   toolName: string
   readOnly: boolean
   mode: ToolApprovalMode
@@ -246,18 +281,35 @@ export const gateToolCall = async (
     step?: IPlanStep
     subagent?: { id: string; depth: number }
     app?: ToolApprovalApp
+    /** The tool runs code: asked while the run acts on an MCP server's skill (`mcpSkills`). */
+    codeExecution?: boolean
+    /** The MCP skills the run acts on (with `codeExecution` only). */
+    mcpSkills?: string[]
   },
   events: ApprovalEvents,
   signal?: AbortSignal,
 ): Promise<void> => {
+  const { codeExecution, mcpSkills: acting, ...shown } = call
   const permission = decideToolPermission({
     toolName: call.toolName,
     readOnly: call.readOnly,
     mode: state.mode,
     rules: state.config.rules,
     remembered: state.remembered,
+    ...(codeExecution ? { codeExecution } : {}),
+    ...(acting?.length ? { mcpSkills: acting } : {}),
   })
   if (permission === 'allow') return
+  // Asked only because the run acts on an MCP server's skill: the request says which.
+  const bySkill =
+    Boolean(codeExecution && acting?.length) &&
+    decideByPolicy({
+      toolName: call.toolName,
+      readOnly: call.readOnly,
+      mode: state.mode,
+      rules: state.config.rules,
+      remembered: state.remembered,
+    }) === 'allow'
   const id = `approval-${Date.now().toString(36)}-${(seq += 1)}`
   if (permission === 'deny') {
     const reason =
@@ -269,11 +321,13 @@ export const gateToolCall = async (
   }
   const onRequest = state.config.onRequest
   if (!onRequest) {
-    const reason = 'no approval handler configured'
+    const reason = bySkill
+      ? "code runs only with a person's approval while the run acts on an MCP server's skill, and no approval handler is configured"
+      : 'no approval handler configured'
     events.resolved({ id, name: call.toolName, approved: false, reason, automatic: true })
     throw new ToolDeniedError(reason)
   }
-  const req: ToolApprovalRequest = { id, ...call }
+  const req: ToolApprovalRequest = { id, ...shown, ...(bySkill ? { mcpSkills: acting } : {}) }
   events.requested(req)
   let decision: { approved: boolean; reason?: string; remember?: boolean }
   // The host's own signal: aborted when the question ends without its answer (the bound, a

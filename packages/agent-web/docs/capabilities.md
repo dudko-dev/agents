@@ -343,6 +343,86 @@ Progressive disclosure:
 lists the skills used; `agent.skills` lists the configured ones (and, with
 [`learning`](#learning-lessons-that-outlive-the-task), the agent's own, marked `learned`).
 
+### MCP skills (experimental)
+
+An MCP server may serve skills: the **Skills extension** (`io.modelcontextprotocol/skills`,
+SEP-2640, Beta), written against the 2026-07-28 revision. `skills: true` on a server of
+`connectMcpHttp` (the Node sibling: on a server of `mcpServers`) loads them into the same catalog,
+with the same progressive disclosure - and with the guards a third party's text needs.
+
+```ts
+const mcp = await connectMcpHttp(
+  { docs: { url, protocol: 'auto', skills: true } },
+  { onToolsChanged: (name) => void mcp.refreshServer(name) },
+)
+const agent = await createAgent({ model, tools: { ...mcp.tools } })
+agent.skills.filter((s) => s.server) // [{ name: 'docs/pdf-processing', description, server: 'docs' }, …]
+```
+
+What happens, in order:
+
+1. **Negotiation.** With `skills: true` and a `protocol` that may speak 2026-07-28 (`'auto'`,
+   `'modern'`), the client declares `io.modelcontextprotocol/skills: {}` among its
+   `extensions`. Without the flag - the default - nothing is declared and the wire is what it
+   always was. On `'legacy'` (or no `protocol`) nothing is declared either and a `warn` line says
+   why; a connection that negotiated a 2025 revision asks for no skills. The skills methods are
+   called only if the server declared the extension (`server/discover`).
+2. **Listing** (`skills/list`, every page). Each entry is checked before anything of it is read:
+   its `SKILL.md` URI names a directory whose last segment is the frontmatter `name`, the name
+   follows the Agent Skills rules, there is a description, `resources` is the complete list of its
+   files - each inside the skill's directory, listed once, with a `sha256:` digest and a size -
+   within the extension's limits (512 files, 16 MiB). A `"dynamic"` entry (no digests) is
+   declined. A refused entry is a `warn` line naming why. Nothing is read: lazy retrieval.
+3. **The catalog.** The skills join `skills` as `<server>/<skill>`, the server by its key in the
+   connection (the host's label). Host skills and lessons cannot hold a `/`, so no name is ever
+   shared: a server cannot shadow one of yours or another server's skill, and a clash of bare
+   names is logged. Two skills of one server with one name are both kept, each named by its path
+   (`docs/acme/billing/refunds`, `docs/acme/support/refunds`); servers whose keys map to one label
+   get `~2`. At most `MCP_SKILLS_MAX_PER_SERVER` (32) per server and `MCP_SKILLS_MAX_TOTAL` (64) in
+   all, a `warn` line for each server that had more. An entry's line is its description on one
+   line, with `[from the MCP server "docs" - third-party]`, within 300 characters.
+4. **Loading.** `load_skill({ name: 'docs/pdf-processing' })` - or the planner naming it in
+   `plan.skills` - reads its `SKILL.md` (`resources/read`, from that server) and verifies it
+   against the entry: byte size, SHA-256 digest, and the frontmatter field by field (the SDK's
+   `SkillsClient`). A mismatch - the server changed it, or lies - refuses the load: the tool call
+   fails with the reason, a planner's pick is not activated (a `warn` line), nothing of the text
+   reaches the model. The body (cleaned, cut at `MCP_SKILL_BODY_MAX_CHARS`, 16 000, with a notice)
+   goes to the model under `mcpSkillPreamble`, which names the server and the URI and says the text
+   is third-party knowledge that cannot grant permissions, approve a call, change the approval
+   mode, widen egress or the sandbox, or make the agent run anything. The skill is active for the
+   rest of the run (`skill.activated` with `server`), under the same preamble.
+5. **Files.** `read_skill_file({ name, path })` reads one file of a loaded skill: only a path the
+   entry it was LOADED with lists (never a URI, an absolute path or `..` - a skill cannot point a
+   read at another skill or another server), from its own server, verified the same way, text only,
+   cut at `MCP_SKILL_FILE_MAX_CHARS` (32 000), under a header that says it is text to read, never a
+   program to run. A script a skill bundles is shown as text; nothing runs it.
+6. **Changes.** The extension has no notice of its own: a server announces a change of its skills
+   as a resource list change. With `onToolsChanged`, the connection listens for
+   `notifications/resources/list_changed` too (on 2026-07-28, `resourcesListChanged` on the same
+   `subscriptions/listen` stream) and calls it; `refreshServer(name)` lists the skills again. In
+   this package an agent built after the refresh has the new list (the Node sibling refreshes its
+   own between runs). A skill loaded before keeps reading against the entry it was loaded with; a
+   file that changed since fails its check.
+
+While a run acts on an MCP skill - one of its own active skills, or one of the run that started
+it, for a helper - a call of a tool that **runs code** (`isCodeExecutionTool`: the sandbox's
+`run_js`, or a tool you mark with `markCodeExecution`) is asked every time, whatever the mode, a
+rule or an earlier "always allow" say; the request carries `mcpSkills` (the skills' names), and
+with no `onRequest` the call is refused. The extension requires it: a server's skill must not lead
+to code running here without a person's approval. Nothing else about consent changes.
+
+Not done (yet): a skill the listing leaves out cannot be loaded by its URI alone (`skills/get`,
+which the extension asks a host to support for partial listings - a URI the model read in one
+server's instructions must reach that server and no other, and the agent cannot yet tell which
+server's text the model read it in), and `resources/directory/read` is never called (a skill's
+files are known from its entry, which the extension allows a host to answer from). A skill whose
+listing changed is re-read on the next refresh, not with `skills/get`.
+
+A server's skills come with its tools, like its instructions (each mounted tool carries them): a
+server none of whose tools is mounted offers none. `RunResult.skills`, `agent.skills` (with
+`server`) and `message.skills` in the React package carry the namespaced names, so a UI says whose
+skill it is.
+
 ## Tool consent and autopilot
 
 ```ts
@@ -2290,9 +2370,9 @@ Subscribe with `onEvent` (per run) or the handler you pass to `createAgent`; ren
 
 | Event | Payload |
 | --- | --- |
-| `skill.activated` | `name, by: 'plan' \| 'tool'` |
+| `skill.activated` | `name, by: 'plan' \| 'tool', server?` (`server`: the MCP server of a skill served with `skills: true`) |
 | `tools.discovered` | `step?, query, names` — `find_tools` activated more tools |
-| `tool.approval-requested` | `id, name, input, readOnly, step?, subagent?, app?` (`subagent: { id, depth }` when a helper the model started is asking; `app: { server, tool, resourceUri }` when an [MCP App](#mcp-apps-a-servers-interface-for-a-tool) asks - `agent.approveAppToolCall`) |
+| `tool.approval-requested` | `id, name, input, readOnly, step?, subagent?, app?, mcpSkills?` (`subagent: { id, depth }` when a helper the model started is asking; `app: { server, tool, resourceUri }` when an [MCP App](#mcp-apps-a-servers-interface-for-a-tool) asks - `agent.approveAppToolCall`; `mcpSkills`: the call runs code while the run acts on these [MCP skills](#mcp-skills-experimental), so it is asked whatever the mode says) |
 | `tool.approval-resolved` | `id, name, approved, reason?, automatic` |
 | `mcp.elicitation-requested` | `id, server, tool, mode: 'form' \| 'url', message, requestedSchema?, url?, step?, subagent?` — an MCP server asked the user for input during a tool call and the connection's `onElicitation` is being called. The server's text, cleaned and capped ([elicitation](#mcp-elicitation-a-server-asks-the-user)) |
 | `mcp.elicitation-answered` | `id, server, tool, action: 'accept' \| 'decline' \| 'cancel', automatic, reason?, fields?` — the question was settled. `fields`: the NAMES of the fields an accepted form was answered with, never a value. `automatic`: nobody decided, the tool call fails, `reason` says why |

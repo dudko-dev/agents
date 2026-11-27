@@ -302,6 +302,33 @@ agent built from them picks up a server's new tool list (react to it via the
 `onToolsChanged` option) without being rebuilt. Filtering is plain object work:
 delete the keys you don't want before merging.
 
+### MCP skills (experimental): a server's instructions as skills
+
+A server may serve **skills** (the [Skills extension](https://github.com/modelcontextprotocol/ext-skills),
+`io.modelcontextprotocol/skills`, Beta, written against 2026-07-28): `SKILL.md` instruction files
+and the files they bundle. Opt in per server - they come with its tools:
+
+```ts
+const mcp = await connectMcpHttp({
+  docs: { url: 'https://docs.example.com/mcp', protocol: 'auto', skills: true },
+})
+const agent = await createAgent({ model, tools: { ...mcp.tools } })
+agent.skills // [{ name: 'docs/pdf-processing', description: '… [from the MCP server "docs" - third-party]', server: 'docs' }, …]
+```
+
+| | |
+| --- | --- |
+| Off by default | Without `skills: true` the extension is not declared and nothing of it is sent. It is declared only where 2026-07-28 may be spoken (`protocol: 'auto'` / `'modern'`); `'legacy'` (or none) logs a `warn` and asks nothing, an `'auto'` connection that ends on 2025 lists nothing. No agent-wide switch. |
+| One catalog, namespaced | The server's skills join your `skills` and the agent's lessons as `<server>/<skill>` (the server by its key in `connectMcpHttp`, never its `serverInfo`). No other skill name can hold a `/`: a server cannot shadow yours, a lesson or another server's - your `git-workflow` keeps its name and the clash is logged. Same-named skills of one server are kept by their paths. |
+| On demand, verified | The prompts carry the name, the description (one line, ≤ 300 characters) and the origin. Nothing is read at connect; `SKILL.md` is read when `load_skill` or the planner asks, a file when `read_skill_file` asks - each checked against the server's entry (size, SHA-256, and for `SKILL.md` the frontmatter): a mismatch is refused, nothing of it used. A file only from the skill's own server, only if its entry lists it, as text. |
+| Knowledge, never policy | Loaded under a preamble saying it is third-party text that cannot grant permissions, approve a call or change the approval mode, widen egress or the sandbox, or make the agent run anything. Nothing of its frontmatter beyond `name` / `description` is read (`allowed-tools` grants nothing). While a run acts on an MCP skill, a tool that runs code (`run_js`, or yours marked with `markCodeExecution`) is always asked - whatever the mode or a rule say; with no `onRequest` it is refused. |
+| Caps | 32 skills per server, 64 in all; 16 000 characters of instructions, 32 000 of a file - every cut said. Entries over the extension's limits (512 files, 16 MiB), `"dynamic"` ones and ones whose URI and frontmatter name disagree are refused with a `warn`. |
+| Changes | Announced as a resource list change: `onToolsChanged(name)` fires (also for that notice), and `refreshServer(name)` lists the skills again. An agent built afterwards has the new ones. |
+
+A server's skills come with its tools, like its instructions: a server whose tools are all
+filtered out (or that has none) offers none. Details: [docs/capabilities.md](docs/capabilities.md#mcp-skills-experimental),
+what a server's skill can and cannot do: [docs/security.md](docs/security.md#mcp-skills-third-party-instructions).
+
 ### Elicitation: a server asks the user
 
 A tool may need something only the user has - a name to confirm, a choice, a
@@ -797,12 +824,12 @@ Loading a definition someone else wrote: [docs/security.md](docs/security.md#pip
 | `executorTiers` | off | `{ light?, standard?, strong? }`, each a model like `planner`: the planner rates every step low / medium / high and the executor runs it on that tier's model; a tier that is not configured falls back to the nearest one; the smallest window among them governs the run ([model tiers](docs/capabilities.md#model-tiers-and-escalation)) |
 | `escalation` | on with tiers | `false`, or `{ maxPerStep?, maxPerRun? }` (1 / 3): a step that fails in a way a stronger model could fix is retried on the next stronger tier before the replanner is asked - continuing the step, never writing twice. Nothing without tiers |
 | `credentials` | — | a `CredentialStore` for `credentialRef` keys |
-| `tools` | `{}` | host tools (`defineTool`) |
+| `tools` | `{}` | host tools (`defineTool`); mark a tool that runs code with `markCodeExecution` (always asked while a run acts on an MCP server's skill) |
 | `availableTools` / `excludedTools` | — | whitelist / blacklist of tool names mounted from `tools` |
 | `toolMode` | `'auto'` | `native` \| `prompted` \| `auto` (cloud→native, local→prompted) |
 | `toolSelectionStrategy` | `'auto'` | `all` \| `plan-narrowed` \| `search` \| `auto` (search above `toolSearchThreshold`, 40, or once the definitions take ¼ of the window) |
 | `toolApproval` | autopilot | consent policy: `{ mode, rules, onRequest, timeoutMs }`; `agent.setToolApprovalMode()`. A question waits `timeoutMs` for a decision, then is denied: default 300000 (`TOOL_APPROVAL_TIMEOUT_MS`), `0` or `Infinity` = until the run is stopped (as is a value above 2^31 - 1, the most a timer holds); negative or `NaN` fails `createAgent`. `onRequest(req, { signal })`: the signal aborts when the question ends without an answer (`TimeoutError` for the bound, `AbortError` for a stop). See [Tool consent](docs/capabilities.md#tool-consent-and-autopilot) |
-| `skills` | — | SKILL.md bundles (`defineSkill` / `parseSkillMarkdown` / `loadSkillFromUrl`) |
+| `skills` | — | SKILL.md bundles (`defineSkill` / `parseSkillMarkdown` / `loadSkillFromUrl`). An MCP server's skills come with its tools (`skills: true` on the server of `connectMcpHttp`, experimental) and join them as `<server>/<skill>` - see [MCP skills](#mcp-skills-experimental-a-servers-instructions-as-skills) |
 | `egress` | off | what the **model** may fetch (`web_fetch`): `true` = any public host over https, or `{ allow, deny, protocols, allowPrivateNetwork, fetch, ... }`; a browser can't pin DNS, so prefer an `allow` list — see [Egress](docs/capabilities.md#egress-what-the-model-may-fetch) |
 | `search` | off | the model may **search the web** (`web_search`: a short list of title / url / snippet): `{ engine: fn }` - a search engine of yours, any API - or `{ provider: 'google', credentialRef, model, baseURL, maxResults, allowPrivateNetwork, readOnly, fetch }` - Google Search through Gemini grounding: one extra `generateContent` call per search on a Gemini key (default model `gemini-2.5-flash-lite`), which **spends model tokens** (`usage` phase `'search'`) and returns **Google redirect links**, not the pages' URLs. No key ships with the library and none is written in the config (`credentialRef` names it in `credentials`); the request reaches only that API; with `egress`, results the model could not fetch are left out. Recipes for Tavily / Brave / SearXNG as an `engine`, the free-tier models and what the redirect links mean — see [Search](docs/capabilities.md#search-finding-the-page-to-fetch) |
 | `media` | off | image generation, speech and transcription as tools, each mounted only when its model is set: `{ imageModel, speechModel, transcriptionModel, maxCalls, timeoutMs, files, folder, voice, speechFormat, transcribeAttachments }`. A model is an AI SDK image / speech / transcription model object or a `ProviderModelSpec` (key by `credentialRef`). Generated files go to the virtual file system and the model gets a path, never the bytes; attached audio is transcribed to text; calls are counted in `usage.mediaCalls` (and the other media fields) and capped per run — see [Media](docs/capabilities.md#media-images-speech-and-transcription) |

@@ -181,6 +181,15 @@ export interface ISkill {
   files?: { path: string; content: string }[]
   // Set on a skill the AGENT wrote (config.learning); absent on the operator's own.
   origin?: ISkillOrigin
+  // Set on a skill an MCP server serves (`skills: true` on its config): which server, and the URI
+  // of its SKILL.md. Third-party text: loaded on demand, under a preamble that says so.
+  mcp?: IMcpSkillOrigin
+}
+
+// Where an MCP server's skill comes from: the server's key in `mcpServers` and its SKILL.md URI.
+export interface IMcpSkillOrigin {
+  server: string
+  uri: string
 }
 
 // Where a learned skill came from.
@@ -238,6 +247,11 @@ export interface IToolApprovalRequest {
   // Set when the call comes from a helper the model started (config.subagents.dynamic), not from
   // the run itself: the helper's id (as in its subagent.start event) and its depth.
   subagent?: { id: string; depth: number }
+  // Set when the call runs code (`run_js`, or a tool marked with markCodeExecution) while the
+  // run acts on skills an MCP server served: those skills, by name. Such a call is ALWAYS asked,
+  // whatever the mode, a rule or an earlier "always allow" say (the Skills extension: a server's
+  // skill must not lead to code running on this side without a person's approval).
+  mcpSkills?: string[]
 }
 
 // What the gate hands `onRequest` beside the request.
@@ -321,6 +335,12 @@ export interface IMcpHttpServerConfig {
   // and an `input_required` result (elicitation) fails the call. See the README, "MCP protocol
   // revision".
   protocol?: McpProtocolMode
+  // EXPERIMENTAL (the Skills extension is Beta): load the skills this server serves
+  // (`io.modelcontextprotocol/skills`) into the agent's skills catalog, as `<server>/<skill>`.
+  // Off by default: without it the extension is not declared and nothing of it is sent. Needs
+  // the 2026-07-28 revision (`protocol: 'auto'` or `'modern'`): the extension is written against
+  // it. Third-party text - knowledge only, never policy; see the README, "MCP skills".
+  skills?: boolean
 }
 
 // Local MCP server spawned as a child process. The transport speaks JSON-RPC
@@ -337,6 +357,8 @@ export interface IMcpStdioServerConfig {
   // short-lived process started from the same command (a server that exits on a request it does
   // not know must not take the session's process with it): the command runs twice per connect.
   protocol?: McpProtocolMode
+  // See IMcpHttpServerConfig.skills.
+  skills?: boolean
 }
 
 // Discriminated union: callers pick HTTP or stdio per server. Existing
@@ -758,7 +780,8 @@ type AgentEventBody =
       beforeTokens: number
       afterTokens: number
     }
-  | { type: 'skill.activated'; name: string; by: 'plan' | 'tool' }
+  // `server`: the MCP server the skill came from (a skill served with `skills: true`).
+  | { type: 'skill.activated'; name: string; by: 'plan' | 'tool'; server?: string }
   // find_tools found and activated these tools (search strategy).
   | { type: 'tools.discovered'; step: IPlanStep; query: string; names: string[] }
   // Only when the agent actually asks (onRequest is called).
@@ -771,6 +794,8 @@ type AgentEventBody =
       step?: IPlanStep
       // Set when a helper the model started is asking (see IToolApprovalRequest.subagent).
       subagent?: { id: string; depth: number }
+      // See IToolApprovalRequest.mcpSkills.
+      mcpSkills?: string[]
     }
   // automatic: true for rule / mode / timeout denials nobody decided on.
   // Automatic ALLOWs emit nothing, to keep the stream quiet.

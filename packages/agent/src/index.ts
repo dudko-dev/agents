@@ -20,6 +20,19 @@ export {
   type McpServerInstructions,
   type McpServerProtocol,
 } from './mcp-shared.ts'
+// MCP skills (`skills: true` on a server, experimental): the extension's id, the caps, the rules.
+export {
+  MCP_SKILLS_EXTENSION,
+  MCP_SKILL_BODY_MAX_CHARS,
+  MCP_SKILL_DESCRIPTION_MAX_CHARS,
+  MCP_SKILL_FILE_MAX_CHARS,
+  MCP_SKILL_MAX_RESOURCES,
+  MCP_SKILL_MAX_TOTAL_BYTES,
+  MCP_SKILLS_MAX_PER_SERVER,
+  MCP_SKILLS_MAX_TOTAL,
+  mcpSkillEntryRefusal,
+  mcpSkillPreamble,
+} from './mcp-skills.ts'
 export {
   MCP_ELICITATION_MAX_PER_RUN,
   MCP_ELICITATION_MAX_PER_TOOL_CALL,
@@ -75,7 +88,9 @@ export { defineSkill, loadSkillsFromDir, parseSkillMarkdown } from './skills.ts'
 // Tool approval
 export {
   decideToolPermission,
+  isCodeExecutionTool,
   isReadOnlyTool,
+  markCodeExecution,
   markReadOnly,
   matchToolRule,
   TOOL_APPROVAL_TIMEOUT_MS,
@@ -290,6 +305,7 @@ export type {
   ILimitBreach,
   IMcpHttpServerConfig,
   IMcpServerConfig,
+  IMcpSkillOrigin,
   IMcpStdioServerConfig,
   IPersistence,
   IRunSnapshot,

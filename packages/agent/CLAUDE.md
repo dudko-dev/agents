@@ -197,6 +197,31 @@
     `listenFaults` / `dropListenStreams` / `closeListenStreams` on virtual time, and a child
     process, `tests/fixtures/mcp-listen-exit.ts`, proves close leaves no timer). Every rule needs
     a mutation check. No setting, by design (the browser's `docs/design.md` says why).
+  - `mcp-skills.ts` (pure, no imports; `skills: true` on a server, EXPERIMENTAL - the MCP Skills
+    extension `io.modelcontextprotocol/skills`, Beta, written against 2026-07-28): the rules on a
+    server's entries (`mcpSkillEntryRefusal`: URI last segment = frontmatter name, the naming
+    rules, `"dynamic"` declined, complete file list inside the skill, sha256 digests, the 512-file /
+    16 MiB limits), the catalog names (`assignMcpSkillNames`: `<server>/<skill>` by the HOST's
+    label - no host skill or lesson name can hold a "/", so nothing shadows anything), the caps
+    (`selectMcpSkills`, 32 per server / 64 in all; body / file / description caps), the preamble
+    (`mcpSkillPreamble`: knowledge, never policy), the file rule (`resolveMcpSkillFile`: only what
+    the LOADED entry lists, never a URI / absolute / `..`), the mark that carries a server's
+    skills on its tools (`markMcpSkills` / `collectMcpSkillSources`, like the instructions: a
+    server with no mounted tool offers none) and one server's catalog over the SDK's
+    `SkillsClient` (`createMcpSkillCatalog`: list, load SKILL.md, read a file against the held
+    entry - the SDK verifies size, digest and frontmatter). A COPY of the browser sibling's
+    `src/mcp/skills.ts`, byte for byte: change both (`tests/mcp-skills-shared.test.ts` compares
+    them and tests every rule). `mcp.ts` wires it (the extension declared only with `skills: true`
+    and a mode that may speak 2026-07-28; listed only on a 2026-07-28 connection; a change comes
+    as `notifications/resources/list_changed`, on the same listen stream, and goes the
+    `onToolsChanged` -> `refreshServer` path); `skills.ts` keeps an MCP skill's state per skill
+    object (`createMcpSkills`, `loadMcpSkill`, `prepareMcpSkills`; `skillPreamble`); `agent.ts`
+    syncs them into `skills` between runs; the runner reads a planner's pick before activating
+    it. While a run (or a run above it) acts on an MCP skill, a tool that runs code
+    (`markCodeExecution`: `run_js`) is ALWAYS asked (`decideToolPermission`, source
+    `'mcp-skill'`). OFF without `skills: true`: no capability, no request. Security boundary:
+    every guard has a test (`tests/mcp-skills*.test.ts`, the second over real sockets against the
+    test server's `skills` / `skillFaults`) and a mutation check.
   - `pipeline-engine.ts` + `pipeline.ts` (`createPipeline`: a graph of agents with conditions and
     loops, described in plain JSON). The engine (definition types, `validatePipeline`, the conditions
     with the non-backtracking `matches` matcher, the wave scheduler; pure, no imports) is a COPY of

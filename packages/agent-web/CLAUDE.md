@@ -326,6 +326,28 @@ waiting for it. OFF
   `tests/mcp-listen.test.ts` compares them and tests every rule; `tests/mcp-protocol.test.ts`
   here drives it against the test server on virtual time, and `tests/fixtures/mcp-listen-exit.ts`
   in a child process proves close leaves no timer). No setting: `docs/design.md` says why.
+- `src/mcp/skills.ts` (pure, no imports; `McpHttpServerConfig.skills`, EXPERIMENTAL - the MCP
+  Skills extension `io.modelcontextprotocol/skills`, Beta, written against 2026-07-28): the rules
+  on a server's entries, the `<server>/<skill>` names (by the HOST's label; no host skill or lesson
+  name can hold a "/"), the caps, `mcpSkillPreamble` (knowledge, never policy), the file rule (only
+  what the entry the skill was LOADED with lists), the mark that carries a server's skills on its
+  tools (`markMcpSkills` / `collectMcpSkillSources`: merging `mcp.tools` is all a host does) and
+  one server's catalog over the SDK's `SkillsClient` (`createMcpSkillCatalog`; the SDK verifies
+  size, digest, frontmatter). A COPY of the server's `src/mcp-skills.ts`, byte for byte - change
+  both (the server's `tests/mcp-skills-shared.test.ts` compares them and tests every rule).
+  `http.ts` wires it: the extension declared only with `skills: true` and a `protocol` that may
+  speak 2026-07-28, listed only on a 2026-07-28 connection, the SDK's
+  `@modelcontextprotocol/client/ext/skills` imported dynamically there; a change arrives as
+  `notifications/resources/list_changed` (`resourcesListChanged` on the listen stream) and goes
+  through `onToolsChanged` / `refreshServer`. `skills.ts` keeps an MCP skill's state per skill
+  object; the runner collects them from `baseTools` at `createAgent` (a helper gets its caller's
+  through `config.skills`, `isMcpSkill`), reads a planner's pick before activating it, and hands
+  `wrapToolsForRun` `mcpSkills` (its own active MCP skills + `SpawnSeed.mcpSkills`): a tool that
+  runs code (`markCodeExecution`: `run_js`) is ALWAYS asked while there is one. OFF without
+  `skills: true`: no capability, no request. Security boundary: every guard has a test
+  (`tests/mcp-skills.test.ts` here over real sockets; the shared rules in the server package) and
+  a mutation check. Docs: README (MCP skills), `docs/capabilities.md`, `docs/security.md`,
+  `docs/design.md`.
 - `src/webmcp/` — optional `./webmcp` subpath: publish a ToolSet through the browser's WebMCP API
   and use a page's WebMCP tools as one. No dependency; a no-op where the browser has no WebMCP.
 - `src/{parse,prompts,events,config,index}.ts`.

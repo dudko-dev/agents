@@ -12,7 +12,8 @@ import { MODEL_TIERS, resolveEscalation } from './tiers.ts'
 import { createSandboxTools, RUN_JS_TOOL } from './sandbox.ts'
 import { createDynamicSubagentTool } from './subagent-dynamic.ts'
 import { resolveDynamicSubagents, SPAWN_SUBAGENT_TOOL } from './subagent-dynamic-shared.ts'
-import { createSkillTools, validateSkills } from './skills.ts'
+import { collectMcpSkillSources, type McpSkillSource } from './mcp-skills.ts'
+import { createMcpSkills, createSkillTools, isMcpSkill, validateSkills } from './skills.ts'
 import { createEgressTools } from './web-fetch.ts'
 import { createSearchTools } from './web-search.ts'
 import { createMedia } from './media.ts'
@@ -79,8 +80,9 @@ export interface IAgent {
   readonly usage: IUsage
   // Zero the counter.
   resetUsage: () => void
-  // Skills (name + description); `learned` marks the ones the agent wrote itself.
-  listSkills: () => { name: string; description: string; learned?: true }[]
+  // Skills (name + description); `learned` marks the ones the agent wrote itself, `server` the
+  // ones an MCP server serves (`skills: true` on its config).
+  listSkills: () => { name: string; description: string; learned?: true; server?: string }[]
   // The agent's own lessons (config.learning), with where each came from.
   listLearnedSkills: () => ISkill[]
   // Delete one of them (e.g. from a UI). false when there is no such learned skill.
@@ -167,8 +169,11 @@ export const createAgent = async (
         log('warn', m),
       )
     : undefined
+  // `skills: true` on an MCP server (experimental): its skills join `skills` once it is
+  // connected (and again after a refresh), so the skill tools exist from the start.
+  const mcpSkillsOn = Object.values(config.mcpServers).some((s) => s.skills === true)
   const builtinTools = wrapToolSet(
-    createSkillTools(skills, { live: Boolean(learning) }),
+    createSkillTools(skills, { live: Boolean(learning) || mcpSkillsOn }),
     wrapDeps,
     {
       builtIn: true,
@@ -340,6 +345,27 @@ export const createAgent = async (
       tools: wrapToolSet(merged.tools, wrapDeps),
       catalog: merged.catalog,
       mcpInstructions: mcpInstructionsFor(merged.tools),
+      // Like the instructions, read from the unwrapped tools: a server's skills come with them.
+      mcpSkills: collectMcpSkillSources(merged.tools),
+    }
+  }
+
+  // The MCP servers' skills in `skills` (mutated in place, as the lessons are): replaced only
+  // between runs - at start, after a refresh or a reconnect - never under one.
+  const syncMcpSkills = (sources: McpSkillSource[]): void => {
+    for (let i = skills.length - 1; i >= 0; i--) {
+      if (isMcpSkill(skills[i])) {
+        skills.splice(i, 1)
+      }
+    }
+    if (sources.length) {
+      skills.push(
+        ...createMcpSkills(
+          sources,
+          skills.map((s) => s.name),
+          (m) => log('warn', m),
+        ),
+      )
     }
   }
 
@@ -457,7 +483,7 @@ export const createAgent = async (
     toolCatalog: toEntries(connected.catalog),
     emit,
     ...(Object.keys(builtinTools).length ? { builtinTools } : {}),
-    ...(skills.length || learning ? { skills } : {}),
+    ...(skills.length || learning || mcpSkillsOn ? { skills } : {}),
     ...(learning
       ? {
           learning: {
@@ -478,6 +504,7 @@ export const createAgent = async (
     }
   }
   syncMcpInstructions(connected.mcpInstructions)
+  syncMcpSkills(connected.mcpSkills)
   // The prompts mention run_js only while it is really the sandbox's tool (not filtered out, not
   // replaced by a host tool of the same name).
   const syncSandbox = (): void => {
@@ -548,6 +575,7 @@ export const createAgent = async (
     Object.assign(ctx.tools, wrapped)
     ctx.toolCatalog = toEntries(merged.catalog)
     syncMcpInstructions(mcpInstructionsFor(merged.tools))
+    syncMcpSkills(collectMcpSkillSources(merged.tools))
     syncFindTools()
     log(
       'info',
@@ -628,7 +656,8 @@ export const createAgent = async (
       skills.map((s) => ({
         name: s.name,
         description: s.description,
-        ...(s.origin ? { learned: true as const } : {}),
+        ...(s.origin?.kind === 'learned' ? { learned: true as const } : {}),
+        ...(s.mcp ? { server: s.mcp.server } : {}),
       })),
     get usage() {
       return { ...spent }
@@ -701,6 +730,7 @@ export const createAgent = async (
         Object.assign(ctx.tools, fresh.tools)
         ctx.toolCatalog = toEntries(fresh.catalog)
         syncMcpInstructions(fresh.mcpInstructions)
+        syncMcpSkills(fresh.mcpSkills)
         syncFindTools()
         syncSandbox()
         syncSubagents()
