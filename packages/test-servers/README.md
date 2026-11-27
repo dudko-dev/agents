@@ -125,6 +125,14 @@ with hand-built JSON-RPC):
 `<name>:ok`, so a client that refetches sees a difference. `mcp.changeListeners()` says how many
 streams would be reached - wait for it instead of sleeping.
 
+**A listen stream that ends (modern).** `mcp.dropListenStreams()` cuts every open
+`subscriptions/listen` stream with no result (what a client sees when the network or a proxy
+drops it) and returns how many there were. `await mcp.closeListenStreams()` ends each one with
+its `subscriptions/listen` result - what a server process that shuts down sends - and goes on
+serving from a fresh handler on the same event bus, as another process taking over would: a new
+subscription is served and hears of the next change. How the NEXT `subscriptions/listen` is
+answered is `mcp.listenFaults` (below).
+
 ### Elicitation tools
 
 `elicitationTools: true` adds four tools that ask the user something. One implementation serves
@@ -224,6 +232,19 @@ in every `protocol` mode; only `server/discover` is touched:
 | `'server_error'` | answers 503 with a plain-text body |
 | `'garbage'` | answers 200 `application/json` with a body that is not JSON |
 | `'cors'` | is blocked in a browser: every preflight answers with the request headers a pre-2026 deployment allows (no `Mcp-Method`, no `Mcp-Name`). A client that is not a browser is not subject to CORS and sees no difference. |
+
+**MCP server** — `mcp.listenFaults`, for every `subscriptions/listen` request (2026-07-28: the
+2025 revisions have no such method). The request is answered before the SDK sees it; a stream
+that is already open is not touched:
+
+| `answer` | `subscriptions/listen` then |
+| --- | --- |
+| `'not_found'` | answers 404 with JSON-RPC `-32601`: a server that does not implement the method |
+| `'not_allowed'` | answers 405 |
+| `'unauthorized'` | answers 401 with the `WWW-Authenticate` challenge, whatever the token |
+| `'forbidden'` | answers 403 |
+| `'unavailable'` | answers 503 with a plain-text body |
+| `'silent'` | answers nothing: the request is held until the client gives it up (`mcp.heldListens()` counts them) |
 
 **MCP server** — `mcp.appFaults` (with `appTools`), both eras:
 

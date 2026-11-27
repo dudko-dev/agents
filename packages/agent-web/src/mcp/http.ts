@@ -36,6 +36,7 @@ import {
   type McpElicitationOptions,
   type McpElicitationSession,
 } from './elicitation.js'
+import { createMcpListenSupervisor, type McpListenSupervisor } from './listen.js'
 import { assertSecureOAuthUrl } from './oauth.js'
 import {
   cleanMcpInstructions,
@@ -103,9 +104,11 @@ export interface McpHttpServerConfig {
    * 2025 revisions with a warning that names the headers. See the README, "CORS".
    *
    * On 2026-07-28 there is no session; a tool-list change arrives over a
-   * `subscriptions/listen` stream this connector opens (it is not opened again
-   * when it drops), and an `input_required` result fails the call unless the
-   * connection was given `onElicitation` (see `ConnectMcpOptions`).
+   * `subscriptions/listen` stream this connector opens - and opens again, with
+   * backoff, when it ends while the connection is open (then `onToolsChanged`
+   * fires once: a change in the gap was announced to nobody) - and an
+   * `input_required` result fails the call unless the connection was given
+   * `onElicitation` (see `ConnectMcpOptions`).
    */
   protocol?: McpProtocolMode
 }
@@ -224,7 +227,10 @@ export interface ConnectMcpOptions {
    * `refreshServer(name)` from a point where no run is reading `tools` — this
    * connector deliberately does not refresh behind a running agent's back.
    * On a 2026-07-28 connection (`protocol`) the notice arrives over a
-   * `subscriptions/listen` stream, opened only when this callback is given.
+   * `subscriptions/listen` stream, opened only when this callback is given and
+   * opened again when it ends (backoff from 1 s to 60 s, at most 10 attempts in
+   * a row; never after a 401 / 403 / 404 / 405). Once a stream is back this
+   * callback fires as for a notice, since a change in the gap was not announced.
    */
   onToolsChanged?: (server: string) => void
   /**
@@ -477,6 +483,8 @@ interface ServerConnect {
   /** The revision the connection negotiated. */
   protocol?: Omit<McpServerProtocol, 'server'>
   listed?: McpToolDescriptor[]
+  /** 2026-07-28 with `onToolsChanged`: what keeps the listen stream open. */
+  listener?: McpListenSupervisor
   error?: string
   needsAuthorization?: boolean
 }
@@ -736,10 +744,10 @@ const openConnection = async (
   cfg: McpHttpServerConfig,
   opts: ConnectMcpOptions,
   log: NonNullable<ConnectMcpOptions['onLog']>,
-  isClosing: () => boolean,
   elicitation: McpElicitationSession | undefined,
 ): Promise<ServerConnect> => {
   let client: Client | undefined
+  let listener: McpListenSupervisor | undefined
   let timedOut = false
   const timeoutMs = cfg.connectTimeoutMs ?? opts.connectTimeoutMs ?? 30_000
   // What the version probe (`protocol: 'auto' | 'modern'`) ran into.
@@ -750,18 +758,23 @@ const openConnection = async (
     opts,
     log,
     probe,
-    isClosing,
     (c) => {
       client = c
       // Created after the deadline already passed: nobody will ever use it.
       if (timedOut) void c.close().catch(() => {})
+    },
+    (l) => {
+      listener = l
+      if (timedOut) l.stop()
     },
     elicitation,
   )
   // A handshake that completes after the deadline must not leave a live session behind.
   attempt.then(
     (r) => {
-      if (timedOut) void r.client?.close().catch(() => {})
+      if (!timedOut) return
+      r.listener?.stop()
+      void r.client?.close().catch(() => {})
     },
     () => {},
   )
@@ -771,7 +784,9 @@ const openConnection = async (
     if (err instanceof ConnectTimeoutError) timedOut = true
     // The client may be live even though we ended up here (listTools() failing
     // after a successful connect, or the deadline passing mid-listing). Close
-    // it, or the SSE stream leaks for the lifetime of the tab.
+    // it, or the SSE stream leaks for the lifetime of the tab - and its listen
+    // stream first, or a retry outlives it.
+    listener?.stop()
     if (client) await client.close().catch(() => {})
     const needsAuthorization = err instanceof UnauthorizedError
     let message = err instanceof Error ? err.message : String(err)
@@ -817,45 +832,34 @@ interface ProbeState {
 }
 
 /**
- * 2026-07-28: ask the server for tool-list change notices. Best effort - a
- * server that does not announce them, or a stream that cannot be opened, leaves
- * a connection whose tools still work; `refreshServer` still re-lists.
+ * 2026-07-28: ask the server for tool-list change notices, and ask again while the
+ * connection is open (`./listen`: backoff, final errors, the re-list once a stream
+ * is back). Best effort - a server that does not announce them, or a stream that
+ * cannot be opened, leaves a connection whose tools still work; `refreshServer`
+ * still re-lists.
  */
 const listenForToolChanges = async (
   name: string,
   client: Client,
   log: NonNullable<ConnectMcpOptions['onLog']>,
-  isClosing: () => boolean,
+  announce: () => void,
+  onListener: (listener: McpListenSupervisor) => void,
 ): Promise<void> => {
   if (!client.getServerCapabilities()?.tools?.listChanged) {
     log('info', `[mcp] ${name}: the server does not announce tool list changes`)
     return
   }
-  try {
-    const subscription = await client.listen(
-      { toolsListChanged: true },
-      { timeout: MCP_LISTEN_ACK_TIMEOUT_MS },
-    )
-    // The SDK does not open the stream again, and neither does this connector:
-    // say so, or the silence reads as "nothing changed".
-    void subscription.closed.then((cause) => {
-      if (!isClosing()) {
-        log(
-          'warn',
-          `[mcp] ${name}: the tool list change stream ended (${
-            cause === 'graceful' ? 'closed by the server' : 'dropped'
-          }); changes are not announced until the server is connected again`,
-        )
-      }
-    })
-  } catch (err) {
-    log(
-      'warn',
-      `[mcp] ${name}: could not subscribe to tool list changes - ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    )
-  }
+  const listener = createMcpListenSupervisor({
+    server: name,
+    listen: (signal) =>
+      client.listen({ toolsListChanged: true }, { timeout: MCP_LISTEN_ACK_TIMEOUT_MS, signal }),
+    log,
+    // Changes made while no stream was open: the path a notice takes, so the host
+    // sees what a notice causes.
+    onResubscribed: announce,
+  })
+  onListener(listener)
+  await listener.start()
 }
 
 const connectAndList = async (
@@ -864,8 +868,8 @@ const connectAndList = async (
   opts: ConnectMcpOptions,
   log: NonNullable<ConnectMcpOptions['onLog']>,
   probe: ProbeState,
-  isClosing: () => boolean,
   onClient: (client: Client) => void,
+  onListener: (listener: McpListenSupervisor) => void,
   elicitation: McpElicitationSession | undefined,
 ): Promise<ServerConnect> => {
   // Read first: a `protocol` that is none of the three names is a
@@ -1008,13 +1012,21 @@ const connectAndList = async (
   // Subscribe BEFORE the first list call: a server that mutates its tool set
   // during init would otherwise lose the notification in the window between
   // connect() and listTools().
+  let listener: McpListenSupervisor | undefined
   if (opts.onToolsChanged) {
     const notify = opts.onToolsChanged
-    client.setNotificationHandler('notifications/tools/list_changed', () => notify(name))
+    const announce = (): void => notify(name)
+    client.setNotificationHandler('notifications/tools/list_changed', announce)
     // 2026-07-28 has no stream a server may write to unasked: the notice above
-    // arrives only on a `subscriptions/listen` stream the client opens. (The
-    // 2025 revisions send it on the GET stream the transport opens by itself.)
-    if (era === 'modern') await listenForToolChanges(name, client, log, isClosing)
+    // arrives only on a `subscriptions/listen` stream the client opens, and
+    // opens again when it ends. (The 2025 revisions send it on the GET stream
+    // the transport opens, and resumes, by itself.)
+    if (era === 'modern') {
+      await listenForToolChanges(name, client, log, announce, (l) => {
+        listener = l
+        onListener(l)
+      })
+    }
   }
 
   const listed = await listAllTools(client, () => warnTruncated(log, name))
@@ -1023,6 +1035,7 @@ const connectAndList = async (
     name,
     client,
     listed,
+    ...(listener ? { listener } : {}),
     instructions: cleanMcpInstructions(client.getInstructions()),
     protocol: { version, era },
   }
@@ -1062,7 +1075,9 @@ export const connectMcpHttp = async (
   const instructions: McpServerInstructions[] = []
   const instructionsOf = new Map<string, string>()
   const protocols: McpServerProtocol[] = []
-  let closing = false
+  // 2026-07-28, with `onToolsChanged`: per connected server, what keeps its
+  // listen stream open (`./listen`). Stopped before the clients are closed.
+  const listeners = new Map<string, McpListenSupervisor>()
   // server name → the tool keys it currently owns, so a refresh can remove
   // exactly its own entries.
   const mountedKeys = new Map<string, string[]>()
@@ -1363,7 +1378,7 @@ export const connectMcpHttp = async (
 
   const connects = await Promise.all(
     Object.entries(servers).map(([name, cfg]) =>
-      openConnection(name, cfg, opts, log, () => closing, elicitationSessionOf(name)),
+      openConnection(name, cfg, opts, log, elicitationSessionOf(name)),
     ),
   )
 
@@ -1378,6 +1393,7 @@ export const connectMcpHttp = async (
       continue
     }
     clients.set(server.name, server.client)
+    if (server.listener) listeners.set(server.name, server.listener)
     if (server.instructions) {
       log(
         'info',
@@ -1487,7 +1503,10 @@ export const connectMcpHttp = async (
       mountTools(name, client, await listAllTools(client, () => warnTruncated(log, name)))
     },
     close: async () => {
-      closing = true
+      // The listen streams first: a pending retry or an attempt in flight must not
+      // outlive (or be logged against) a client that is going away.
+      for (const listener of listeners.values()) listener.stop()
+      listeners.clear()
       appResources.clear()
       await Promise.allSettled([...clients.values()].map((c) => c.close()))
     },

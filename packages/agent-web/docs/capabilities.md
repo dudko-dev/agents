@@ -431,7 +431,9 @@ every call wastes the window — and OpenAI rejects more than 128 tools.
 - names are `server__tool`, sanitised to `[a-zA-Z0-9_-]` and capped at 64
   chars; collisions get a `_2` suffix;
 - `annotations.readOnlyHint` marks tools read-only for the consent gate;
-- `notifications/tools/list_changed` → `onToolsChanged(server)` → `refreshServer`.
+- `notifications/tools/list_changed` → `onToolsChanged(server)` → `refreshServer` (on 2026-07-28
+  also once after the listen stream was opened again: see
+  [the protocol revision](#the-protocol-revision-protocol)).
 
 **Selection** — `toolSelectionStrategy` (default `'auto'`):
 
@@ -562,9 +564,35 @@ Both errors come in one exchange, not after a timeout. `ConnectedMcp.protocols` 
 - **Tool list changes.** 2026-07-28 has no stream a server may write to unasked.
   With `onToolsChanged` set and `tools.listChanged` advertised, the connector opens a
   `subscriptions/listen` stream before the first `tools/list` (it waits up to 10 s for the
-  acknowledgement, then goes on without and logs `warn`). When the stream ends for any reason
-  other than `close()`, a `warn` line says so and it is **not** opened again - the SDK does not
-  re-listen and neither does this connector. Without `onToolsChanged` no stream is opened.
+  acknowledgement, then goes on without and logs `warn`). Without `onToolsChanged` no stream is
+  opened. The SDK does not re-listen; this connector does (`src/mcp/listen.ts`, the Node
+  sibling's rules and log lines):
+  - **What is retried.** A stream that ends while the connection is open, whether dropped (no
+    result) or closed by the server with its result, and an attempt that failed for a passing
+    reason: a 5xx, a 429, an acknowledgement that did not come in 10 s, a network error, the
+    SDK server's `-32603` "Subscription limit reached". A first attempt at connect that fails
+    that way is retried too (the connect itself goes on, as before).
+  - **What is final.** 401 / 403 (the OAuth flow's to fix: an `authProvider` already had its
+    refresh-and-retry), 404 / 405 / `-32601` (the server does not offer the method), `-32602`,
+    a client that is not connected, and an acknowledgement without `toolsListChanged` (`info`,
+    and the stream is closed). One `warn` line: `could not subscribe to tool list changes - … ;
+    not tried again: …`.
+  - **When.** Attempt n waits `min(60 s, 1 s × 2^(n-1))` less a random share of up to half: at
+    most 1, 2, 4, 8, 16, 32 s, then 60 s. The count starts over only after a stream stayed up
+    60 s; a stream acknowledged and lost sooner counts, so a flapping server is given up on
+    after **10 attempts in a row** like a dead one (`warn`: `… gave up after 10 attempts in a
+    row - …`).
+  - **Once it is back** (`info`: `listening for tool list changes again (attempt n); the tool
+    list is read again`) `onToolsChanged(server)` fires once - the callback a notice calls, so a
+    host reacts exactly as to a notice (`refreshServer`). Notices that arrive meanwhile on the
+    new stream fire it as usual.
+  - **Logs.** One `warn` per loss or failed attempt, with the attempt and the delay
+    (`[mcp] wx: the tool list change stream ended (dropped); listening again in 0.8 s (attempt
+    1 of 10)`); the transport may add a `transport error` line of its own for the same loss.
+  - **`close()`** takes down a pending retry, the stability timer and an attempt in flight
+    before the clients close: no timer outlives the connection. An open stream is ended by the
+    client's own close (no extra request).
+  - `refreshServer(name)` works whatever the stream does.
 - **Sessions and reconnection** do not exist in that revision: no `mcp-session-id`, no GET
   stream, no `Last-Event-ID`; `reconnection` on the config applies to 2025 connections only.
 - **`input_required`.** The SDK is told not to answer it (`inputRequired.autoFulfill: false`), so

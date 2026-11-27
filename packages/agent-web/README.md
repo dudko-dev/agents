@@ -257,9 +257,17 @@ On 2026-07-28: there is no session (`mcp-session-id`), no GET stream and no
   2026-07-28, fails with that same explanation.
 - **Tool list changes** arrive over a `subscriptions/listen` stream, which the
   connector opens at connect when you pass `onToolsChanged` and the server
-  advertises `tools.listChanged`. If that stream ends it is **not opened
-  again**: a `warn` line says so, and changes are not announced until you
-  connect again. `refreshServer(name)` always works.
+  advertises `tools.listChanged`. When that stream ends while the connection is
+  open - dropped, or closed by the server with its result - it is **opened
+  again**, with backoff (at most 1 s, 2 s, 4 s, ... up to 60 s, less a random
+  share of up to half; the count starts over after a stream that stayed up a
+  minute), and once it is back `onToolsChanged(name)` fires once, exactly as
+  for a notice: a change made in the gap was announced to nobody. After 10
+  attempts in a row it gives up; a 401 / 403 / 404 / 405 (or `-32601`) stops
+  it at once. One `warn` per loss with the attempt and the delay, one `info`
+  when it is back, one `warn` on giving up. `close()` takes down a pending
+  retry and an attempt in flight. `refreshServer(name)` always works. No
+  setting: see [docs/design.md](docs/design.md#mcp-the-listen-stream-is-opened-again).
 - **`input_required` needs `onElicitation`.** Without it, a tool that asks the
   user something (elicitation), or asks for the call to be sent again with a
   state, fails with `MCP tool "x" did not finish: the server asked for more

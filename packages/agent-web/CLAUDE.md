@@ -293,8 +293,8 @@ waiting for it. OFF
   the 2025 wire), and runs each mode against the `legacy` / `dual` / `modern` test servers. On a
   modern connection: `Mcp-Method` / `Mcp-Name` are set by the transport from the message (so
   `client.request` is enough; `Mcp-Param-*` is `callTool`'s own and is not sent), tool list
-  changes need `client.listen` (opened at connect when `onToolsChanged` is given; never opened
-  again), `inputRequired.autoFulfill` is off and an `input_required` answer fails the call
+  changes need `client.listen` (opened at connect when `onToolsChanged` is given, and opened
+  again by `listen.ts` when it ends), `inputRequired.autoFulfill` is off and an `input_required` answer fails the call
   unless `onElicitation` is set (then `elicitation.ts` answers it). CORS: a page's SDK reads a BLOCKED probe as "a 2025 server"
   (it decides by `window` + `document`), so `http.ts` remembers a network-level failure seen
   during the probe (`ProbeState.blocked`) and `diagnoseMcpCors(url, fetch, { protocol })` tries
@@ -313,6 +313,19 @@ waiting for it. OFF
   check (and `iss` handed to the SDK's `auth()`), the refusal of a callback without discovery
   state, the issuer stamp surviving storage, the scope policy - each have a test in
   `tests/mcp.test.ts` and need a mutation check.
+- `src/mcp/listen.ts` (pure, no imports) — the 2026-07-28 `subscriptions/listen` stream kept
+  open (`createMcpListenSupervisor`, used by `listenForToolChanges` in `http.ts`): a stream that
+  ends while the connection is open - dropped, or closed by the server with its result - is
+  opened again with backoff (1 s doubled up to 60 s, less up to half), the count reset only by a
+  stream that stayed up a minute, given up after 10 in a row, final at once on 401 / 403 / 404 /
+  405 / -32601 / -32602; once back it calls the SAME `onToolsChanged` a notice calls. `close()`
+  stops every listener before the clients close (and so does every failed-connect path in
+  `openConnection`). Its timers (`setTimeout`) have a test seam of their OWN
+  (`Symbol.for('@dudko.dev/agent:mcp-listen-test-time')`, driven by `tests/helpers/listen-time.ts`,
+  the same file in both packages), never the wait clock's, which is for run deadlines only. A COPY of the server's `src/mcp-listen.ts`, byte for byte - change both (the server's
+  `tests/mcp-listen.test.ts` compares them and tests every rule; `tests/mcp-protocol.test.ts`
+  here drives it against the test server on virtual time, and `tests/fixtures/mcp-listen-exit.ts`
+  in a child process proves close leaves no timer). No setting: `docs/design.md` says why.
 - `src/webmcp/` — optional `./webmcp` subpath: publish a ToolSet through the browser's WebMCP API
   and use a page's WebMCP tools as one. No dependency; a no-op where the browser has no WebMCP.
 - `src/{parse,prompts,events,config,index}.ts`.
