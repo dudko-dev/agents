@@ -19,6 +19,8 @@ import type {
   McpElicitationResult,
   McpModule,
   McpOAuthCallback,
+  McpOAuthRegistration,
+  McpOAuthRegistrationKind,
   McpProtocolMode,
   McpServerProtocol,
   McpServerResult,
@@ -45,6 +47,19 @@ export interface McpOAuthOptions {
    * ignores it and registers dynamically.
    */
   clientMetadataUrl?: string
+  /**
+   * How the client is registered with the server's authorization server:
+   * `'auto'` (the default - the document where the server supports it, dynamic
+   * registration otherwise), `'cimd'` (the document only: needs a
+   * `clientMetadataUrl`, and a server without support ends in `status: 'error'`
+   * before anything is sent to its registration endpoint) or `'dcr'` (dynamic
+   * registration only, even with a `clientMetadataUrl`). Kept across the
+   * redirect, and with the server list of `useMcpServers`. Left out, nothing is
+   * passed. A core that does not know the option is refused for `'cimd'` /
+   * `'dcr'` (it would register as it always did). Which way was taken is in
+   * `oauthRegistration`.
+   */
+  registration?: McpOAuthRegistration
 }
 
 export interface McpConnectOptions {
@@ -176,6 +191,12 @@ export interface UseMcpReturn extends McpElicitationControls {
   /** Where to send the user when `status === 'needs-authorization'`. */
   authorizationUrl?: string
   /**
+   * How the OAuth client of the connected server was registered - `'cimd'`
+   * (its client ID metadata document) or `'dcr'` (dynamic registration) - once
+   * it is connected with OAuth, on a core that reports it.
+   */
+  oauthRegistration?: McpOAuthRegistrationKind
+  /**
    * Whether the installed core exposes the OAuth API. `undefined` until the
    * optional subpath has been loaded once — call `checkOAuthSupport()` to
    * resolve it before offering OAuth in your UI.
@@ -276,13 +297,22 @@ export const OAUTH_UNSUPPORTED =
 const PENDING_KEY = 'agent-web-react:mcp:pending'
 const OAUTH_KEY = 'agent-web-react:mcp:oauth'
 
-interface OAuthRecord {
-  url: string
-  name?: string
+/**
+ * The OAuth details a redirect record keeps for one server - both hooks write one before the
+ * user leaves for the authorization server, and build the provider and the reconnect from it
+ * on the way back, so the client is the same both times.
+ */
+export interface McpOAuthRecord {
   redirectUrl: string
   scope?: string
   clientName?: string
   clientMetadataUrl?: string
+  registration?: McpOAuthRegistration
+}
+
+interface OAuthRecord extends McpOAuthRecord {
+  url: string
+  name?: string
   /** The protocol revisions the connection was asked for, kept across the redirect. */
   protocol?: McpProtocolMode
   /** `skills: true` was asked for, kept across the redirect. */
@@ -449,6 +479,71 @@ export const mcpOAuthProviderOptions = (
     scope: oauth.scope,
     // Left out when unset: a provider built without it keeps registering dynamically.
     ...(clientMetadataUrl !== undefined ? { clientMetadataUrl } : {}),
+    // Left out when unset, too: the core's default is 'auto'.
+    ...(oauth.registration !== undefined ? { registration: oauth.registration } : {}),
+  }
+}
+
+/**
+ * What a redirect record keeps of the options `mcpOAuthProviderOptions` resolved (the server's
+ * URL is kept beside it). Pure; written as JSON, so an unset field is simply absent.
+ */
+export const mcpOAuthRecordOf = (resolved: BrowserOAuthProviderOptions): McpOAuthRecord => ({
+  redirectUrl: resolved.redirectUrl,
+  scope: resolved.scope,
+  clientName: resolved.clientName,
+  clientMetadataUrl: resolved.clientMetadataUrl,
+  ...(resolved.registration !== undefined ? { registration: resolved.registration } : {}),
+})
+
+/**
+ * The OAuth details read back from a redirect record on the way in: what the provider and the
+ * reconnect are built with. Pure. `registration` is passed on as it was stored - a value the
+ * core does not know is refused by the core, never read as "auto".
+ */
+export const mcpOAuthOptionsOfRecord = (record: McpOAuthRecord): McpOAuthOptions => ({
+  redirectUrl: record.redirectUrl,
+  scope: record.scope,
+  clientName: record.clientName,
+  clientMetadataUrl: record.clientMetadataUrl,
+  ...(record.registration !== undefined ? { registration: record.registration } : {}),
+})
+
+export const registrationUnsupported = (registration: McpOAuthRegistration): string =>
+  `The installed @dudko.dev/agent-web does not support oauth.registration ('${registration}'): it would register as it always did. Upgrade the core, or leave registration out.`
+
+/**
+ * The core's OAuth provider for one server. A `registration` other than `'auto'` needs a core
+ * that knows it - an older one would ignore it and register the old way (a document under
+ * `'dcr'`, a dynamic registration under `'cimd'`) - so that is refused here, before any request.
+ */
+export const newMcpOAuthProvider = (
+  mod: McpModule,
+  options: BrowserOAuthProviderOptions,
+): BrowserOAuthProvider => {
+  if (!mod.BrowserOAuthProvider) throw new Error(OAUTH_UNSUPPORTED)
+  const provider = new mod.BrowserOAuthProvider(options)
+  const asked = options.registration
+  if (asked !== undefined && asked !== 'auto' && provider.registration !== asked) {
+    throw new Error(registrationUnsupported(asked))
+  }
+  return provider
+}
+
+/**
+ * How the provider's stored client was registered (`'cimd'` / `'dcr'`), read after a sign-in;
+ * undefined without a provider, on a core that does not report it, or when the read fails.
+ * Never throws: it is what the UI shows, not a check.
+ */
+export const mcpOAuthRegistrationOf = async (
+  provider: BrowserOAuthProvider | undefined,
+): Promise<McpOAuthRegistrationKind | undefined> => {
+  if (typeof provider?.registrationKind !== 'function') return undefined
+  try {
+    const kind = await provider.registrationKind()
+    return kind === 'cimd' || kind === 'dcr' ? kind : undefined
+  } catch {
+    return undefined
   }
 }
 
@@ -538,6 +633,9 @@ export const useMcp = (options: UseMcpOptions = {}): UseMcpReturn => {
   const [protocol, setProtocol] = useState<McpServerProtocol | undefined>(undefined)
   const [error, setError] = useState<string | undefined>(undefined)
   const [authorizationUrl, setAuthorizationUrl] = useState<string | undefined>(undefined)
+  const [oauthRegistration, setOauthRegistration] = useState<McpOAuthRegistrationKind | undefined>(
+    undefined,
+  )
   const [oauthSupported, setOauthSupported] = useState<boolean | undefined>(undefined)
   const [completingAuthorization, setCompletingAuthorization] = useState(
     () => readCallbackParams() !== undefined,
@@ -585,6 +683,7 @@ export const useMcp = (options: UseMcpOptions = {}): UseMcpReturn => {
       setStatus('connecting')
       setError(undefined)
       setAuthorizationUrl(undefined)
+      setOauthRegistration(undefined)
       setTools(undefined)
       setCatalog([])
       setInstructions(undefined)
@@ -606,17 +705,15 @@ export const useMcp = (options: UseMcpOptions = {}): UseMcpReturn => {
           const record: OAuthRecord = {
             url: opts.url,
             name,
-            redirectUrl: providerOptions.redirectUrl,
-            scope: providerOptions.scope,
-            clientName: providerOptions.clientName,
-            clientMetadataUrl: providerOptions.clientMetadataUrl,
+            ...mcpOAuthRecordOf(providerOptions),
             ...(opts.protocol ? { protocol: opts.protocol } : {}),
             ...(opts.skills ? { skills: true } : {}),
             startedAt: Date.now(),
           }
-          // Throws on a clientMetadataUrl the core refuses (not https, or a bare
-          // origin): reported below as this server's error, before any request.
-          authProvider = new mod.BrowserOAuthProvider(providerOptions)
+          // Throws on a clientMetadataUrl or registration the core refuses (not
+          // https, a bare origin, 'cimd' without a document, a core that does not
+          // know the option): reported below as this server's error, before any request.
+          authProvider = newMcpOAuthProvider(mod, providerOptions)
           providerRef.current = authProvider
           // `pending` resumes the redirect; `oauth` outlives it so tokens stay
           // addressable for forgetAuthorization() after a reload.
@@ -679,6 +776,9 @@ export const useMcp = (options: UseMcpOptions = {}): UseMcpReturn => {
         setCatalog(connection.catalog)
         setInstructions(mcpInstructionsOf(connection, name))
         setProtocol(mcpProtocolOf(connection, name))
+        const registered = await mcpOAuthRegistrationOf(authProvider)
+        if (!current()) return
+        setOauthRegistration(registered)
         setStatus('connected')
       } catch (err) {
         if (!current()) return
@@ -697,6 +797,7 @@ export const useMcp = (options: UseMcpOptions = {}): UseMcpReturn => {
     setInstructions(undefined)
     setProtocol(undefined)
     setAuthorizationUrl(undefined)
+    setOauthRegistration(undefined)
     setError(undefined)
     setStatus('idle')
   }, [closeConnection])
@@ -769,7 +870,8 @@ export const useMcp = (options: UseMcpOptions = {}): UseMcpReturn => {
         const mod = await loadMcp()
         setOauthSupported(typeof mod.BrowserOAuthProvider === 'function')
         if (!mod.BrowserOAuthProvider || !mod.finishMcpOAuth) throw new Error(OAUTH_UNSUPPORTED)
-        const provider = new mod.BrowserOAuthProvider(mcpOAuthProviderOptions(pending.url, pending))
+        const oauth = mcpOAuthOptionsOfRecord(pending)
+        const provider = newMcpOAuthProvider(mod, mcpOAuthProviderOptions(pending.url, oauth))
         providerRef.current = provider
         await mod.finishMcpOAuth(provider, callback)
         writeRecord(PENDING_KEY, undefined)
@@ -784,16 +886,12 @@ export const useMcp = (options: UseMcpOptions = {}): UseMcpReturn => {
         // hung handshake must not leave the UI stuck on "finishing".
         setCompletingAuthorization(false)
         // With the details the flow was started with: the same redirect, scope,
-        // client name and client ID metadata document, not the hook's defaults.
+        // client name, client ID metadata document and registration, not the
+        // hook's defaults.
         await connect({
           url: pending.url,
           name: pending.name,
-          oauth: {
-            redirectUrl: pending.redirectUrl,
-            scope: pending.scope,
-            clientName: pending.clientName,
-            clientMetadataUrl: pending.clientMetadataUrl,
-          },
+          oauth,
           ...(pending.protocol ? { protocol: pending.protocol } : {}),
           ...(pending.skills === true ? { skills: true } : {}),
         })
@@ -831,6 +929,7 @@ export const useMcp = (options: UseMcpOptions = {}): UseMcpReturn => {
     protocol,
     error,
     authorizationUrl,
+    oauthRegistration,
     oauthSupported,
     completingAuthorization,
     pendingElicitations: elicitation.pendingElicitations,

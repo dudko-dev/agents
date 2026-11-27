@@ -108,7 +108,7 @@ src/
 ├── llm/util.ts          clip / prompt helpers / usageOfError (the spend of a failed structured call)
 ├── mcp/                 OPTIONAL HTTP MCP connector (./mcp subpath)
 │   ├── http.ts          StreamableHTTP connect / mount / refresh
-│   └── oauth.ts         OAuth 2.1 + DCR client provider (vault-backed)
+│   └── oauth.ts         OAuth 2.1 client provider: CIMD or DCR (`registration`), vault-backed
 ├── webmcp/              OPTIONAL bridge to the browser's WebMCP API (./webmcp subpath)
 ├── parse.ts             robust JSON-salvage parsers (the prompted backbone)
 ├── prompts.ts           default phase prompts (native + prompted variants)
@@ -1029,6 +1029,52 @@ form is ordinary, and the step used to end under them (the elicitation answered 
   a server-side host would need the bridge in the page and a round trip for every app call. The
   names (`apps`, `mcp.app`, `readUiResource`, `appTool`, `callAppTool`, `approveAppToolCall`) are
   kept for when it does.
+
+## MCP OAuth: `registration` - auto by default, and `'cimd'` refuses before it registers
+
+How the OAuth client gets its `client_id` is one option on the provider, `registration`, with the
+same names and rules in both cores: `'auto'`, `'cimd'`, `'dcr'`.
+
+**Why `'auto'` is the default.** It is what the SDK does on its own and what the providers did
+before the option existed, so no stored client changes meaning and no host has to change a line.
+It is also the right choice for most hosts: the client ID metadata document where the authorization
+server supports it (no registration record left at every server, one stable `client_id` whose
+redirect addresses the host controls), dynamic registration elsewhere - which every MCP
+authorization server accepts today (the 2026-07-28 revision deprecates DCR, but keeps it for at
+least a year). The other two are for hosts that must know which one happened. `'cimd'`: a host
+that may not leave registrations at third-party servers, or needs a `client_id` a server's policy
+can name. `'dcr'`: a document that cannot be used from where the host runs (the demo off
+agent.dudko.dev: its document lists that site's pages only), or a server that advertises CIMD and
+then cannot fetch the document.
+
+**Why `'cimd'` fails in `clientInformation()`.** The SDK chooses between the document and a
+registration inside `auth()` (`@modelcontextprotocol/client` 2.4, `authInternal`): it saves the
+discovery state, then reads `provider.clientInformation()`, and only with nothing stored looks at
+`client_id_metadata_document_supported` and `provider.clientMetadataUrl` - the document when both
+are there, `registerClient()` otherwise. `clientInformation()` is the last call of ours before that
+choice and comes after the metadata is saved, so the provider reads the same metadata the SDK is
+about to read and throws when it promises nothing. Nothing has been sent but discovery. The
+alternative - a fetch that refuses the registration endpoint - would have to be ours on every path
+(the transport's 401 handling, `beginMcpOAuth`, a host's own fetch), would know the endpoint only
+by URL, and would surface as a network error. With no record of the server at all the provider
+refuses too: it fails closed, because a future SDK that reads the client before saving discovery
+would otherwise register. After a refusal the stored discovery state is dropped: the SDK reuses it
+without asking again, so a server that starts advertising CIMD would stay refused until a reset.
+`'dcr'` needs no such hook: the getter `clientMetadataUrl` is what the SDK reads, and under
+`'dcr'` it returns nothing.
+
+**Why the kind is stamped, not derived.** "CIMD when the `client_id` is the configured document"
+is right until the document's URL changes; then an old document client would read as a dynamic
+one and be reused under `'dcr'`. When a client is saved the provider knows exactly which URL the SDK
+used, so the kind is written on the record then (and a registration response cannot set it). Records
+written before the stamp fall back to the comparison.
+
+**Why a changed setting forgets the client AND its tokens.** A token belongs to the client it was
+issued to. Keeping the tokens would keep the old client in use - the transport sends the stored
+access token without asking `auth()` - until it expires, and its refresh would then go out under
+the new client and fail. Forgetting both costs one sign-in and leaves nothing of the old setting
+behind. It happens once per provider, before the first read of the client or a token (the setting
+of a provider is fixed); `'auto'` forgets nothing and reads nothing extra.
 
 ## Secrets
 

@@ -35,7 +35,11 @@ against its production build.
 - `src/hooks/` — `use-agent` (the hook; `send` / `stopSubagent` steer a running agent
   through the core's `RunControl`), `use-credentials` (vault),
   `use-local-model` (any on-device runtime as an engine) + `use-webllm-model`
-  (its WebLLM engine), `use-mcp` (remote MCP + OAuth round-trip),
+  (its WebLLM engine), `use-mcp` (remote MCP + OAuth round-trip; every OAuth provider is built
+  by `newMcpOAuthProvider` - it refuses `oauth.registration` `'cimd'` / `'dcr'` on a core that does
+  not know the option - and the redirect record goes through `mcpOAuthRecordOf` /
+  `mcpOAuthOptionsOfRecord`, so the same client comes back; `oauthRegistration` from
+  `mcpOAuthRegistrationOf`),
   `use-mcp-servers` (several servers), `use-chat-history`, `use-virtual-files`,
   `use-speech-to-text`.
 - `src/approval-queue.ts` — `createApprovalQueue`, the consent queue behind `useAgent`'s

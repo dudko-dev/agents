@@ -1222,6 +1222,8 @@ export interface ILocalMcp extends ILocalMcpServer {
   faults: ILocalAuthorizationServer['faults']
   /** Every client ID metadata document URL the authorization server fetched. */
   cimdFetches: string[]
+  /** Mutable: what the authorization server's metadata advertises from now on. */
+  advertised: ILocalAuthorizationServer['advertised']
   /**
    * Every request the token endpoint received: its form parameters, how the
    * client authenticated, and the OAuth error it was answered with (if any).
@@ -1276,6 +1278,7 @@ export const startLocalMcp = async (opts: ILocalMcpOptions = {}): Promise<ILocal
     tokenRequests: as.tokenRequests,
     faults: as.faults,
     cimdFetches: as.cimdFetches,
+    advertised: as.advertised,
     close: async () => {
       await mcp.close()
       await as.close()

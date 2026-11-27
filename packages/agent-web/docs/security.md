@@ -113,12 +113,35 @@ exchanged)
 - **`clientMetadataUrl` (CIMD)** must be https with a non-root path. With it the
   `client_id` is a URL you control, and the authorization server reads the
   allowed `redirect_uris` from the document there - keep that list exact.
+- **`registration` decides what is sent where** (the same in the Node package):
+
+  | | registration endpoint | `client_id` in the authorization and token requests | who fetches the document |
+  |---|---|---|---|
+  | `'auto'`, server advertises CIMD | nothing | the document's URL | the authorization server, from your host |
+  | `'auto'`, server does not | a POST of the client metadata (`client_name`, `redirect_uris`, grant and response types, `token_endpoint_auth_method: 'none'`, `application_type`, `scope`, your `clientMetadata`) | the one it issued | nobody |
+  | `'cimd'`, server advertises CIMD | nothing | the document's URL | the authorization server, from your host |
+  | `'cimd'`, server does not | **nothing**: the provider refuses before the SDK can register, and nobody is sent to authorize | - | nobody |
+  | `'dcr'` | the POST above, even when the server advertises CIMD | the one it issued | nobody - the URL is never shown to the SDK |
+
+  Discovery (the resource and authorization server metadata) is read in every
+  case. Under `'cimd'` with no record of the authorization server at all the
+  provider refuses too: it fails closed rather than let the SDK choose.
+- **A changed `registration` does not carry the old client's credentials
+  over.** Under `'cimd'` / `'dcr'` a stored client of the other kind is
+  forgotten with its tokens before either is read, so its access token is not
+  sent under the new setting. The kind comes from a stamp written when the
+  client was saved, by the provider and not by the authorization server (a
+  registration response that carries the stamp's key is overwritten).
 
 **What it does not protect against**
 
 - An authorization server that does not send `iss` and does not promise to: the
   response is accepted on `state` and the stored record of the flow alone.
 - Tokens stored without an issuer stamp, until their first use (see above).
+- An authorization server that advertises CIMD and then treats the `client_id`
+  URL carelessly (does not fetch the document, or ignores its `redirect_uris`):
+  `registration: 'cimd'` decides what this client sends, not what the server
+  does with it.
 - XSS on your origin, as with every key in the vault.
 
 ---

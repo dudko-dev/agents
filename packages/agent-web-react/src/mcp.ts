@@ -18,8 +18,12 @@ export {
   isUnauthorizedError,
   mcpAppsRouter,
   mcpInstructionsOf,
+  mcpOAuthOptionsOfRecord,
   mcpOAuthProviderOptions,
+  mcpOAuthRecordOf,
+  mcpOAuthRegistrationOf,
   mcpProtocolOf,
+  newMcpOAuthProvider,
   readCallbackParams,
   stripOAuthParams,
 } from './hooks/use-mcp.js'
@@ -27,6 +31,7 @@ export type {
   McpConnectOptions,
   McpElicitationControls,
   McpOAuthOptions,
+  McpOAuthRecord,
   McpStatus,
   UseMcpOptions,
   UseMcpReturn,
@@ -53,6 +58,7 @@ export type {
   PendingElicitation,
 } from './elicitation.js'
 export type {
+  BrowserOAuthProvider,
   BrowserOAuthProviderOptions,
   ConnectedMcp,
   McpCatalogEntry,
@@ -63,6 +69,8 @@ export type {
   McpElicitationResult,
   McpElicitationSchema,
   McpOAuthCallback,
+  McpOAuthRegistration,
+  McpOAuthRegistrationKind,
   McpProtocolMode,
   McpServerInstructions,
   McpServerProtocol,

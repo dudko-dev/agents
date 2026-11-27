@@ -996,15 +996,42 @@ new BrowserOAuthProvider({
   clientName: 'my-app', scope: 'mcp:tools',
   clientMetadata: { software_id: '…' },       // merged over the registration defaults
   clientMetadataUrl: 'https://my-app.example/oauth/client.json', // CIMD, optional
+  registration: 'auto',                       // or 'cimd' (the document only) / 'dcr' (DCR only)
   storage,                                    // default: the encrypted vault
 })
 ```
 
-- **Which client ID is used**: a registration already in storage, else
-  `clientMetadataUrl` when the authorization server advertises
-  `client_id_metadata_document_supported`, else dynamic registration (RFC 7591).
+- **Which client ID is used** (`registration`, the same option in the Node
+  package):
+  - `'auto'` (default): a client already in storage, else `clientMetadataUrl`
+    when the authorization server advertises
+    `client_id_metadata_document_supported`, else dynamic registration (RFC 7591);
+  - `'cimd'`: the document only - a stored client is used only when its
+    `client_id` is `clientMetadataUrl`; with no such client and an authorization
+    server that does not advertise support (a literal `true`), the provider
+    throws before the SDK can register (`… does not support client ID metadata
+    documents (CIMD), which this connection requires (registration: 'cimd') -
+    nothing was sent to its registration endpoint`) and drops the stored
+    discovery state, so the next attempt reads the metadata again. Needs
+    `clientMetadataUrl` (the constructor throws without one);
+  - `'dcr'`: dynamic registration only - `provider.clientMetadataUrl` is
+    `undefined` whatever was configured, and a stored document client is not
+    used.
+
   `clientMetadataUrl` must be https with a non-root path, and the document it
-  serves must list the same `redirect_uris`.
+  serves must list the same `redirect_uris`. An unknown `registration` throws in
+  the constructor. `provider.registration` is the setting;
+  `await provider.registrationKind()` is how the stored client was made
+  (`'cimd'` / `'dcr'`, or `undefined` when there is none this provider would
+  use).
+- **A changed `registration`** never reuses the other kind's client: under
+  `'cimd'` / `'dcr'`, the first read of the client or a token (once per
+  provider) forgets a stored client of the other kind together with its tokens,
+  and the user signs in again. The kind is stamped on the stored record when the
+  client is saved (`x-agent-registration`; taken off before the SDK sees the
+  record, and replaced whatever a registration response carried); a record
+  without the stamp is CIMD when its `client_id` is the document configured
+  now.
 - **Registration defaults**: a public client (`token_endpoint_auth_method:
   'none'`, PKCE), `authorization_code` + `refresh_token`, `application_type` by the
   redirect URL (`'web'` for an https page, `'native'` for a loopback one).

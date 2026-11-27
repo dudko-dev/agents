@@ -1,0 +1,11 @@
+{
+  "client_id": "https://agent.dudko.dev/oauth/client.json",
+  "client_name": "agent-web-demo",
+  "client_uri": "https://agent.dudko.dev/demo/",
+  "logo_uri": "https://agent.dudko.dev/apple-touch-icon.png",
+  "redirect_uris": ["https://agent.dudko.dev/demo/", "https://agent.dudko.dev/pipeline/"],
+  "grant_types": ["authorization_code", "refresh_token"],
+  "response_types": ["code"],
+  "token_endpoint_auth_method": "none",
+  "application_type": "web"
+}

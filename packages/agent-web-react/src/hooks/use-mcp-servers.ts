@@ -6,19 +6,23 @@ import type {
   ConnectedMcp,
   McpCatalogEntry,
   McpModule,
+  McpOAuthRegistrationKind,
   McpProtocolMode,
   McpServerProtocol,
 } from '../mcp-types.js'
 import type { McpAppsConnectionLike } from './use-mcp-app-host.js'
 import {
   claimOAuthCallback,
-  defaultRedirectUrl,
   describeMcpResult,
   loadMcp,
   mcpAppsRouter,
   mcpInstructionsOf,
+  mcpOAuthOptionsOfRecord,
   mcpOAuthProviderOptions,
+  mcpOAuthRecordOf,
+  mcpOAuthRegistrationOf,
   mcpProtocolOf,
+  newMcpOAuthProvider,
   OAUTH_UNSUPPORTED,
   PENDING_TTL_MS,
   readCallbackParams,
@@ -29,6 +33,7 @@ import {
   writeRecord,
   type McpElicitationControls,
   type McpOAuthOptions,
+  type McpOAuthRecord,
   type McpStatus,
   type UseMcpOptions,
 } from './use-mcp.js'
@@ -47,7 +52,10 @@ export interface McpServerSpec {
   auth?: McpAuthMode
   /** Bearer token for `auth: 'bearer'` — kept in memory only, never persisted. */
   token?: string
-  /** OAuth details for `auth: 'oauth'` (`clientMetadataUrl` for CIMD among them). */
+  /**
+   * OAuth details for `auth: 'oauth'` (`clientMetadataUrl` for CIMD and `registration` among
+   * them). Remembered with the server.
+   */
   oauth?: McpOAuthOptions
   /**
    * The MCP protocol revisions this connection may use (`'legacy'` / `'auto'` / `'modern'`,
@@ -87,6 +95,11 @@ export interface McpServerView {
   error?: string
   /** Where to send the user when `status === 'needs-authorization'`. */
   authorizationUrl?: string
+  /**
+   * How its OAuth client was registered - `'cimd'` (the client ID metadata document) or `'dcr'`
+   * (dynamic registration) - while it is connected with OAuth, on a core that reports it.
+   */
+  oauthRegistration?: McpOAuthRegistrationKind
   catalog: McpCatalogEntry[]
   /**
    * What the server told the agent in its handshake (its MCP `instructions`), while it is
@@ -151,13 +164,9 @@ interface StoredServer {
   apps?: boolean
 }
 
-interface PendingRecord {
+interface PendingRecord extends McpOAuthRecord {
   name: string
   url: string
-  redirectUrl: string
-  scope?: string
-  clientName?: string
-  clientMetadataUrl?: string
   startedAt: number
 }
 
@@ -285,13 +294,10 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const providerFor = (mod: McpModule, spec: StoredServer): BrowserOAuthProvider => {
-    if (!mod.BrowserOAuthProvider) throw new Error(OAUTH_UNSUPPORTED)
-    // Throws on a clientMetadataUrl the core refuses (not https, or a bare origin).
-    return new mod.BrowserOAuthProvider(
-      mcpOAuthProviderOptions(spec.url, spec.oauth, optionsRef.current),
-    )
-  }
+  // Throws on a clientMetadataUrl or registration the core refuses (not https, a bare origin,
+  // 'cimd' without a document, a core that does not know the option).
+  const providerFor = (mod: McpModule, spec: StoredServer): BrowserOAuthProvider =>
+    newMcpOAuthProvider(mod, mcpOAuthProviderOptions(spec.url, spec.oauth, optionsRef.current))
 
   const connectServer = useCallback(
     async (name: string): Promise<void> => {
@@ -309,6 +315,7 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
         status: 'connecting',
         error: undefined,
         authorizationUrl: undefined,
+        oauthRegistration: undefined,
         catalog: [],
         instructions: undefined,
         protocol: undefined,
@@ -375,8 +382,11 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
         })
         setToolsVersion((v) => v + 1)
         const negotiated = mcpProtocolOf(connection, name)
+        const oauthRegistration = await mcpOAuthRegistrationOf(provider)
+        if (!current()) return
         patch(name, {
           status: 'connected',
+          oauthRegistration,
           catalog: connection.catalog,
           instructions: mcpInstructionsOf(connection, name),
           protocol: negotiated ? { version: negotiated.version, era: negotiated.era } : undefined,
@@ -453,10 +463,7 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
       const pending: PendingRecord = {
         name,
         url: spec.url,
-        redirectUrl: spec.oauth?.redirectUrl ?? defaultRedirectUrl(),
-        scope: spec.oauth?.scope,
-        clientName: spec.oauth?.clientName ?? optionsRef.current.clientName,
-        clientMetadataUrl: spec.oauth?.clientMetadataUrl ?? optionsRef.current.clientMetadataUrl,
+        ...mcpOAuthRecordOf(mcpOAuthProviderOptions(spec.url, spec.oauth, optionsRef.current)),
         startedAt: Date.now(),
       }
       writeRecord(pendingKey, pending)
@@ -488,6 +495,7 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
       patch(name, {
         status: 'idle',
         authorizationUrl: undefined,
+        oauthRegistration: undefined,
         catalog: [],
         instructions: undefined,
         protocol: undefined,
@@ -541,15 +549,7 @@ export const useMcpServers = (options: UseMcpServersOptions = {}): UseMcpServers
             setServers((list) => [...list, view(spec)])
             saveList()
           }
-          const provider = providerFor(mod, {
-            ...spec,
-            oauth: {
-              redirectUrl: pending.redirectUrl,
-              scope: pending.scope,
-              clientName: pending.clientName,
-              clientMetadataUrl: pending.clientMetadataUrl,
-            },
-          })
+          const provider = providerFor(mod, { ...spec, oauth: mcpOAuthOptionsOfRecord(pending) })
           live(spec.name).provider = provider
           await mod.finishMcpOAuth(provider, callback)
           writeRecord(pendingKey, undefined)
