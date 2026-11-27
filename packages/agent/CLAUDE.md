@@ -219,7 +219,17 @@
     { consent }` over `config.mcpSkills.consent`; `decideMcpSkillConsent` / `recordMcpSkillConsent`,
     the grant bound to `mcpSkillGrantKey` - server, URI, every digest; nested skills
     (`mcpSkillEnclosingUri`) never covered by another yes; `mcpSkillConsentView` - the body is
-    the model's text exactly). A COPY of the browser sibling's
+    the model's text exactly), and a directory of a skill (`read_skill_file` on a directory, for
+    every kind of skill: `skillDirectoryRef` - root `''` / `.` / `./` / `/`, never a URI, `..`,
+    `?`, `#` or `\` -, `skillDirectoryChildren` / `skillDirectoryOf`, `resolveMcpSkillPath` - a
+    listed file wins -, `skillDirectoryListing` - `{ name, directory, files, directories, more?,
+    notServed?, note? }`, 64 at most). The listing comes from the HELD entry; with `directoryRead`
+    declared, the catalog's `readDirectory` (present only then) sends `resources/directory/read` to
+    that server for `<root>[/<dir>]` and `compareMcpSkillDirectory` only counts what it lists
+    beyond the entry (never named: `mcpSkillDirectoryNote` is counts only) and marks `notServed`;
+    a change logs a `warn` and calls `onChanged` (wired to `onToolsChanged`: the deferred
+    refresh) once per held entry; a failed read = the entry alone. `"dynamic"` stays declined.
+    A COPY of the browser sibling's
     `src/mcp/skills.ts`, byte for byte: change both (`tests/mcp-skills-shared.test.ts` compares
     them and tests every rule). `mcp.ts` wires it (the extension declared only with `skills: true`
     and a mode that may speak 2026-07-28; listed only on a 2026-07-28 connection; a change comes

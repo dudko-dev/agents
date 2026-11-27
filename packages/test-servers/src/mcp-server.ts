@@ -38,7 +38,7 @@ import {
   type IToolResult,
   type IUrlElicitation,
 } from './mcp-elicitation.ts'
-import { createSkillCatalog, type ISkillFaults } from './mcp-skills.ts'
+import { createSkillCatalog, type ISkillDirectoryRead, type ISkillFaults } from './mcp-skills.ts'
 import {
   TRAVEL_APP_URI,
   TRAVEL_BAD_APP_URI,
@@ -136,6 +136,15 @@ export interface ILocalMcpServerOptions extends IListenOptions {
    * against that revision. `skillFaults` adds the misbehaving ones. Default: off.
    */
   skills?: boolean
+  /**
+   * With `skills`: also serve `resources/directory/read` (the extension's optional method) and so
+   * declare `directoryRead: true` - the direct children of a directory of the served `skill://`
+   * files, subdirectories as `inode/directory`, -32602 for a URI that is not a directory, the
+   * SDK's `ttlMs` / `cacheScope`. `{ pageSize }` pages the children (`nextCursor`). The faults
+   * `skillFaults.directoryExtra` / `directoryOmit` / `directoryError` change what it answers.
+   * Default: off (the extension is declared without `directoryRead`).
+   */
+  skillDirectoryRead?: boolean | ISkillDirectoryRead
 }
 
 /**
@@ -243,6 +252,11 @@ export interface ILocalMcpServer {
   /** Every `skills/get` URI a client asked for, in order (with `skills`). */
   skillGets: string[]
   /**
+   * Every `resources/directory/read` URI a client asked for, one per page, in order (with
+   * `skills` and `skillDirectoryRead`).
+   */
+  skillDirectoryReads: string[]
+  /**
    * Serve one more skill (with `skills`) - `path` is its skill path, its last segment its name -
    * and announce a resource list change (`notifications/resources/list_changed`) to every
    * listening client, which is how a skills change reaches one. `listed: false`: served by
@@ -343,7 +357,9 @@ export const startLocalMcpServer = async (
     opts.appTools === true ? {} : opts.appTools || undefined
   const extraTools: string[] = []
   // Modern only: the SDK's skills extension over a source of ours (see `mcp-skills.ts`).
-  const skillCatalog = opts.skills ? await createSkillCatalog() : undefined
+  const skillCatalog = opts.skills
+    ? await createSkillCatalog({ directoryRead: opts.skillDirectoryRead })
+    : undefined
   let instructions = opts.instructions
   let mcpOrigin = ''
   const elicitation = createElicitation({
@@ -1145,6 +1161,7 @@ export const startLocalMcpServer = async (
     skillFaults: skillCatalog?.faults ?? {},
     skillReads: skillCatalog?.reads ?? [],
     skillGets: skillCatalog?.gets ?? [],
+    skillDirectoryReads: skillCatalog?.directoryReads ?? [],
     addSkill: async (path, description, body, options) => {
       if (!skillCatalog) {
         throw new Error('addSkill: this server was started without `skills`')
@@ -1210,6 +1227,8 @@ export interface ILocalMcpOptions extends Pick<IListenOptions, 'host' | 'cors'> 
   appTools?: boolean | ITravelAppOptions
   /** Also serve skills, 2026-07-28 only (see `ILocalMcpServerOptions.skills`). */
   skills?: boolean
+  /** With `skills`: directory reads too (see `ILocalMcpServerOptions.skillDirectoryRead`). */
+  skillDirectoryRead?: boolean | ISkillDirectoryRead
 }
 
 export interface ILocalMcp extends ILocalMcpServer {
@@ -1270,6 +1289,7 @@ export const startLocalMcp = async (opts: ILocalMcpOptions = {}): Promise<ILocal
       cacheHint: opts.cacheHint,
       appTools: opts.appTools,
       skills: opts.skills,
+      skillDirectoryRead: opts.skillDirectoryRead,
     })
   } catch (err) {
     await as.close()

@@ -42,6 +42,15 @@ import {
   mcpSkillRecordOf,
   resolveMcpSkillFile,
   selectMcpSkills,
+  compareMcpSkillDirectory,
+  MCP_SKILL_DIRECTORY_ENTRIES_MAX,
+  MCP_SKILL_FILES_SHOWN_MAX,
+  mcpSkillDirectoryNote,
+  skillDirectoryChildren,
+  skillDirectoryListing,
+  skillDirectoryOf,
+  skillDirectoryRef,
+  resolveMcpSkillPath,
   type McpSkillEntryLike,
   type McpSkillSource,
   type McpSkillsClientLike,
@@ -969,5 +978,543 @@ test('denied: the model is told nothing of the skill is in its context, and not 
   assert.match(
     mcpSkillDeniedMessage('docs/x', 'docs', 'no-one-to-ask'),
     /no approval handler is configured/,
+  )
+})
+
+// ── a directory of a skill (read_skill_file on a directory; resources/directory/read) ──────
+
+test('directory ref: the root and a subdirectory in their forms; never a URI, "..", ?, # or \\', () => {
+  for (const root of ['', '.', './', '/', '  ', './/']) {
+    assert.deepEqual(skillDirectoryRef(root), { dir: '' }, JSON.stringify(root))
+  }
+  for (const sub of ['templates', 'templates/', './templates/', './templates', 'templates//']) {
+    assert.deepEqual(skillDirectoryRef(sub), { dir: 'templates' }, sub)
+  }
+  assert.deepEqual(skillDirectoryRef('templates/regional/'), { dir: 'templates/regional' })
+  for (const bad of [
+    '..',
+    '../other',
+    'templates/../..',
+    'templates/./x',
+    'a//b',
+    '/templates',
+    '//',
+    'skill://pdf-processing/templates',
+    'file:///etc',
+    'c:templates',
+    'templates?x=1',
+    'templates#top',
+    'templates\\regional',
+    7,
+    undefined,
+  ]) {
+    assert.ok('refused' in skillDirectoryRef(bad), String(bad))
+  }
+})
+
+test('directory children: the direct ones only, files and subdirectories sorted; unknown = none', () => {
+  const paths = [
+    'templates/regional/eu.md',
+    'templates/invoice.md',
+    'references/FORMS.md',
+    'templates/b.md',
+    'templates/regional/us/ny.md',
+    'top.md',
+  ]
+  assert.deepEqual(skillDirectoryChildren(paths, ''), {
+    files: ['top.md'],
+    directories: ['references', 'templates'],
+  })
+  assert.deepEqual(skillDirectoryChildren(paths, 'templates'), {
+    files: ['templates/b.md', 'templates/invoice.md'],
+    directories: ['templates/regional'],
+  })
+  assert.deepEqual(skillDirectoryChildren(paths, 'templates/regional'), {
+    files: ['templates/regional/eu.md'],
+    directories: ['templates/regional/us'],
+  })
+  // A file is no directory, a prefix of a name is none, nothing under it is none.
+  assert.equal(skillDirectoryChildren(paths, 'top.md'), undefined)
+  assert.equal(skillDirectoryChildren(paths, 'temp'), undefined)
+  assert.equal(skillDirectoryChildren(paths, 'nope'), undefined)
+  // The root always is one, even of a skill without files.
+  assert.deepEqual(skillDirectoryChildren([], ''), { files: [], directories: [] })
+  // A path with an empty, "." or ".." segment is no file of any directory.
+  assert.deepEqual(skillDirectoryChildren(['./x/y.md', 'a//b.md', '../c.md', 'ok.md'], ''), {
+    files: ['ok.md'],
+    directories: [],
+  })
+})
+
+test('directory of a skill: a path among its files, with its children - or none', () => {
+  const paths = ['references/FORMS.md', 'scripts/extract.py']
+  assert.deepEqual(skillDirectoryOf(paths, './'), {
+    dir: '',
+    files: [],
+    directories: ['references', 'scripts'],
+  })
+  assert.deepEqual(skillDirectoryOf(paths, 'references/'), {
+    dir: 'references',
+    files: ['references/FORMS.md'],
+    directories: [],
+  })
+  for (const none of ['nope', 'references/FORMS.md', '../x', 'skill://x/references', 3]) {
+    assert.equal(skillDirectoryOf(paths, none), undefined, String(none))
+  }
+})
+
+test('path rule: a listed file wins over a directory of the same name; neither = the file refusal', () => {
+  const files = ['notes', 'notes/a.md', 'references/FORMS.md']
+  assert.deepEqual(resolveMcpSkillPath(files, 'notes'), { path: 'notes' }, 'the file wins')
+  assert.deepEqual(resolveMcpSkillPath(files, './notes'), { path: 'notes' })
+  assert.deepEqual(resolveMcpSkillPath(files, 'notes/'), {
+    dir: 'notes',
+    files: ['notes/a.md'],
+    directories: [],
+  })
+  assert.deepEqual(resolveMcpSkillPath(files, '.'), {
+    dir: '',
+    files: ['notes'],
+    directories: ['notes', 'references'],
+  })
+  assert.deepEqual(resolveMcpSkillPath(files, 'references/FORMS.md'), {
+    path: 'references/FORMS.md',
+  })
+  // Neither: exactly what the file rule says, as before.
+  for (const bad of ['nope', '../x', 'skill://other/references', 'references?x', 'references#y']) {
+    assert.deepEqual(resolveMcpSkillPath(files, bad), resolveMcpSkillFile(files, bad), bad)
+    assert.ok('refused' in resolveMcpSkillPath(files, bad), bad)
+  }
+})
+
+test('directory listing: subdirectories first, at most MCP_SKILL_FILES_SHOWN_MAX in all, "more" the rest', () => {
+  const small = skillDirectoryListing('docs/pdf', '', {
+    files: ['a.md'],
+    directories: ['templates'],
+  })
+  assert.deepEqual(small, {
+    name: 'docs/pdf',
+    directory: '.',
+    files: ['a.md'],
+    directories: ['templates'],
+  })
+  const files = Array.from({ length: 70 }, (_, i) => `t/f${String(i).padStart(2, '0')}.md`)
+  const directories = ['t/a', 't/b']
+  const big = skillDirectoryListing('s', 't', { files, directories })
+  assert.equal(big.directory, 't')
+  assert.deepEqual(big.directories, directories)
+  assert.equal(big.files.length, MCP_SKILL_FILES_SHOWN_MAX - 2)
+  assert.deepEqual(big.files, files.slice(0, MCP_SKILL_FILES_SHOWN_MAX - 2))
+  assert.equal(big.more, 70 + 2 - MCP_SKILL_FILES_SHOWN_MAX)
+  assert.equal(big.note, undefined)
+  assert.equal(big.notServed, undefined)
+})
+
+const ROOT = 'skill://pdf-processing'
+const MANIFEST = ['SKILL.md', 'references/FORMS.md', 'scripts/extract.py', 'templates/a.md']
+const live = (...items: [string, string?][]) =>
+  items.map(([uri, mimeType]) => ({
+    uri,
+    name: uri.split('/').pop(),
+    ...(mimeType ? { mimeType } : {}),
+  }))
+
+test('directory compare: what the server lists beyond the entry is counted - never named', () => {
+  const drift = compareMcpSkillDirectory({
+    manifest: MANIFEST,
+    dir: 'references',
+    root: ROOT,
+    live: live(
+      [`${ROOT}/references/FORMS.md`, 'text/markdown'],
+      [`${ROOT}/references/NEW.md`, 'text/markdown'],
+      [`${ROOT}/references/secret-plan.md`, 'text/markdown'],
+    ),
+  })
+  assert.deepEqual(drift, { extra: 2, notServed: [], truncated: false })
+  assert.ok(!JSON.stringify(drift).includes('NEW'), 'no name of the extra')
+  assert.ok(!JSON.stringify(drift).includes('secret-plan'))
+})
+
+test('directory compare: what the entry holds and the server does not list is notServed', () => {
+  const drift = compareMcpSkillDirectory({
+    manifest: MANIFEST,
+    dir: '',
+    root: ROOT,
+    // SKILL.md and references are there; scripts and templates are not.
+    live: live([`${ROOT}/SKILL.md`, 'text/markdown'], [`${ROOT}/references`, 'inode/directory']),
+  })
+  assert.deepEqual(drift, { extra: 0, notServed: ['scripts', 'templates'], truncated: false })
+  const empty = compareMcpSkillDirectory({
+    manifest: MANIFEST,
+    dir: 'scripts',
+    root: ROOT,
+    live: [],
+  })
+  assert.deepEqual(empty.notServed, ['scripts/extract.py'])
+})
+
+test('directory compare: only direct children of that directory count; the rest is ignored', () => {
+  const drift = compareMcpSkillDirectory({
+    manifest: MANIFEST,
+    dir: 'references',
+    root: ROOT,
+    live: [
+      ...live(
+        [`${ROOT}/references/FORMS.md`, 'text/markdown'],
+        [`${ROOT}/references/deeper/x.md`], // not direct
+        [`${ROOT}/scripts/other.py`], // another directory
+        [`${ROOT}/x.md`], // the root
+        ['skill://other-skill/references/y.md'], // another skill
+        ['skill://pdf-processing-evil/references/z.md'], // a sibling prefix
+        ['skill://pdf-processing-references/evil.md'], // reads as references/evil.md, outside
+        ['https://attacker.invalid/references/a.md'],
+        [`${ROOT}/references/q.md?x=1`], // a query
+        [`${ROOT}/references/%2E%2E`], // decodes to ".."
+        [`${ROOT}/references/a%2Fb`], // decodes to a "/"
+        ['not a uri'],
+      ),
+      { name: 'no uri' },
+      'a string',
+      null,
+      { uri: 7 },
+    ],
+  })
+  assert.deepEqual(drift, { extra: 0, notServed: [], truncated: false })
+})
+
+test('directory compare: two spellings of one name are one child; a fragment is no other file', () => {
+  const manifest = ['SKILL.md', 'docs/Q%26A.md', 'docs/a b.md', 'docs/caf%C3%A9.md']
+  const drift = compareMcpSkillDirectory({
+    manifest,
+    dir: 'docs',
+    root: ROOT,
+    live: live(
+      [`${ROOT}/docs/Q&A.md`],
+      [`${ROOT}/docs/Q%26A.md`],
+      [`${ROOT}/docs/a%20b.md`],
+      [`${ROOT}/docs/café.md`],
+      [`${ROOT}/docs/caf%C3%A9.md#top`],
+      [`${ROOT}/docs/NEW.md`],
+      [`${ROOT}/docs/new.md`], // another name: case matters
+      [`${ROOT}/docs/NEW.md`], // listed twice: one extra
+    ),
+  })
+  assert.deepEqual(drift, { extra: 2, notServed: [], truncated: false })
+  // The directory itself in another spelling.
+  const spaced = compareMcpSkillDirectory({
+    manifest: ['SKILL.md', 'my dir/x.md'],
+    dir: 'my dir',
+    root: ROOT,
+    live: live([`${ROOT}/my%20dir/x.md`]),
+  })
+  assert.deepEqual(spaced, { extra: 0, notServed: [], truncated: false })
+})
+
+test('directory compare: a declared kind must match - a file is not the directory of that name', () => {
+  const asFile = compareMcpSkillDirectory({
+    manifest: MANIFEST,
+    dir: '',
+    root: ROOT,
+    live: live(
+      [`${ROOT}/SKILL.md`, 'text/markdown'],
+      [`${ROOT}/references`, 'text/plain'],
+      [`${ROOT}/scripts`], // no MIME type: either kind
+      [`${ROOT}/templates`, 'inode/directory'],
+    ),
+  })
+  assert.deepEqual(asFile, { extra: 1, notServed: ['references'], truncated: false })
+  const asDirectory = compareMcpSkillDirectory({
+    manifest: MANIFEST,
+    dir: 'references',
+    root: ROOT,
+    live: live([`${ROOT}/references/FORMS.md`, 'inode/directory']),
+  })
+  assert.deepEqual(asDirectory, {
+    extra: 1,
+    notServed: ['references/FORMS.md'],
+    truncated: false,
+  })
+})
+
+test('directory compare: at most MCP_SKILL_DIRECTORY_ENTRIES_MAX looked at - then notServed is unknown', () => {
+  const many = Array.from({ length: MCP_SKILL_DIRECTORY_ENTRIES_MAX + 10 }, (_, i) => ({
+    uri: `${ROOT}/references/n${i}.md`,
+    name: `n${i}.md`,
+  }))
+  const drift = compareMcpSkillDirectory({
+    manifest: MANIFEST,
+    dir: 'references',
+    root: ROOT,
+    live: many,
+  })
+  assert.deepEqual(drift, {
+    extra: MCP_SKILL_DIRECTORY_ENTRIES_MAX,
+    notServed: [],
+    truncated: true,
+  })
+  // Exactly the cap: all looked at.
+  const full = compareMcpSkillDirectory({
+    manifest: MANIFEST,
+    dir: 'references',
+    root: ROOT,
+    live: many.slice(0, MCP_SKILL_DIRECTORY_ENTRIES_MAX),
+  })
+  assert.equal(full.truncated, false)
+  assert.deepEqual(full.notServed, ['references/FORMS.md'])
+})
+
+test('directory note: counts only, in a sentence of ours; nothing when the views agree', () => {
+  assert.equal(mcpSkillDirectoryNote(0, 0), undefined)
+  const extra = mcpSkillDirectoryNote(2, 0) as string
+  assert.match(extra, /^The server now lists 2 more item\(s\) here than the approved entry/)
+  assert.match(extra, /cannot be read under the current approval/)
+  assert.match(extra, /asked about again, when the server's skills are refreshed\.$/)
+  assert.match(mcpSkillDirectoryNote(5, 0, true) as string, /lists at least 5 more/)
+  const gone = mcpSkillDirectoryNote(0, 1) as string
+  assert.match(gone, /^1 item\(s\) listed here \(notServed\) are no longer listed by the server/)
+  assert.ok(!gone.includes('more item'))
+  const both = mcpSkillDirectoryNote(1, 1) as string
+  assert.ok(both.includes('1 more item') && both.includes('(notServed)'))
+})
+
+test('directory listing with a drift: notServed only of what is shown; the note; never an extra name', () => {
+  const listing = skillDirectoryListing(
+    'docs/pdf-processing',
+    'references',
+    { files: ['references/FORMS.md'], directories: [] },
+    { extra: 1, notServed: ['references/FORMS.md', 'references/hidden.md'], truncated: false },
+  )
+  assert.deepEqual(listing.notServed, ['references/FORMS.md'])
+  assert.match(listing.note as string, /1 more item\(s\)[\s\S]*1 item\(s\) listed here/)
+  // SKILL.md is in the entry, never in a listing: its absence is not said to the model.
+  const root = skillDirectoryListing(
+    's',
+    '',
+    { files: [], directories: ['references'] },
+    { extra: 0, notServed: ['SKILL.md'], truncated: false },
+  )
+  assert.equal(root.notServed, undefined)
+  assert.equal(root.note, undefined)
+  const agree = skillDirectoryListing(
+    's',
+    '',
+    { files: ['a.md'], directories: [] },
+    { extra: 0, notServed: [], truncated: false },
+  )
+  assert.deepEqual(Object.keys(agree).sort(), ['directories', 'directory', 'files', 'name'])
+})
+
+// A fake SkillsClient with directory reads: what `readDirectory` answers, every call.
+const directoryClient = (opts: {
+  directoryRead?: boolean
+  answer?: (uri: string) => unknown
+  entries?: unknown[]
+}) => {
+  const calls: { uri: string; signal?: AbortSignal }[] = []
+  const pdf = entry({
+    resources: [
+      { uri: 'skill://pdf-processing/SKILL.md', digest: D('a'), size: 10 },
+      { uri: 'skill://pdf-processing/references/FORMS.md', digest: D('b'), size: 5 },
+      { uri: 'skill://pdf-processing/scripts/extract.py', digest: D('c'), size: 5 },
+    ],
+  })
+  let skills = opts.entries ?? [pdf]
+  const client: McpSkillsClientLike & { set: (s: unknown[]) => void } = {
+    supported: true,
+    ...(opts.directoryRead === undefined ? {} : { directoryRead: opts.directoryRead }),
+    list: async () => ({ skills, invalid: [] }),
+    get: async () => ({ skill: undefined }),
+    read: async () => ({ text: 'T', body: 'B' }),
+    readDirectory: async (uri: string, o?: { signal?: AbortSignal }) => {
+      calls.push({ uri, ...(o?.signal ? { signal: o.signal } : {}) })
+      const r = opts.answer?.(uri) ?? { resources: [] }
+      if (r instanceof Error) throw r
+      return r as { resources: unknown[] }
+    },
+    set: (s) => {
+      skills = s
+    },
+  }
+  return { client, calls, pdf }
+}
+
+test('catalog: readDirectory only for a server that declared directoryRead - never called otherwise', async () => {
+  for (const directoryRead of [undefined, false]) {
+    const { client, calls } = directoryClient({ directoryRead })
+    const { source, refresh } = createMcpSkillCatalog('docs', client, () => {})
+    await refresh()
+    assert.equal(source.readDirectory, undefined, String(directoryRead))
+    await source.load('skill://pdf-processing/SKILL.md')
+    assert.deepEqual(calls, [])
+  }
+  // Declared, but a client without the method: none either.
+  const { client } = directoryClient({ directoryRead: true })
+  const bare = { ...client, readDirectory: undefined }
+  assert.equal(createMcpSkillCatalog('docs', bare, () => {}).source.readDirectory, undefined)
+  const declared = createMcpSkillCatalog(
+    'docs',
+    directoryClient({ directoryRead: true }).client,
+    () => {},
+  )
+  assert.equal(typeof declared.source.readDirectory, 'function')
+})
+
+test("catalog: readDirectory asks this server for the skill's root, or <root>/<dir> - no trailing slash", async () => {
+  const { client, calls } = directoryClient({ directoryRead: true })
+  const { source, refresh } = createMcpSkillCatalog('docs', client, () => {})
+  await refresh()
+  const loaded = await source.load('skill://pdf-processing/SKILL.md')
+  const signal = new AbortController().signal
+  await source.readDirectory?.(loaded, '', { signal })
+  await source.readDirectory?.(loaded, 'references')
+  assert.deepEqual(
+    calls.map((c) => c.uri),
+    ['skill://pdf-processing', 'skill://pdf-processing/references'],
+  )
+  assert.equal(calls[0].signal, signal, "the tool call's signal")
+})
+
+test('catalog: readDirectory refuses a directory the held entry does not hold, before any request', async () => {
+  const { client, calls, pdf } = directoryClient({ directoryRead: true })
+  const { source, refresh } = createMcpSkillCatalog('docs', client, () => {})
+  await refresh()
+  const loaded = await source.load('skill://pdf-processing/SKILL.md')
+  for (const dir of [
+    'nope',
+    '../git-workflow',
+    'references/',
+    './references',
+    'references/FORMS.md',
+    '/',
+    '.',
+  ]) {
+    await assert.rejects(source.readDirectory!(loaded, dir), /has no directory/, dir)
+  }
+  await assert.rejects(
+    source.readDirectory!(
+      { uri: pdf.uri, body: '', files: ['references/FORMS.md'], entry: pdf as McpSkillEntryLike },
+      'references',
+    ),
+    /was not loaded/,
+    'a forged loaded skill reads nothing',
+  )
+  assert.deepEqual(calls, [])
+})
+
+test('catalog: readDirectory against the held entry - an extra counted, a missing one marked, logged, announced once', async () => {
+  const logs: string[] = []
+  let announced = 0
+  const { client } = directoryClient({
+    directoryRead: true,
+    answer: (uri) =>
+      uri.endsWith('/references')
+        ? {
+            resources: [
+              { uri: `${uri}/FORMS.md`, name: 'FORMS.md', mimeType: 'text/markdown' },
+              { uri: `${uri}/NEW.md`, name: 'NEW.md', mimeType: 'text/markdown' },
+            ],
+          }
+        : uri.endsWith('/scripts')
+          ? { resources: [] }
+          : {
+              resources: [
+                { uri: `${uri}/SKILL.md`, name: 'SKILL.md' },
+                { uri: `${uri}/references`, name: 'references', mimeType: 'inode/directory' },
+                { uri: `${uri}/scripts`, name: 'scripts', mimeType: 'inode/directory' },
+              ],
+            },
+  })
+  const { source, refresh } = createMcpSkillCatalog(
+    'docs',
+    client,
+    (l, m) => logs.push(`${l} ${m}`),
+    {
+      onChanged: () => {
+        announced += 1
+      },
+    },
+  )
+  await refresh()
+  const loaded = await source.load('skill://pdf-processing/SKILL.md')
+  logs.length = 0
+  assert.deepEqual(await source.readDirectory!(loaded, ''), {
+    extra: 0,
+    notServed: [],
+    truncated: false,
+  })
+  assert.deepEqual(logs, [], 'the views agree: nothing said')
+  assert.equal(announced, 0)
+  const references = await source.readDirectory!(loaded, 'references')
+  assert.deepEqual(references, { extra: 1, notServed: [], truncated: false })
+  assert.equal(announced, 1)
+  const line = (logs as string[]).find((l) => l.startsWith('warn '))
+  assert.match(
+    String(line),
+    /docs: the skill "pdf-processing" \(skill:\/\/pdf-processing\/SKILL.md\) changed on the server - its directory "references" lists 1 item\(s\) its entry does not and not 0 it does/,
+  )
+  assert.ok(!logs.join('\n').includes('NEW.md'), 'counts only, even in the log')
+  assert.deepEqual(await source.readDirectory!(loaded, 'scripts'), {
+    extra: 0,
+    notServed: ['scripts/extract.py'],
+    truncated: false,
+  })
+  assert.equal(announced, 1, 'once per held entry')
+  // A new load holds a new entry: announced again when it is seen changed.
+  client.set([
+    entry({
+      resources: [
+        { uri: 'skill://pdf-processing/SKILL.md', digest: D('a'), size: 10 },
+        { uri: 'skill://pdf-processing/references/FORMS.md', digest: D('d'), size: 5 },
+      ],
+    }),
+  ])
+  await refresh()
+  const again = await source.load('skill://pdf-processing/SKILL.md')
+  await source.readDirectory!(again, 'references')
+  assert.equal(announced, 2)
+  // The earlier load still compares with its own entry.
+  assert.deepEqual((await source.readDirectory!(loaded, 'scripts'))?.notServed, [
+    'scripts/extract.py',
+  ])
+})
+
+test('catalog: a directory read that fails is listed from the entry alone - logged; a stop propagates', async () => {
+  const logs: string[] = []
+  const failing = (answer: (uri: string) => unknown) => {
+    const { client } = directoryClient({ directoryRead: true, answer })
+    return createMcpSkillCatalog('docs', client, (l, m) => logs.push(`${l} ${m}`))
+  }
+  for (const answer of [
+    () => Object.assign(new Error('MCP error -32602: not a directory resource'), { code: -32602 }),
+    () => Object.assign(new Error('Server does not declare directoryRead'), { code: -32003 }),
+    () => new Error('socket hang up'),
+    () => ({ resources: 'nope' }),
+    () => ({}),
+  ]) {
+    const { source, refresh } = failing(answer)
+    await refresh()
+    const loaded = await source.load('skill://pdf-processing/SKILL.md')
+    logs.length = 0
+    assert.equal(await source.readDirectory!(loaded, 'references'), undefined)
+    assert.ok(
+      logs.some((l) =>
+        /^warn \[mcp\] docs: resources\/directory\/read of skill:\/\/pdf-processing\/references (failed|gave no list)/.test(
+          l,
+        ),
+      ),
+      logs.join('\n'),
+    )
+  }
+  // Aborted: the error goes on (the run stops), nothing is swallowed.
+  const controller = new AbortController()
+  const { source, refresh } = failing(() => {
+    controller.abort()
+    return Object.assign(new Error('This operation was aborted'), { name: 'AbortError' })
+  })
+  await refresh()
+  const loaded = await source.load('skill://pdf-processing/SKILL.md')
+  await assert.rejects(
+    source.readDirectory!(loaded, 'references', { signal: controller.signal }),
+    /aborted/,
   )
 })

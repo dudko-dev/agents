@@ -72,6 +72,12 @@ published**, never a runtime dependency of anything.
   by `skills/get` only), the `skills/get` log (`skillGets`), and a `SkillSource`
   for the 2.x SDK's `SkillsExtension` (attached to every modern server the handler builds). The
   `nameMismatch` listing is answered by hand in `mcp-server.ts`: the SDK drops such an entry.
+  With `skillDirectoryRead` the source also has `readDirectory` (written here: the direct
+  children of a directory of the served files, `inode/directory` for subdirectories, `undefined` =
+  the SDK's -32602, `pageSize` paging), which is what makes the SDK declare `directoryRead: true`
+  and route `resources/directory/read`; its log is `skillDirectoryReads`, its faults
+  `directoryExtra` / `directoryOmit` / `directoryError`. Without the option the source has no
+  `readDirectory`: the capability and the wire stay what they were.
 - `src/mcp-elicitation.ts` — the `elicit_*` tools as step functions (ask or finish), the signed
   `requestState`, the URL-mode pages and `elicitationFaults`. It knows no transport: the modern
   driver (an `input_required` result) and the legacy one (real `elicitation/create` requests on the

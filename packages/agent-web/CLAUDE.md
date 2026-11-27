@@ -359,7 +359,13 @@ waiting for it. OFF
   `mcpSkillRoomRefusal`; `assignAddedMcpSkillName`) and the consent before a skill's text enters
   the context (`McpSkillConsent`: `'once-per-skill'` default / `'ask'` / `'never'`;
   `decideMcpSkillConsent`, `recordMcpSkillConsent`, `mcpSkillGrantKey` - server, URI, every digest -,
-  `mcpSkillEnclosingUri` for nested skills, `mcpSkillConsentView`). A COPY of the server's `src/mcp-skills.ts`, byte for byte - change
+  `mcpSkillEnclosingUri` for nested skills, `mcpSkillConsentView`), and a directory of a skill
+  (`read_skill_file` on a directory, every kind of skill: `skillDirectoryRef`, `skillDirectoryOf`,
+  `resolveMcpSkillPath` - a listed file wins -, `skillDirectoryListing`; listed from the HELD
+  entry; with `directoryRead` declared the catalog's `readDirectory` asks that server
+  (`resources/directory/read`) only for staleness - `compareMcpSkillDirectory` counts what it
+  lists beyond the entry, never names it, marks `notServed`; a change fires `onToolsChanged` once
+  per held entry; `"dynamic"` stays declined). A COPY of the server's `src/mcp-skills.ts`, byte for byte - change
   both (the server's `tests/mcp-skills-shared.test.ts` compares them and tests every rule).
   `http.ts` wires it: the extension declared only with `skills: true` and a `protocol` that may
   speak 2026-07-28, listed only on a 2026-07-28 connection, the SDK's

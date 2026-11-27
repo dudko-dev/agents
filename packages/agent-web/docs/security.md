@@ -757,6 +757,21 @@ the server writes them, and can change them at any time.
 - **Origin-bound reads.** A file is read from the skill's own server, only if the entry the skill
   was loaded with lists it: never a URI, an absolute path or `..`. A skill cannot make the agent
   read another server's resources, or a file the server added after the skill was loaded.
+- **A directory read is a live observation, never the manifest.** `read_skill_file` on a
+  directory lists it from the entry the skill was loaded and approved with, after the same
+  consent as a file. Only a server that declared `directoryRead` is sent `resources/directory/read`
+  - for a directory that entry holds, under the skill's own root, on THAT server - and its answer
+  is used only to tell whether the skill changed there: a child it lists that the entry does not
+  is never shown to the model (not its name, URI, description or MIME type), never read, and
+  never added to what may be read; the model gets a sentence of ours with a count, the log a line
+  with counts. The only change it can cause is that the server's skills are listed again between
+  runs - and a skill whose entry changed is asked about again. A child the entry holds and the
+  server no longer lists is named (it is the entry's own path). A failed directory read changes
+  nothing but a log line. At most 640 of its entries are looked at.
+- **`"dynamic"` skills are declined, on purpose.** Their entry lists no files and no digests, so
+  nothing can be verified and a consent cannot bind to their content (the extension: they "cannot
+  be content-bound"). A directory read would be the only way to find their files, and it gives no
+  integrity either; it is never used to let one in.
 - **Bounded.** 32 skills per server and 64 in all in the catalog; 300 characters per catalog line,
   16 000 of instructions, 32 000 of a file - every cut said.
 - **Held in memory only.** Nothing of a skill is written to disk, IndexedDB or a checkpoint (a run
