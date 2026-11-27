@@ -66,7 +66,13 @@ export const modernRequest = (
   url: string = URL_ON_SITE,
 ): Request => {
   nextId += 1
-  const name = typeof params.name === 'string' ? params.name : undefined
+  // `Mcp-Name` mirrors the tool's name, or the resource's URI (the SDK checks they agree).
+  const name =
+    typeof params.name === 'string'
+      ? params.name
+      : typeof params.uri === 'string'
+        ? params.uri
+        : undefined
   return new Request(url, {
     method: 'POST',
     headers: {

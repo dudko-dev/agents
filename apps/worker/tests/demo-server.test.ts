@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test, { mock } from 'node:test'
+import vm from 'node:vm'
 import {
   boundResponse,
   createDemoMcpServer,
@@ -9,6 +10,16 @@ import {
   type DemoMcpServer,
 } from '../src/demo-server.ts'
 import { DEMO_TOOL_NAMES, DOCS_PATH, ECHO_MAX_CHARS, tripForm } from '../src/tools.ts'
+import { tripBoardHtml } from '../src/trip-board-app.ts'
+import {
+  APP_DOCS_PATH,
+  APP_ONLY_TOOLS,
+  bookingCode,
+  TRIP_BOARD_URI,
+  TRIP_MAX_NIGHTS,
+  tripDay,
+  tripPlan,
+} from '../src/trip-board.ts'
 import {
   ASKABLE,
   initialize,
@@ -55,6 +66,9 @@ const TRIP = {
 
 // ── the two eras ────────────────────────────────────────────────────────────
 
+/** Tools and a resource (the trip board's app), and lists that never change. */
+const CAPABILITIES = { tools: { listChanged: false }, resources: { listChanged: false } }
+
 test('2026-07-28: server/discover names the revision, the instructions and no list changes', async () => {
   await withServer(async (server) => {
     const answer = await modern(server, 'server/discover')
@@ -62,7 +76,7 @@ test('2026-07-28: server/discover names the revision, the instructions and no li
     const result = answer.message.result
     assert.deepEqual(result.supportedVersions, [MODERN])
     assert.equal(result.instructions, DEMO_INSTRUCTIONS)
-    assert.deepEqual(result.capabilities, { tools: { listChanged: false } })
+    assert.deepEqual(result.capabilities, CAPABILITIES)
     assert.deepEqual(result._meta['io.modelcontextprotocol/serverInfo'], DEMO_SERVER_INFO)
   })
 })
@@ -74,13 +88,13 @@ test('2025-11-25: initialize is answered statelessly, with no session id', async
     assert.equal(answer.headers.get('mcp-session-id'), null)
     const result = answer.message.result
     assert.equal(result.protocolVersion, '2025-11-25')
-    assert.deepEqual(result.capabilities, { tools: { listChanged: false } })
+    assert.deepEqual(result.capabilities, CAPABILITIES)
     assert.deepEqual(result.serverInfo, DEMO_SERVER_INFO)
     assert.equal(result.instructions, DEMO_INSTRUCTIONS)
   })
 })
 
-test('tools/list: the same five read-only tools on both eras; roll_dice declares its output', async () => {
+test('tools/list: the same tools on both eras, read-only but for book_trip; roll_dice declares its output', async () => {
   await withServer(async (server) => {
     const lists = [
       (await modern(server, 'tools/list')).message.result.tools,
@@ -93,7 +107,8 @@ test('tools/list: the same five read-only tools on both eras; roll_dice declares
         [...DEMO_TOOL_NAMES],
       )
       for (const tool of tools) {
-        assert.equal(tool.annotations.readOnlyHint, true, tool.name)
+        // book_trip changes nothing either, but it stands for a booking: see trip-board.ts.
+        assert.equal(tool.annotations.readOnlyHint, tool.name !== 'book_trip', tool.name)
         assert.ok(tool.description.length > 20, tool.name)
       }
       const dice = tools.find((t: { name: string }) => t.name === 'roll_dice')
@@ -341,6 +356,325 @@ test('open_docs (2026-07-28): a link on the origin the request was sent to', asy
   })
 })
 
+// ── trip_board: an MCP App ──────────────────────────────────────────────────
+
+const LISBON = {
+  destination: 'Lisbon',
+  start: '2026-12-01',
+  nights: 3,
+  travellers: 2,
+  budget: 'comfortable',
+}
+
+const toolsOf = async (server: DemoMcpServer, era: 'modern' | 'legacy') =>
+  era === 'modern'
+    ? (await modern(server, 'tools/list')).message.result.tools
+    : (await legacy(server, { jsonrpc: '2.0', id: 'list', method: 'tools/list', params: {} }))
+        .message.result.tools
+
+const readApp = async (server: DemoMcpServer, era: 'modern' | 'legacy', uri = TRIP_BOARD_URI) =>
+  era === 'modern'
+    ? modern(server, 'resources/read', { uri })
+    : legacy(server, { jsonrpc: '2.0', id: 'read', method: 'resources/read', params: { uri } })
+
+const callOn = async (
+  server: DemoMcpServer,
+  era: 'modern' | 'legacy',
+  name: string,
+  args: Record<string, unknown>,
+) =>
+  era === 'modern'
+    ? modern(server, 'tools/call', call(name, args))
+    : legacy(server, { jsonrpc: '2.0', id: name, method: 'tools/call', params: call(name, args) })
+
+for (const era of ['modern', 'legacy'] as const) {
+  test(`trip_board (${era}): the tool declares its app; the two app tools are for the app only`, async () => {
+    await withServer(async (server) => {
+      const tools = await toolsOf(server, era)
+      const byName = new Map(tools.map((t: { name: string }) => [t.name, t]))
+      const board = byName.get('trip_board') as any
+      assert.deepEqual(board._meta, {
+        ui: { resourceUri: TRIP_BOARD_URI, visibility: ['model', 'app'] },
+        // The deprecated flat key, for hosts that read only that one.
+        'ui/resourceUri': TRIP_BOARD_URI,
+      })
+      assert.deepEqual(Object.keys(board.outputSchema.properties), ['trip', 'days', 'estimate'])
+      for (const name of APP_ONLY_TOOLS) {
+        const tool = byName.get(name) as any
+        // `visibility: ['app']`: a host that speaks MCP Apps never gives it to its model.
+        assert.deepEqual(tool._meta, { ui: { visibility: ['app'] } }, name)
+        assert.match(tool.description, /app only/, name)
+        assert.ok(tool.outputSchema, name)
+      }
+      // Every other tool says nothing about apps.
+      for (const tool of tools) {
+        if (!['trip_board', ...APP_ONLY_TOOLS].includes(tool.name)) {
+          assert.equal(tool._meta, undefined, tool.name)
+        }
+      }
+      const book = byName.get('book_trip') as any
+      assert.deepEqual(book.annotations, {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      })
+      assert.match(book.description, /DEMO booking: nothing is booked, charged or stored/)
+      assert.equal((byName.get('reshuffle_day') as any).annotations.readOnlyHint, true)
+    })
+  })
+
+  test(`trip_board (${era}): resources/read returns the app - its MIME type, empty CSP lists, one self-contained document`, async () => {
+    await withServer(async (server) => {
+      if (era === 'legacy') await initialize(server)
+      const answer = await readApp(server, era)
+      assert.equal(answer.status, 200)
+      // The whole answer fits the response bound with room to spare.
+      assert.ok(answer.text.length < DEMO_LIMITS.responseBytes / 2, `${answer.text.length} bytes`)
+      const [content, ...more] = answer.message.result.contents
+      assert.equal(more.length, 0)
+      assert.equal(content.uri, TRIP_BOARD_URI)
+      assert.equal(content.mimeType, 'text/html;profile=mcp-app')
+      assert.deepEqual(content._meta, {
+        ui: {
+          csp: { connectDomains: [], resourceDomains: [], frameDomains: [], baseUriDomains: [] },
+          prefersBorder: true,
+        },
+      })
+      const html: string = content.text
+      assert.match(html, /^<!doctype html><html lang="en">/)
+      assert.ok(html.length < 40 * 1024, `${html.length} characters`)
+      // Nothing to load: no external script, style, image, font or frame, no URL but the docs.
+      assert.doesNotMatch(html, /<(link|img|iframe|object|embed|base)\b|\bsrc=|@import|url\(/i)
+      const urls = [...html.matchAll(/https?:\/\/[^\s"'<>]+/g)].map(([url]) => url)
+      assert.deepEqual(urls, [`https://agent.dudko.dev${APP_DOCS_PATH}`])
+      assert.equal(html.match(/<script>/g)?.length, 1)
+    })
+  })
+
+  test(`trip_board (${era}): a plan computed from its inputs, the same every time`, async () => {
+    await withServer(async (server) => {
+      if (era === 'legacy') await initialize(server)
+      const first = await callOn(server, era, 'trip_board', LISBON)
+      const again = await callOn(server, era, 'trip_board', LISBON)
+      const plan = first.message.result.structuredContent as ReturnType<typeof tripPlan>
+      assert.equal(first.message.result.isError, undefined)
+      assert.deepEqual(again.message.result.structuredContent, plan)
+      assert.deepEqual(plan, tripPlan({ ...LISBON, end: '2026-12-04' } as never))
+      assert.deepEqual(plan.trip, { ...LISBON, end: '2026-12-04' })
+      assert.deepEqual(
+        plan.days.map((d) => [d.day, d.date]),
+        [
+          [1, '2026-12-01'],
+          [2, '2026-12-02'],
+          [3, '2026-12-03'],
+          [4, '2026-12-04'],
+        ],
+      )
+      // Arrival and departure days, and middle days of three plans, none of them twice.
+      assert.equal(plan.days[0]?.theme, 'Arrive and settle in')
+      assert.equal(plan.days[0]?.items[0]?.title, 'Arrive in Lisbon and check in')
+      assert.equal(plan.days[3]?.items.at(-1)?.title, 'Check out and head home')
+      assert.deepEqual(
+        plan.days.map((d) => d.items.length),
+        [2, 3, 3, 2],
+      )
+      assert.equal(new Set(plan.days.map((d: { theme: string }) => d.theme)).size, 4)
+      assert.deepEqual(plan.estimate, { currency: 'EUR', perPerson: 565, total: 1130 })
+      // The text is the same plan, for the model and for hosts without apps.
+      const words = textOf(first)
+      assert.match(words, /^Trip board for Lisbon: 3 nights from 2026-12-01 to 2026-12-04/)
+      for (const day of plan.days) assert.ok(words.includes(day.theme), day.theme)
+      assert.match(words, /€1,130 in all/)
+    })
+  })
+}
+
+test('trip_board: defaults, no dates without a first day, inputs bounded by the schema', async () => {
+  await withServer(async (server) => {
+    const plain = await modern(server, 'tools/call', call('trip_board', { destination: ' Kyoto ' }))
+    const plan = plain.message.result.structuredContent
+    assert.deepEqual(plan.trip, {
+      destination: 'Kyoto',
+      nights: 3,
+      travellers: 2,
+      budget: 'comfortable',
+    })
+    assert.equal(plan.days.length, 4)
+    assert.ok(plan.days.every((d: { date?: string }) => d.date === undefined))
+    assert.match(plan.days[0].items[0].title, /Arrive in Kyoto/)
+    // A place is not case: the same plan.
+    const lower = await modern(server, 'tools/call', call('trip_board', { destination: 'kyoto' }))
+    assert.deepEqual(
+      lower.message.result.structuredContent.days.map((d: { theme: string }) => d.theme),
+      plan.days.map((d: { theme: string }) => d.theme),
+    )
+    for (const bad of [
+      { destination: '' },
+      { destination: 'x'.repeat(81) },
+      { destination: 'Rome', nights: TRIP_MAX_NIGHTS + 1 },
+      { destination: 'Rome', nights: 0 },
+      { destination: 'Rome', travellers: 13 },
+      { destination: 'Rome', budget: 'unlimited' },
+      { destination: 'Rome', start: 'next week' },
+    ]) {
+      const answer = await modern(server, 'tools/call', call('trip_board', bad))
+      assert.equal(answer.message.result.isError, true, JSON.stringify(bad))
+    }
+    const blank = await modern(server, 'tools/call', call('trip_board', { destination: '   ' }))
+    assert.equal(blank.message.result.isError, true)
+    assert.match(textOf(blank), /A destination is needed/)
+    // The longest trip is still a small answer.
+    const long = await modern(
+      server,
+      'tools/call',
+      call('trip_board', { destination: 'x'.repeat(80), start: '2026-12-30', nights: 14 }),
+    )
+    assert.equal(long.message.result.structuredContent.days.length, 15)
+    assert.equal(long.message.result.structuredContent.days[14].date, '2027-01-13')
+    assert.ok(long.text.length < 16 * 1024, `${long.text.length} bytes`)
+  })
+})
+
+test('trip_board: the docs link of the app is on the origin the request was sent to', async () => {
+  await withServer(async (server) => {
+    const local = await read(
+      await server.fetch(
+        modernRequest(
+          'resources/read',
+          { uri: TRIP_BOARD_URI },
+          {},
+          {},
+          'http://127.0.0.1:4199/mcp/demo',
+        ),
+      ),
+    )
+    const html: string = local.message.result.contents[0].text
+    assert.ok(html.includes(JSON.stringify(`http://127.0.0.1:4199${APP_DOCS_PATH}`)))
+    assert.ok(!html.includes('https://agent.dudko.dev'))
+    // A resource that is not there is an error, not an empty answer.
+    const missing = await modern(server, 'resources/read', { uri: 'ui://demo/other.html' })
+    assert.ok(missing.message.error, JSON.stringify(missing.message))
+  })
+})
+
+test('trip_board: resources/list names the app, with its type and policy', async () => {
+  await withServer(async (server) => {
+    const { resources } = (await modern(server, 'resources/list')).message.result
+    assert.equal(resources.length, 1)
+    assert.equal(resources[0].uri, TRIP_BOARD_URI)
+    assert.equal(resources[0].mimeType, 'text/html;profile=mcp-app')
+    assert.deepEqual(resources[0]._meta.ui.csp.connectDomains, [])
+  })
+})
+
+test('trip_board: the app script compiles, and speaks the extension as the specification says', () => {
+  const html = tripBoardHtml(`https://agent.dudko.dev${APP_DOCS_PATH}`)
+  const code = html.slice(html.indexOf('<script>') + 8, html.indexOf('</script>'))
+  assert.doesNotThrow(() => new vm.Script(code, { filename: 'trip-board.js' }))
+  // The handshake, in its order, and the revision of the extension it names.
+  const initialize = code.indexOf("request('ui/initialize'")
+  const initialized = code.indexOf("notify('ui/notifications/initialized'")
+  assert.ok(initialize > 0 && initialized > initialize)
+  assert.match(code, /protocolVersion: '2026-01-26'/)
+  assert.match(code, /appInfo: \{ name: 'trip-board', version: '1\.0\.0' \}/)
+  assert.match(code, /appCapabilities: \{ availableDisplayModes: \['inline'\] \}/)
+  // Text from the server is never markup: innerHTML takes the constant icons only.
+  assert.deepEqual(
+    [...code.matchAll(/innerHTML = (\w+)/g)].map(([, value]) => value),
+    ['svg'],
+  )
+  // It talks to the window that framed it, and listens to that window only.
+  assert.match(code, /event\.source !== host/)
+  assert.doesNotMatch(code, /window\.top|top\.postMessage|localStorage|indexedDB|fetch\(/)
+})
+
+test('reshuffle_day: another plan for one day, computed from its inputs; a day out of the trip is an error', async () => {
+  await withServer(async (server) => {
+    const args = { destination: 'Lisbon', day: 2, days: 4, start: '2026-12-01' }
+    const first = await modern(server, 'tools/call', call('reshuffle_day', { ...args, variant: 0 }))
+    const next = await modern(server, 'tools/call', call('reshuffle_day', { ...args, variant: 1 }))
+    const board = tripPlan({ ...LISBON } as never)
+    // Variant 0 is the board's own plan for that day; the next one is another.
+    assert.deepEqual(first.message.result.structuredContent, board.days[1])
+    const other = next.message.result.structuredContent
+    assert.deepEqual(other, tripDay('Lisbon', 2, 4, 1, '2026-12-01'))
+    assert.notEqual(other.theme, board.days[1].theme)
+    assert.equal(other.variant, 1)
+    assert.equal(other.date, '2026-12-02')
+    assert.match(textOf(next), new RegExp(`^Day 2, ${other.theme}: `))
+    // Eight alternatives for a middle day, all different.
+    const themes = new Set(Array.from({ length: 8 }, (_, v) => tripDay('Lisbon', 2, 4, v).theme))
+    assert.equal(themes.size, 8)
+    const outside = await modern(
+      server,
+      'tools/call',
+      call('reshuffle_day', { ...args, day: 5, variant: 0 }),
+    )
+    assert.equal(outside.message.result.isError, true)
+    assert.match(textOf(outside), /Day 5 is not in a trip of 4 days/)
+  })
+})
+
+for (const era of ['modern', 'legacy'] as const) {
+  test(`book_trip (${era}): a demo confirmation computed from the trip - the same trip, the same code`, async () => {
+    await withServer(async (server) => {
+      if (era === 'legacy') await initialize(server)
+      const args = { ...LISBON, variants: [0, 1, 0, 0] }
+      const first = await callOn(server, era, 'book_trip', args)
+      const again = await callOn(server, era, 'book_trip', args)
+      const value = first.message.result.structuredContent
+      assert.equal(first.message.result.isError, undefined)
+      assert.match(value.confirmation, /^DEMO-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$/)
+      assert.deepEqual(again.message.result.structuredContent, value)
+      assert.deepEqual(value, {
+        confirmation: bookingCode({ ...LISBON, end: '2026-12-04' } as never, [0, 1, 0, 0]),
+        trip: { ...LISBON, end: '2026-12-04' },
+        total: 1130,
+        currency: 'EUR',
+        demo: true,
+      })
+      assert.match(textOf(first), /^Demo booking DEMO-.+ Nothing was booked or charged/)
+    })
+  })
+}
+
+test('book_trip: every input is in the code; the case and the spaces of the place are not', async () => {
+  const trip = { ...LISBON, end: '2026-12-04' } as never
+  const code = bookingCode(trip, [0, 1, 0, 0])
+  // Missing plans are the first ones.
+  assert.equal(bookingCode(trip, [0, 1]), code)
+  assert.equal(bookingCode({ ...LISBON, destination: '  lisbon ' } as never, [0, 1, 0, 0]), code)
+  const others = [
+    bookingCode(trip, [0, 0, 0, 0]),
+    bookingCode({ ...LISBON, destination: 'Porto' } as never, [0, 1, 0, 0]),
+    bookingCode({ ...LISBON, start: '2026-12-02' } as never, [0, 1, 0, 0]),
+    bookingCode({ ...LISBON, nights: 4 } as never, [0, 1, 0, 0]),
+    bookingCode({ ...LISBON, travellers: 3 } as never, [0, 1, 0, 0]),
+    bookingCode({ ...LISBON, budget: 'luxury' } as never, [0, 1, 0, 0]),
+  ]
+  assert.equal(new Set([code, ...others]).size, others.length + 1)
+  await withServer(async (server) => {
+    // More plans than days, and arguments past the element bound, are refused.
+    const extra = await modern(
+      server,
+      'tools/call',
+      call('book_trip', { ...LISBON, variants: [0, 0, 0, 0, 0] }),
+    )
+    assert.equal(extra.message.result.isError, true)
+    const huge = await modern(
+      server,
+      'tools/call',
+      call('book_trip', {
+        ...LISBON,
+        variants: Array.from({ length: DEMO_LIMITS.toolInputElements }, () => 0),
+      }),
+    )
+    assert.equal(huge.message.result.isError, true)
+    assert.match(textOf(huge), /maximum of 64 elements/)
+  })
+})
+
 // ── the limits of a public endpoint ─────────────────────────────────────────
 
 const bigBody = (bytes: number): string =>
@@ -558,6 +892,19 @@ test('nothing is logged: not the inputs, not the errors', async () => {
         ASKABLE,
       )
       await modern(server, 'tools/call', call('nope', { text: 'SECRET-INPUT-2' }))
+      await modern(server, 'tools/call', call('trip_board', { destination: 'SECRET-PLACE-1' }))
+      await modern(
+        server,
+        'tools/call',
+        call('book_trip', {
+          destination: 'SECRET-PLACE-2',
+          nights: 2,
+          travellers: 1,
+          budget: 'luxury',
+          variants: [1, 2, 3, 4],
+        }),
+      )
+      await modern(server, 'resources/read', { uri: 'ui://demo/SECRET.html' })
       await server.fetch(
         new Request(URL_ON_SITE, {
           method: 'POST',

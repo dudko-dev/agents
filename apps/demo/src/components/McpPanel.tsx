@@ -132,9 +132,10 @@ export const McpPanel = ({
             Try the demo server
           </button>
           <span>
-            No server of your own? This site runs a small one: tools that answer at once, and two
-            that ask you something in the middle of the call — a form (<code>plan_trip</code>) and
-            a link (<code>open_docs</code>).
+            No server of your own? This site runs a small one: tools that answer at once, two that
+            ask you something in the middle of the call — a form (<code>plan_trip</code>) and a link
+            (<code>open_docs</code>) — and one that comes with an app (<code>trip_board</code>): a
+            trip board drawn in the chat, whose pretend booking waits for your OK.
           </span>
         </div>
       )}
