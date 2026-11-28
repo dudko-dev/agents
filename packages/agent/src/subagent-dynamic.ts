@@ -153,8 +153,15 @@ export const createDynamicSubagentTool = (deps: IDynamicSubagentDeps): Tool => {
           scope.running,
           settings,
         )
-        const { maxTotalTokens: _legacy, persistence: _none, ...inherited } = parentConfig
-        void [_legacy, _none]
+        // No persistence and no lease of its own: a helper runs under its parent's lease, and its
+        // state is in the parent's snapshots. sharedLimits is kept - its calls go through it.
+        const {
+          maxTotalTokens: _legacy,
+          persistence: _none,
+          runLease: _noLease,
+          ...inherited
+        } = parentConfig
+        void [_legacy, _none, _noLease]
         const config: IAgentConfig = {
           ...inherited,
           maxIterations: budget.maxIterations,
@@ -183,9 +190,10 @@ export const createDynamicSubagentTool = (deps: IDynamicSubagentDeps): Tool => {
           onUsage: _onUsage,
           run: _run,
           takeRoundUpdates: _take,
+          lease: _lease,
           ...shared
         } = agent
-        void [_learning, _sandbox, _subagents, _findTools, _mcp, _onUsage, _run, _take]
+        void [_learning, _sandbox, _subagents, _findTools, _mcp, _onUsage, _run, _take, _lease]
         const mcpInstructions =
           agent.config.mcpInstructions === false
             ? ''

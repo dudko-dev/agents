@@ -15,6 +15,7 @@ import { hasTokenLimits, limitsStopCondition, resolveLimits } from './limits.ts'
 import { effectiveToolStrategy } from './planner.ts'
 import { WEB_FETCH_TOOL } from './web-fetch.ts'
 import { buildExecutorUserPrompt, composeExecutorSystem, renderUserMessages } from './prompts.ts'
+import { stageModel } from './shared-limits.ts'
 import { stageEmitsThoughts } from './thinking.ts'
 import type { IAttemptOutcome, IEarlierAttempt } from './tiers.ts'
 import { MAX_CARRIED_DISCOVERED_TOOLS } from './tool-search.ts'
@@ -328,7 +329,7 @@ const runOnce = async (
   const deadline = deadlineSignal(run?.clock, signal, ctx.config.llmTimeoutMs ?? 0)
   try {
     const result = streamText({
-      model: attempt.model ?? ctx.executorModel,
+      model: stageModel(ctx, 'executor', attempt.model ?? ctx.executorModel),
       tools,
       ...(activeTools ? { activeTools } : {}),
       ...(active || editMessages || steered

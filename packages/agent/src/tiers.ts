@@ -6,6 +6,7 @@ import type {
   StepComplexity,
   TierReason,
 } from './types.ts'
+import { isModelCallRefused } from './utils.ts'
 
 // Model tiers (config.executorTiers) and escalation (config.escalation): the pure rules. Which
 // tier a step runs on, which tier is tried after a failure, what counts as a failure a stronger
@@ -213,6 +214,11 @@ const statusIn = (
 export const isEscalatableError = (err: unknown): boolean => {
   const name = nameOf(err)
   if (name === 'AbortError' || name === 'TimeoutError') {
+    return false
+  }
+  // Refused by config.sharedLimits (a shared rate limit or budget): like a 429, not a failure a
+  // bigger model fixes - and a stronger tier would only ask again.
+  if (isModelCallRefused(err)) {
     return false
   }
   if (isDeniedOutput(err) || isBudgetOutput(err)) {

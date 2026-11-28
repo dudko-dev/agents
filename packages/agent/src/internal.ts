@@ -4,6 +4,7 @@ import type { RunControlPort } from './control.ts'
 import type { ISpawnReservation } from './subagent-dynamic-shared.ts'
 import type { McpSkillConsent, McpSkillRunConsent } from './mcp-skills.ts'
 import type { IMedia } from './media.ts'
+import type { IResolvedRunLease } from './run-lease.ts'
 import type { IResolvedEscalation, IStepWrites } from './tiers.ts'
 import type { IWaitClock } from './wait-clock.ts'
 import type {
@@ -142,6 +143,9 @@ export interface IAgentInternalContext {
   // Set when config.media names a model: its tools are among `tools`; the runner uses it to
   // transcribe a run's audio attachments.
   media?: IMedia
+  // config.runLease, checked and filled in (the owner) by createAgent. Absent on the context of a
+  // helper's run: helpers run under their parent's lease.
+  lease?: IResolvedRunLease
   // Per-run state; set by the runner on its per-run copy of the context.
   run?: IRunState
   // Take what the user said since the last boundary, for delivery INSIDE a step (between

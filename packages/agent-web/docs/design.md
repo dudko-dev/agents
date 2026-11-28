@@ -180,6 +180,35 @@ again). A hook that throws is logged and the run carries on: persistence is
 observability, not a correctness boundary. The hook names match the Node
 sibling, where the contract originated.
 
+### Event order across crashes: `(attempt, seq)`
+
+A client that shows a run - or a server that relays it from many workers - must put its
+events in order, and a run's events do not come from one uninterrupted process: a reload
+or a crash cuts the run, a resume continues it, perhaps elsewhere. Arrival order, wall
+clocks and a counter alone all fail there: arrival order is the transport's, clocks of two
+machines disagree, and a counter restarted by the resume collides with the one before it.
+So every event of a run carries `seq` (1, 2, ... within one attempt) and `attempt` (1 for
+the run as first started, one more per resume), and `(attempt, seq)` is a TOTAL order with
+no ties: within an attempt the counter is monotonic, and two attempts never share a number.
+
+That last part is why the attempt is persisted, and when. The attempt a resume runs as is
+one more than the snapshot's; if it were only written at the resumed run's first
+checkpoint, a crash before that checkpoint would hand the NEXT resume the same number, and
+two attempts' events would interleave ambiguously. So a resume records its attempt
+(`onRunResume`, else `onStepComplete`) before it emits anything - and, unlike every other
+write, a failure there refuses the resume: carrying on would produce events under a number
+the store does not know about. A snapshot whose attempt is not a positive integer is
+refused for the same reason.
+
+Delivery stays at-least-once, and the numbering says so instead of hiding it: the step a
+crash interrupted runs again under the next attempt, so its events (and its tool calls)
+come again with the new attempt's numbers - a consumer that deduplicates keeps the later
+attempt's copy. A subagent's envelope is numbered in the parent run and the child event
+inside keeps the child run's own numbers: each run's events are one order, and a tree of
+runs is a tree of orders. The fields are optional on the type because events outside a run
+(a pipeline's own events) carry none; the Node sibling has the same names and rules, and
+on the server they are what its scale-out hooks (a run lease, shared limits) build on.
+
 ## Steering a run (`RunControl`)
 
 `run()` returns when the run is over, so a host with something to say mid-run

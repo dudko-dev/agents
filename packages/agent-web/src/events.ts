@@ -313,9 +313,22 @@ type AgentEventBody =
   | PipelineEvent
 
 /**
+ * `seq` / `attempt` order a run's events, across crashes and resumes: `attempt` is 1 for a fresh
+ * run and one more for every resume, `seq` counts the events of one attempt from 1. Ordered by
+ * (attempt, seq) the events of a run are a total order. Delivery is at-least-once: the step a
+ * crash interrupted runs again under the next attempt, so its events come again with that
+ * attempt's numbers. A `subagent.event` envelope is numbered in the parent run; the child event
+ * inside keeps its own numbers. Events outside a run (a pipeline's own `pipeline.*` events,
+ * `approveAppToolCall`, `sampleForApp`) carry none.
+ *
  * `nodeId` / `visit` are set on the events a pipeline forwards from a node's agent (and on the
  * `pipeline.node.*` events themselves).
  */
-export type AgentEvent = AgentEventBody & { nodeId?: string; visit?: number }
+export type AgentEvent = AgentEventBody & {
+  seq?: number
+  attempt?: number
+  nodeId?: string
+  visit?: number
+}
 
 export type AgentEventHandler = (event: AgentEvent) => void

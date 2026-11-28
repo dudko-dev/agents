@@ -38,6 +38,11 @@ export class MemoryRunStore implements RunPersistence {
     this.runs.set(snapshot.runId, snapshot)
   }
 
+  /** A resume started: its attempt is on record before any of its events. */
+  onRunResume(snapshot: RunSnapshot): void {
+    this.runs.set(snapshot.runId, snapshot)
+  }
+
   onRunComplete(snapshot: RunSnapshot): void {
     if (snapshot.status === 'complete' && !this.keepCompleted) this.runs.delete(snapshot.runId)
     else this.runs.set(snapshot.runId, snapshot)
@@ -117,6 +122,11 @@ export class IndexedDBRunStore implements RunPersistence {
   }
 
   onStepComplete(snapshot: RunSnapshot): Promise<void> {
+    return this.put(snapshot)
+  }
+
+  /** A resume started: its attempt is on record before any of its events. */
+  onRunResume(snapshot: RunSnapshot): Promise<void> {
     return this.put(snapshot)
   }
 

@@ -6,12 +6,15 @@ import { z } from 'zod'
 import { createAgent } from './agent.ts'
 import { isReadOnlyTool, markReadOnly } from './approval.ts'
 import { runContext } from './context.ts'
+import type { IModelCall, ISharedLimits } from './shared-limits.ts'
 import { adoptSubagentEvent } from './subagent-dynamic-shared.ts'
 import type { AgentEvent, EventHandler, IAgentConfig, IUsage } from './types.ts'
-import { clipText, emptyUsage, errorMessage, normalizeUsage } from './utils.ts'
+import { clipText, emptyUsage, errorMessage, normalizeUsage, usageOfError } from './utils.ts'
 import { createWaitClock, followHumanWaits, type IWaitClock } from './wait-clock.ts'
 
-export type SubagentIsolation = 'worker' | 'in-process'
+// 'remote': the child runs wherever the host's `dispatch` sends it (another worker, another
+// machine); no config crosses - the host decides the child's config over there.
+export type SubagentIsolation = 'worker' | 'in-process' | 'remote'
 
 // A named way to run the same subagent. Its `config` is laid OVER the base
 // config, field by field and shallow: a profile's `limits` replaces the base's
@@ -28,23 +31,11 @@ export interface ISubagentProfile {
   config?: Partial<IAgentConfig>
 }
 
-export interface ISubagentToolOptions {
+interface ISubagentToolBase {
   // Tool name the parent model calls.
   name: string
   // When the parent should delegate to this subagent.
   description: string
-  // The child agent's config. With 'worker' isolation it must be
-  // structured-cloneable: no functions anywhere (getHeaders, authProvider,
-  // fetch, sanitizers, persistence, onRequest, native tools...).
-  config: IAgentConfig
-  // 'worker' (default): the child runs in its own worker_thread - its CPU
-  // work and crashes stay off the parent's event loop. 'in-process': the
-  // child is a plain agent on this thread.
-  isolation?: SubagentIsolation
-  // Host tools for the child. In-process: merged into config.tools. Worker:
-  // PROXIED - the child sees their schemas, every call runs here on the
-  // parent thread.
-  tools?: ToolSet
   // Parallel calls of this tool beyond this many queue. Default 4.
   maxConcurrent?: number
   // Abort the child after this many ms. Default: none. Time a person takes to answer a question
@@ -54,13 +45,91 @@ export interface ISubagentToolOptions {
   outputMaxChars?: number
   // Mark the tool read-only for tool approval. Default false.
   readOnly?: boolean
+}
+
+export interface ILocalSubagentToolOptions extends ISubagentToolBase {
+  // The child agent's config. With 'worker' isolation it must be
+  // structured-cloneable: no functions anywhere (getHeaders, authProvider,
+  // fetch, sanitizers, persistence, onRequest, native tools...). A `runLease` in it is dropped:
+  // a subagent runs under its parent's lease.
+  config: IAgentConfig
+  // 'worker' (default): the child runs in its own worker_thread - its CPU
+  // work and crashes stay off the parent's event loop. 'in-process': the
+  // child is a plain agent on this thread.
+  isolation?: 'worker' | 'in-process'
+  // Host tools for the child. In-process: merged into config.tools. Worker:
+  // PROXIED - the child sees their schemas, every call runs here on the
+  // parent thread.
+  tools?: ToolSet
   // Named variants the parent model chooses between per call. The tool gains an
   // optional `profile` argument (one of these names); leaving it out runs the
   // base config. The child's context is still just `task` - a profile that
   // changes `systemPrompt`, `skills` or `tools` is how a child gets a different
   // one. Without profiles the tool is exactly what it was.
   profiles?: Record<string, ISubagentProfile>
+  dispatch?: never
 }
+
+// What `dispatch` is given: the child's input and who it is for.
+export interface IRemoteSubagentTask {
+  // The subagent's id in this run's events (subagent.start / .event / .complete / .error).
+  id: string
+  // The tool's name, and the profile the parent model chose (a name: what it means is yours).
+  name: string
+  profile?: string
+  // The task the parent model wrote: the child's whole input.
+  input: string
+  // The run whose tool call this is, and the run the host started (they differ under a helper).
+  parentRunId?: string
+  rootRunId?: string
+  // 1 for a subagent of the run the host started, 2 for one a helper of that run called, ...
+  depth: number
+}
+
+export interface IRemoteSubagentContext {
+  // Aborted when the parent stops (the run, its step, a stopSubagent, the tool's timeoutMs).
+  signal: AbortSignal
+  // Forward an event of the remote child: it reaches the parent's stream as a subagent.event
+  // envelope, as a local child's does. Untrusted - checked, clipped and capped
+  // (REMOTE_SUBAGENT_LIMITS); ignored once dispatch has settled. A forwarded `usage` event is
+  // shown, never charged: the usage dispatch returns is.
+  emit: (event: AgentEvent) => void
+}
+
+export interface IRemoteSubagentResult {
+  text: string
+  // What the child spent: charged to the parent run once, when dispatch resolves. A dispatch that
+  // throws an error with a `usage` field is charged that.
+  usage?: IUsage
+}
+
+export type RemoteSubagentDispatch = (
+  task: IRemoteSubagentTask,
+  context: IRemoteSubagentContext,
+) => Promise<IRemoteSubagentResult>
+
+export interface IRemoteSubagentToolOptions extends ISubagentToolBase {
+  isolation: 'remote'
+  // Run the child somewhere else and resolve with its answer.
+  dispatch: RemoteSubagentDispatch
+  // Names the parent model chooses between (passed to dispatch as `task.profile`): a description
+  // only - no config crosses.
+  profiles?: Record<string, { description: string }>
+  config?: never
+  tools?: never
+}
+
+export type ISubagentToolOptions = ILocalSubagentToolOptions | IRemoteSubagentToolOptions
+
+// What a remote child may send back, at most.
+export const REMOTE_SUBAGENT_LIMITS = {
+  // Events forwarded per call; later ones are dropped (one warning says how many).
+  maxEvents: 10_000,
+  // One event, as JSON.
+  maxEventChars: 64_000,
+  // The event's `type`.
+  maxTypeChars: 64,
+} as const
 
 // ── worker protocol (JSON-cloneable) ─────────────────────────────────────
 export interface IProxiedToolDescriptor {
@@ -71,19 +140,41 @@ export interface IProxiedToolDescriptor {
 }
 
 export type ParentToWorkerMessage =
-  | { type: 'run'; task: string; config: IAgentConfig; proxied: IProxiedToolDescriptor[] }
+  | {
+      type: 'run'
+      task: string
+      config: IAgentConfig
+      proxied: IProxiedToolDescriptor[]
+      // The calling run has config.sharedLimits: the child's model calls ask it over here.
+      sharedLimits?: boolean
+    }
   | { type: 'abort' }
   | { type: 'tool-result'; callId: string; ok: boolean; output: unknown }
   // The calling run started (true) / stopped (false) waiting for a person (its clock stopped /
   // runs again, wait-clock.ts): a proxied host tool call in flight runs in that run, so the
   // clock of the child run that made it follows.
   | { type: 'tool-wait'; waiting: boolean }
+  // The calling run's beforeModelCall let the child's model call go (ok) or refused it.
+  | { type: 'model-call-result'; callId: string; ok: boolean; error?: string }
 
 export type WorkerToParentMessage =
   | { type: 'event'; event: AgentEvent }
   | { type: 'tool-call'; callId: string; name: string; input: unknown }
+  // A model call of the child asks the calling run's sharedLimits / tells it the call ended.
+  | { type: 'model-call'; callId: string; call: IModelCall }
+  | { type: 'model-call-end'; callId: string; usage: IUsage; ok: boolean }
   | { type: 'done'; text: string; usage: IUsage; iterations: number }
   | { type: 'error'; error: string }
+
+// A subagent runs under its parent's lease (config.runLease): one in its config is dropped.
+const withoutLease = (config: IAgentConfig): IAgentConfig => {
+  if (!config || config.runLease === undefined) {
+    return config
+  }
+  const { runLease: _lease, ...rest } = config
+  void _lease
+  return rest as IAgentConfig
+}
 
 const DEFAULT_OUTPUT_MAX_CHARS = 8_000
 const DEFAULT_MAX_CONCURRENT = 4
@@ -286,7 +377,7 @@ interface IChildOutcome {
 }
 
 const runInProcess = async (
-  opts: ISubagentToolOptions,
+  opts: ILocalSubagentToolOptions,
   config: IAgentConfig,
   task: string,
   signal: AbortSignal,
@@ -306,7 +397,7 @@ const runInProcess = async (
 }
 
 const runInWorker = (
-  opts: ISubagentToolOptions,
+  opts: ILocalSubagentToolOptions,
   config: IAgentConfig,
   task: string,
   signal: AbortSignal,
@@ -315,6 +406,17 @@ const runInWorker = (
 ): Promise<IChildOutcome> =>
   new Promise<IChildOutcome>((resolve, reject) => {
     const hostTools = opts.tools ?? {}
+    // The calling run's sharedLimits (functions cannot cross): the child's model calls ask it
+    // here, under the run the host started.
+    const store = runContext.getStore()
+    const limits: ISharedLimits | undefined = store?.sharedLimits
+    const rootRunId = store?.rootRunId ?? store?.runId
+    const modelCalls = new Map<string, IModelCall>()
+    const warn = (message: string): void => {
+      try {
+        store?.emit?.({ type: 'log', level: 'warn', message })
+      } catch {}
+    }
     let settled = false
     let worker: Worker
     let unwatch: (() => void) | undefined
@@ -369,6 +471,53 @@ const runInWorker = (
             },
           )
           break
+        case 'model-call': {
+          if (!limits) {
+            break
+          }
+          const { runId: _childRun, ...rest } = msg.call
+          void _childRun
+          const call: IModelCall = { ...rest, ...(rootRunId ? { runId: rootRunId } : {}) }
+          modelCalls.set(msg.callId, call)
+          const answer = (ok: boolean, error?: string): void => {
+            if (!settled) {
+              worker.postMessage({
+                type: 'model-call-result',
+                callId: msg.callId,
+                ok,
+                ...(error !== undefined ? { error } : {}),
+              } satisfies ParentToWorkerMessage)
+            }
+          }
+          Promise.resolve()
+            .then(() => limits.beforeModelCall(call, { signal }))
+            .then(
+              () => answer(true),
+              (err) => {
+                modelCalls.delete(msg.callId)
+                answer(false, errorMessage(err))
+              },
+            )
+          break
+        }
+        case 'model-call-end': {
+          const call = modelCalls.get(msg.callId)
+          modelCalls.delete(msg.callId)
+          if (!call || !limits?.afterModelCall) {
+            break
+          }
+          const failed = (err: unknown): void =>
+            warn(`[sharedLimits] afterModelCall threw (${call.stage}): ${errorMessage(err)}`)
+          try {
+            const r = limits.afterModelCall(call, normalizeUsage(msg.usage), { ok: msg.ok })
+            if (r && typeof (r as Promise<void>).then === 'function') {
+              ;(r as Promise<void>).then(undefined, failed)
+            }
+          } catch (err) {
+            failed(err)
+          }
+          break
+        }
         case 'done':
           finish(() => resolve({ text: msg.text, usage: msg.usage }))
           break
@@ -412,8 +561,113 @@ const runInWorker = (
       task,
       config: toCloneable(config),
       proxied: describeTools(hostTools),
+      ...(limits ? { sharedLimits: true } : {}),
     } satisfies ParentToWorkerMessage)
   })
+
+const REMOTE_EVENT_TYPE = /^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$/
+
+// One event a remote child sent, as plain data, or undefined when it is not one: not an object,
+// no well-formed `type`, too big, not serialisable.
+export const remoteSubagentEventOf = (raw: unknown): AgentEvent | undefined => {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return undefined
+  }
+  const type = (raw as { type?: unknown }).type
+  if (
+    typeof type !== 'string' ||
+    type.length > REMOTE_SUBAGENT_LIMITS.maxTypeChars ||
+    !REMOTE_EVENT_TYPE.test(type)
+  ) {
+    return undefined
+  }
+  let json: string | undefined
+  try {
+    json = JSON.stringify(raw)
+  } catch {
+    return undefined
+  }
+  if (json === undefined || json.length > REMOTE_SUBAGENT_LIMITS.maxEventChars) {
+    return undefined
+  }
+  return JSON.parse(json) as AgentEvent
+}
+
+const countOf = (v: unknown): number =>
+  typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.min(v, Number.MAX_SAFE_INTEGER) : 0
+
+// What a remote child says it spent, as a usage that can only ADD to the parent's: every field a
+// count that is not negative (a negative one would hand budget back), the total at least input +
+// output.
+export const remoteSubagentUsageOf = (raw: unknown): IUsage => {
+  if (!raw || typeof raw !== 'object') {
+    return emptyUsage()
+  }
+  const usage = normalizeUsage(raw as Parameters<typeof normalizeUsage>[0])
+  const out: Record<string, number> = {}
+  for (const [key, value] of Object.entries(usage)) {
+    if (typeof value === 'number') {
+      out[key] = countOf(value)
+    }
+  }
+  const bounded = out as unknown as IUsage
+  bounded.totalTokens = Math.max(bounded.totalTokens, bounded.inputTokens + bounded.outputTokens)
+  return bounded
+}
+
+const usageIsZero = (u: IUsage): boolean =>
+  Object.values(u).every((v) => typeof v !== 'number' || v === 0)
+
+// The remote child: dispatch, bounded by the signal (a stop does not wait for a dispatch that
+// ignores it), its events checked and capped, its answer checked.
+const runRemote = async (
+  opts: IRemoteSubagentToolOptions,
+  task: IRemoteSubagentTask,
+  signal: AbortSignal,
+  onEvent: EventHandler,
+  warn: (message: string) => void,
+): Promise<IChildOutcome> => {
+  let open = true
+  let forwarded = 0
+  let dropped = 0
+  const emit = (raw: AgentEvent): void => {
+    if (!open) {
+      return
+    }
+    const event = remoteSubagentEventOf(raw)
+    if (!event || forwarded >= REMOTE_SUBAGENT_LIMITS.maxEvents) {
+      dropped++
+      return
+    }
+    forwarded++
+    onEvent(event)
+  }
+  try {
+    const out = await new Promise<IRemoteSubagentResult>((resolve, reject) => {
+      const onAbort = (): void => reject(signal.reason ?? new DOMException('Aborted', 'AbortError'))
+      if (signal.aborted) {
+        onAbort()
+        return
+      }
+      signal.addEventListener('abort', onAbort, { once: true })
+      Promise.resolve()
+        .then(() => opts.dispatch(task, { signal, emit }))
+        .then(resolve, reject)
+        .finally(() => signal.removeEventListener('abort', onAbort))
+    })
+    if (!out || typeof out !== 'object' || typeof (out as { text?: unknown }).text !== 'string') {
+      throw new Error(`subagent "${opts.name}": dispatch must resolve to { text: string, usage? }`)
+    }
+    return { text: out.text, usage: remoteSubagentUsageOf(out.usage) }
+  } finally {
+    open = false
+    if (dropped) {
+      warn(
+        `[subagent] ${opts.name}: ${dropped} event(s) of the remote child were dropped (not an event, too big, or past ${REMOTE_SUBAGENT_LIMITS.maxEvents})`,
+      )
+    }
+  }
+}
 
 /**
  * Expose a whole agent as ONE tool of a parent agent: input `{ task }`,
@@ -427,10 +681,33 @@ export const createSubagentTool = (opts: ISubagentToolOptions): Tool => {
   if (!opts.name || typeof opts.name !== 'string') {
     throw new Error('createSubagentTool: name is required')
   }
-  if (isolation === 'worker') {
-    assertWorkerSafeConfig(opts.config, `subagent "${opts.name}": config`)
+  if (isolation !== 'worker' && isolation !== 'in-process' && isolation !== 'remote') {
+    throw new Error(
+      `subagent "${opts.name}": isolation must be 'worker', 'in-process' or 'remote', got ${JSON.stringify(isolation)}`,
+    )
   }
-  const profiles = opts.profiles ?? {}
+  const remote = isolation === 'remote' ? (opts as IRemoteSubagentToolOptions) : undefined
+  const local = isolation === 'remote' ? undefined : (opts as ILocalSubagentToolOptions)
+  if (remote) {
+    if (typeof remote.dispatch !== 'function') {
+      throw new Error(`subagent "${opts.name}": isolation 'remote' needs a dispatch function`)
+    }
+    // What the child runs with is decided where it runs: nothing of a config, and no host tool,
+    // can be sent there.
+    for (const field of ['config', 'tools'] as const) {
+      if ((remote as unknown as Record<string, unknown>)[field] !== undefined) {
+        throw new Error(
+          `subagent "${opts.name}": \`${field}\` makes no sense with isolation 'remote' - nothing crosses to the remote child; its ${field} is decided where dispatch runs it`,
+        )
+      }
+    }
+  } else if ((opts as { dispatch?: unknown }).dispatch !== undefined) {
+    throw new Error(`subagent "${opts.name}": dispatch is for isolation 'remote' only`)
+  }
+  if (local && isolation === 'worker') {
+    assertWorkerSafeConfig(withoutLease(local.config), `subagent "${opts.name}": config`)
+  }
+  const profiles: Record<string, ISubagentProfile> = opts.profiles ?? {}
   const profileNames = Object.keys(profiles)
   for (const [pname, p] of Object.entries(profiles)) {
     if (!pname.trim()) {
@@ -441,11 +718,16 @@ export const createSubagentTool = (opts: ISubagentToolOptions): Tool => {
         `subagent "${opts.name}": profile "${pname}" needs a description - the parent model chooses by it`,
       )
     }
+    if (remote && p.config !== undefined) {
+      throw new Error(
+        `subagent "${opts.name}": profile "${pname}" has a config, which makes no sense with isolation 'remote' - the profile's name is passed to dispatch, which decides what it means`,
+      )
+    }
     if (isolation === 'worker' && p.config) {
       // A function in a profile would otherwise surface only when that profile is
       // first chosen - possibly hours into a run.
       assertWorkerSafeConfig(
-        p.config as IAgentConfig,
+        withoutLease(p.config as IAgentConfig),
         `subagent "${opts.name}": profile "${pname}" config`,
       )
     }
@@ -496,7 +778,10 @@ export const createSubagentTool = (opts: ISubagentToolOptions): Tool => {
       // Before taking a slot or announcing a start: an unknown name is a tool error
       // the model can correct, not a delegation that began and died.
       const profile = pickProfile(profileName)
-      const config: IAgentConfig = { ...opts.config, ...profile?.config }
+      // A subagent runs under its parent's lease: never one of its own.
+      const config: IAgentConfig | undefined = local
+        ? withoutLease({ ...local.config, ...profile?.config })
+        : undefined
       const store = runContext.getStore()
       const emit: EventHandler = store?.emit ?? (() => {})
       const id = randomUUID()
@@ -525,7 +810,9 @@ export const createSubagentTool = (opts: ISubagentToolOptions): Tool => {
       let childUsage: IUsage = emptyUsage()
       const onChildEvent: EventHandler = (event) => {
         waits.see(event)
-        if (event.type === 'usage') {
+        // A remote child's usage is charged once, from what dispatch returns: a forwarded usage
+        // event is shown, not charged (it would count twice).
+        if (event.type === 'usage' && !remote) {
           // Counted on the parent as it happens, so the parent's limits
           // see a long-running child.
           const usage = normalizeUsage(event.usage)
@@ -565,11 +852,44 @@ export const createSubagentTool = (opts: ISubagentToolOptions): Tool => {
             ac.abort(new DOMException('Aborted', 'AbortError'))
           },
         )
-        const out =
-          isolation === 'worker'
-            ? await runInWorker(opts, config, task, ac.signal, onChildEvent, clock)
-            : await runInProcess(opts, config, task, ac.signal, onChildEvent)
+        const out = remote
+          ? await runRemote(
+              remote,
+              {
+                id,
+                name,
+                ...(profile ? { profile: profileName } : {}),
+                input: task,
+                ...(store?.runId ? { parentRunId: store.runId } : {}),
+                ...((store?.rootRunId ?? store?.runId)
+                  ? { rootRunId: store?.rootRunId ?? store?.runId }
+                  : {}),
+                depth: (store?.state?.spawn?.depth ?? 0) + 1,
+              },
+              ac.signal,
+              onChildEvent,
+              (message) => emit({ type: 'log', level: 'warn', message }),
+            )
+          : isolation === 'worker'
+            ? await runInWorker(
+                local as ILocalSubagentToolOptions,
+                config as IAgentConfig,
+                task,
+                ac.signal,
+                onChildEvent,
+                clock,
+              )
+            : await runInProcess(
+                local as ILocalSubagentToolOptions,
+                config as IAgentConfig,
+                task,
+                ac.signal,
+                onChildEvent,
+              )
         childUsage = normalizeUsage(out.usage)
+        if (remote && !usageIsZero(childUsage)) {
+          emit({ type: 'usage', phase: 'subagent', usage: childUsage })
+        }
         const text = clipText(out.text, outputMaxChars)
         emit({ type: 'subagent.complete', id, name, text, usage: childUsage })
         return text
@@ -580,12 +900,19 @@ export const createSubagentTool = (opts: ISubagentToolOptions): Tool => {
           : timedOut
             ? `subagent "${name}" timed out after ${opts.timeoutMs}ms`
             : errorMessage(err)
+        // A remote child that failed may still say what it spent (an error with `usage`).
+        const lost = remote ? usageOfError(err) : undefined
+        const spent = lost ? remoteSubagentUsageOf(lost) : undefined
+        if (spent && !usageIsZero(spent)) {
+          emit({ type: 'usage', phase: 'subagent', usage: spent })
+        }
         emit({
           type: 'subagent.error',
           id,
           name,
           error: message,
           ...(stoppedByUser ? { stopped: true } : {}),
+          ...(spent && !usageIsZero(spent) ? { usage: spent } : {}),
         })
         if (stoppedByUser || timedOut) {
           throw new Error(message)

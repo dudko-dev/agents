@@ -87,7 +87,13 @@ import {
   type IUsage,
   type ModelTier,
 } from './loop-types.js'
-import { resolveResume, type RunSnapshot, type RunStatus } from './persistence.js'
+import {
+  recordResume,
+  resolveResume,
+  resumeAttemptOf,
+  type RunSnapshot,
+  type RunStatus,
+} from './persistence.js'
 import { createPlan, type PlanOutcome } from './planner.js'
 import type { IDecisionModel } from '../decision.js'
 import { resolveDecisionModel } from '../decision-provider.js'
@@ -710,13 +716,22 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
   ): Promise<RunResult> => {
     // Validated BEFORE anything is emitted or spent: a bad id throws to the caller.
     const resumed = await resolveResume(config.persistence, opts.resumeFromRunId)
+    // Every event of the run, numbered: `attempt` is 1 for a fresh run and one more for every
+    // resume, `seq` counts the events of one attempt from 1 - (attempt, seq) is their total order
+    // across crashes and reloads.
+    const attempt = resumed ? resumeAttemptOf(resumed) : 1
+    let seq = 0
     const emit = (event: AgentEvent): void => {
       try {
-        opts.onEvent?.(event)
+        opts.onEvent?.({ ...event, seq: ++seq, attempt })
       } catch {
         /* a bad handler must not break the run */
       }
     }
+    // The resumed attempt goes on record before it says anything: a crash before its first
+    // checkpoint must not let the next resume reuse the number. A store that cannot record it
+    // refuses the resume (it throws to the caller, nothing ran).
+    if (resumed) await recordResume(config.persistence, resumed, attempt, (m) => log.warn(m))
     // A resumed run is the SAME run: its goal, session and id come from the checkpoint.
     let text = (resumed?.goal ?? goal).trim()
     const sessionId = resumed?.sessionId ?? opts.sessionId ?? cfg.sessionId
@@ -1182,6 +1197,7 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
         ...(spawnRun && !seed && spawnRun.root.spawned
           ? { subagentsSpawned: spawnRun.root.spawned }
           : {}),
+        attempt,
         ...extra,
       })
       const persist = async (

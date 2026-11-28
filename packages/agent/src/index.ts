@@ -291,8 +291,22 @@ export type {
   PipelineUsage,
   PipelineValidation,
 } from './pipeline-engine.ts'
-export { createSubagentTool } from './subagent.ts'
-export type { ISubagentProfile, ISubagentToolOptions, SubagentIsolation } from './subagent.ts'
+export { createSubagentTool, REMOTE_SUBAGENT_LIMITS } from './subagent.ts'
+export type {
+  ILocalSubagentToolOptions,
+  IRemoteSubagentContext,
+  IRemoteSubagentResult,
+  IRemoteSubagentTask,
+  IRemoteSubagentToolOptions,
+  ISubagentProfile,
+  ISubagentToolOptions,
+  RemoteSubagentDispatch,
+  SubagentIsolation,
+} from './subagent.ts'
+export { RunLeaseError, RUN_LEASE_DEFAULT_TTL_MS } from './run-lease.ts'
+export type { IRunLease, IRunLeaseOptions, RunLeaseLostReason } from './run-lease.ts'
+export { isModelCallRefused, ModelCallRefusedError } from './shared-limits.ts'
+export type { IModelCall, ISharedLimits, ModelCallStage } from './shared-limits.ts'
 // Dynamic subagents: helpers the model starts itself (config.subagents.dynamic).
 export {
   adoptSubagentEvent,

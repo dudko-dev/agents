@@ -9,6 +9,7 @@ import { isMainThread, parentPort, type MessagePort } from 'node:worker_threads'
 import { createAgent, type IAgent } from './agent.ts'
 import { markReadOnly } from './approval.ts'
 import { runContext } from './context.ts'
+import type { IModelCall, ISharedLimits } from './shared-limits.ts'
 import { toCloneable, type ParentToWorkerMessage, type WorkerToParentMessage } from './subagent.ts'
 import { errorMessage } from './utils.ts'
 import { createWaitClock, followClock } from './wait-clock.ts'
@@ -16,6 +17,32 @@ import { createWaitClock, followClock } from './wait-clock.ts'
 export const serveSubagentWorker = (port: MessagePort): void => {
   const ac = new AbortController()
   const pending = new Map<string, (r: { ok: boolean; output: unknown }) => void>()
+  // The calling run's sharedLimits, asked over the port: a model call of this child waits for
+  // the parent's answer ('model-call-result') and tells it when it ended ('model-call-end').
+  const modelCalls = new Map<string, (r: { ok: boolean; error?: string }) => void>()
+  const modelCallIds = new WeakMap<IModelCall, string>()
+  const proxiedLimits: ISharedLimits = {
+    beforeModelCall: (call) =>
+      new Promise<void>((resolve, reject) => {
+        const callId = randomUUID()
+        modelCallIds.set(call, callId)
+        modelCalls.set(callId, (r) => {
+          modelCalls.delete(callId)
+          if (r.ok) {
+            resolve()
+          } else {
+            reject(new Error(r.error ?? 'refused'))
+          }
+        })
+        post({ type: 'model-call', callId, call: toCloneable(call) })
+      }),
+    afterModelCall: (call, usage, outcome) => {
+      const callId = modelCallIds.get(call)
+      if (callId) {
+        post({ type: 'model-call-end', callId, usage: toCloneable(usage), ok: outcome.ok })
+      }
+    },
+  }
   // The calling run's clock as this thread sees it: stopped while that run waits for a person
   // ('tool-wait'). A proxied call runs over there, so while one is in flight the clock of the
   // child run that made it follows this one (wait-clock.ts): the step waiting for the host
@@ -78,7 +105,11 @@ export const serveSubagentWorker = (port: MessagePort): void => {
     let agent: IAgent | undefined
     try {
       agent = await createAgent(
-        { ...msg.config, ...(msg.proxied.length ? { tools } : {}) },
+        {
+          ...msg.config,
+          ...(msg.proxied.length ? { tools } : {}),
+          ...(msg.sharedLimits ? { sharedLimits: proxiedLimits } : {}),
+        },
         (event) => post({ type: 'event', event: toCloneable(event) }),
       )
       const r = await agent.run({ input: msg.task, signal: ac.signal })
@@ -103,6 +134,12 @@ export const serveSubagentWorker = (port: MessagePort): void => {
         break
       case 'tool-result':
         pending.get(msg.callId)?.({ ok: msg.ok, output: msg.output })
+        break
+      case 'model-call-result':
+        modelCalls.get(msg.callId)?.({
+          ok: msg.ok,
+          ...(msg.error !== undefined ? { error: msg.error } : {}),
+        })
         break
       case 'tool-wait':
         if (msg.waiting) {

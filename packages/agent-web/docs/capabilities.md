@@ -1810,11 +1810,24 @@ if (unfinished) await agent.run('', { resumeFromRunId: unfinished.runId })
 - A stopped run (`cancelled`) and a failed one can be resumed; a `complete` one cannot.
   `IndexedDBRunStore` drops a completed run's snapshot (`keepCompleted: true` keeps it
   as an audit trail); `MemoryRunStore` does the same but does not survive a reload.
-- The hooks are `onRunStart`, `onStepComplete`, `onRunComplete` and `loadRun` — the
-  names the Node package uses — so a store of your own is four methods. A hook that
-  throws is logged and the run carries on: persistence is observability, not a
-  correctness boundary. The snapshot's field names follow this package's `run(goal)`
-  (`goal`, not Node's `input`).
+- The hooks are `onRunStart`, `onStepComplete`, `onRunComplete`, `onRunResume` and
+  `loadRun` — the names the Node package uses — so a store of your own is a handful of
+  methods. A write hook that throws is logged and the run carries on: persistence is
+  observability, not a correctness boundary. The one exception is `onRunResume` (below).
+  The snapshot's field names follow this package's `run(goal)` (`goal`, not Node's
+  `input`).
+- **Attempts and the order of events.** Every event of a run carries `seq` and `attempt`:
+  `attempt` is 1 for the run as first started and one more for every resume, `seq` counts
+  the events of one attempt from 1. Ordered by `(attempt, seq)`, a run's events are one
+  total order across reloads and crashes. Every snapshot carries the `attempt` that wrote
+  it (absent on an older snapshot: read as 1). A resume writes `onRunResume` — the loaded
+  snapshot with the NEW attempt, status `executing` — **before** it emits anything (a store
+  without that hook gets the same write as `onStepComplete`), so a crash even before the
+  resumed run's first checkpoint never lets two attempts share a number. That write is not
+  best-effort: if it throws, the resume is refused (`run()` rejects, nothing ran). A
+  snapshot whose `attempt` is not a positive integer is not resumed. Delivery is
+  at-least-once: the step a crash interrupted runs again under the next attempt, so its
+  events come again with the new attempt's numbers.
 - The database gains a `runs` object store (schema v3); an existing database upgrades in
   place and keeps its data.
 
@@ -2590,6 +2603,14 @@ Soften it per app with `systemPrompt`, or replace any phase via `prompts`.
 Everything the agent does is a typed `AgentEvent` (the union is in [`src/events.ts`](../src/events.ts)).
 Subscribe with `onEvent` (per run) or the handler you pass to `createAgent`; render them however you like.
 
+Every event of a run also carries **`seq`** and **`attempt`**, its place in the run: `attempt` is 1 for
+a fresh run and one more for every [resume](#resuming-an-interrupted-run), `seq` counts the events of
+one attempt from 1, so `(attempt, seq)` is a total order of the run's events across reloads and
+crashes. A `subagent.event` envelope is numbered in the parent run; the event inside keeps the child
+run's own numbers. Delivery is at-least-once: a step a crash interrupted runs again under the next
+attempt, and its events come again with that attempt's numbers. Events outside a run (a pipeline's
+own `pipeline.*` events, `approveAppToolCall`, `sampleForApp`) carry neither.
+
 **The loop**
 
 | Event | Payload |
@@ -2645,7 +2666,7 @@ Subscribe with `onEvent` (per run) or the handler you pass to `createAgent`; ren
 
 | Event | Payload |
 | --- | --- |
-| `subagent.start` / `subagent.event` / `subagent.complete` / `subagent.error` | `id, name` + `task, parentId, depth, profile?, dynamic?, role?, tools?` / `event` / `text, usage` / `error, stopped?, usage?` — a static subagent or a helper the model started; see [the subagent tree](#the-subagent-tree-from-the-events) |
+| `subagent.start` / `subagent.event` / `subagent.complete` / `subagent.error` | `id, name` + `task, parentId, depth, profile?, dynamic?, role?, tools?` / `event` / `text, usage` / `error, stopped?, usage?` — a static subagent or a helper the model started; see [the subagent tree](#the-subagent-tree-from-the-events). The envelope's `seq` is the parent run's; the `event` inside keeps the child's `seq` / `attempt` |
 | `message.queued` | `id, text` — a `RunControl.send()` is waiting for a boundary |
 | `message.delivered` | `id, text, at: 'round' \| 'step' \| 'final'` — the model has seen it |
 

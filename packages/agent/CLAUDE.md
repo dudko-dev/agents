@@ -99,6 +99,51 @@
   - `control.ts` (`createRunControl`: send a message into a running loop, stop one
     subagent). The runner drains it at round / step / final boundaries; messages are
     recorded in `IRunState.userUpdates` and in run snapshots.
+  - Scale-out HOOKS (README, "Running on many workers"): small optional hooks, the host brings the
+    broker / store - NO broker code, no runtime dependency here. Without them nothing changes: no
+    timer, the models not even wrapped, the golden fixtures untouched (`tests/model-tiers.test.ts`
+    also runs the golden requests WITH both hooks on and gets the same wire).
+    - Event order (`runner.ts`, both cores, same names): every event of a run is tagged in ONE
+      place (`dispatch` in `runAgentLoop`: the run's fixed `runId`, `seq` from 1 per attempt,
+      `attempt`), so a subagent envelope emitted from inside the child's run context still
+      carries the PARENT's id. `IRunSnapshot.attempt`; a resume runs as `resumeAttemptOf` (+1) and
+      records it BEFORE any event (`recordResume`: `onRunResume`, else `onStepComplete`) - NOT
+      fail-open, a throw refuses the resume; `resolveResume` refuses an attempt that is not a
+      positive integer. `tests/event-order.test.ts` (both packages).
+    - `run-lease.ts` (`config.runLease`, Node only: `resolveRunLease` - ttl 1000..2^31-1, owner,
+      methods - `holdRunLease` - acquire, renew every ttl/3, lost on false / throw / no answer
+      within ttl, `release`, `RunLeaseError`). STRICT: acquired before anything of a run (a resume
+      even before `loadRun`); a lost lease aborts the run's signal (combined into the run's own)
+      and `callPersistence` writes NOTHING more; one `lease.lost` event; the run rejects with the
+      `RunLeaseError`; a lost lease is not released. Helpers and subagents never take one (the
+      helper's ctx drops `lease` and its config `runLease`, `subagent.ts` drops `runLease`). Its
+      timers have a test seam of their OWN (`Symbol.for('@dudko.dev/agent:run-lease-test-time')`,
+      `tests/helpers/lease-time.ts`), never the wait clock's; real timers are unref'd; a child
+      process (`tests/fixtures/run-lease-exit.ts`) proves no way out leaves one. Every guard has a
+      test in `tests/run-lease.test.ts` and a mutation check.
+    - `shared-limits.ts` (`config.sharedLimits`, Node only): one AI SDK middleware
+      (`wrapLanguageModel`) around the stage's model, applied AT THE CALL SITE (`stageModel(ctx,
+      stage, model)`, `limitedModel` for the pipeline's route call): the planner model serves the
+      planner, the replanner and the route call, the synthesizer model the answer and the summaries,
+      so the stage is named where the call is made. A new language-model call MUST go through it
+      (`tests/shared-limits.test.ts` counts the hook's calls per stage against the endpoint's log).
+      The hook in force is the run's (`IRunContext.sharedLimits`: the agent's own, else the run
+      above it - an in-process subagent), `call.runId` the ROOT run (`IRunContext.rootRunId`); a
+      worker child asks the parent over the worker protocol (`model-call` / `model-call-result` /
+      `model-call-end`). A refusal is `ModelCallRefusedError`, never retried (`withRetry` checks
+      `isModelCallRefused` in `utils.ts` before anything else) nor escalated (`tiers.ts`); a wait
+      counts against the call's own timeout (not the wait clock); a slot given after the call was
+      given up gets `afterModelCall(ok: false)`. Media, search grounding and decision models are
+      NOT wrapped, deliberately.
+    - Remote subagents (`subagent.ts`, `isolation: 'remote'`, `dispatch(task, { signal, emit })`):
+      no config crosses (`config` / `tools` / a profile's `config` refused); what comes back is
+      untrusted (`remoteSubagentEventOf`: plain object, `type` pattern, size, `REMOTE_SUBAGENT_LIMITS`
+      count, nothing after settle; `remoteSubagentUsageOf`: non-negative counts); usage charged
+      ONCE from the result (forwarded `usage` events are not charged); a stop aborts `signal` and
+      does not wait for the dispatch. Every guard has a test in `tests/subagent-remote.test.ts`.
+    - `examples/scale-out-memory.ts`: in-memory reference implementations (lease map with TTL,
+      token bucket + per-run budget), typechecked with the package and exercised by
+      `tests/scale-out-example.test.ts`.
   - `provider.ts` (`resolveStage` / model factory per provider), `mcp.ts` (stdio + streamable-HTTP
     MCP connections, reconnect, paginated `tools/list`) + `mcp-oauth.ts` (OAuth 2.1 provider,
     file-backed tokens; `registration: 'auto' | 'cimd' | 'dcr'`, the browser sibling's names and

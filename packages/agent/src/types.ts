@@ -15,6 +15,8 @@ import type {
 } from './mcp-elicitation.ts'
 import type { McpProtocolMode } from './mcp-shared.ts'
 import type { McpSkillConsent, McpSkillConsentView, McpSkillsSetting } from './mcp-skills.ts'
+import type { IRunLease, RunLeaseLostReason } from './run-lease.ts'
+import type { ISharedLimits } from './shared-limits.ts'
 import type { ISubagentsConfig } from './subagent-dynamic-shared.ts'
 
 export type ProviderType =
@@ -604,6 +606,22 @@ export interface IAgentConfig {
   // the data back; implementations can persist for audit, debugging, or
   // resume-after-crash workflows.
   persistence?: IPersistence
+  // Scale-out hook: one worker at a time owns a run. The host's lease (any store with an atomic
+  // "take it if nobody holds it") is acquired before a run - fresh or resumed - does anything,
+  // renewed every ttlMs / 3 while it goes and released at the end. A refused acquire ends the
+  // run before it starts (RunLeaseError, `lost: false`, nothing persisted); a renew that answers
+  // false, throws or does not answer before the lease runs out aborts the run at once and stops
+  // every persistence write (RunLeaseError, `lost: true`, a `lease.lost` event). Subagents and
+  // helpers run under their parent's lease. Off unless set. See src/run-lease.ts and the README,
+  // "Running on many workers".
+  runLease?: IRunLease
+  // Scale-out hook: limits shared by many workers (a provider's rate limit, a tenant's budget).
+  // `beforeModelCall` is asked before EVERY language-model call - the four stages, compaction
+  // summaries, a pipeline's route call, helpers, subagents, escalated tiers - and may wait or
+  // refuse (ModelCallRefusedError, never retried); `afterModelCall` is told the call's usage.
+  // Media models, the search grounding call and decision models do not go through it. Off unless
+  // set: without it the models are not even wrapped. See src/shared-limits.ts.
+  sharedLimits?: ISharedLimits
   toolSelectionStrategy?: ToolSelectionStrategy
   // Sanitize an input the LLM passed to a tool BEFORE the call is dispatched
   // and BEFORE the step.tool-call event is emitted. Use to redact secrets the
@@ -936,15 +954,33 @@ type AgentEventBody =
       model: string
     }
   | { type: 'revisions.exceeded'; cap: number }
+  // config.runLease: a renew answered false (`refused`), threw (`error`, the message in `error`) or
+  // did not answer before the lease ran out (`expired`). The run is aborted at once and persists
+  // nothing more: another worker may own it now. Fires once, before the run rejects with a
+  // RunLeaseError (`lost: true`).
+  | { type: 'lease.lost'; owner: string; reason: RunLeaseLostReason; error?: string }
   | { type: 'error'; error: Error; phase: 'plan' | 'execute' | 'replan' | 'synthesize' | 'init' }
   // A pipeline's own events (createPipeline): the run, each node visit, each edge decision.
   | PipelineEvent
 
-// runId is auto-populated at emit time from AsyncLocalStorage. Consumers that
-// multiplex events across concurrent runs on the same agent should filter by it.
+// runId is set on every event of a run. Consumers that multiplex events across concurrent runs
+// on the same agent should filter by it.
+// seq / attempt order a run's events, across crashes and resumes: `attempt` is 1 for a fresh run
+// and one more for every resume, `seq` counts the events of one attempt from 1. Ordered by
+// (attempt, seq) the events of a run are a total order. Delivery is at-least-once: the step a
+// crash interrupted runs again under the next attempt, so its events come again, with that
+// attempt's numbers. A subagent.event envelope is numbered in the parent run; the child event
+// inside keeps its own numbers. Events outside a run (createAgent's logs, agent.compact(), a
+// pipeline's own pipeline.* events) carry none.
 // nodeId / visit are set on the events a pipeline forwards from a node's agent (and on the
 // pipeline.node.* events themselves).
-export type AgentEvent = AgentEventBody & { runId?: string; nodeId?: string; visit?: number }
+export type AgentEvent = AgentEventBody & {
+  runId?: string
+  seq?: number
+  attempt?: number
+  nodeId?: string
+  visit?: number
+}
 
 export type EventHandler = (event: AgentEvent) => void
 
@@ -1046,6 +1082,14 @@ export interface IRunSnapshot {
   escalations?: number
   // Helpers the model started so far (counts against subagents.dynamic.maxChildren on resume).
   subagentsSpawned?: number
+  // The attempt that wrote the snapshot: 1 for the run as first started, one more for every
+  // resume (the `attempt` of its events). A resume records its attempt BEFORE any of its events
+  // (onRunResume), so a crash at any point never lets two attempts share a number. Absent on a
+  // snapshot written before the field existed: read as 1.
+  attempt?: number
+  // With config.runLease: the owner whose run wrote it (a store can refuse a write of anyone
+  // else - fencing).
+  leaseOwner?: string
 }
 
 // Optional persistence facade. Write hooks fire at run start, after each
@@ -1055,11 +1099,19 @@ export interface IRunSnapshot {
 //
 // Write hooks: errors are caught and logged at warn level - persistence
 // failures must NEVER crash a run. Reads in loadRun, by contrast, propagate
-// to the caller (a missing snapshot is a configuration / programmer error).
+// to the caller (a missing snapshot is a configuration / programmer error), and
+// so does the resume write (onRunResume, or onStepComplete without it): a resume
+// whose attempt is not on record is refused before it runs.
 export interface IPersistence {
   onRunStart?: (snapshot: IRunSnapshot) => void | Promise<void>
   onStepComplete?: (snapshot: IRunSnapshot) => void | Promise<void>
   onRunComplete?: (snapshot: IRunSnapshot) => void | Promise<void>
+  // A resume is starting: the loaded snapshot with the NEW `attempt` (status 'executing'), written
+  // before the resumed run emits anything, so that a crash before its first checkpoint still
+  // leaves the attempt on record. Without it the same write goes to onStepComplete. Unlike the
+  // other write hooks this one is NOT fail-open: a throw fails the resume (before anything ran) -
+  // an attempt that is not on record would be reused by the next resume.
+  onRunResume?: (snapshot: IRunSnapshot) => void | Promise<void>
   // Optional read hook used by agent.run({ resumeFromRunId }). Returns the
   // saved snapshot, or null when not found. Implementations that don't want
   // to support resume can simply omit this method.
