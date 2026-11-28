@@ -152,11 +152,16 @@ export const startWorker = async (
     { ...sessionAgentConfig(agentConfig, profiles, pipelineConfigs), ...shared },
     agentLogger(log),
   )
+  // CHILD_ASK: a child's ask parks its own run (its workflow waits for the answer), or is a denial.
+  const childAsk = cfg.childAsk ?? 'park'
   const subagents = new Map<string, IAgent>()
   for (const [name, profile] of Object.entries(profiles)) {
     subagents.set(
       name,
-      await createAgent({ ...childAgentConfig(agentConfig, profile), ...shared }, agentLogger(log)),
+      await createAgent(
+        { ...childAgentConfig(agentConfig, profile, childAsk), ...shared },
+        agentLogger(log),
+      ),
     )
   }
   // One agent per node of every pipeline. The catalog: the worker's tools as the session agent
@@ -168,7 +173,10 @@ export const startWorker = async (
     const definition = preparedDefinition(name, p.definition)
     const nodes = new Map<string, IPipelineNodeRuntime>()
     for (const node of definition.nodes) {
-      const config: IAgentConfig = { ...pipelineNodeConfig(agentConfig, node, catalog), ...shared }
+      const config: IAgentConfig = {
+        ...pipelineNodeConfig(agentConfig, node, catalog, childAsk),
+        ...shared,
+      }
       const nodeAgent = await createAgent(config, agentLogger(log))
       nodeAgents.push(nodeAgent)
       nodes.set(node.id, { node, agent: nodeAgent, config })
@@ -184,7 +192,16 @@ export const startWorker = async (
     taskQueue: cfg.temporal.taskQueue,
     identity: cfg.identity,
     ...(bundle ? { workflowBundle: { codePath: bundle } } : { workflowsPath: WORKFLOWS_PATH }),
-    activities: createActivities({ agent, runs, events, parked, log, subagents, pipelines }),
+    activities: createActivities({
+      agent,
+      runs,
+      events,
+      parked,
+      log,
+      subagents,
+      pipelines,
+      childAsk,
+    }),
     maxConcurrentActivityTaskExecutions: cfg.maxConcurrentTurns,
     shutdownGraceTime: cfg.shutdownGraceMs,
     // A stop reaches a running turn on its next heartbeat: send them often.
@@ -198,6 +215,7 @@ export const startWorker = async (
     workflows: bundle ? 'bundle' : 'source',
     subagents: [...subagents.keys()],
     pipelines: [...pipelines.keys()],
+    childAsk,
   })
   const done = worker.run().finally(async () => {
     log.info('worker stopped; closing', { identity: cfg.identity })

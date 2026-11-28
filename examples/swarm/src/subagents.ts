@@ -9,9 +9,11 @@
 // A profile's agent is the worker's agent with the profile laid over it: another model, another
 // system prompt, and ONLY the tools it lists - each one a tool the worker itself has (an MCP
 // server's `<server>__<tool>`, or a native tool), checked when the worker starts. A child has no
-// subagents of its own and nobody to ask: its approvals follow the worker's mode and rules, and an
-// 'ask' is a denial.
+// subagents of its own. Its approvals follow the worker's mode and rules; an 'ask' PARKS the
+// child's own run (CHILD_ASK=park, the default: the child workflow waits for the person's answer
+// through the gateway, like a session turn) or is a denial (CHILD_ASK=deny: nobody to ask).
 import { createSubagentTool, deferResult, type IAgentConfig } from '@dudko.dev/agent'
+import { childApproval, type ChildAsk } from './child-ask.ts'
 import { ConfigError } from './env.ts'
 import { currentTurnScope } from './lease.ts'
 import { pipelineTools, type IPipelineConfig } from './pipelines.ts'
@@ -104,8 +106,13 @@ export const checkSubagentProfiles = (
   }
 }
 
-// The child agent's config: the worker's, with the profile over it and only its tools.
-export const childAgentConfig = (base: IAgentConfig, p: ISubagentProfile): IAgentConfig => {
+// The child agent's config: the worker's, with the profile over it and only its tools. `ask`:
+// CHILD_ASK (default 'deny' here: nobody to ask unless the worker says the children may wait).
+export const childAgentConfig = (
+  base: IAgentConfig,
+  p: ISubagentProfile,
+  ask: ChildAsk = 'deny',
+): IAgentConfig => {
   const names = p.tools ?? []
   const servers = new Set(names.map(serverOf).filter((s): s is string => Boolean(s)))
   const { tools: _tools, availableTools: _available, subagents: _dynamic, ...rest } = base
@@ -123,15 +130,8 @@ export const childAgentConfig = (base: IAgentConfig, p: ISubagentProfile): IAgen
     ),
     ...(Object.keys(native).length ? { tools: native } : {}),
     ...(names.length ? { availableTools: names } : {}),
-    // Nobody to ask: the worker's mode and rules decide, an 'ask' is a denial.
-    ...(base.toolApproval
-      ? {
-          toolApproval: {
-            ...(base.toolApproval.mode ? { mode: base.toolApproval.mode } : {}),
-            ...(base.toolApproval.rules ? { rules: base.toolApproval.rules } : {}),
-          },
-        }
-      : {}),
+    // The worker's mode and rules decide; an 'ask' parks the child (CHILD_ASK=park) or is a denial.
+    ...childApproval(base, ask),
   }
 }
 

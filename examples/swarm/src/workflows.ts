@@ -14,6 +14,11 @@
 // it as the deterministic scheduler, and every node visit is a child workflow `pipelineNode` of
 // its own (one activity: the node's agent.run, and its route call). Temporal's history is the
 // graph's snapshot: replayed after a crash, the engine gets the finished visits' answers from it.
+//
+// A child whose run parks on a person (an "ask" of the approval mode) waits like the session does,
+// holding no slot: its workflow takes the answers the gateway signals to it, checks each one, and
+// resumes the same run once every item has its answer (child-state.ts); it tells the session when
+// it starts and stops waiting (childParkSignal: the state shows it, the stream gets a marker).
 import {
   ActivityCancellationType,
   allHandlersFinished,
@@ -21,6 +26,7 @@ import {
   CancelledFailure,
   condition,
   continueAsNew,
+  getExternalWorkflowHandle,
   isCancellation,
   ParentClosePolicy,
   patched,
@@ -37,6 +43,16 @@ import {
 } from '@dudko.dev/agent/pipeline-engine'
 import type { SwarmActivities } from './activities.ts'
 import {
+  acceptChildAnswer,
+  childParked,
+  childReady,
+  childView,
+  closeChildWait,
+  initialChildWait,
+  takeChildAnswers,
+  type IChildWait,
+} from './child-state.ts'
+import {
   createAbortLatch,
   completedOutcomeOf,
   createStreamLog,
@@ -50,7 +66,11 @@ import {
 } from './pipeline-state.ts'
 import {
   answerSignal,
+  childParkSignal,
+  childStateQuery,
+  childWorkflowIdOf,
   messageSignal,
+  PATCH_CHILD_PARKING,
   PATCH_PIPELINES,
   PATCH_SUBAGENTS,
   PIPELINE_NODE_WORKFLOW,
@@ -59,6 +79,7 @@ import {
   stopSignal,
   SUBAGENT_WORKFLOW,
   TURN_REFUSED,
+  workflowIdOf,
 } from './session-api.ts'
 import {
   acceptAnswer,
@@ -66,6 +87,7 @@ import {
   acceptStop,
   carry,
   childFinished,
+  childPark,
   childrenRunning,
   finishTurn,
   hasWork,
@@ -79,6 +101,9 @@ import {
   type TurnOutcome,
 } from './session-state.ts'
 import type {
+  IAnswer,
+  IChildParked,
+  IChildParkNotice,
   IPipelineInput,
   IPipelineNodeInput,
   ISessionOptions,
@@ -103,6 +128,55 @@ const messageOf = (err: unknown): string => {
   }
   return e?.message || String(err)
 }
+
+// The child side of a child's park: run the activity; while it reports `parked`, tell the session,
+// wait (no slot held) until every item has an answer the workflow accepted, tell the session
+// again and resume the same run with them. A partial answer keeps it waiting; a resume that parks
+// again waits again. A stop cancels the wait (condition rejects with the scope).
+const untilAnswered = async <T extends { status: string }>(
+  wait: IChildWait,
+  run: (answers?: Record<string, IAnswer>) => Promise<T | IChildParked>,
+  tell: (
+    notice: Pick<IChildParkNotice, 'state' | 'runId' | 'requests' | 'answered'>,
+  ) => Promise<void>,
+): Promise<T> => {
+  let answers: Record<string, IAnswer> | undefined
+  for (;;) {
+    const out = await run(answers)
+    if (out.status !== 'parked') {
+      return out as T
+    }
+    const parked = out as IChildParked
+    childParked(wait, parked, Date.now())
+    await tell({ state: 'waiting', runId: parked.runId, requests: parked.requests })
+    await condition(() => childReady(wait))
+    answers = takeChildAnswers(wait)
+    await tell({ state: 'resumed', runId: parked.runId, answered: Object.keys(answers) })
+  }
+}
+
+// What a child tells its session (childParkSignal). Best effort: a session that is gone has
+// stopped its children already; a cancellation is the child's own and goes on up.
+const tellSession =
+  (
+    sessionId: string,
+    who: Pick<IChildParkNotice, 'itemId' | 'kind' | 'workflowId' | 'nodeId' | 'visit'>,
+  ) =>
+  async (
+    notice: Pick<IChildParkNotice, 'state' | 'runId' | 'requests' | 'answered'>,
+  ): Promise<void> => {
+    try {
+      await getExternalWorkflowHandle(workflowIdOf(sessionId)).signal(childParkSignal, {
+        ...who,
+        ...notice,
+        at: Date.now(),
+      })
+    } catch (err) {
+      if (isCancellation(err)) {
+        throw err
+      }
+    }
+  }
 
 export async function session(input: ISessionInput): Promise<ISessionView> {
   const state = initialState(input.sessionId, input.options, input.carry)
@@ -152,6 +226,13 @@ export async function session(input: ISessionInput): Promise<ISessionView> {
     }
   })
   setHandler(stateQuery, () => view(state, ended))
+  // A child of the parked turn waits for a person, or goes on (behind the patch: only a child
+  // new enough to wait sends it, and the markers it queues are new commands).
+  setHandler(childParkSignal, (notice) => {
+    if (patched(PATCH_CHILD_PARKING)) {
+      childPark(state, notice, Date.now())
+    }
+  })
 
   // One child workflow per static subagent call and per pipeline call of the parked turn, every
   // start decided at once (startChildren: so the markers stay in order). Started in a scope of
@@ -285,7 +366,9 @@ export async function session(input: ISessionInput): Promise<ISessionView> {
 
 // The child workflow of one static subagent call: one activity, one agent.run of the profile on
 // the task (its own run and its own stream in Postgres), then its turn.ended marker. A failure is a
-// value (the parent answers the item with it); a cancellation (the parent's stop) is not.
+// value (the parent answers the item with it); a cancellation (the parent's stop) is not. A run
+// that parks on a person waits here for the answers (untilAnswered) - behind the patch: a child
+// started before it never parks (its activity is not told it may), its asks are denials.
 export async function subagent(input: ISubagentInput): Promise<SubagentOutcome> {
   const o = input.options
   const { runSubagent } = proxyActivities<SwarmActivities>({
@@ -304,10 +387,23 @@ export async function subagent(input: ISubagentInput): Promise<SubagentOutcome> 
     startToCloseTimeout: '1 minute',
     retry: { initialInterval: '1s', maximumInterval: '10s' },
   })
+  const parking = patched(PATCH_CHILD_PARKING)
+  const wait = initialChildWait()
+  setHandler(answerSignal, (answer) => {
+    acceptChildAnswer(wait, { ...answer, by: 'client' })
+  })
+  setHandler(childStateQuery, () => childView(wait))
+  const workflowId = childWorkflowIdOf(input.sessionId, input.parentRunId, input.itemId)
   let outcome: SubagentOutcome
   let cancelled: unknown
   try {
-    outcome = await runSubagent(input)
+    outcome = parking
+      ? await untilAnswered<SubagentOutcome>(
+          wait,
+          (answers) => runSubagent({ ...input, park: true, ...(answers ? { answers } : {}) }),
+          tellSession(input.sessionId, { itemId: input.itemId, kind: 'subagent', workflowId }),
+        )
+      : ((await runSubagent(input)) as SubagentOutcome)
   } catch (err) {
     if (isCancellation(err)) {
       cancelled = err
@@ -316,6 +412,7 @@ export async function subagent(input: ISubagentInput): Promise<SubagentOutcome> 
       outcome = { status: 'failed', error: messageOf(err) }
     }
   }
+  closeChildWait(wait)
   // Written whatever happened - a cancelled workflow schedules nothing unless it is told to.
   await CancellationScope.nonCancellable(() =>
     endTurn({
@@ -326,6 +423,7 @@ export async function subagent(input: ISubagentInput): Promise<SubagentOutcome> 
       ...(outcome.status === 'failed' ? { error: outcome.error } : {}),
       ...(outcome.status !== 'failed' && outcome.runId ? { runId: outcome.runId } : {}),
       ...(outcome.status !== 'failed' && outcome.attempt ? { attempt: outcome.attempt } : {}),
+      ...(parking ? { closes: { sessionId: input.sessionId, owner: workflowId } } : {}),
     }),
   )
   // The parent stopped it (the run aborted and recorded 'cancelled'): the child ends cancelled.
@@ -476,7 +574,8 @@ export async function pipeline(input: IPipelineInput): Promise<PipelineOutcome> 
 
 // One visit of one pipeline node: one activity - the node's agent.run on its input, then its
 // route call (where the node ran, as the core's runner contract says) - and its stream's
-// turn.ended. Like a subagent child: a failure is a value, a cancellation is not.
+// turn.ended. Like a subagent child: a failure is a value, a cancellation is not, and a run that
+// parks on a person waits here for the answers (the pipeline simply waits for the visit).
 export async function pipelineNode(input: IPipelineNodeInput): Promise<PipelineNodeOutcome> {
   const o = input.options
   const { runPipelineNode } = proxyActivities<SwarmActivities>({
@@ -495,10 +594,28 @@ export async function pipelineNode(input: IPipelineNodeInput): Promise<PipelineN
     startToCloseTimeout: '1 minute',
     retry: { initialInterval: '1s', maximumInterval: '10s' },
   })
+  const parking = patched(PATCH_CHILD_PARKING)
+  const wait = initialChildWait()
+  setHandler(answerSignal, (answer) => {
+    acceptChildAnswer(wait, { ...answer, by: 'client' })
+  })
+  setHandler(childStateQuery, () => childView(wait))
   let outcome: PipelineNodeOutcome
   let cancelled: unknown
   try {
-    outcome = await runPipelineNode(input)
+    outcome = parking
+      ? await untilAnswered<PipelineNodeOutcome>(
+          wait,
+          (answers) => runPipelineNode({ ...input, park: true, ...(answers ? { answers } : {}) }),
+          tellSession(input.sessionId, {
+            itemId: input.itemId,
+            kind: 'pipeline',
+            workflowId: input.workflowId,
+            nodeId: input.node.id,
+            visit: input.input.visit,
+          }),
+        )
+      : ((await runPipelineNode(input)) as PipelineNodeOutcome)
   } catch (err) {
     if (isCancellation(err)) {
       cancelled = err
@@ -507,6 +624,7 @@ export async function pipelineNode(input: IPipelineNodeInput): Promise<PipelineN
       outcome = { status: 'failed', error: messageOf(err) }
     }
   }
+  closeChildWait(wait)
   await CancellationScope.nonCancellable(() =>
     endTurn({
       sessionId: input.stream,
@@ -522,6 +640,7 @@ export async function pipelineNode(input: IPipelineNodeInput): Promise<PipelineN
       ...(outcome.status === 'failed' ? { error: outcome.error } : {}),
       ...(outcome.status !== 'failed' && outcome.runId ? { runId: outcome.runId } : {}),
       ...(outcome.status !== 'failed' && outcome.attempt ? { attempt: outcome.attempt } : {}),
+      ...(parking ? { closes: { sessionId: input.sessionId, owner: input.workflowId } } : {}),
     }),
   )
   if (cancelled || CancellationScope.current().consideredCancelled) {

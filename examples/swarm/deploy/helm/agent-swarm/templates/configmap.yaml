@@ -92,6 +92,7 @@ data:
   AGENT_SYSTEM_PROMPT: {{ . | quote }}
   {{- end }}
   AGENT_TOOL_APPROVAL: {{ $a.toolApproval | quote }}
+  CHILD_ASK: {{ $a.childAsk | quote }}
   {{- with $a.toolRules }}
   AGENT_TOOL_RULES: {{ include "swarm.json" . | quote }}
   {{- end }}

@@ -60,7 +60,7 @@ test('migrate is idempotent', async () => {
   const r = await pool.query('SELECT name FROM swarm_migrations ORDER BY name')
   assert.deepEqual(
     r.rows.map((x) => x.name),
-    ['001_init.sql', '002_parking.sql'],
+    ['001_init.sql', '002_parking.sql', '003_child_parking.sql'],
   )
 })
 

@@ -108,6 +108,7 @@ test('the worker: defaults, and the limiter only when its rate is set', () => {
   assert.equal(cfg.shutdownGraceMs, 30_000)
   assert.equal(cfg.limiter, undefined)
   assert.equal(cfg.agent.providerType, 'openai')
+  assert.equal(cfg.childAsk, 'park', 'a child waits for a person by default')
   assert.equal(limiterConfig({}), undefined)
   assert.throws(() => limiterConfig({ LIMITER_CAPACITY: '5' }), /LIMITER_REFILL_PER_SECOND is not/)
   assert.deepEqual(limiterConfig({ LIMITER_REFILL_PER_SECOND: '0.5' }), {
@@ -129,6 +130,22 @@ test('the worker: defaults, and the limiter only when its rate is set', () => {
     () => limiterConfig({ LIMITER_REFILL_PER_SECOND: 'fast' }),
     /LIMITER_REFILL_PER_SECOND/,
   )
+})
+
+test('CHILD_ASK: park (default) or deny - a worker setting; anything else is refused by name', () => {
+  assert.equal(workerConfig({ ...base, CHILD_ASK: 'park' }).childAsk, 'park')
+  assert.equal(workerConfig({ ...base, CHILD_ASK: 'deny' }).childAsk, 'deny')
+  assert.equal(workerConfig({ ...base, CHILD_ASK: ' ' }).childAsk, 'park', 'blank is unset')
+  for (const bad of ['Park', 'ask', 'yes', 'true', 'park,deny']) {
+    assert.throws(
+      () => workerConfig({ ...base, CHILD_ASK: bad }),
+      (err: unknown) =>
+        err instanceof ConfigError && /CHILD_ASK must be park \| deny/.test(err.message),
+      bad,
+    )
+  }
+  // Not a session option: the gateway does not read it.
+  assert.equal('childAsk' in gatewayConfig({ ...base, CHILD_ASK: 'deny' }).session, false)
 })
 
 test('migrate uses MIGRATE_DATABASE_URL when set (a role that may change the schema)', () => {

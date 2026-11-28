@@ -11,9 +11,10 @@
 // `tools` are tools the worker mounts (a native tool, or `<server>__<tool>` of MCP_SERVERS) and
 // `mcpServers` names worker MCP servers whose tools the node gets, all of them. Anything else a
 // node names is refused when the worker starts (skills, settings, a tool or a server the worker
-// does not have), with the pipeline and the node in the message. A node has nobody to ask: its
-// approvals follow the worker's mode and rules (an 'ask' is a denial), it does not park, and it has
-// no subagents or pipelines of its own.
+// does not have), with the pipeline and the node in the message. A node's approvals follow the
+// worker's mode and rules: an 'ask' parks the node visit's own run (CHILD_ASK=park: its workflow
+// waits for the person's answer, the pipeline waits for the visit) or is a denial
+// (CHILD_ASK=deny). It has no subagents or pipelines of its own.
 import {
   createSubagentTool,
   deferResult,
@@ -26,6 +27,7 @@ import {
 } from '@dudko.dev/agent'
 import { ConfigError } from './env.ts'
 import { currentTurnScope } from './lease.ts'
+import { childApproval, type ChildAsk } from './child-ask.ts'
 
 export interface IPipelineConfig {
   // When the parent model should call it (the tool's description).
@@ -185,10 +187,12 @@ export const checkPipelines = (
 //                   that names one tool of a server AND whole servers gets an allowlist: its tools
 //                   and the tools of the whole servers as the worker found them at start (`catalog`)
 //   nothing named - no tool at all (a node that only reasons), never "every tool"
+//   ask           - CHILD_ASK: an 'ask' parks the visit's run ('park') or is a denial ('deny')
 export const pipelineNodeConfig = (
   base: IAgentConfig,
   node: PipelineNode,
   catalog: readonly IToolCatalogEntry[] = [],
+  ask: ChildAsk = 'deny',
 ): IAgentConfig => {
   const names = node.tools ?? []
   const whole = new Set(node.mcpServers ?? [])
@@ -242,15 +246,8 @@ export const pipelineNodeConfig = (
     ),
     ...(Object.keys(native).length ? { tools: native } : {}),
     ...(available ? { availableTools: available } : {}),
-    // Nobody to ask: the worker's mode and rules decide, an 'ask' is a denial.
-    ...(base.toolApproval
-      ? {
-          toolApproval: {
-            ...(base.toolApproval.mode ? { mode: base.toolApproval.mode } : {}),
-            ...(base.toolApproval.rules ? { rules: base.toolApproval.rules } : {}),
-          },
-        }
-      : {}),
+    // The worker's mode and rules decide; an 'ask' parks the visit (CHILD_ASK=park) or is a denial.
+    ...childApproval(base, ask),
   }
 }
 

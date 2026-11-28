@@ -31,7 +31,8 @@ import {
 import type { IEventStore, IEventWriter, TurnMarker } from '../src/db/events.ts'
 import type { IParkedRow, IParkedStore } from '../src/db/parked.ts'
 import type { IRunBinding, IRunRow, IRunStore } from '../src/db/runs.ts'
-import { createHeartbeatLease } from '../src/lease.ts'
+import type { ChildAsk } from '../src/child-ask.ts'
+import { createHeartbeatLease, currentTurnScope } from '../src/lease.ts'
 import { silentLogger } from '../src/log.ts'
 import { pipelineDispatch } from '../src/pipelines.ts'
 import { PIPELINE_TEXT_MAX_CHARS } from '../src/pipeline-state.ts'
@@ -150,6 +151,7 @@ interface IHarness {
   pickRoute?: IActivityDeps['pickRoute']
   // The agent as it is, without the lease taken first (a run that ends before it takes one).
   unleased?: boolean
+  childAsk?: ChildAsk
 }
 
 const setup = (h: IHarness) => {
@@ -161,6 +163,7 @@ const setup = (h: IHarness) => {
   const recorded: Omit<IParkedRow, 'state'>[] = []
   const answered: { sessionId: string; ids: string[] }[] = []
   const cancelled: { sessionId: string; turn: number }[] = []
+  const closed: { sessionId: string; owner: string }[] = []
   const latestAsked: { stream: string; turn: number }[] = []
   const batches: IStreamBatch[] = []
   const superseded: string[] = []
@@ -207,6 +210,7 @@ const setup = (h: IHarness) => {
     record: async (rows) => void recorded.push(...rows),
     markAnswered: async (sessionId, ids) => void answered.push({ sessionId, ids }),
     cancelTurn: async (sessionId, turn) => void cancelled.push({ sessionId, turn }),
+    cancelOwned: async (sessionId, owner) => void closed.push({ sessionId, owner }),
     item: async () => undefined,
     subagents: async () => [],
     pipelines: async () => [],
@@ -258,6 +262,7 @@ const setup = (h: IHarness) => {
       ]),
     ),
     ...(h.pickRoute ? { pickRoute: h.pickRoute } : {}),
+    ...(h.childAsk ? { childAsk: h.childAsk } : {}),
     routeHeartbeatMs: 5,
   })
   return {
@@ -272,6 +277,7 @@ const setup = (h: IHarness) => {
     recorded,
     answered,
     cancelled,
+    closed,
     latestAsked,
     batches,
     flushes: () => flushes,
@@ -553,6 +559,21 @@ test('endTurn writes the turn.ended marker and cancels what the turn still waite
   }
   await new MockActivityEnvironment().run(t.activities.writeMarkers, [m])
   assert.deepEqual(t.streamMarkers, [m])
+  // A child's end also closes what it still waited for (its own items, under the session); that
+  // is not part of the marker.
+  await new MockActivityEnvironment().run(t.activities.endTurn, {
+    sessionId: 's/p_sub',
+    turn: 1,
+    status: 'stopped',
+    closes: { sessionId: 's', owner: 'subagent-s-run-1-p_sub' },
+  })
+  assert.deepEqual(t.markers.at(-1), {
+    kind: 'ended',
+    sessionId: 's/p_sub',
+    turn: 1,
+    body: { status: 'stopped' },
+  })
+  assert.deepEqual(t.closed, [{ sessionId: 's', owner: 'subagent-s-run-1-p_sub' }])
 })
 
 // --- parking ----------------------------------------------------------------------------------
@@ -790,6 +811,117 @@ test('runSubagent: an unknown profile is retried elsewhere; a child that parks i
     (err: unknown) =>
       err instanceof ApplicationFailure && err.type === TURN_REFUSED && err.nonRetryable === true,
   )
+})
+
+// --- children that wait for a person ------------------------------------------------------------
+
+test("runSubagent with park: an ask parks the child's run, its items are the session's, owned by the child", async () => {
+  let mayPark: boolean | undefined
+  const t = setup({
+    run: async () => result('parent'),
+    subagents: {
+      researcher: async () => {
+        mayPark = currentTurnScope()?.mayPark
+        // A deferred call named like a subagent is still a client's item in a child.
+        return parkedResult([approvalItem, subagentItem('p_x', 'not a call')])
+      },
+    },
+  })
+  const out = await new MockActivityEnvironment().run(t.activities.runSubagent, {
+    ...childInput,
+    park: true,
+  })
+  assert.equal(mayPark, true, 'the run may park')
+  assert.deepEqual(out, {
+    status: 'parked',
+    runId: FRESH,
+    attempt: 1,
+    requests: requestsOf([approvalItem, subagentItem('p_x', 'not a call')], new Set()),
+  })
+  const owner = { workflowId: subagentWorkflowIdOf('s', 'run-1', 'p_sub'), itemId: 'p_sub' }
+  assert.deepEqual(
+    t.recorded.map((r) => [
+      r.sessionId,
+      r.itemId,
+      r.turn,
+      r.runId,
+      r.answeredBy,
+      r.childId,
+      r.owner,
+    ]),
+    [
+      ['s', 'p_approve', 1, FRESH, 'client', undefined, owner],
+      ['s', 'p_x', 1, FRESH, 'client', undefined, owner],
+    ],
+  )
+})
+
+test('runSubagent resumes a parked child with its answers, marked answered under the session', async () => {
+  let seen: IAgentRunOptions | undefined
+  const waiting = snapshot('waiting', { parked: { runId: 'run-1', items: [approvalItem], at: 1 } })
+  const t = setup({
+    latest: row(waiting, { sessionId: 's/p_sub' }),
+    run: async () => result('parent'),
+    subagents: {
+      researcher: async (o) => {
+        seen = o
+        return result('wrote it')
+      },
+    },
+  })
+  const out = await new MockActivityEnvironment().run(t.activities.runSubagent, {
+    ...childInput,
+    park: true,
+    answers: { p_approve: { requestId: 'p_approve', value: { approved: true }, at: 3 } },
+  })
+  assert.equal(out.status, 'completed')
+  assert.equal(seen?.resumeFromRunId, 'run-1')
+  assert.deepEqual(seen?.answers, { p_approve: { approved: true } })
+  assert.deepEqual(t.answered, [{ sessionId: 's', ids: ['p_approve'] }])
+  // A retry without an answer for it: the child is parked still, under the session again.
+  const again = setup({
+    latest: row(waiting, { sessionId: 's/p_sub' }),
+    run: async () => result('parent'),
+    subagents: { researcher: async () => result('never') },
+  })
+  const parked = await new MockActivityEnvironment().run(again.activities.runSubagent, {
+    ...childInput,
+    park: true,
+  })
+  assert.equal(parked.status, 'parked')
+  assert.equal(again.recorded[0]?.sessionId, 's')
+  assert.equal(again.recorded[0]?.owner?.itemId, 'p_sub')
+})
+
+test('a child that may not wait: no park flag (started before child parking) or CHILD_ASK=deny - refused', async () => {
+  for (const [why, childAsk, park] of [
+    ['no park flag', undefined, undefined],
+    ['CHILD_ASK=deny', 'deny', true],
+  ] as const) {
+    let mayPark: boolean | undefined
+    const t = setup({
+      run: async () => result('x'),
+      ...(childAsk ? { childAsk } : {}),
+      subagents: {
+        researcher: async () => {
+          mayPark = currentTurnScope()?.mayPark
+          return parkedResult([approvalItem])
+        },
+      },
+    })
+    await assert.rejects(
+      async () =>
+        new MockActivityEnvironment().run(t.activities.runSubagent, {
+          ...childInput,
+          ...(park ? { park } : {}),
+        }),
+      (err: unknown) =>
+        err instanceof ApplicationFailure && err.type === TURN_REFUSED && err.nonRetryable === true,
+      why,
+    )
+    assert.equal(mayPark, undefined, `${why}: the run was not told it may park`)
+    assert.deepEqual(t.recorded, [], `${why}: nothing recorded`)
+  }
 })
 
 // --- pipelines ----------------------------------------------------------------------------------
@@ -1091,6 +1223,67 @@ test('runPipelineNode: refused when the worker lacks the node or has another one
     (err: unknown) =>
       err instanceof ApplicationFailure && err.type === TURN_REFUSED && err.nonRetryable === true,
   )
+})
+
+test('runPipelineNode with park: the visit parks, owned by the visit (its node and visit), resumed with answers', async () => {
+  let mayPark: boolean | undefined
+  const t = setup({
+    run: async () => result('x'),
+    pipelines: {
+      review: {
+        definition: review,
+        runs: {
+          draft: async () => {
+            mayPark = currentTurnScope()?.mayPark
+            return parkedResult([approvalItem])
+          },
+        },
+      },
+    },
+  })
+  const input = nodeInput('draft')
+  const out = await new MockActivityEnvironment().run(t.activities.runPipelineNode, {
+    ...input,
+    park: true,
+  })
+  assert.equal(mayPark, true)
+  assert.equal(out.status, 'parked')
+  assert.deepEqual(
+    t.recorded.map((r) => [r.sessionId, r.turn, r.answeredBy, r.owner]),
+    [
+      [
+        's',
+        1,
+        'client',
+        { workflowId: input.workflowId, itemId: 'p_pipe', nodeId: 'draft', visit: 1 },
+      ],
+    ],
+  )
+  const waiting = snapshot('waiting', { parked: { runId: 'run-1', items: [approvalItem], at: 1 } })
+  let seen: IAgentRunOptions | undefined
+  const resumed = setup({
+    latest: row(waiting, { sessionId: input.stream }),
+    run: async () => result('x'),
+    pipelines: {
+      review: {
+        definition: review,
+        runs: {
+          draft: async (o) => {
+            seen = o
+            return result('draft says ok')
+          },
+        },
+      },
+    },
+  })
+  const done = await new MockActivityEnvironment().run(resumed.activities.runPipelineNode, {
+    ...input,
+    park: true,
+    answers: { p_approve: { requestId: 'p_approve', value: { approved: false }, at: 2 } },
+  })
+  assert.equal(done.status, 'completed')
+  assert.deepEqual(seen?.answers, { p_approve: { approved: false } })
+  assert.deepEqual(resumed.answered, [{ sessionId: 's', ids: ['p_approve'] }])
 })
 
 test('runSubagent and runPipelineNode supersede a run of theirs that died before its plan, first', async () => {
