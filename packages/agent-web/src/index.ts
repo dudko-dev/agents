@@ -53,34 +53,45 @@ export { synthesizeAnswer } from './agent/synthesizer.js'
 export type { AgentContext, EffectiveToolStrategy } from './agent/internal.js'
 
 // ── Pipelines: a graph of agents with conditions and loops, in plain JSON ────
-export { createPipeline, nodeResolver } from './pipeline/index.js'
+export { createPipeline, nodeResolver, pickPipelineRoute } from './pipeline/index.js'
 export type {
   NodeResolverOptions,
   Pipeline,
   PipelineOptions,
+  PipelineRouteOptions,
+  PipelineRouteResult,
   PipelineRunOptions,
 } from './pipeline/index.js'
 export {
+  matchPipelineRoute,
   normalizePipeline,
   PIPELINE_LIMITS,
+  PIPELINE_ROUTER_SYSTEM,
   PipelineNodeError,
   PipelineValidationError,
+  preparePipeline,
   renderPipelineNodeInput,
+  renderPipelineRoutePrompt,
+  runPipelineGraph,
   testPipelineCondition,
   validatePipeline,
 } from './pipeline/engine.js'
 export type {
+  PipelineAbortBehaviour,
   PipelineCondition,
   PipelineDefinition,
   PipelineEdge,
   PipelineEvent,
+  PipelineGraphRunOptions,
   PipelineIssue,
   PipelineNode,
   PipelineNodeContext,
+  PipelineNodeEvent,
   PipelineNodeInput,
   PipelineNodeOutput,
   PipelineNodeRunner,
   PipelineNodeSource,
+  PipelinePlan,
   PipelineResult,
   PipelineRoute,
   PipelineStop,

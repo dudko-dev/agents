@@ -1,6 +1,16 @@
 // The pipeline engine: the JSON definition, its validation, the edge conditions and the scheduler.
 // Pure - no agent, no I/O, no imports: a node is run by the `runNode` it is handed.
 //
+// DETERMINISTIC, BY CONTRACT. No clock (`Date`, `performance`), no randomness (`Math.random`,
+// `crypto`), no timers, no I/O, no imports, and no global the language itself does not define:
+// `DOMException` and `AbortController` are used only where the runtime has them (`abortError`,
+// `createStopper`). What a run does - the calls to `runNode`, the events, the trace, the result -
+// depends only on the definition, the input and the runner's answers in the order they arrive
+// (and on when `signal` aborts, which is an input too). So a host can use `runPipelineGraph` as a
+// deterministic scheduler and replay a run from a log of those answers, in a sandbox that has
+// nothing but the language. `tests/pipeline-determinism.test.ts` (both packages) holds the file to
+// it: a scan of its source, and a run inside a `node:vm` context with only the language's globals.
+//
 // A DELIBERATE COPY. `packages/agent/src/pipeline-engine.ts` and
 // `packages/agent-web/src/pipeline/engine.ts` are the same file, byte for byte: change both, with
 // tests (`tests/pipeline-agent.test.ts` in the Node package fails when they differ). Only the adapter
@@ -119,7 +129,9 @@ export interface PipelineNodeOutput {
 }
 
 export interface PipelineNodeContext<E = never> {
-  // Aborted when the run is aborted, or when another node of the wave failed.
+  // Aborted when the run is aborted, or when another node of the wave failed. Where the runtime
+  // has no AbortController, a stand-in with `aborted`, `reason`, `onabort`, `throwIfAborted()` and
+  // `addEventListener` / `removeEventListener` for 'abort'.
   signal: AbortSignal
   pipeline: PipelineDefinition
   // Forward one of the node's own events; the runner adds `nodeId` and `visit`.
@@ -1085,11 +1097,14 @@ interface PlannedEdge {
   matcher?: Matcher
 }
 
-// A validated definition, ready to run.
+// A validated definition, ready to run. It holds maps and functions, not JSON: prepare it where it
+// runs (preparePipeline is pure, so preparing the same definition twice gives the same plan).
 export interface PipelinePlan {
+  // The normalised copy (every edge has an id).
   definition: PipelineDefinition
   nodes: Map<string, PipelineNode>
   outgoing: Map<string, PlannedEdge[]>
+  // The definition's limits, or the defaults.
   maxNodeVisits: number
   maxRuns: number
   // Can `from` reach `to` along the edges (conditions aside)?
@@ -1139,15 +1154,21 @@ export const preparePipeline = (definition: PipelineDefinition): PipelinePlan =>
   }
 }
 
-export interface PipelineGraphRunOptions<E = never> {
-  input: string
-  signal?: AbortSignal
-  onEvent?: (event: PipelineEvent | PipelineNodeEvent<E>) => void
-}
-
 // What an aborted run does: 'reject' with an AbortError, or 'resolve' with what it has and
-// `stoppedBy: 'aborted'`. Each package follows its own agent.
+// `stoppedBy: 'aborted'`. Each package's createPipeline follows its own agent.
 export type PipelineAbortBehaviour = 'reject' | 'resolve'
+
+export interface PipelineGraphRunOptions<E = never> {
+  // The request: every node's `input.request`.
+  input: string
+  // Read through `aborted` and `addEventListener` / `removeEventListener('abort')` only.
+  signal?: AbortSignal
+  // The pipeline.* events, and the nodes' own (`ctx.emit`) with `nodeId` and `visit` added. A
+  // handler that throws does not break the run.
+  onEvent?: (event: PipelineEvent | PipelineNodeEvent<E>) => void
+  // Default 'reject'.
+  onAbort?: PipelineAbortBehaviour
+}
 
 // One finished visit, and how many of the activations it fired are still alive.
 interface VisitRecord {
@@ -1163,7 +1184,70 @@ interface Activation {
   record: VisitRecord
 }
 
-const abortError = (): Error => new DOMException('Aborted', 'AbortError')
+// The error an aborted run rejects with: a DOMException named AbortError, as the platform's own
+// APIs throw. A runtime without DOMException gets an Error with the same name and message.
+const abortError = (): Error => {
+  if (typeof DOMException === 'function') return new DOMException('Aborted', 'AbortError')
+  const error = new Error('Aborted')
+  error.name = 'AbortError'
+  return error
+}
+
+// How a run stops the visits still in flight (their `ctx.signal`).
+interface Stopper {
+  signal: AbortSignal
+  abort: () => void
+}
+
+type AbortListener =
+  ((event: { type: 'abort' }) => void) | { handleEvent: (event: { type: 'abort' }) => void }
+
+// An AbortController where the runtime has one. Without it, a stand-in with the part of
+// AbortSignal a runner reads: `aborted`, `reason`, `onabort`, `throwIfAborted()` and
+// `addEventListener` / `removeEventListener` for 'abort' (a listener added twice runs once; the
+// signal aborts once, so `once` changes nothing). A listener that throws does not stop the others,
+// nor the run.
+const createStopper = (): Stopper => {
+  if (typeof AbortController === 'function') {
+    const controller = new AbortController()
+    return { signal: controller.signal, abort: () => controller.abort() }
+  }
+  const listeners: AbortListener[] = []
+  const signal = {
+    aborted: false,
+    reason: undefined as unknown,
+    onabort: null as ((event: { type: 'abort' }) => void) | null,
+    addEventListener(type: string, listener: AbortListener | null): void {
+      if (type === 'abort' && listener && !listeners.includes(listener)) listeners.push(listener)
+    },
+    removeEventListener(type: string, listener: AbortListener | null): void {
+      const index = listener ? listeners.indexOf(listener) : -1
+      if (type === 'abort' && index >= 0) listeners.splice(index, 1)
+    },
+    throwIfAborted(): void {
+      if (signal.aborted) throw signal.reason
+    },
+  }
+  const abort = (): void => {
+    if (signal.aborted) return
+    signal.aborted = true
+    signal.reason = abortError()
+    const event = { type: 'abort' as const, target: signal }
+    const call = (fn: (event: { type: 'abort' }) => void, thisArg: unknown): void => {
+      try {
+        fn.call(thisArg, event)
+      } catch {
+        // As a DOM listener's error: reported nowhere here, and the others still run.
+      }
+    }
+    for (const listener of listeners.splice(0)) {
+      if (typeof listener === 'function') call(listener, signal)
+      else call(listener.handleEvent, listener)
+    }
+    if (typeof signal.onabort === 'function') call(signal.onabort, signal)
+  }
+  return { signal: signal as unknown as AbortSignal, abort }
+}
 
 const addUsage = (into: PipelineUsage, usage: PipelineUsage | undefined): void => {
   if (!usage) return
@@ -1173,16 +1257,34 @@ const addUsage = (into: PipelineUsage, usage: PipelineUsage | undefined): void =
   }
 }
 
-// Run a prepared pipeline once. See the scheduling rules in the package's docs: waves, the join
-// rule, the caps.
+// Run a prepared pipeline once, with `runNode` running every node: the scheduler createPipeline
+// uses, public so a host can run a graph with a runner of its own (a queue job, a remote worker,
+// a child workflow). The scheduling rules (waves, the join rule, the caps) are in the package's
+// docs; the runner's side of the contract:
+// - `runNode(node, input, ctx)` is called once per visit, never for an activation a cap refused.
+//   It resolves with `{ text, usage?, route? }`: `text` is what the edges test (anything but a
+//   string counts as ''), `usage` is added to the result's, and `route` is one of `node.routes`'
+//   labels exactly as written - anything else is no route (`matchPipelineRoute` turns a model's
+//   answer into a label).
+// - The visits of a wave are started in the order their nodes were first activated, before any is
+//   awaited; the next wave starts once all of them have settled. A visit's output is applied
+//   (events, trace, edges) when it settles, so the order the answers arrive in is part of the
+//   input: the same answers in the same order give the same run.
+// - A runner that rejects fails the run: the other visits' `ctx.signal` is aborted, nothing they
+//   do afterwards counts, and the run rejects with a PipelineNodeError, whatever `onAbort` says.
+// - `options.signal` aborting does the same to the visits in flight and settles the run at once,
+//   without waiting for them: it rejects with an AbortError (`onAbort: 'reject'`, the default) or
+//   resolves with what it has and `stoppedBy: 'aborted'` ('resolve').
+// - `ctx.emit(event)` forwards one of the node's own events, with `nodeId` and `visit`, until the
+//   run is over.
 export const runPipelineGraph = async <E = never>(
   plan: PipelinePlan,
   runNode: PipelineNodeRunner<E>,
   options: PipelineGraphRunOptions<E>,
-  onAbort: PipelineAbortBehaviour,
 ): Promise<PipelineResult> => {
   const { definition } = plan
-  const controller = new AbortController()
+  const onAbort = options.onAbort ?? 'reject'
+  const stopper = createStopper()
   // Set once the run is over for the nodes still in flight: their events and results are ignored.
   let halted: 'aborted' | 'failed' | undefined
   let halt: (err: Error) => void = () => {}
@@ -1223,7 +1325,7 @@ export const runPipelineGraph = async <E = never>(
   const onOuterAbort = (): void => {
     if (halted) return
     halted = 'aborted'
-    controller.abort()
+    stopper.abort()
     halt(abortError())
   }
 
@@ -1241,7 +1343,7 @@ export const runPipelineGraph = async <E = never>(
         node,
         { request: options.input, from: activations.map((a) => ({ ...a.source })), visit: number },
         {
-          signal: controller.signal,
+          signal: stopper.signal,
           pipeline: definition,
           emit: (event) => {
             if (!halted) emit({ ...event, nodeId, visit: number })
@@ -1259,7 +1361,7 @@ export const runPipelineGraph = async <E = never>(
         visit: number,
         error: err instanceof Error ? err.message : String(err),
       })
-      controller.abort()
+      stopper.abort()
       halt(failure)
       return
     }

@@ -872,6 +872,76 @@ Conditions (`always`, `contains`, `matches`, `route`, `otherwise`), the scheduli
 join, the loop caps), validation and the events: **[docs/capabilities.md](docs/capabilities.md#pipelines-a-graph-of-agents)**.
 Loading a definition someone else wrote: [docs/security.md](docs/security.md#pipelines-a-definition-is-data).
 
+### Running the graph yourself
+
+`createPipeline` is a scheduler with `createAgent` as its node runner. Both halves are public, so a
+host can keep the scheduler and run every node its own way - a worker, a server job, another tab -
+and make the route call where the node ran:
+
+```ts
+import { createAgent, pickPipelineRoute, preparePipeline, runPipelineGraph } from '@dudko.dev/agent-web'
+
+const plan = preparePipeline(definition) // validates (PipelineValidationError) and compiles
+const result = await runPipelineGraph(
+  plan,
+  async (node, input, ctx) => {
+    // input: { request, from: [{ nodeId, name?, text }], visit } - renderPipelineNodeInput(input)
+    // is the text a createPipeline node is given.
+    const text = await worker.run(node.id, input, { signal: ctx.signal }) // your runner
+    if (!node.routes?.length) return { text }
+    // The route call createPipeline makes: the node's decision model, then its planner model.
+    const config = configOf(node) // the node's BrowserAgentConfig
+    const { route, usage } = await pickPipelineRoute(node, text, {
+      agent: await agentOf(node, config), // createAgent(config), kept per node
+      config,
+      signal: ctx.signal,
+      onEvent: ctx.emit,
+    })
+    return { text, usage, route }
+  },
+  { input: 'A release note for v2', signal, onEvent, onAbort: 'resolve' },
+)
+```
+
+The runner's contract:
+
+- **When it is called.** Once per visit, never for an activation a cap refused (`plan.maxNodeVisits`
+  / `plan.maxRuns`: the definition's `limits` or the defaults). All visits of a wave are started, in
+  the order their nodes were first activated, before any is awaited; the next wave starts when all
+  of them have settled. A visit's answer is applied (events, trace, edges) when it settles.
+- **What it returns.** `{ text, usage?, route? }`. `text` is what the edges test (not a string
+  counts as `''`); `usage` is added to `result.usage`, every numeric field; `route` must be one of
+  `node.routes`' labels exactly as written - anything else, or none, is no route. To pick one with a
+  model of your own: `PIPELINE_ROUTER_SYSTEM` and `renderPipelineRoutePrompt(node, text)` are the
+  prompt, `matchPipelineRoute(node, answer)` turns the answer into a label.
+- **When it fails.** A runner that rejects fails the run with a `PipelineNodeError` (`nodeId`,
+  `visit`, `cause`), whatever `onAbort` says: the other visits' `ctx.signal` aborts, and what they
+  return afterwards is ignored.
+- **Abort.** `signal` aborts the visits in flight (their `ctx.signal`) and settles the run at once,
+  without waiting for them: it rejects with an `AbortError` (`onAbort: 'reject'`, the default, as
+  the Node sibling's `createPipeline` does) or resolves with what it has and `stoppedBy: 'aborted'`
+  (`'resolve'`, as `createPipeline` does here). Aborted before it starts: no visit at all.
+- **Events.** `onEvent` gets the `pipeline.*` events `createPipeline` sends; `ctx.emit(event)`
+  forwards one of the node's own, with `nodeId` and `visit`, until the run is over.
+
+`pickPipelineRoute(node, text, { agent, config, signal?, onEvent? })` resolves with
+`{ route?, usage }`: the agent's decision model first (`config.decisionModel`, when it is
+confident of a label), else its planner model - structured output, then plain text - with the
+config's budget, temperature and `chatTimeoutMs`. No label, or a failed call, is no route; an
+abort rejects with an `AbortError`.
+
+**Deterministic by contract.** The engine - `preparePipeline`, `runPipelineGraph`, the conditions -
+reads no clock, no randomness and no timer, and does no I/O: the same definition, input and runner
+answers, arriving in the same order (and an abort at the same point), give the same calls, events,
+trace and result. So it can be a deterministic scheduler, replayed from a log of the runner's
+answers. It needs nothing but the JavaScript language: where there is no `AbortController`,
+`ctx.signal` is a stand-in (`aborted`, `reason`, `onabort`, `throwIfAborted()`, `addEventListener` /
+`removeEventListener`), where there is no `DOMException` the abort error is an `Error` named
+`AbortError`, and of your `signal` only `aborted` and `addEventListener` / `removeEventListener`
+for `'abort'` are read. The engine itself is one file with no imports; this package's entry point
+loads the whole agent with it. `pickPipelineRoute` calls a model, so it is not part of that: it
+belongs where the node runs. Why: [docs/design.md](docs/design.md#pipelines-waves-a-join-rule-caps).
+
 ## Configuration (highlights)
 
 | Option | Default | Purpose |
