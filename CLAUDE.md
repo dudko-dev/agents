@@ -50,6 +50,15 @@ private apps and one private example (with its shared package):
   (`DATABASE_URL`) and starts a Temporal dev server (`@temporalio/testing`, downloaded) - CI runs it
   in `swarm.yml`, not in `ci.yml`. It uses only the agent's public API: a change it would need in
   the core is a change to `packages/agent`, made there. Its own `CLAUDE.md` has the rules.
+- `examples/swarm-cloudflare` — `swarm-cloudflare` (private, NEVER published; not in
+  `release-plan.mjs`, and must stay out of it): the same swarm - `swarm-shared`'s HTTP API and
+  session semantics - on Cloudflare: a Durable Object per session (the reducer's single writer: its
+  state, event log, runs, call journal, lease, parked items, children and an outbox of effects), a
+  Workflow instance per turn, per static subagent call, per pipeline call and per node visit, the
+  Node core in workerd (`nodejs_compat`). `build` is `wrangler deploy --dry-run` (offline);
+  `test` runs in Node (the objects' logic over `node:sqlite`); `test:e2e` runs `wrangler dev` - CI
+  runs it in `swarm-cloudflare.yml`. Nothing here deploys or logs in to Cloudflare; the owner does
+  (its README's "Deploying"). Its own `CLAUDE.md` has the rules.
 - `examples/swarm-shared` — `swarm-shared` (private, NEVER published; not in `release-plan.mjs`,
   and must stay out of it): the platform-independent part of the swarm, shared by its ports to
   other platforms (the same HTTP API, the same session semantics) - the session's logic, ids and
@@ -75,9 +84,10 @@ pnpm nx <target> <project>   # e.g. pnpm nx test @dudko.dev/agent-web
 ```
 
 Projects: `@dudko.dev/agent`, `@dudko.dev/agent-web`, `@dudko.dev/agent-web-react`,
-`@dudko.dev/test-servers`, `demo`, `site`, `worker`, `app-sandbox`, `swarm`, `swarm-shared`.
+`@dudko.dev/test-servers`, `demo`, `site`, `worker`, `app-sandbox`, `swarm`, `swarm-shared`,
+`swarm-cloudflare`.
 Targets come from each package's `scripts`: `typecheck`, `format:check`, `format`, `build`, `test`
-(and `test:e2e` in the React package, `test:integration` in `swarm` - not part of `pnpm check`;
+(and `test:e2e` in the React package, `test:integration` in `swarm`, `test:e2e` in `swarm-cloudflare` - not part of `pnpm check`;
 `@dudko.dev/test-servers` has no `build`).
 
 After **any** change to `.ts` / `.tsx`, run the four checks for the packages you touched **and
@@ -133,7 +143,8 @@ tool. Do not infer success from "the change looks right".
   dependencies); `swarm.yml` (the swarm example's integration tests against a Postgres service
   and a Temporal dev server, its Docker image built without a push, and its Helm chart's lint /
   template / kubeconform, on changes to `examples/swarm`, `examples/swarm-shared` or
-  `packages/agent`); `swarm-image.yml`
+  `packages/agent`); `swarm-cloudflare.yml` (the Cloudflare port's end-to-end tests against
+  `wrangler dev`, local only - it never deploys); `swarm-image.yml`
   (publishes the swarm image for linux/amd64 + arm64 to `ghcr.io/dudko-dev/agent-swarm`, and to
   `docker.io/sergdudko/agent-swarm` when the `DOCKER_USER` / `DOCKER_PAT` secrets are set: on an
   `agent-v*` tag - after a Release run, since release.yml's tag push starts no workflow - and by

@@ -1,0 +1,45 @@
+// The agent swarm on Cloudflare: one Worker (the gateway), a Durable Object per session and one per
+// rate-limit bucket, a Workflow per turn and per child. Local: `wrangler dev` (secrets from
+// .dev.vars - copy .dev.vars.example). Deploying is the owner's step (README, "Deploying").
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "agent-swarm",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  // The Node core (@dudko.dev/agent) needs Node's APIs: node:crypto, node:async_hooks, ...
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      // One per session (idFromName(sessionId)): its state, events, runs, journal, parked items.
+      { "name": "SESSION", "class_name": "SessionDO" },
+      // One per token bucket of sharedLimits (LIMITER_*).
+      { "name": "LIMITER", "class_name": "LimiterDO" },
+    ],
+  },
+  // SQLite-backed objects. Never edit an applied migration: add the next tag.
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SessionDO", "LimiterDO"] }],
+  "workflows": [
+    // One instance per turn: turn-<session>-<turn>.
+    { "name": "agent-swarm-turn", "binding": "TURN", "class_name": "TurnWorkflow" },
+    // One per static subagent call, one per pipeline call, one per pipeline node visit.
+    { "name": "agent-swarm-subagent", "binding": "SUBAGENT", "class_name": "SubagentWorkflow" },
+    { "name": "agent-swarm-pipeline", "binding": "PIPELINE", "class_name": "PipelineWorkflow" },
+    { "name": "agent-swarm-node", "binding": "NODE", "class_name": "PipelineNodeWorkflow" },
+  ],
+  // The non-secret settings (README, "Configuration", has every one). Secrets - GATEWAY_TOKENS,
+  // AGENT_API_KEY, and MCP_SERVERS when its headers carry a token - are Worker secrets
+  // (`wrangler secret put`), `.dev.vars` locally; never here.
+  "vars": {
+    "LOG_LEVEL": "info",
+    "GATEWAY_AUTH": "bearer",
+    "AGENT_PROVIDER_TYPE": "openai",
+    "AGENT_MODEL": "gpt-5-mini",
+    "AGENT_TOOL_APPROVAL": "autopilot",
+    "CHILD_ASK": "park",
+  },
+  "observability": { "enabled": true },
+  // No previews, no workers.dev route by default: the API needs a token, but there is no reason to
+  // publish more than the owner chooses (README, "Deploying").
+  "workers_dev": false,
+  "preview_urls": false,
+}

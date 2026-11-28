@@ -11,6 +11,9 @@ image, a Helm chart.
 This is an **example**, not a package: private in the workspace, never published. Read it, run it,
 copy what you need.
 
+The same API and session semantics on Cloudflare Durable Objects + Workflows, with no Temporal
+and no Postgres: [`examples/swarm-cloudflare`](../swarm-cloudflare).
+
 - [Architecture](#architecture)
 - [Run it with Docker Compose](#run-it-with-docker-compose)
 - [The HTTP API](#the-http-api)

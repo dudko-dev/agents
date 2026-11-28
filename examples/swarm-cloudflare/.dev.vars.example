@@ -1,0 +1,10 @@
+# Copy to .dev.vars for `wrangler dev` (never commit .dev.vars). In production these are Worker
+# secrets: `npx wrangler secret put GATEWAY_TOKENS` (README, "Deploying").
+GATEWAY_TOKENS=change-me-to-a-long-random-token
+AGENT_API_KEY=sk-...
+# Optional: an OpenAI-compatible server instead of OpenAI (any vars of wrangler.jsonc can be
+# overridden here for local runs).
+# AGENT_PROVIDER_TYPE=openai-compatible
+# AGENT_BASE_URL=http://127.0.0.1:8000/v1
+# AGENT_MODEL=my-model
+# MCP_SERVERS={"docs":{"url":"https://mcp.example.com/mcp","headers":{"authorization":"Bearer ..."}}}

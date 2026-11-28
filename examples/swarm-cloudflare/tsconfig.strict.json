@@ -1,0 +1,6 @@
+{
+  // src and the unit tests, with noUncheckedIndexedAccess (tsconfig.json says why not the e2e).
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "noUncheckedIndexedAccess": true },
+  "include": ["src/**/*", "tests/**/*"]
+}

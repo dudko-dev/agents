@@ -1,0 +1,23 @@
+{
+  // The Worker (workerd's types: @cloudflare/workers-types) and the tests, e2e and scripts (Node's):
+  // the Worker runs with nodejs_compat, so both sets describe it. The e2e import the TypeScript
+  // source of @dudko.dev/test-servers, which is not written for noUncheckedIndexedAccess:
+  // tsconfig.strict.json adds it for src and tests (`typecheck` runs both).
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "forceConsistentCasingInFileNames": true,
+    "lib": ["ES2022"],
+    "types": ["node", "@cloudflare/workers-types"],
+    "ignoreDeprecations": "6.0"
+  },
+  "include": ["src/**/*", "tests/**/*", "e2e/**/*", "scripts/**/*"]
+}

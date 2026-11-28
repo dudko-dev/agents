@@ -1,0 +1,55 @@
+name: Swarm on Cloudflare example
+
+# examples/swarm-cloudflare: the swarm's HTTP API and session semantics on Durable Objects +
+# Workflows. ci.yml already runs its typecheck, format, build (an offline `wrangler deploy
+# --dry-run`) and unit tests with every other project; this adds the end-to-end tests against
+# `wrangler dev` (workerd + Miniflare, local only). Nothing is deployed and no Cloudflare account
+# is used: there are no Cloudflare secrets in this workflow, and none must be added.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'examples/swarm-cloudflare/**'
+      - 'examples/swarm-shared/**'
+      - 'packages/agent/**'
+      - 'packages/test-servers/**'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - '.github/workflows/swarm-cloudflare.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'examples/swarm-cloudflare/**'
+      - 'examples/swarm-shared/**'
+      - 'packages/agent/**'
+      - 'packages/test-servers/**'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - '.github/workflows/swarm-cloudflare.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: '${{ github.workflow }} @ ${{ github.event.pull_request.head.ref || github.ref }}'
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: Checks and end-to-end tests (wrangler dev)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      WRANGLER_SEND_METRICS: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # nx builds @dudko.dev/agent and swarm-shared first (the Worker bundles their dist).
+      - run: pnpm nx run-many -t typecheck format:check build test -p swarm-cloudflare
+      - run: pnpm nx run swarm-cloudflare:test:e2e

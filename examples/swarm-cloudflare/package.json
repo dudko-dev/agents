@@ -1,0 +1,63 @@
+{
+  "name": "swarm-cloudflare",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "The agent swarm (examples/swarm) on Cloudflare's own primitives: the same HTTP API and session semantics, with a Durable Object per session and Workflows per turn and per child. An example, never published.",
+  "license": "MIT",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.strict.json",
+    "test": "node --test --test-timeout=60000 --experimental-strip-types --disable-warning=ExperimentalWarning tests/*.test.ts",
+    "test:e2e": "node --test --test-concurrency=1 --test-timeout=240000 --experimental-strip-types --disable-warning=ExperimentalWarning e2e/*.test.ts",
+    "dev": "wrangler dev",
+    "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\" \"e2e/**/*.ts\" \"scripts/*.mjs\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\" \"e2e/**/*.ts\" \"scripts/*.mjs\""
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^4.0.111",
+    "@ai-sdk/google": "^4.0.128",
+    "@ai-sdk/openai": "^4.0.125",
+    "@ai-sdk/openai-compatible": "^3.0.96",
+    "@dudko.dev/agent": "workspace:*",
+    "swarm-shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261127.1",
+    "@dudko.dev/test-servers": "workspace:*",
+    "@types/node": "^22.9.0",
+    "ai": "^7.0.184",
+    "prettier": "^3.10.1",
+    "typescript": "^6.0.3",
+    "wrangler": "4.169.0",
+    "zod": "^4.6.7"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "nx": {
+    "targets": {
+      "typecheck": {
+        "inputs": [
+          "default",
+          "^production",
+          "{workspaceRoot}/packages/agent/tests/helpers/openai-server.ts",
+          "{workspaceRoot}/packages/test-servers/src/**/*"
+        ]
+      },
+      "test": {
+        "inputs": [
+          "default",
+          "^production",
+          "{workspaceRoot}/packages/agent/tests/helpers/openai-server.ts"
+        ]
+      },
+      "test:e2e": {
+        "dependsOn": [
+          "^build"
+        ],
+        "cache": false
+      }
+    }
+  }
+}
