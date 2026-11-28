@@ -1,11 +1,12 @@
 // Run snapshots in Postgres (`swarm_runs`): the agent's `persistence`, and which run belongs to
 // which turn of which session.
 //
-// A fresh run gets its id from the core (a random UUID; `agent.run` takes no id for a fresh run),
-// so the turn cannot name its run in advance. Instead the run is BOUND to the turn the moment its
-// lease is taken (`bindRun`, before the run does anything): the retry of a turn looks the run up
-// by (session, turn) and resumes it. `run_no` counts the runs of one turn: a turn whose worker
-// died before the first snapshot (no plan yet - nothing to resume) starts a second run.
+// A fresh run's id is named by the activity (`agent.run({ runId })`, a function of the stream, the
+// turn and the run's number in it - activities.ts, `runIdOf`), and the run is BOUND to the turn
+// the moment its lease is taken (`bindRun`, before the run does anything): the retry of a turn
+// looks the run up by (session, turn) and resumes it. `run_no` counts the runs of one turn: a turn
+// whose worker died before the first snapshot (no plan yet - nothing to resume; the core also
+// refuses to start a run again under an id that has journal entries) starts a second run.
 //
 // Every write is fenced by `attempt`: a checkpoint may not go below the attempt on record, a
 // resume must go above it. A worker that lost its turn (a paused process, a partition) cannot

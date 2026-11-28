@@ -30,7 +30,7 @@ const scope = (extra: Partial<ITurnScope> = {}): ITurnScope & { beats: unknown[]
   return {
     sessionId: 's',
     turn: 2,
-    intent: { kind: 'fresh', runNo: 1, attemptBase: 0 },
+    intent: { kind: 'fresh', runId: 'r1', runNo: 1, attemptBase: 0 },
     heartbeat: (d) => void beats.push(d),
     revoked: () => undefined,
     beats,
@@ -53,6 +53,9 @@ test('acquire outside a turn activity is refused', async () => {
 test('a fresh run is bound to its turn; renew heartbeats; release forgets it', async () => {
   const { lease, bound } = make()
   const s = scope()
+  // Only the run the activity named (run({ runId })): another id is refused before any bind.
+  assert.equal(await withTurnScope(s, () => Promise.resolve(lease.acquire('other', opts))), false)
+  assert.deepEqual(bound, [])
   assert.equal(await withTurnScope(s, () => Promise.resolve(lease.acquire('r1', opts))), true)
   assert.deepEqual(bound, [{ runId: 'r1', sessionId: 's', turn: 2, runNo: 1, attemptBase: 0 }])
   assert.equal(s.runId, 'r1')
@@ -99,6 +102,9 @@ test('once Temporal takes the turn away, acquire and renew say no', async () => 
   why = 'the heartbeat timed out'
   assert.equal(await lease.renew('r1', opts), false)
   assert.deepEqual(s.beats, [], 'no heartbeat for a turn that is not ours')
-  const late = scope({ revoked: () => 'the worker is shutting down' })
+  const late = scope({
+    intent: { kind: 'fresh', runId: 'r2', runNo: 1, attemptBase: 0 },
+    revoked: () => 'the worker is shutting down',
+  })
   assert.equal(await withTurnScope(late, () => Promise.resolve(lease.acquire('r2', opts))), false)
 })

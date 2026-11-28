@@ -53,10 +53,10 @@ approval mode, a Temporal address without a port, a root or writable container -
 | `image.*` | repository, tag (default: `appVersion`) or `digest`, pull policy |
 | `secrets.*` | the Secret and key of each secret: `databaseUrl`, `migrateDatabaseUrl`, `gatewayTokens`, `agentApiKey`, `temporalApiKey`, `temporalTls` (`ca.crt`, and `tls.crt` + `tls.key` with `clientCertificate`) |
 | `temporal.*` | `address`, `namespace`, `taskQueue`, `tls`; `enabled` runs the bundled Temporal chart (below) |
-| `session.*` | the session options: read by the gateway, fixed when a session starts (`SESSION_*`, `TURN_*`, `SUBAGENT_MAX_PER_*`) |
+| `session.*` | the session options: read by the gateway, fixed when a session starts (`SESSION_*`, `TURN_*`, `SUBAGENT_MAX_PER_*`, `PIPELINE_MAX_PER_*`) |
 | `gateway.*` | replicas, auth, CORS, body and stream bounds, the Service, `preStopSleepSeconds`, `terminationGracePeriodSeconds`, the HPA (`autoscaling`), resources, scheduling, `extraEnv` / `extraEnvFrom` |
 | `worker.*` | concurrency, `shutdownGraceSeconds` (+ `terminationExtraSeconds` = the pod's grace period), lease, the shared limiter, autoscaling (HPA on CPU, or KEDA), resources, scheduling, extra env |
-| `agent.*` | the agent's non-secret settings: provider, model(s), base URL, system prompt, `toolApproval` and `toolRules`, `mcpServers`, `subagents` (SUBAGENTS), caps, any other `AGENT_*` under `extra` |
+| `agent.*` | the agent's non-secret settings: provider, model(s), base URL, system prompt, `toolApproval` and `toolRules`, `mcpServers`, `subagents` (SUBAGENTS), `pipelines` (PIPELINES), caps, any other `AGENT_*` under `extra` |
 | `migrate.*` | the hook Job: on/off, retries, deadline, resources |
 | `serviceAccount.*`, `podDisruptionBudget.*`, `ingress.*`, `networkPolicy.*` | as below |
 | `podSecurityContext`, `securityContext`, `tmp.sizeLimit` | the pods' security (below) |
@@ -126,7 +126,7 @@ default: a production Temporal is run on its own, with its own upgrades and back
 
 - `helm lint --strict` with the default values and with [`ci/all-on-values.yaml`](ci/all-on-values.yaml)
   (every flag on: KEDA with TLS and an API key, NetworkPolicy, Ingress, the bundled Temporal, the
-  limiter, subagents, extra env, a digest);
+  limiter, subagents, a pipeline, extra env, a digest);
 - `helm template` of both, validated by `kubeconform -strict` against the Kubernetes schemas
   (pinned commit of yannh/kubernetes-json-schema) and the CRD schemas KEDA's objects need (pinned
   commit of datreeio/CRDs-catalog) - nothing is skipped: a kind without a schema fails;

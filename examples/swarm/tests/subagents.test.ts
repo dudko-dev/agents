@@ -16,7 +16,7 @@ import {
 const scope = (subagents?: ITurnScope['subagents']): ITurnScope => ({
   sessionId: 's',
   turn: 1,
-  intent: { kind: 'fresh', runNo: 1, attemptBase: 0 },
+  intent: { kind: 'fresh', runId: 'r1', runNo: 1, attemptBase: 0 },
   heartbeat: () => {},
   revoked: () => undefined,
   ...(subagents ? { subagents } : {}),

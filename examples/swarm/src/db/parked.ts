@@ -1,6 +1,7 @@
 // The items parked turns wait for (`swarm_parked`): written by the turn activity when its run
 // parks, read by the gateway to check an answer before it signals the session - so an answer
-// can be checked (and sent) while no worker runs - and to list a session's subagent calls.
+// can be checked (and sent) while no worker runs - and to list a session's subagent and pipeline
+// calls.
 //
 //   pending   - the turn waits for it
 //   answered  - the turn went on with its answer (marked when the resume starts)
@@ -11,14 +12,17 @@ import type { IQueryable, IStatement } from './pool.ts'
 
 export type ParkedState = 'pending' | 'answered' | 'cancelled'
 
+// Who answers an item: a client (a person, an outside system) or a child workflow of the session.
+export type AnsweredBy = 'client' | 'subagent' | 'pipeline'
+
 export interface IParkedRow {
   sessionId: string
   itemId: string
   turn: number
   runId: string
   kind: IParkedRequest['kind']
-  answeredBy: 'client' | 'subagent'
-  // The child workflow that answers it (answeredBy 'subagent').
+  answeredBy: AnsweredBy
+  // The child workflow that answers it (answeredBy 'subagent' / 'pipeline').
   childId?: string
   item: unknown
   state: ParkedState
@@ -87,10 +91,19 @@ export const parkedItemSql = (sessionId: string, itemId: string): IStatement => 
   values: [sessionId, itemId],
 })
 
-export const subagentsOfSql = (sessionId: string): IStatement => ({
-  text: `${SELECT}WHERE session_id = $1 AND answered_by = 'subagent' ORDER BY created_at, item_id`,
-  values: [sessionId],
+// A session's calls answered by children of one kind ('subagent' / 'pipeline'), oldest first.
+export const childrenOfSql = (
+  sessionId: string,
+  by: Exclude<AnsweredBy, 'client'>,
+): IStatement => ({
+  text: `${SELECT}WHERE session_id = $1 AND answered_by = $2 ORDER BY created_at, item_id`,
+  values: [sessionId, by],
 })
+
+export const subagentsOfSql = (sessionId: string): IStatement =>
+  childrenOfSql(sessionId, 'subagent')
+export const pipelinesOfSql = (sessionId: string): IStatement =>
+  childrenOfSql(sessionId, 'pipeline')
 
 interface IRecord {
   session_id: string
@@ -98,7 +111,7 @@ interface IRecord {
   turn: number
   run_id: string
   kind: IParkedRequest['kind']
-  answered_by: 'client' | 'subagent'
+  answered_by: AnsweredBy
   child_id: string | null
   item: unknown
   state: ParkedState
@@ -122,6 +135,7 @@ export interface IParkedStore {
   cancelTurn: (sessionId: string, turn: number) => Promise<void>
   item: (sessionId: string, itemId: string) => Promise<IParkedRow | undefined>
   subagents: (sessionId: string) => Promise<IParkedRow[]>
+  pipelines: (sessionId: string) => Promise<IParkedRow[]>
 }
 
 export const createParkedStore = (db: IQueryable): IParkedStore => ({
@@ -146,6 +160,10 @@ export const createParkedStore = (db: IQueryable): IParkedStore => ({
   },
   subagents: async (sessionId) => {
     const { text, values } = subagentsOfSql(sessionId)
+    return (await db.query<IRecord>(text, values)).rows.map(rowOf)
+  },
+  pipelines: async (sessionId) => {
+    const { text, values } = pipelinesOfSql(sessionId)
     return (await db.query<IRecord>(text, values)).rows.map(rowOf)
   },
 })

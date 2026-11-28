@@ -9,6 +9,10 @@
 //   GET  /sessions/:id/events?after=<cursor>  SSE: replay from Postgres, then live (LISTEN/NOTIFY)
 //   GET  /sessions/:id/subagents            the session's static subagent calls (Postgres)
 //   GET  /sessions/:id/subagents/:itemId/events?after=<cursor>  SSE: one child's own stream
+//   GET  /sessions/:id/pipelines            the session's pipeline calls (Postgres)
+//   GET  /sessions/:id/pipelines/:itemId/events?after=<cursor>  SSE: a pipeline's own stream
+//   GET  /sessions/:id/pipelines/:itemId/nodes/:nodeId/:visit/events?after=<cursor>
+//                                           SSE: one node visit's own stream
 //   GET  /healthz  /readyz                  no auth
 import { randomUUID } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
@@ -20,7 +24,12 @@ import type { ISubscription } from './db/notify.ts'
 import type { IParkedRow } from './db/parked.ts'
 import { corsHeaders, createBearerCheck, HttpError, readJson, sendError, sendJson } from './http.ts'
 import { errorMessage, type ILogger } from './log.ts'
-import { subagentStreamOf } from './session-api.ts'
+import {
+  pipelineEventsPath,
+  pipelineNodeStreamOf,
+  pipelineStreamOf,
+  subagentStreamOf,
+} from './session-api.ts'
 import type { IAnswer, ISessionView, IStopRequest, IUserMessage } from './session-types.ts'
 
 // What the gateway needs from Temporal (and the session table). The real one is backend.ts.
@@ -33,9 +42,10 @@ export interface ISessionBackend {
   // The session was started here (Postgres): the event stream of an unknown id is a 404.
   exists: (sessionId: string) => Promise<boolean>
   // An item a parked turn of the session waits for (Postgres: no worker needed), and the
-  // session's static subagent calls.
+  // session's static subagent and pipeline calls.
   parkedItem: (sessionId: string, itemId: string) => Promise<IParkedRow | undefined>
   subagents: (sessionId: string) => Promise<IParkedRow[]>
+  pipelines: (sessionId: string) => Promise<IParkedRow[]>
   // Throws when Temporal or Postgres cannot be reached.
   ready: () => Promise<void>
 }
@@ -72,12 +82,24 @@ export class BackendUnavailableError extends Error {
 }
 
 export const ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/
+// A node visit's number in a route: 1 and up (the engine's maxNodeVisits is at most 100).
+export const VISIT_PATTERN = /^[1-9][0-9]{0,2}$/
 
 type Route =
   | { name: 'create' }
-  | { name: 'message' | 'stop' | 'state' | 'events' | 'subagents'; sessionId: string }
+  | {
+      name: 'message' | 'stop' | 'state' | 'events' | 'subagents' | 'pipelines'
+      sessionId: string
+    }
   | { name: 'answer'; sessionId: string; requestId: string }
-  | { name: 'subagentEvents'; sessionId: string; requestId: string }
+  | { name: 'subagentEvents' | 'pipelineEvents'; sessionId: string; requestId: string }
+  | {
+      name: 'pipelineNodeEvents'
+      sessionId: string
+      requestId: string
+      nodeId: string
+      visit: string
+    }
   | { name: 'healthz' | 'readyz' }
 
 const ROUTES: { pattern: RegExp; method: string; route: (m: RegExpExecArray) => Route }[] = [
@@ -119,6 +141,27 @@ const ROUTES: { pattern: RegExp; method: string; route: (m: RegExpExecArray) => 
     method: 'GET',
     route: (m) => ({ name: 'subagentEvents', sessionId: m[1]!, requestId: m[2]! }),
   },
+  {
+    pattern: /^\/sessions\/([^/]+)\/pipelines$/,
+    method: 'GET',
+    route: (m) => ({ name: 'pipelines', sessionId: m[1]! }),
+  },
+  {
+    pattern: /^\/sessions\/([^/]+)\/pipelines\/([^/]+)\/events$/,
+    method: 'GET',
+    route: (m) => ({ name: 'pipelineEvents', sessionId: m[1]!, requestId: m[2]! }),
+  },
+  {
+    pattern: /^\/sessions\/([^/]+)\/pipelines\/([^/]+)\/nodes\/([^/]+)\/([^/]+)\/events$/,
+    method: 'GET',
+    route: (m) => ({
+      name: 'pipelineNodeEvents',
+      sessionId: m[1]!,
+      requestId: m[2]!,
+      nodeId: m[3]!,
+      visit: m[4]!,
+    }),
+  },
 ]
 
 export type RouteMatch =
@@ -137,8 +180,12 @@ export const matchRoute = (method: string, path: string): RouteMatch => {
   const ids = [
     'sessionId' in route ? route.sessionId : undefined,
     'requestId' in route ? route.requestId : undefined,
+    'nodeId' in route ? route.nodeId : undefined,
   ]
   if (ids.some((id) => id !== undefined && !ID_PATTERN.test(id))) {
+    return { ok: false, status: 404 }
+  }
+  if ('visit' in route && !VISIT_PATTERN.test(route.visit)) {
     return { ok: false, status: 404 }
   }
   return { ok: true, route }
@@ -388,6 +435,13 @@ export const createGateway = (deps: IGatewayDeps): IGateway => {
               `a subagent answers ${r.requestId}; stop the turn to give up on it`,
             )
           }
+          if (item.answeredBy === 'pipeline') {
+            throw new HttpError(
+              409,
+              'answered_by_pipeline',
+              `a pipeline answers ${r.requestId}; stop the turn to give up on it`,
+            )
+          }
           const problem = answerProblem(item.kind, value)
           if (problem) {
             throw new HttpError(400, 'invalid_answer', problem)
@@ -426,6 +480,29 @@ export const createGateway = (deps: IGatewayDeps): IGateway => {
           await events(req, res, stream, url, cors, async () => {
             const item = await parkedItem(r.sessionId, r.requestId)
             return item?.answeredBy === 'subagent'
+          })
+          return
+        }
+        case 'pipelines': {
+          if (!(await sessionExists(r.sessionId))) {
+            throw new HttpError(404, 'not_found', `no session ${r.sessionId}`)
+          }
+          const rows = await unavailableOn(() => backend.pipelines(r.sessionId))
+          sendJson(res, 200, { pipelines: rows.map((row) => pipelineView(row)) }, cors)
+          return
+        }
+        case 'pipelineEvents':
+        case 'pipelineNodeEvents': {
+          // The pipeline's own stream, or one visit of one of its nodes: either way the item must
+          // be one a pipeline answers. A visit that has not started (or never will) is an empty
+          // stream that waits, as a child's stream does before its run begins.
+          const stream =
+            r.name === 'pipelineNodeEvents'
+              ? pipelineNodeStreamOf(r.sessionId, r.requestId, r.nodeId, Number(r.visit))
+              : pipelineStreamOf(r.sessionId, r.requestId)
+          await events(req, res, stream, url, cors, async () => {
+            const item = await parkedItem(r.sessionId, r.requestId)
+            return item?.answeredBy === 'pipeline'
           })
           return
         }
@@ -472,6 +549,21 @@ export const subagentView = (row: IParkedRow): Record<string, unknown> => {
     ...(row.childId ? { workflowId: row.childId } : {}),
     ...(item.subagent ?? {}),
     events: `/sessions/${row.sessionId}/subagents/${row.itemId}/events`,
+  }
+}
+
+// A pipeline call as GET /sessions/:id/pipelines lists it. Its node visits are named by the
+// `pipeline.node.started` events of its own stream (each with the visit's `events`).
+export const pipelineView = (row: IParkedRow): Record<string, unknown> => {
+  const item = (row.item ?? {}) as { pipeline?: Record<string, unknown> }
+  return {
+    itemId: row.itemId,
+    turn: row.turn,
+    runId: row.runId,
+    state: row.state,
+    ...(row.childId ? { workflowId: row.childId } : {}),
+    ...(item.pipeline ?? {}),
+    events: pipelineEventsPath(row.sessionId, row.itemId),
   }
 }
 

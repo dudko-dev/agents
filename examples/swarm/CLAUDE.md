@@ -8,8 +8,10 @@
 
 A reference deployment of `@dudko.dev/agent` as a swarm: a Temporal workflow per conversation
 (`session`), one `agent.run` per turn as an activity (`runTurn`), turns that park (the core's
-journal + parking) and static subagents as child workflows (`subagent` -> `runSubagent`), state in
-Postgres, a stateless `node:http` gateway with SSE, one image with three roles, a Helm chart.
+journal + parking), static subagents as child workflows (`subagent` -> `runSubagent`) and pipelines
+as child workflows (`pipeline`, the core's graph engine as its scheduler, -> one `pipelineNode` per
+node visit -> `runPipelineNode`), state in Postgres, a stateless `node:http` gateway with SSE, one
+image with three roles, a Helm chart.
 **Private, never published** (not in `.github/scripts/release-plan.mjs`; keep it out). No version
 bumps, no CHANGELOG.
 
@@ -19,11 +21,14 @@ bumps, no CHANGELOG.
   `packages/agent/src`, no deep imports. A change the swarm needs in the core is made in
   `packages/agent` (and its browser sibling), with its tests - not worked around here.
 - **The workflow is deterministic.** `src/workflows.ts` imports only `@temporalio/workflow`,
-  `session-api.ts`, `session-state.ts` (which imports `answers.ts`, pure and import-free) and
+  `@dudko.dev/agent/pipeline-engine` (the core's graph engine: no imports, deterministic by
+  contract - NEVER the main entry, `tests/bundle.test.ts` fails on it), `session-api.ts`,
+  `session-state.ts` (which imports `answers.ts`, pure and import-free), `pipeline-state.ts` and
   types; no Node, no clock but the workflow's `Date.now()`, no randomness. The logic lives in
-  `session-state.ts` (pure, unit-tested); the workflow wires it. A change that alters the commands
-  a running session replays (activities scheduled, their order, timers, child workflows) needs
-  `patched()` (ids in `session-api.ts`, `PATCH_*`) or a new workflow type - sessions live for days.
+  `session-state.ts` / `pipeline-state.ts` (pure, unit-tested); the workflow wires it. A change
+  that alters the commands a running session replays (activities scheduled, their order, timers,
+  child workflows) needs `patched()` (ids in `session-api.ts`, `PATCH_*`) or a new workflow type -
+  sessions live for days.
   `tests/replay.test.ts` replays recorded histories (`tests/fixtures/*.history.json`) on the
   current code: a change that breaks one is a replay break. Record a new fixture for a new path.
 - **Session options are workflow input** (`ISessionOptions`, read by the gateway at start), never
@@ -50,6 +55,23 @@ bumps, no CHANGELOG.
   `subagent.started` / `.ended` markers go in the parked attempt's slot at seq >= 2^30, written by
   the workflow in order, BEFORE the resumed attempt starts. Continue-as-new waits for running
   children.
+- **Pipelines** (`PIPELINES`, `pipelines.ts`): the tool defers like a subagent's (caps in
+  `ITurnInput.pipelines`); the session starts a child `pipeline` per item (behind
+  `PATCH_PIPELINES`; every start of a park, of both kinds, decided at once in `startChildren` -
+  one marker counter, so the markers stay in order). `pipeline` reads its definition through an
+  activity (`pipelineDefinition`), runs `runPipelineGraph` with `onAbort: 'reject'` and an abort
+  latch on its cancellation scope, starts one child `pipelineNode` per visit (a wave in the same
+  task), writes the engine's events through ONE `writeStream` at a time (`createStreamLog`: the
+  batches depend only on the activations, so they replay), waits for its visits, then its
+  `turn.ended`. `runPipelineNode`: the worker's node agent (checked equal to the planned node,
+  `canonicalJson`) on `renderPipelineNodeInput`, then `pickPipelineRoute` in the same activity
+  (heartbeats; a stop is `stopped`, a lost turn `TurnMoved`). Streams: the pipeline's
+  `<session>/<item>`, a visit's `<session>/<item>/<node>/<visit>`. A node resolves against the
+  worker (`pipelineNodeConfig`); anything it names that the worker cannot honour is a ConfigError
+  at start.
+- **Run ids**: a fresh run's id is named by the activity (`runIdOf(stream, turn, runNo)`,
+  `agent.run({ runId })`); the lease takes only the run the activity named. A run that is on record
+  is resumed (planTurn), never started again under its id.
 - **The cursor is `<turn>:<turn_attempt>:<seq>`**; `turn_attempt = attempt_base + attempt` so a
   turn that had to start a second run still has one total order. The turn markers use attempt `0`
   (`turn.started`) and `2147483647` (`turn.ended`).
@@ -62,11 +84,15 @@ bumps, no CHANGELOG.
 
 - `src/main.ts` — the role dispatch. `config.ts`, `env.ts`, `agent-config.ts` — the environment.
 - `src/session-types.ts`, `session-api.ts`, `session-state.ts`, `workflows.ts` (`session`,
-  `subagent`) — the session; `answers.ts` — the answer checks per kind (gateway + workflow).
-- `src/activities.ts` (`runTurn`, `runSubagent`, `endTurn`, `writeMarkers`, `planTurn`),
-  `lease.ts` (the heartbeat lease, its fence and the turn scope), `subagents.ts` (SUBAGENTS: the
-  tools, `dispatch`, the child and session agent configs), `worker.ts` (the worker and its agents,
-  its health port, the SDK's logger).
+  `subagent`, `pipeline`, `pipelineNode`) — the session; `answers.ts` — the answer checks per kind
+  (gateway + workflow).
+- `src/activities.ts` (`runTurn`, `runSubagent`, `pipelineDefinition`, `runPipelineNode`,
+  `endTurn`, `writeMarkers`, `writeStream`, `planTurn`, `runIdOf`), `lease.ts` (the heartbeat
+  lease, its fence and the turn scope), `subagents.ts` (SUBAGENTS: the tools, `dispatch`, the child
+  and session agent configs), `pipelines.ts` (PIPELINES: the tools, `dispatch`, the checks, a
+  node's agent config), `pipeline-state.ts` (the `pipeline` workflow's pure logic: the abort latch,
+  the stream log, node input / output, outcomes), `worker.ts` (the worker and its agents - session,
+  subagents, every pipeline node -, its health port, the SDK's logger).
 - `src/gateway.ts` (routes, the stream), `http.ts` (bodies, auth, CORS), `backend.ts` (Temporal
   + the session table), `gateway-main.ts`, `cursor.ts`.
 - `src/db/` — `pool.ts`, `migrate.ts`, `runs.ts` (snapshots, binding, fencing), `journal.ts` (the
@@ -90,7 +116,8 @@ bumps, no CHANGELOG.
 - `tests/integration/*.test.ts` (`test:integration`, `swarm.yml`): a real Postgres (`DATABASE_URL`)
   and a Temporal dev server (`@temporalio/testing` `createLocal()`, or `TEMPORAL_CLI_PATH`); the
   model is `packages/agent/tests/helpers/openai-server.ts`, imported by relative path. The crash
-  test kills a real worker process (`main.ts worker`).
+  tests kill a real worker process (`main.ts worker`, or `tests/integration/notes-worker.ts`: the
+  same with a native write tool, so a test can count the writes).
 
 ```bash
 pnpm nx run-many -t typecheck format:check build test -p swarm

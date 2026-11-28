@@ -42,8 +42,9 @@ private apps and one private example:
   self-hosted Temporal + Postgres - a session workflow per conversation, one `agent.run` per turn as
   an activity, the agent's scale-out hooks (`persistence` with the call journal, `runLease`,
   `sharedLimits`, events) on Temporal and Postgres, turns that park on a person's answer, static
-  subagents as child workflows, a stateless `node:http` gateway with SSE, one image (`Dockerfile`,
-  distroless, roles `gateway` | `worker` | `migrate`), `compose.yaml` and a Helm chart
+  subagents and pipelines (the core's graph engine in a workflow) as child workflows, a stateless
+  `node:http` gateway with SSE, one image (`Dockerfile`, distroless, roles `gateway` | `worker` |
+  `migrate`), `compose.yaml` and a Helm chart
   (`deploy/helm/agent-swarm`). TypeScript run directly by Node; `build`
   only bundles the workflow code. `test` needs nothing external; `test:integration` needs a Postgres
   (`DATABASE_URL`) and starts a Temporal dev server (`@temporalio/testing`, downloaded) - CI runs it

@@ -154,7 +154,7 @@ jobs:
           helm template swarm "$CHART" > /dev/null
           for bad in 'agent.toolApproval=yolo' 'podSecurityContext.runAsNonRoot=false' \
             'securityContext.readOnlyRootFilesystem=false' 'temporal.address=no-port' \
-            'gateway.auth=open' 'session.subagentMaxPerRound=0'; do
+            'gateway.auth=open' 'session.subagentMaxPerRound=0' 'session.pipelineMaxPerRound=0'; do
             if helm template swarm "$CHART" --set "$bad" > /dev/null 2>&1; then
               echo "accepted: $bad"; exit 1
             fi

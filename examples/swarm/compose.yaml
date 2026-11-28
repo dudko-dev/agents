@@ -80,6 +80,8 @@ services:
       TURN_HEARTBEAT_TIMEOUT_MS: ${TURN_HEARTBEAT_TIMEOUT_MS:-20000}
       SUBAGENT_MAX_PER_ROUND: ${SUBAGENT_MAX_PER_ROUND:-4}
       SUBAGENT_MAX_PER_SESSION: ${SUBAGENT_MAX_PER_SESSION:-50}
+      PIPELINE_MAX_PER_ROUND: ${PIPELINE_MAX_PER_ROUND:-2}
+      PIPELINE_MAX_PER_SESSION: ${PIPELINE_MAX_PER_SESSION:-20}
     ports:
       - '127.0.0.1:8080:8080'
     healthcheck:
@@ -102,7 +104,8 @@ services:
   worker:
     <<: *swarm
     command: ['worker']
-    # The provider keys and the agent's settings (AGENT_*, MCP_SERVERS, SUBAGENTS, LIMITER_*).
+    # The provider keys and the agent's settings (AGENT_*, MCP_SERVERS, SUBAGENTS, PIPELINES,
+    # LIMITER_*).
     env_file:
       - path: .env
         required: false

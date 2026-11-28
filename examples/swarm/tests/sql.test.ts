@@ -10,6 +10,8 @@ import {
   insertEventsSql,
   INSERT_MAX_ROWS,
   markerRow,
+  PIPELINE_STREAM_RUN,
+  streamBatchRows,
   streamMarkerRow,
 } from '../src/db/events.ts'
 import {
@@ -22,6 +24,7 @@ import {
   cancelTurnSql,
   markAnsweredSql,
   parkedItemSql,
+  pipelinesOfSql,
   recordParkedSql,
   subagentsOfSql,
 } from '../src/db/parked.ts'
@@ -295,7 +298,46 @@ test('parked items: one upsert per park, answered / cancelled only from pending'
   )
   assert.match(cancelTurnSql('s', 2).text, /AND turn = \$2 AND state = 'pending'$/)
   assert.deepEqual(parkedItemSql('s', 'p1').values, ['s', 'p1'])
-  assert.match(subagentsOfSql('s').text, /answered_by = 'subagent'/)
+  assert.match(subagentsOfSql('s').text, /answered_by = \$2 ORDER BY created_at, item_id$/)
+  assert.deepEqual(subagentsOfSql('s').values, ['s', 'subagent'])
+  assert.deepEqual(pipelinesOfSql('s').values, ['s', 'pipeline'])
+})
+
+test("a pipeline's own stream: its turn.started, then the engine's events in the workflow's order", () => {
+  const rows = streamBatchRows(
+    {
+      stream: 's/p1',
+      started: { name: 'review', input: 'the task' },
+      events: [
+        { seq: 1, event: { type: 'pipeline.started', pipeline: 'review' } },
+        { seq: 2, event: { type: 'pipeline.node.started', nodeId: 'a', visit: 1, from: [] } },
+      ],
+    },
+    1024,
+  )
+  assert.deepEqual(
+    rows.map((r) => [r.sessionId, r.turn, r.runId, r.attempt, r.seq, r.turnAttempt, r.type]),
+    [
+      ['s/p1', 1, 'turn-1', 0, 0, 0, 'turn.started'],
+      ['s/p1', 1, PIPELINE_STREAM_RUN, 1, 1, 1, 'pipeline.started'],
+      ['s/p1', 1, PIPELINE_STREAM_RUN, 1, 2, 1, 'pipeline.node.started'],
+    ],
+  )
+  assert.equal(JSON.parse(rows[2]!.json).nodeId, 'a')
+  // Without `started` (every batch but the first): only the events. A huge one is a stub.
+  const later = streamBatchRows(
+    {
+      stream: 's/p1',
+      events: [{ seq: 3, event: { type: 'pipeline.node.finished', text: 'x'.repeat(2000) } }],
+    },
+    1024,
+  )
+  assert.equal(later.length, 1)
+  assert.deepEqual(JSON.parse(later[0]!.json), {
+    type: 'pipeline.node.finished',
+    truncated: true,
+    bytes: JSON.stringify({ type: 'pipeline.node.finished', text: 'x'.repeat(2000) }).length,
+  })
 })
 
 test('subagent markers: the slot and seq the workflow chose, a run id of their own', () => {

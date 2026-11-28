@@ -28,6 +28,7 @@ import {
 
 export {
   startLocalOpenAI,
+  systemOf,
   toolNames,
   toolResults,
   userOf,
@@ -160,10 +161,11 @@ export const inProcessGateway = (cfg: IGatewayConfig): Promise<IRunningGateway> 
   startGateway(cfg, silentLogger)
 
 // A worker as its own process (`main.ts worker`), the way the image runs it - so it can be killed.
-export const childWorker = (env: Record<string, string>): ChildProcess => {
+// `script`: another entry that starts a worker (notes-worker.ts: one with a native write tool).
+export const childWorker = (env: Record<string, string>, script = MAIN): ChildProcess => {
   const child = spawn(
     process.execPath,
-    ['--experimental-strip-types', '--disable-warning=ExperimentalWarning', MAIN, 'worker'],
+    ['--experimental-strip-types', '--disable-warning=ExperimentalWarning', script, 'worker'],
     {
       env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '/tmp', ...env },
       stdio: ['ignore', 'pipe', 'pipe'],
