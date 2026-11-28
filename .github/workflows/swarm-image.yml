@@ -169,7 +169,11 @@ jobs:
             org.opencontainers.image.created=${{ steps.names.outputs.created }}
             org.opencontainers.image.licenses=MIT
           cache-from: type=gha,scope=swarm-image
-          cache-to: type=gha,scope=swarm-image,mode=max
+          # A run started by `workflow_run` (every release) gets a token that may not write the
+          # Actions cache ("cache write denied: token has no writable scopes"). The export runs
+          # after the push, so it failed a run whose images were already out: a cache that cannot
+          # be written is a warning, never the run's verdict.
+          cache-to: type=gha,scope=swarm-image,mode=max,ignore-error=true
       - name: Summary
         env:
           TAGS: ${{ steps.names.outputs.tags }}
