@@ -307,6 +307,9 @@ export { RunLeaseError, RUN_LEASE_DEFAULT_TTL_MS } from './run-lease.ts'
 export type { IRunLease, IRunLeaseOptions, RunLeaseLostReason } from './run-lease.ts'
 export { isModelCallRefused, ModelCallRefusedError } from './shared-limits.ts'
 export type { IModelCall, ISharedLimits, ModelCallStage } from './shared-limits.ts'
+// The call journal (persistence.journal) and parking a run on what it waits for.
+export { deferResult, isDeferredResult, JournalError, JOURNAL_LIMITS } from './journal.ts'
+export type { IDeferredResult } from './journal.ts'
 // Dynamic subagents: helpers the model starts itself (config.subagents.dynamic).
 export {
   adoptSubagentEvent,
@@ -342,6 +345,17 @@ export type {
   IMcpStdioServerConfig,
   IPersistence,
   IRunSnapshot,
+  IRunJournal,
+  IJournalEntry,
+  IJournalModelEntry,
+  IJournalToolEntry,
+  IJournalPendingEntry,
+  IJournalAnswerEntry,
+  IParkedRun,
+  ParkedItem,
+  ParkAnswer,
+  ToolApprovalAnswer,
+  ToolResultAnswer,
   ISkill,
   ISkillOrigin,
   ISkillStore,
