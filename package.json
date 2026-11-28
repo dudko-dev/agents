@@ -20,6 +20,6 @@
     "affected": "nx affected -t typecheck format:check build test"
   },
   "devDependencies": {
-    "nx": "^24.0.7"
+    "nx": "^24.1.0"
   }
 }
