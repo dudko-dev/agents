@@ -6,7 +6,7 @@ import type { IAgentInternalContext, IExecutorTiers } from './internal.ts'
 import { runContext } from './context.ts'
 import { connectMcpServers, filterTools } from './mcp.ts'
 import { collectMcpInstructions, renderMcpInstructions } from './mcp-shared.ts'
-import { buildModelFromStage, resolveStage } from './provider.ts'
+import { buildModelFromStage, resolveStageModel, stageModelId } from './provider.ts'
 import { runAgentLoop } from './runner.ts'
 import { resolveRunLease } from './run-lease.ts'
 import { checkSharedLimits, stageModel } from './shared-limits.ts'
@@ -478,7 +478,8 @@ export const createAgent = async (
   // Executor always inherits the top-level config; planner / synthesizer can
   // override any field (provider, baseURL, apiKey, model) via the dedicated
   // override blocks. Legacy plannerModel / synthesizerModel still work as
-  // model-only shortcuts when the override block is absent.
+  // model-only shortcuts when the override block is absent. A model object (top level, a
+  // stage, a tier) is used as it is - nothing is imported or built for it.
   //
   // Provider SDKs are dynamically imported (peerDependencies, optional), so
   // model construction is async; build all three in parallel since they are
@@ -493,9 +494,9 @@ export const createAgent = async (
     // The `standard` tier IS the executor: the top-level model unless executorTiers.standard
     // overrides it. Tiers are in play only when a light or a strong model is named too.
     const tierConfig = config.executorTiers ?? {}
-    const executorStage = resolveStage(config, tierConfig.standard, undefined, 'executor')
-    const plannerStage = resolveStage(config, config.planner, config.plannerModel, 'planner')
-    const synthesizerStage = resolveStage(
+    const executorStage = resolveStageModel(config, tierConfig.standard, undefined, 'executor')
+    const plannerStage = resolveStageModel(config, config.planner, config.plannerModel, 'planner')
+    const synthesizerStage = resolveStageModel(
       config,
       config.synthesizer,
       config.synthesizerModel,
@@ -508,12 +509,17 @@ export const createAgent = async (
     ])
     if (tierConfig.light || tierConfig.strong) {
       const models: IExecutorTiers['models'] = { standard: executorModel }
-      const ids: IExecutorTiers['ids'] = { standard: executorStage.model }
+      const ids: IExecutorTiers['ids'] = { standard: stageModelId(executorStage) }
       for (const tier of ['light', 'strong'] as const) {
         if (tierConfig[tier]) {
-          const stage = resolveStage(config, tierConfig[tier], undefined, `executorTiers.${tier}`)
+          const stage = resolveStageModel(
+            config,
+            tierConfig[tier],
+            undefined,
+            `executorTiers.${tier}`,
+          )
           models[tier] = await buildModelFromStage(config.clientName, stage)
-          ids[tier] = stage.model
+          ids[tier] = stageModelId(stage)
         }
       }
       tiers = {

@@ -7,6 +7,7 @@ import { createAgent } from './agent.ts'
 import { isReadOnlyTool, markReadOnly } from './approval.ts'
 import { runContext } from './context.ts'
 import { isDeferredResult, markJournalRerun, type IDeferredResult } from './journal.ts'
+import { isModelObject } from './provider.ts'
 import type { IModelCall, ISharedLimits } from './shared-limits.ts'
 import { adoptSubagentEvent } from './subagent-dynamic-shared.ts'
 import type { AgentEvent, EventHandler, IAgentConfig, IUsage } from './types.ts'
@@ -28,7 +29,7 @@ export interface ISubagentProfile {
   description: string
   // Fields laid over the subagent's `config` (model - even another provider -
   // thinking, limits, systemPrompt, skills, tools ...). With 'worker' isolation
-  // it must be structured-cloneable, like the base config.
+  // it must be structured-cloneable, like the base config (no model objects).
   config?: Partial<IAgentConfig>
 }
 
@@ -51,8 +52,9 @@ interface ISubagentToolBase {
 export interface ILocalSubagentToolOptions extends ISubagentToolBase {
   // The child agent's config. With 'worker' isolation it must be
   // structured-cloneable: no functions anywhere (getHeaders, authProvider,
-  // fetch, sanitizers, persistence, onRequest, native tools...). A `runLease` in it is dropped:
-  // a subagent runs under its parent's lease.
+  // fetch, sanitizers, persistence, onRequest, native tools...) and no model objects (a
+  // provider config instead). A `runLease` in it is dropped: a subagent runs under its parent's
+  // lease.
   config: IAgentConfig
   // 'worker' (default): the child runs in its own worker_thread - its CPU
   // work and crashes stay off the parent's event loop. 'in-process': the
@@ -230,8 +232,8 @@ const clipStrings = (value: unknown, depth = 0): unknown => {
 export const slimEvent = (event: AgentEvent): AgentEvent => clipStrings(event) as AgentEvent
 
 /**
- * Throws naming the first function-valued field of a config that has to
- * cross into a worker thread (functions are not structured-cloneable).
+ * Throws naming the first function-valued field or model object of a config
+ * that has to cross into a worker thread (neither is structured-cloneable).
  */
 export const assertWorkerSafeConfig = (config: IAgentConfig, label = 'config'): void => {
   if (config.tools && Object.keys(config.tools).length) {
@@ -248,6 +250,14 @@ export const assertWorkerSafeConfig = (config: IAgentConfig, label = 'config'): 
     }
     if (!value || typeof value !== 'object' || seen.has(value)) {
       return
+    }
+    // A model object (the top-level model, a stage, a tier, a media model) is a class instance:
+    // structured clone refuses it or, with its methods on the prototype, passes a copy that
+    // cannot be called.
+    if (isModelObject(value)) {
+      throw new Error(
+        `${path} is a model object, which cannot cross into a worker thread; use isolation 'in-process', or a provider config (providerType + a model id)`,
+      )
     }
     seen.add(value)
     for (const [k, v] of Object.entries(value)) {

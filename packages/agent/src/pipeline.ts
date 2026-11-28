@@ -20,7 +20,7 @@ import {
   type PipelineNodeRunner,
   type PipelineResult,
 } from './pipeline-engine.ts'
-import { buildModelFromStage, resolveStage } from './provider.ts'
+import { buildModelFromStage, resolveStageModel } from './provider.ts'
 import { limitedModel } from './shared-limits.ts'
 import { generateStructured } from './structured.ts'
 import type {
@@ -104,7 +104,7 @@ const routerOf = async (config: IAgentConfig): Promise<LanguageModel> => {
   if (!router) {
     router = await buildModelFromStage(
       config.clientName,
-      resolveStage(config, config.planner, config.plannerModel, 'planner'),
+      resolveStageModel(config, config.planner, config.plannerModel, 'planner'),
     )
     routers.set(config, router)
   }

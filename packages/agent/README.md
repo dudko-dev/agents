@@ -65,7 +65,7 @@ npm install workers-ai-provider          # cloudflare
 # gateway: no extra install — ships inside `ai`
 ```
 
-Setting `providerType` to a value whose SDK isn't installed throws a clear `"Provider package "@ai-sdk/X" is not installed"` error at `createAgent` time.
+Setting `providerType` to a value whose SDK isn't installed throws a clear `"Provider package "@ai-sdk/X" is not installed"` error at `createAgent` time. Or build the model yourself and pass the object as `model`: the agent then imports no provider package at all (see [Your own model object](#your-own-model-object)).
 
 ## Quick start
 
@@ -1032,7 +1032,7 @@ const researcher = createSubagentTool({
 const agent = await createAgent({ ...config, tools: { researcher } })
 ```
 
-- **`'worker'`** runs each call in its own `worker_thread` (terminated afterwards), so the child's CPU work and crashes stay off the parent's event loop. Its config must be structured-cloneable — a function anywhere (`getHeaders`, `authProvider`, `fetch`, sanitizers, `persistence`, `onRequest`, native `tools`) throws, naming the field. Host tools passed as `tools` are **proxied**: the child sees their schemas, every call runs on the parent thread.
+- **`'worker'`** runs each call in its own `worker_thread` (terminated afterwards), so the child's CPU work and crashes stay off the parent's event loop. Its config must be structured-cloneable — a function anywhere (`getHeaders`, `authProvider`, `fetch`, sanitizers, `persistence`, `onRequest`, native `tools`) or a [model object](#your-own-model-object) (`model`, a stage, a tier, a media model) throws when the tool is created, naming the field. Host tools passed as `tools` are **proxied**: the child sees their schemas, every call runs on the parent thread.
 - **`'in-process'`** builds the child on this thread; `tools` are merged into its config.
 
 Several calls in one model step run in parallel (bounded by `maxConcurrent`). The parent's abort aborts the child. `timeoutMs` does not count the time a person takes to answer the child's questions (an approval, an MCP elicitation) or the calling run's: while one waits, the subagent's limit and the calling step's `llmTimeoutMs` are stopped, and a worker child whose proxied host tool call is in flight stops its own step limit too. The child's usage is emitted on the parent as `usage` with `phase: 'subagent'` as it happens, so it counts against the parent's limits. Parent events: `subagent.start`, `subagent.event` (each child event, long strings clipped), `subagent.complete` (`text`, `usage`), `subagent.error`.
@@ -1545,7 +1545,7 @@ const pipeline = createPipeline(definition, {
   // What the names in the definition stand for. A name that is not here fails its node.
   resolveNode: nodeResolver({
     base: config, // an IAgentConfig: every node starts from it
-    models: { smart: { model: 'gpt-4.1-mini' } },
+    models: { smart: { model: 'gpt-4.1-mini' } }, // or a model object: { model: openai('gpt-5') }
     tools: { files: fileTools },
     // skills: { ... }, mcpServers: { ... },
     // configure: (config, node) => config  // the place to read node.settings
@@ -1776,15 +1776,15 @@ Consent is the host's job ([tool approval](#tool-approval-and-autopilot)) — th
 
 | Field | Notes |
 | --- | --- |
-| `providerType` | `'openai' \| 'anthropic' \| 'google' \| 'openai-compatible' \| 'xai' \| 'azure' \| 'amazon-bedrock' \| 'google-vertex' \| 'deepseek' \| 'gateway' \| 'cloudflare'`. Each provider's SDK is an **optional peerDependency** — install only the package(s) you intend to use; setting `providerType` to a missing one throws at `createAgent` time. |
+| `providerType` | `'openai' \| 'anthropic' \| 'google' \| 'openai-compatible' \| 'xai' \| 'azure' \| 'amazon-bedrock' \| 'google-vertex' \| 'deepseek' \| 'gateway' \| 'cloudflare'`. Each provider's SDK is an **optional peerDependency** — install only the package(s) you intend to use; setting `providerType` to a missing one throws at `createAgent` time. The provider of every model given as an id; optional when every stage runs on a [model object](#your-own-model-object), and a model id with no `providerType` (its block's or the top level's) throws at `createAgent`, naming the block. |
 | `baseURL` | Required for `openai-compatible` (point at your self-hosted server) and `azure` (point at your deployment URL). Optional for the rest. |
-| `apiKey` | Required by the type, but **ignored** for `google-vertex` (which authenticates via Google ADC). |
+| `apiKey` | Optional: unset, the provider's SDK reads its own environment variable (`OPENAI_API_KEY`, ...). **Ignored** for `google-vertex` (which authenticates via Google ADC) and by a model object. |
 | `providerOptions` | Escape hatch for provider-specific factory options. Spread into the SDK's `create*()` call after `baseURL` / `apiKey`, so anything documented for the underlying SDK works: e.g. `{ apiVersion, resourceName }` for Azure, `{ region, accessKeyId, secretAccessKey }` for Bedrock, `{ project, location, googleAuthOptions }` for Vertex, `{ accountId }` (or `{ binding }` inside a Worker) for Cloudflare. Per-stage override blocks have their own `providerOptions`; if absent, the top-level value is used. |
 | `subagents` | Off by default. `{ dynamic: true }` or `{ dynamic: { maxDepth, maxChildren, maxConcurrent, budgetShare, minTokens, timeoutMs, defaultTools } }` gives the model `spawn_subagent`: it starts a helper agent for a sub-task, with a subset of its own tools and a share of what is left of its budgets. A helper can only have less than the run that starts it. See [Dynamic subagents](#dynamic-subagents-helpers-the-model-starts-itself). |
 | `sandbox` | Off by default. `true` or `{ timeoutMs, memoryLimitBytes, maxOutputChars, maxCodeChars }` gives the model `run_js`: JavaScript it wrote runs in QuickJS/WebAssembly inside a worker thread that is killed at the deadline. Needs the optional peer `quickjs-emscripten`. See [Running code](#running-code-the-sandbox). |
-| `model` | Default model for every stage (executor / planner / synthesizer) when no per-stage override is set. |
-| `planner` / `synthesizer` | Optional per-stage override blocks: `{ providerType?, baseURL?, apiKey?, model? }`. Use these to mix providers (e.g. Gemini planner, Anthropic synthesizer). Cross-provider overrides MUST set their own `apiKey`. |
-| `executorTiers` | Off by default. `{ light?, standard?, strong? }`, each a stage override like `planner`: the planner rates every step `low` / `medium` / `high` and the executor runs it on that tier's model; a tier that is not configured falls back to the nearest one. See [Model tiers and escalation](#model-tiers-and-escalation). |
+| `model` | Default model for every stage (executor / planner / synthesizer) when no per-stage override is set: a model id of `providerType`, or a ready AI SDK model object (`AgentModel`), used as it is. See [Your own model object](#your-own-model-object). |
+| `planner` / `synthesizer` | Optional per-stage override blocks: `{ providerType?, baseURL?, apiKey?, model? }`, or a model object for the stage. Use these to mix providers (e.g. Gemini planner, Anthropic synthesizer). Cross-provider overrides MUST set their own `apiKey`. |
+| `executorTiers` | Off by default. `{ light?, standard?, strong? }`, each a stage override like `planner` (a block or a model object): the planner rates every step `low` / `medium` / `high` and the executor runs it on that tier's model; a tier that is not configured falls back to the nearest one. See [Model tiers and escalation](#model-tiers-and-escalation). |
 | `escalation` | `true` (default once `executorTiers` is on) \| `false` \| `{ maxPerStep?, maxPerRun? }` (defaults 1 / 3). A step that fails in a way a stronger model could fix is retried on the next stronger tier before the replanner is consulted. Nothing without tiers. |
 | `decisionModel` | Off by default. A [decision model](#decision-models): an object with `decide(question, { abortSignal })` that answers a closed question with `{ choice, confidence }` (`decisionModelFromAiSdk(...)` adapts Gemini Decision 1, TypeSafe's Jev or any AI SDK decision model). Where it is confident it replaces the replanner's continue / finish call and a pipeline node's route call. Never consulted for tool approval or egress. |
 | `decision` | `{ confidenceThreshold?, timeoutMs?, replan?, route? }` (defaults `0.8`, `5000`, `true`, `true`). Below the threshold, on an error, a timeout or an answer that is not an option, the ordinary model call runs unchanged. |
@@ -1826,6 +1826,34 @@ Consent is the host's job ([tool approval](#tool-approval-and-autopilot)) — th
 | `runLease` | Off by default. `{ acquire, renew, release, ttlMs?, owner? }`: one worker at a time owns a run - acquired before it starts, renewed every `ttlMs / 3` (default `30000`), released at the end; a lost lease aborts the run and stops every persistence write (`RunLeaseError`, `lease.lost`). `agent.leaseOwner`. See [Running on many workers](#running-on-many-workers-scale-out-hooks). |
 | `sharedLimits` | Off by default. `{ beforeModelCall(call, { signal }), afterModelCall?(call, usage, { ok }) }`: asked before every language-model call (wait = a rate limit, throw = a refusal, `ModelCallRefusedError`, never retried) and told its usage. Not for media, search grounding or decision models. See [Running on many workers](#running-on-many-workers-scale-out-hooks). |
 | `logLevel` | `'none' \| 'error' \| 'warn' \| 'info' \| 'debug'` |
+
+### Your own model object
+
+`model` - and `planner`, `synthesizer` and each `executorTiers` entry - also takes a ready AI SDK language model object: the agent uses it as it is, imports no provider package for it, and needs no `providerType` or `apiKey`.
+
+```ts
+import { createOpenAI } from '@ai-sdk/openai'
+import { createAgent } from '@dudko.dev/agent'
+
+const openai = createOpenAI({ apiKey: env.OPENAI_API_KEY })
+
+const agent = await createAgent({
+  clientName: 'my-worker',
+  model: openai('gpt-5-mini'), // every stage
+  planner: openai('gpt-5'), // a stage of its own: an object, or a block as before
+  mcpServers: {},
+  maxIterations: 6,
+  maxStepsPerTask: 8,
+})
+```
+
+Why: with a model id the agent builds the model itself, with a dynamic `import()` of the provider package `providerType` names - which a runtime that bundles everything ahead of time (Cloudflare Workers / workerd) cannot do. A model object also carries what only the host has: a model wrapped in its own middleware (`wrapLanguageModel`), a Workers AI binding's model, a test mock.
+
+- **Mixing.** Stages can mix objects and ids. Over a top-level object, a stage with no block (or a block that sets nothing) runs on that object; a block that names a model id goes the provider way and needs a `providerType` - its own or the top level's (createAgent throws, naming the block, when there is none). A block with provider fields but no model id over an object throws too: there is nothing to apply them to. The top-level `providerType` / `apiKey` / `baseURL` / `providerOptions` are then only the defaults of such blocks; a block that names another provider and inherits a top-level `apiKey` throws as ever (cross-provider key inheritance), since a top level with no `providerType` has a key of no named provider. `plannerModel` / `synthesizerModel` are `{ model }` blocks.
+- **Names.** Where a model is named - `step.start`'s `model` with tiers, the `agent.model` / `agent.provider` span attributes - an object is named by its `modelId` / `provider`.
+- **Media.** `media.*Model` took objects already; a media block with a model id over a top-level object needs a `providerType` as well (`media.imageModel: model "..." is a model id, so a providerType is needed ...`).
+- **Pipelines.** A registry entry may be an object: `models: { smart: { model: openai('gpt-5') } }`. Its node's route call runs on it too.
+- **Worker subagents: no.** A model object is a class instance with methods: it cannot cross into a worker thread. `createSubagentTool` with `isolation: 'worker'` (the default) throws when the tool is created if the child's config or a profile's carries one anywhere (`config.model is a model object, which cannot cross into a worker thread ...`). Use `isolation: 'in-process'`, or give the worker child a provider config (`providerType` + a model id). In-process subagents, dynamic helpers (`spawn_subagent`, which use the caller's models) and remote subagents (no config crosses) are not affected.
 
 ### Picking models per stage
 
