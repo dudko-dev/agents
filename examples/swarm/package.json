@@ -21,7 +21,7 @@
     "format:check": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\" \"scripts/**/*.ts\""
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "^4.0.110",
+    "@ai-sdk/anthropic": "^4.0.111",
     "@ai-sdk/google": "^4.0.128",
     "@ai-sdk/openai": "^4.0.125",
     "@ai-sdk/openai-compatible": "^3.0.96",
@@ -37,7 +37,7 @@
     "@temporalio/testing": "^1.27.0",
     "@types/node": "^22.9.0",
     "@types/pg": "^8.23.1",
-    "ai": "^7.0.183",
+    "ai": "^7.0.184",
     "ajv": "^8.20.0",
     "prettier": "^3.10.1",
     "typescript": "^6.0.3",
