@@ -1,7 +1,7 @@
 # agents — instructions for Claude
 
 Monorepo (pnpm workspaces + Nx) of three published packages, one private test package, four
-private apps and one private example:
+private apps and one private example (with its shared package):
 
 - `packages/agent` — `@dudko.dev/agent`, the Node / server agent.
 - `packages/agent-web` — `@dudko.dev/agent-web`, the in-browser agent (the core of the next two).
@@ -43,13 +43,21 @@ private apps and one private example:
   an activity, the agent's scale-out hooks (`persistence` with the call journal, `runLease`,
   `sharedLimits`, events) on Temporal and Postgres, turns that park on a person's answer, static
   subagents and pipelines (the core's graph engine in a workflow) as child workflows, a stateless
-  `node:http` gateway with SSE, one image (`Dockerfile`, distroless, roles `gateway` | `worker` |
-  `migrate`), `compose.yaml` and a Helm chart
+  gateway with SSE (`swarm-shared`'s fetch handler on `node:http`), one image (`Dockerfile`,
+  distroless, roles `gateway` | `worker` | `migrate`), `compose.yaml` and a Helm chart
   (`deploy/helm/agent-swarm`). TypeScript run directly by Node; `build`
   only bundles the workflow code. `test` needs nothing external; `test:integration` needs a Postgres
   (`DATABASE_URL`) and starts a Temporal dev server (`@temporalio/testing`, downloaded) - CI runs it
   in `swarm.yml`, not in `ci.yml`. It uses only the agent's public API: a change it would need in
   the core is a change to `packages/agent`, made there. Its own `CLAUDE.md` has the rules.
+- `examples/swarm-shared` — `swarm-shared` (private, NEVER published; not in `release-plan.mjs`,
+  and must stay out of it): the platform-independent part of the swarm, shared by its ports to
+  other platforms (the same HTTP API, the same session semantics) - the session's logic, ids and
+  types, the answer checks, the cursor (`./workflow`: what a workflow sandbox may import), and the
+  HTTP API as a fetch-style handler over Web APIs (`(request: Request) => Promise<Response>`, no
+  `node:*`). Unlike `test-servers` it ships built JS (`build`: tsc -> `dist`, which `exports`
+  names): the swarm's image copies it into `node_modules`, where Node strips no types. Its own
+  `CLAUDE.md` has the rules.
 
 **Each package has its own `CLAUDE.md`. Read it before changing that package** — layout, conventions
 and the reasons behind them live there. This file holds only what is shared.
@@ -67,7 +75,7 @@ pnpm nx <target> <project>   # e.g. pnpm nx test @dudko.dev/agent-web
 ```
 
 Projects: `@dudko.dev/agent`, `@dudko.dev/agent-web`, `@dudko.dev/agent-web-react`,
-`@dudko.dev/test-servers`, `demo`, `site`, `worker`, `app-sandbox`, `swarm`.
+`@dudko.dev/test-servers`, `demo`, `site`, `worker`, `app-sandbox`, `swarm`, `swarm-shared`.
 Targets come from each package's `scripts`: `typecheck`, `format:check`, `format`, `build`, `test`
 (and `test:e2e` in the React package, `test:integration` in `swarm` - not part of `pnpm check`;
 `@dudko.dev/test-servers` has no `build`).
@@ -124,7 +132,8 @@ tool. Do not infer success from "the change looks right".
   (the Node agent against a real local model: gates its publish, and runs on PRs that touch its
   dependencies); `swarm.yml` (the swarm example's integration tests against a Postgres service
   and a Temporal dev server, its Docker image built without a push, and its Helm chart's lint /
-  template / kubeconform, on changes to `examples/swarm` or `packages/agent`); `swarm-image.yml`
+  template / kubeconform, on changes to `examples/swarm`, `examples/swarm-shared` or
+  `packages/agent`); `swarm-image.yml`
   (publishes the swarm image for linux/amd64 + arm64 to `ghcr.io/dudko-dev/agent-swarm`, and to
   `docker.io/sergdudko/agent-swarm` when the `DOCKER_USER` / `DOCKER_PAT` secrets are set: on an
   `agent-v*` tag - after a Release run, since release.yml's tag push starts no workflow - and by

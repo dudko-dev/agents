@@ -12,8 +12,8 @@ import { fileURLToPath } from 'node:url'
 import { after, before, test } from 'node:test'
 import type { TestWorkflowEnvironment } from '@temporalio/testing'
 import type pg from 'pg'
+import { pipelineNodeStreamOf } from 'swarm-shared'
 import type { IRunningGateway } from '../../src/gateway-main.ts'
-import { pipelineNodeStreamOf } from '../../src/session-api.ts'
 import type { IPipelineConfig } from '../../src/pipelines.ts'
 import {
   api,

@@ -9,18 +9,20 @@ import { randomUUID } from 'node:crypto'
 import { after, before, test } from 'node:test'
 import type { TestWorkflowEnvironment } from '@temporalio/testing'
 import type pg from 'pg'
-import { insertSessionSql } from '../../src/backend.ts'
-import { compareCursors, parseCursor, type ICursor } from '../../src/cursor.ts'
-import type { IRunningGateway } from '../../src/gateway-main.ts'
-import type { IPipelineConfig } from '../../src/pipelines.ts'
 import {
+  compareCursors,
+  parseCursor,
   pipelineNodeWorkflowIdOf,
   pipelineWorkflowIdOf,
-  SESSION_WORKFLOW,
+  SUBAGENT_MARKER_SEQ,
   workflowIdOf,
-} from '../../src/session-api.ts'
-import { SUBAGENT_MARKER_SEQ } from '../../src/session-state.ts'
-import type { IParkedRequest } from '../../src/session-types.ts'
+  type ICursor,
+  type IParkedRequest,
+} from 'swarm-shared'
+import { insertSessionSql } from '../../src/backend.ts'
+import type { IRunningGateway } from '../../src/gateway-main.ts'
+import type { IPipelineConfig } from '../../src/pipelines.ts'
+import { SESSION_WORKFLOW } from '../../src/session-api.ts'
 import type { IRunningWorker } from '../../src/worker.ts'
 import {
   agentConfig,

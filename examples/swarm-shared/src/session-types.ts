@@ -11,10 +11,10 @@ export interface IUserMessage {
   at: number
 }
 
-// The answer to an item a parked turn waits for (see "Parking" in the README): a person's decision
-// (an 'approval' item) or a tool's result from outside (a 'tool' item) - checked by answers.ts.
-// A static subagent's or a pipeline's child workflow answers its own item the same way
-// (`by: 'subagent'` / `by: 'pipeline'`).
+// The answer to an item a parked turn waits for (see "Parking" in examples/swarm/README.md): a
+// person's decision (an 'approval' item) or a tool's result from outside (a 'tool' item) - checked
+// by answers.ts. A static subagent's or a pipeline's child workflow answers its own item the same
+// way (`by: 'subagent'` / `by: 'pipeline'`).
 export interface IAnswer {
   requestId: string
   value: unknown
@@ -225,9 +225,9 @@ export type PipelineOutcome =
     }
 
 // What a child workflow `pipelineNode` is given: ONE visit of one node - one agent.run of the
-// node's agent (the worker's, see pipelines.ts) on the rendered input, and the route call when
-// the node has routes. `node` is the node as the pipeline's plan has it (the worker checks it is
-// the one it has); `stream` keys the visit's run and events.
+// node's agent (the worker's, see examples/swarm's pipelines.ts) on the rendered input, and the
+// route call when the node has routes. `node` is the node as the pipeline's plan has it (the
+// worker checks it is the one it has); `stream` keys the visit's run and events.
 export interface IPipelineNodeInput {
   sessionId: string
   turn: number

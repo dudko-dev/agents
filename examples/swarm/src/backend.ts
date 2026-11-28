@@ -1,24 +1,25 @@
-// The gateway's backend: Temporal for the sessions (start, signals, the state query) and the
-// session table in Postgres (the event stream of an unknown id is a 404 without asking Temporal).
+// The gateway's backend (swarm-shared's ISessionBackend) on this platform: Temporal for the sessions
+// (start, signals, the state query) and the session table in Postgres (the event stream of an
+// unknown id is a 404 without asking Temporal).
 import { WorkflowNotFoundError, type Client } from '@temporalio/client'
-import { createParkedStore } from './db/parked.ts'
-import type { IQueryable } from './db/pool.ts'
 import {
   BackendUnavailableError,
   ChildEndedError,
   SessionEndedError,
   SessionNotFoundError,
+  workflowIdOf,
   type ISessionBackend,
-} from './gateway.ts'
+  type ISessionOptions,
+} from 'swarm-shared'
+import { createParkedStore } from './db/parked.ts'
+import type { IQueryable } from './db/pool.ts'
 import {
   answerSignal,
   messageSignal,
   SESSION_WORKFLOW,
   stateQuery,
   stopSignal,
-  workflowIdOf,
 } from './session-api.ts'
-import type { ISessionOptions } from './session-types.ts'
 import type { ISessionInput } from './workflows.ts'
 
 export const insertSessionSql =

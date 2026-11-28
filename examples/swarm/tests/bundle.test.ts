@@ -1,9 +1,11 @@
 // The workflow bundle holds the pipeline engine (`@dudko.dev/agent/pipeline-engine`, which imports
 // nothing) and NOTHING of the agent's main entry, the AI SDK, zod or the MCP client: the workflow
 // sandbox has the language and little else, and the engine is the only part of the agent that is
-// deterministic by contract. Bundled here from the source (not the `build` output, which may be
-// stale). Each marker is a string literal that minification keeps, checked to be in its library
-// first, so the test cannot pass by looking for something that is nowhere.
+// deterministic by contract. The session logic comes from `swarm-shared/workflow` (built), and none
+// of swarm-shared's HTTP API (the gateway, its plumbing) comes with it. Bundled here from the source
+// (not the `build` output, which may be stale). Each marker is a string literal that minification
+// keeps, checked to be in its library first, so the test cannot pass by looking for something that
+// is nowhere.
 import assert from 'node:assert/strict'
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
@@ -38,16 +40,23 @@ const packageText = (name: string, entry: string): string => {
 
 const resolved = (specifier: string): string => fileURLToPath(import.meta.resolve(specifier))
 
-test('the workflow bundle has the pipeline engine and none of the main entry, ai, zod or MCP', async () => {
+test('the workflow bundle has the pipeline engine and swarm-shared/workflow, none of the main entry, ai, zod, MCP or the HTTP API', async () => {
   const { code } = await bundleWorkflowCode({ workflowsPath: WORKFLOWS_PATH, logger: silent })
   const agentMain = resolved('@dudko.dev/agent')
   const engine = resolved('@dudko.dev/agent/pipeline-engine')
+  // swarm-shared's built files, one by one (`dist/<module>.js`).
+  const shared = (module: string): string =>
+    readFileSync(join(dirname(resolved('swarm-shared/workflow')), `${module}.js`), 'utf8')
   // The MCP client is the agent's dependency, not the swarm's: resolved from the agent.
   const mcp = createRequire(agentMain).resolve('@modelcontextprotocol/client')
   const present: [string, string][] = [
     // PipelineNodeError's message (runPipelineGraph) and PipelineValidationError's (preparePipeline).
     ['Pipeline node "', readFileSync(engine, 'utf8')],
     ['Invalid pipeline: ', readFileSync(engine, 'utf8')],
+    // The session's markers, a child's answer check, the answer checks per kind: swarm-shared.
+    ['pipeline.call.ended', shared('session-state')],
+    ['a client answers a child item', shared('child-state')],
+    ['an answer is a JSON object', shared('answers')],
   ]
   const absent: [string, string, string][] = [
     // The planner's role phrase: the agent's main entry.
@@ -62,6 +71,9 @@ test('the workflow bundle has the pipeline engine and none of the main entry, ai
       'notifications/initialized',
       packageText('@modelcontextprotocol/client', mcp),
     ],
+    // swarm-shared's HTTP API: the event stream's type (gateway.js), a body refusal (http.js).
+    ['the gateway', 'text/event-stream; charset=utf-8', shared('gateway')],
+    ['the HTTP plumbing', 'unsupported_media_type', shared('http')],
   ]
   for (const [marker, source] of present) {
     assert.ok(source.includes(marker), `"${marker}" is in the engine`)

@@ -28,17 +28,23 @@ WORKDIR /repo
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN corepack enable && pnpm --version
 # The manifests of the projects the swarm needs, then the install: this layer stays cached until a
-# dependency changes. (@dudko.dev/test-servers is the agent's dev dependency.)
+# dependency changes. (@dudko.dev/test-servers is the agent's dev dependency; swarm-shared is the
+# swarm's platform-independent part.)
 COPY packages/agent/package.json packages/agent/
 COPY packages/test-servers/package.json packages/test-servers/
+COPY examples/swarm-shared/package.json examples/swarm-shared/
 COPY examples/swarm/package.json examples/swarm/
 RUN pnpm install --frozen-lockfile --filter "swarm..."
-# The sources: the agent is built from this tree (workspace:*), then the workflow bundle.
+# The sources: the agent and swarm-shared are built from this tree (workspace:*; swarm-shared ships
+# JS - node_modules gets a copy of it below, and Node strips no types there), then the workflow
+# bundle.
 COPY packages/agent packages/agent
+COPY examples/swarm-shared examples/swarm-shared
 COPY examples/swarm examples/swarm
-RUN pnpm --filter @dudko.dev/agent build && pnpm --filter swarm build
+RUN pnpm --filter @dudko.dev/agent build && pnpm --filter swarm-shared build \
+  && pnpm --filter swarm build
 # A pruned production install of the swarm alone - its files, its production dependencies, the
-# agent's dist - resolved from the workspace lockfile. `deploy` copies workspace packages
+# agent's and swarm-shared's dist - resolved from the workspace lockfile. `deploy` copies workspace packages
 # (injected); the repo keeps them linked for development, so the setting is given here only.
 # Then what the roles never load: the workflow bundler (the bundle is prebuilt), the core bridge's
 # binaries of other platforms, declarations and source maps.

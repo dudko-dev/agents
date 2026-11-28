@@ -8,12 +8,12 @@ import { fileURLToPath } from 'node:url'
 import { TestWorkflowEnvironment } from '@temporalio/testing'
 import type { IAgentConfig } from '@dudko.dev/agent'
 import pg from 'pg'
+import type { ISessionOptions } from 'swarm-shared'
 import type { IGatewayConfig, IWorkerConfig } from '../../src/config.ts'
 import { migrate } from '../../src/db/migrate.ts'
 import { createPool } from '../../src/db/pool.ts'
 import { startGateway, type IRunningGateway } from '../../src/gateway-main.ts'
 import { silentLogger } from '../../src/log.ts'
-import type { ISessionOptions } from '../../src/session-types.ts'
 import { startWorker, type IRunningWorker } from '../../src/worker.ts'
 import {
   startLocalOpenAI,

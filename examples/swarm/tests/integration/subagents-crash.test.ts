@@ -7,8 +7,8 @@ import type { ChildProcess } from 'node:child_process'
 import { after, before, test } from 'node:test'
 import type { TestWorkflowEnvironment } from '@temporalio/testing'
 import type pg from 'pg'
+import { workflowIdOf } from 'swarm-shared'
 import type { IRunningGateway } from '../../src/gateway-main.ts'
-import { workflowIdOf } from '../../src/session-api.ts'
 import {
   api,
   childWorker,

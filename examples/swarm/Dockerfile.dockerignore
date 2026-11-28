@@ -11,6 +11,10 @@
 !packages/agent/tsup.config.ts
 !packages/agent/src/**
 !packages/test-servers/package.json
+!examples/swarm-shared/package.json
+!examples/swarm-shared/tsconfig.json
+!examples/swarm-shared/tsconfig.build.json
+!examples/swarm-shared/src/**
 !examples/swarm/package.json
 !examples/swarm/README.md
 !examples/swarm/tsconfig.json

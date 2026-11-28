@@ -2,9 +2,9 @@
 // own on the worker. The tool is the core's remote subagent (`createSubagentTool({ isolation:
 // 'remote', dispatch })`), and `dispatch` never runs the child: it answers `deferResult()` at once,
 // so the turn PARKS with one 'tool' item per call. The session workflow then starts a child
-// workflow per item (session-state.ts, workflows.ts), whose activity runs the profile's agent
-// (activities.ts, runSubagent), and resumes the turn with their answers. No worker slot is held
-// while the children run.
+// workflow per item (swarm-shared's session-state.ts, workflows.ts), whose activity runs the
+// profile's agent (activities.ts, runSubagent), and resumes the turn with their answers. No worker
+// slot is held while the children run.
 //
 // A profile's agent is the worker's agent with the profile laid over it: another model, another
 // system prompt, and ONLY the tools it lists - each one a tool the worker itself has (an MCP
