@@ -387,7 +387,7 @@ export const truncateToolModelOutput = (
 }
 
 // What the AI SDK sends when a tool has no toModelOutput.
-const defaultModelOutput = (output: unknown): ToolModelOutput => {
+export const defaultModelOutput = (output: unknown): ToolModelOutput => {
   if (typeof output === 'string') {
     return { type: 'text', value: output }
   }

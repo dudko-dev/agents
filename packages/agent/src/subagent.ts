@@ -6,6 +6,7 @@ import { z } from 'zod'
 import { createAgent } from './agent.ts'
 import { isReadOnlyTool, markReadOnly } from './approval.ts'
 import { runContext } from './context.ts'
+import { isDeferredResult, markJournalRerun, type IDeferredResult } from './journal.ts'
 import type { IModelCall, ISharedLimits } from './shared-limits.ts'
 import { adoptSubagentEvent } from './subagent-dynamic-shared.ts'
 import type { AgentEvent, EventHandler, IAgentConfig, IUsage } from './types.ts'
@@ -103,10 +104,13 @@ export interface IRemoteSubagentResult {
   usage?: IUsage
 }
 
+// Resolve with the child's answer - or with deferResult() when the answer will come later, from
+// outside (the run parks with this call pending; needs persistence.journal - see the README,
+// "Parking a run").
 export type RemoteSubagentDispatch = (
   task: IRemoteSubagentTask,
   context: IRemoteSubagentContext,
-) => Promise<IRemoteSubagentResult>
+) => Promise<IRemoteSubagentResult | IDeferredResult>
 
 export interface IRemoteSubagentToolOptions extends ISubagentToolBase {
   isolation: 'remote'
@@ -390,6 +394,12 @@ const runInProcess = async (
   )
   try {
     const r = await child.run({ input: task, signal })
+    // Its own journal parked it (the calling run has none): only the run the host started can wait.
+    if (r.parked) {
+      throw new Error(
+        `subagent "${opts.name}": its run parked, and a subagent's run cannot wait - only the run the host started can (give the calling agent persistence.journal instead)`,
+      )
+    }
     return { text: r.text, usage: r.usage }
   } finally {
     await child.close({ timeoutMs: 5_000 }).catch(() => {})
@@ -626,7 +636,7 @@ const runRemote = async (
   signal: AbortSignal,
   onEvent: EventHandler,
   warn: (message: string) => void,
-): Promise<IChildOutcome> => {
+): Promise<IChildOutcome | IDeferredResult> => {
   let open = true
   let forwarded = 0
   let dropped = 0
@@ -643,7 +653,7 @@ const runRemote = async (
     onEvent(event)
   }
   try {
-    const out = await new Promise<IRemoteSubagentResult>((resolve, reject) => {
+    const out = await new Promise<IRemoteSubagentResult | IDeferredResult>((resolve, reject) => {
       const onAbort = (): void => reject(signal.reason ?? new DOMException('Aborted', 'AbortError'))
       if (signal.aborted) {
         onAbort()
@@ -655,8 +665,14 @@ const runRemote = async (
         .then(resolve, reject)
         .finally(() => signal.removeEventListener('abort', onAbort))
     })
+    // The answer comes later: the tool call hands the sentinel on (the journal parks it).
+    if (isDeferredResult(out)) {
+      return out
+    }
     if (!out || typeof out !== 'object' || typeof (out as { text?: unknown }).text !== 'string') {
-      throw new Error(`subagent "${opts.name}": dispatch must resolve to { text: string, usage? }`)
+      throw new Error(
+        `subagent "${opts.name}": dispatch must resolve to { text: string, usage? } or deferResult()`,
+      )
     }
     return { text: out.text, usage: remoteSubagentUsageOf(out.usage) }
   } finally {
@@ -886,6 +902,9 @@ export const createSubagentTool = (opts: ISubagentToolOptions): Tool => {
                 ac.signal,
                 onChildEvent,
               )
+        if (isDeferredResult(out)) {
+          return out
+        }
         childUsage = normalizeUsage(out.usage)
         if (remote && !usageIsZero(childUsage)) {
           emit({ type: 'usage', phase: 'subagent', usage: childUsage })
@@ -927,5 +946,11 @@ export const createSubagentTool = (opts: ISubagentToolOptions): Tool => {
       }
     },
   })
+  // In-process, the child's run is a run inside this call: on a replay the call runs again and
+  // the child's calls replay from the journal (journal.ts). A worker's or a remote child's are
+  // not recorded one by one: the call's result is.
+  if (isolation === 'in-process') {
+    markJournalRerun(subagent)
+  }
   return markReadOnly(subagent, opts.readOnly === true)
 }

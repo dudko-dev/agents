@@ -11,6 +11,7 @@ import { resolveCompaction } from './compaction.ts'
 import { createToolResultClearer } from './context-editing.ts'
 import { outputCapNotice, stageCallOptions } from './call-options.ts'
 import type { IAgentInternalContext } from './internal.ts'
+import { isPendingToolOutput, journalRoundEnd } from './journal.ts'
 import { hasTokenLimits, limitsStopCondition, resolveLimits } from './limits.ts'
 import { effectiveToolStrategy } from './planner.ts'
 import { WEB_FETCH_TOOL } from './web-fetch.ts'
@@ -390,8 +391,9 @@ const runOnce = async (
           break
         }
         case 'tool-result': {
-          // A streaming tool's intermediate values; only the final one counts.
-          if ((part as { preliminary?: boolean }).preliminary) {
+          // A streaming tool's intermediate values; only the final one counts. A call whose
+          // result comes from outside (persistence.journal) has none yet: the run parks.
+          if ((part as { preliminary?: boolean }).preliminary || isPendingToolOutput(part.output)) {
             break
           }
           const known = toolInputs.get(part.toolCallId)
@@ -446,6 +448,8 @@ const runOnce = async (
       result.usage,
       result.finishReason,
     ])
+    // persistence.journal: a call of the last round is pending - the run parks here.
+    journalRoundEnd()
     const cut = outputCapNotice(ctx.config, 'executor', finishReason)
     if (cut) {
       ctx.emit({ type: 'log', level: 'warn', message: cut })
