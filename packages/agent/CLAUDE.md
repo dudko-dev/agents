@@ -245,7 +245,9 @@
     waits). The REPL's side is `cli/elicit.ts` (`AGENT_MCP_ELICITATION`; pure but for the `ask`
     it is given; `tests/cli-elicit.test.ts`).
   - The MCP client is the official 2.x SDK, `@modelcontextprotocol/client` (stdio from its
-    `/stdio` subpath, the JSON Schema validator from `/validators/ajv`); `@modelcontextprotocol/sdk`
+    `/stdio` subpath, the JSON Schema validator from `/validators/ajv` - or `/validators/cf-worker` where
+    code generation from strings is forbidden, as in workerd: `newOutputSchemaValidator`, probed once;
+    `tests/mcp-output-schema-codegen.test.ts` runs a child under `--disallow-code-generation-from-strings`); `@modelcontextprotocol/sdk`
     1.x is gone from this package (the test servers keep it, for their `legacy` mode).
     The revision is a per-server opt-in, `protocol: 'legacy' | 'auto' | 'modern'` (both config
     shapes; `mcpProtocolMode` / `mcpVersionNegotiation` in `mcp-shared.ts` map it to the SDK's

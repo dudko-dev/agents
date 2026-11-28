@@ -16,6 +16,7 @@ import {
 import { SkillsClient } from '@modelcontextprotocol/client/ext/skills'
 import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotocol/client/stdio'
 import { AjvJsonSchemaValidator } from '@modelcontextprotocol/client/validators/ajv'
+import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/client/validators/cf-worker'
 import { dynamicTool, jsonSchema, type ToolSet } from 'ai'
 import { randomUUID } from 'node:crypto'
 import { mkdir, writeFile } from 'node:fs/promises'
@@ -414,6 +415,29 @@ export interface IConnectedMcp {
   refreshServer: (name: string) => Promise<void>
 }
 
+// The validator a tool's `outputSchema` is compiled with. Ajv compiles a schema to code
+// (`new Function`), which a runtime that forbids code generation from strings refuses - Cloudflare
+// Workers (workerd) does, and so does `node --disallow-code-generation-from-strings`: every
+// structured tool would then fail as having an invalid outputSchema. There the SDK's code-free
+// validator (`@cfworker/json-schema`, what the browser sibling uses; the same dialects) is used
+// instead. Asked once per process; Node as it ships keeps Ajv.
+let codeGeneration: boolean | undefined
+export const codeGenerationAllowed = (): boolean => {
+  if (codeGeneration === undefined) {
+    try {
+      codeGeneration = new Function('return true')() === true
+    } catch {
+      codeGeneration = false
+    }
+  }
+  return codeGeneration
+}
+
+export const newOutputSchemaValidator = (
+  canGenerate = codeGenerationAllowed(),
+): AjvJsonSchemaValidator | CfWorkerJsonSchemaValidator =>
+  canGenerate ? new AjvJsonSchemaValidator() : new CfWorkerJsonSchemaValidator()
+
 export const connectMcpServers = async (
   servers: Record<string, IMcpServerConfig>,
   log: (level: 'info' | 'warn' | 'error', message: string) => void,
@@ -499,10 +523,11 @@ export const connectMcpServers = async (
       }
     }
     const keys: string[] = []
-    // The SDK's own validator (Ajv, dialect by `$schema`), one per mount: a
+    // The SDK's own validator (Ajv, dialect by `$schema` - or its code-free one
+    // where code generation is off: newOutputSchemaValidator), one per mount: a
     // schema with an `$id` is remembered by the instance that compiled it, so
     // it is never shared between servers nor kept across a refresh.
-    let schemaValidator: AjvJsonSchemaValidator | undefined
+    let schemaValidator: AjvJsonSchemaValidator | CfWorkerJsonSchemaValidator | undefined
 
     let mounted = 0
     let skipped = 0
@@ -537,7 +562,7 @@ export const connectMcpServers = async (
           return outputValidator
         }
         try {
-          schemaValidator ??= new AjvJsonSchemaValidator()
+          schemaValidator ??= newOutputSchemaValidator()
           outputValidator = schemaValidator.getValidator(t.outputSchema as JsonSchemaType)
         } catch (err) {
           // Before anything is sent, so nothing ran on the server: a schema
