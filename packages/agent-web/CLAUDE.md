@@ -57,7 +57,10 @@ behind every decision.
   rule, refused with `resumeFromRunId`, refused when `loadRun` has the id; `tests/run-id.test.ts`;
   `recordResume` puts a
   resume's `attempt` on record - `onRunResume`, else `onStepComplete` - BEFORE any of its events,
-  and is not best-effort: a throw refuses the resume), `internal` (per-run
+  and is not best-effort: a throw refuses the resume; `refuseServerOnlyConfig` /
+  `refuseServerOnlyRunOptions`: the Node sibling's journal, run lease, shared limits and `answers`
+  are refused, not ignored, and `{ park: true }` is a denial that says why -
+  `tests/server-only.test.ts`), `internal` (per-run
   state and prompt plumbing the stages share; not public). Every event of a run is numbered in
   ONE place (`emit` in `runCore`: `seq` from 1 per attempt, `attempt` +1 per resume) - the Node
   sibling's names and rules (`tests/event-order.test.ts` in both packages).

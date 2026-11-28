@@ -90,6 +90,8 @@ import {
 import {
   recordResume,
   resolveResume,
+  refuseServerOnlyConfig,
+  refuseServerOnlyRunOptions,
   resolveRunId,
   resumeAttemptOf,
   type RunSnapshot,
@@ -393,6 +395,7 @@ const FINDINGS_BUDGET = 6_000
  * async. Each `run` streams typed AgentEvents for any UI to render.
  */
 export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> => {
+  refuseServerOnlyConfig(config)
   const cfg = resolveConfig(config)
   // What `subagents.dynamic` switches on (spawn_subagent), and - when this agent IS a helper the
   // model started - what it takes over from the run that started it.
@@ -1618,6 +1621,7 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
   }
 
   const run = async (goal: string, opts: RunOptions = {}): Promise<RunResult> => {
+    refuseServerOnlyRunOptions(opts)
     // Before anything is spent: a hand-made object in place of createRunControl() is refused.
     const port = portOf(opts.control)
     const track: RunTrack = {}
