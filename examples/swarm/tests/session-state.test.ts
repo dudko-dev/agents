@@ -10,6 +10,7 @@ import {
   capHistory,
   carry,
   childFinished,
+  childPark,
   childrenRunning,
   finishTurn,
   hasWork,
@@ -28,12 +29,13 @@ import {
   view,
 } from '../src/session-state.ts'
 import {
+  pipelineNodeWorkflowIdOf,
   pipelineStreamOf,
   pipelineWorkflowIdOf,
   subagentStreamOf,
   subagentWorkflowIdOf,
 } from '../src/session-api.ts'
-import type { IParkedRequest, ISessionOptions } from '../src/session-types.ts'
+import type { IChildParkNotice, IParkedRequest, ISessionOptions } from '../src/session-types.ts'
 
 const options = (extra: Partial<ISessionOptions> = {}): ISessionOptions => ({
   idleTimeoutMs: 0,
@@ -840,4 +842,163 @@ test('a session started before pipelines existed gets their defaults', () => {
   })
   const old = initialState('s', options(), { ...carry(s), pipelinesStarted: undefined } as never)
   assert.equal(old.pipelinesStarted, 0)
+})
+
+// --- children that wait for a person ------------------------------------------------------------
+
+const childItem = (id: string): IParkedRequest => ({
+  requestId: id,
+  kind: 'approval',
+  question: { request: { toolName: 'write_note', input: { text: id } } },
+})
+const waitingOf = (
+  itemId: string,
+  workflowId: string,
+  extra: Partial<IChildParkNotice> = {},
+): IChildParkNotice => ({
+  itemId,
+  kind: 'subagent',
+  workflowId,
+  runId: 'c1',
+  state: 'waiting',
+  requests: [childItem('q1')],
+  at: 4,
+  ...extra,
+})
+
+test('a child that waits: shown in the state, its waiting / resumed markers in order with the others', () => {
+  const s = initialState('s', options())
+  park(s, [sub('k1'), sub('k2'), approval('a')], 3)
+  startChildren(s, 1)
+  s.markers = []
+  const k1 = subagentWorkflowIdOf('s', 'r1', 'k1')
+  const k2 = subagentWorkflowIdOf('s', 'r1', 'k2')
+  assert.equal(childPark(s, waitingOf('k1', k1), 4), true)
+  assert.deepEqual(view(s).parked?.waiting, [
+    {
+      itemId: 'k1',
+      name: 'researcher',
+      workflowId: k1,
+      runId: 'c1',
+      kind: 'subagent',
+      requests: [childItem('q1')],
+      since: 4,
+      events: '/sessions/s/subagents/k1/events',
+    },
+  ])
+  // The other child ends meanwhile; then the first one goes on: one counter for every marker
+  // after the starts, in the order the workflow saw them.
+  childFinished(s, 'k2', { status: 'completed', runId: 'c2', attempt: 1, text: 'ok', usage }, 5)
+  assert.equal(
+    childPark(s, { ...waitingOf('k1', k1), state: 'resumed', answered: ['q1'], requests: [] }, 6),
+    true,
+  )
+  assert.equal(view(s).parked?.waiting, undefined, 'nobody waits')
+  childFinished(s, 'k1', { status: 'completed', runId: 'c1', attempt: 2, text: 'ok', usage }, 7)
+  assert.deepEqual(
+    s.markers.map((m) => [
+      m.type,
+      m.turnAttempt,
+      m.seq - SUBAGENT_MARKER_SEQ - SUBAGENT_MARKER_SPAN,
+      m.body.itemId,
+    ]),
+    [
+      ['subagent.waiting', 3, 0, 'k1'],
+      ['subagent.ended', 3, 1, 'k2'],
+      ['subagent.resumed', 3, 2, 'k1'],
+      ['subagent.ended', 3, 3, 'k1'],
+    ],
+  )
+  assert.deepEqual(s.markers[0]!.body, {
+    itemId: 'k1',
+    name: 'researcher',
+    workflowId: k1,
+    runId: 'c1',
+    requests: [{ requestId: 'q1', kind: 'approval', toolName: 'write_note' }],
+    events: '/sessions/s/subagents/k1/events',
+  })
+  assert.deepEqual(s.markers[2]!.body.answered, ['q1'])
+  // The person's own item is the last one: the turn goes on.
+  assert.equal(parkedReadyAfter(s, 'a'), true)
+})
+
+test('a pipeline node visit that waits: the visit named, its own stream; the pipeline ending drops it', () => {
+  const s = initialState('s', options())
+  park(s, [pipe('p1')], 2)
+  startChildren(s, 1)
+  s.markers = []
+  const visit = pipelineNodeWorkflowIdOf(pipelineWorkflowIdOf('s', 'r1', 'p1'), 'draft', 2)
+  const notice = waitingOf('p1', visit, { kind: 'pipeline', nodeId: 'draft', visit: 2 })
+  assert.equal(childPark(s, notice, 4), true)
+  const w = view(s).parked!.waiting![0]!
+  assert.deepEqual(
+    [w.kind, w.name, w.nodeId, w.visit, w.workflowId],
+    ['pipeline', 'review', 'draft', 2, visit],
+  )
+  assert.equal(w.events, '/sessions/s/pipelines/p1/nodes/draft/2/events')
+  assert.equal(s.markers[0]!.type, 'pipeline.call.waiting')
+  assert.deepEqual([s.markers[0]!.body.nodeId, s.markers[0]!.body.visit], ['draft', 2])
+  // The pipeline fails (another node of the wave): it waits for nobody any more.
+  pipelineFinished(s, 'p1', { status: 'failed', error: 'x', runs: 2, usage }, 5)
+  assert.equal(view(s).parked?.waiting, undefined)
+  assert.equal(childPark(s, { ...notice, state: 'resumed', answered: ['q1'] }, 6), false, 'over')
+})
+
+test('a notice about anything but a running child of this park is ignored', () => {
+  const s = initialState('s', options())
+  park(s, [sub('k1'), approval('a'), pipe('p1')], 1)
+  startChildren(s, 1)
+  s.markers = []
+  const k1 = subagentWorkflowIdOf('s', 'r1', 'k1')
+  const ignored: [string, IChildParkNotice][] = [
+    ['not an item of the park', waitingOf('nope', k1)],
+    ['an item no child answers', waitingOf('a', subagentWorkflowIdOf('s', 'r1', 'a'))],
+    ['another workflow', waitingOf('k1', 'subagent-other-r1-k1')],
+    ["another session's child", waitingOf('k1', subagentWorkflowIdOf('t', 'r1', 'k1'))],
+    ["another run's child", waitingOf('k1', subagentWorkflowIdOf('s', 'r0', 'k1'))],
+    ['the wrong kind', waitingOf('k1', k1, { kind: 'pipeline', nodeId: 'n', visit: 1 })],
+    ['a subagent with a node', waitingOf('k1', k1, { nodeId: 'n', visit: 1 })],
+    [
+      'a node visit without its node',
+      waitingOf('p1', pipelineWorkflowIdOf('s', 'r1', 'p1'), { kind: 'pipeline' }),
+    ],
+    [
+      'another node than its workflow names',
+      waitingOf('p1', pipelineNodeWorkflowIdOf(pipelineWorkflowIdOf('s', 'r1', 'p1'), 'a', 1), {
+        kind: 'pipeline',
+        nodeId: 'b',
+        visit: 1,
+      }),
+    ],
+    ['nothing to wait for', waitingOf('k1', k1, { requests: [] })],
+    ['resumed without waiting', { ...waitingOf('k1', k1), state: 'resumed' }],
+  ]
+  for (const [why, notice] of ignored) {
+    assert.equal(childPark(s, notice, 2), false, why)
+  }
+  assert.equal(view(s).parked?.waiting, undefined)
+  assert.deepEqual(s.markers, [])
+  // A child that has ended, and a park that is over (stopped), take no notice.
+  childFinished(s, 'k1', { status: 'failed', error: 'x' }, 3)
+  assert.equal(childPark(s, waitingOf('k1', k1), 4), false, 'ended')
+  const t = initialState('s', options())
+  park(t, [sub('k1')], 1)
+  startChildren(t, 1)
+  acceptStop(t, { at: 2 }, 2)
+  assert.equal(childPark(t, waitingOf('k1', k1), 3), false, 'stopped')
+})
+
+test('a waiting child is still a child: no continue-as-new, its item is not ready; a stop ends it all', () => {
+  const s = initialState('s', options({ maxTurnsPerRun: 1 }))
+  park(s, [sub('k1')], 1)
+  startChildren(s, 1)
+  s.markers = []
+  childPark(s, waitingOf('k1', subagentWorkflowIdOf('s', 'r1', 'k1')), 2)
+  s.markers = []
+  assert.equal(childrenRunning(s), true)
+  assert.equal(shouldContinueAsNew(s, true), false)
+  assert.equal(hasWork(s), false, 'nothing to do while the person decides')
+  acceptStop(s, { at: 3 }, 3)
+  assert.equal(view(s).parked, undefined)
+  assert.equal(s.endings[0]?.status, 'stopped')
 })

@@ -118,6 +118,68 @@ export type SubagentOutcome =
   | { status: 'stopped'; runId?: string; attempt?: number; usage?: IUsage }
   | { status: 'failed'; error: string }
 
+// What a child's activity (runSubagent, runPipelineNode) is given beside the child's input.
+// `park`: the child workflow waits for a person's answers (it is new enough to - behind
+// PATCH_CHILD_PARKING), so a run that parks reports `parked` (a child without it never parks: an
+// ask is a denial, a deferred result a refusal). `answers`: the resume of a parked run, with an
+// answer for every item it waits for.
+export interface IChildRun {
+  park?: boolean
+  answers?: Record<string, IAnswer>
+}
+
+// A child's run that parked: it waits for an answer to every request (a person's decision, or a
+// result from outside), from the gateway - the child workflow resumes the SAME run with them.
+export interface IChildParked {
+  status: 'parked'
+  runId: string
+  attempt: number
+  requests: IParkedRequest[]
+}
+
+// What a child workflow of a parked turn tells the session about its own park
+// (childParkSignal): it waits for a person (`waiting`, with the items), or it goes on
+// (`resumed`, with the ids it was answered). `itemId`: the parked turn's item the child answers
+// (a subagent call, or a pipeline call - then `nodeId` / `visit` name the node visit that waits).
+export interface IChildParkNotice {
+  itemId: string
+  kind: 'subagent' | 'pipeline'
+  // The child that waits: the subagent child, or the pipeline's node visit.
+  workflowId: string
+  nodeId?: string
+  visit?: number
+  runId: string
+  state: 'waiting' | 'resumed'
+  requests?: IParkedRequest[]
+  answered?: string[]
+  at: number
+}
+
+// A child of the parked turn that waits for a person, as the session's state shows it. `requests`
+// are what to answer - POST /sessions/:id/answers/:requestId, the same route as the turn's own
+// items; `events` is the child's own stream.
+export interface IChildWaiting {
+  itemId: string
+  kind: 'subagent' | 'pipeline'
+  name: string
+  workflowId: string
+  nodeId?: string
+  visit?: number
+  runId: string
+  requests: IParkedRequest[]
+  since: number
+  events: string
+}
+
+// A child workflow's own state (childStateQuery): running its activity, waiting for answers (what
+// it waits for, and which have come), or ended.
+export interface IChildView {
+  status: 'running' | 'waiting' | 'ended'
+  // How many times its run parked.
+  parks: number
+  parked?: { runId: string; requests: IParkedRequest[]; answered: string[] }
+}
+
 // A call of a pipeline (PIPELINES), as the parent model made it: its `task` is the pipeline's
 // request.
 export interface IPipelineCall {
@@ -253,6 +315,9 @@ export interface ITurnEnd {
   route?: string
   runs?: number
   stoppedBy?: string
+  // A child that may have waited for answers: the items it still waits for (in `swarm_parked`,
+  // under the session, owned by the child's workflow id) are closed with it. Not in the marker.
+  closes?: { sessionId: string; owner: string }
 }
 
 export type SessionStatus = 'idle' | 'running' | 'stopping' | 'parked' | 'ended'
@@ -267,7 +332,14 @@ export interface ISessionView {
   queued: { id: string; at: number }[]
   // Messages dropped because the queue was full.
   dropped: number
-  parked?: { turn: number; runId: string; requests: IParkedRequest[]; answered: string[] }
+  // `waiting`: the children of the parked turn that wait for a person (their own items).
+  parked?: {
+    turn: number
+    runId: string
+    requests: IParkedRequest[]
+    answered: string[]
+    waiting?: IChildWaiting[]
+  }
   // Static subagent calls started in this session (counted against subagentMaxPerSession).
   subagentsStarted?: number
   // Pipeline calls started in this session (counted against pipelineMaxPerSession).
@@ -278,15 +350,25 @@ export interface ISessionView {
 
 // A marker the workflow puts in a session's stream about a child workflow of a parked turn:
 // `subagent.started` / `pipeline.call.started` when it starts, `subagent.ended` /
-// `pipeline.call.ended` when it is over. In the parked attempt's slot of the turn (`turnAttempt`)
-// at seq SUBAGENT_MARKER_SEQ + n, after every event of that attempt and before the resumed one's
-// (session-state.ts says how n is chosen). (Not `pipeline.started`: that is the engine's own
-// event, in the pipeline's own stream.)
+// `pipeline.call.ended` when it is over, and between them `subagent.waiting` /
+// `pipeline.call.waiting` when the child (a pipeline's node visit) parks on a person's answer and
+// `subagent.resumed` / `pipeline.call.resumed` when it goes on with the answers. In the parked
+// attempt's slot of the turn (`turnAttempt`) at seq SUBAGENT_MARKER_SEQ + n, after every event of
+// that attempt and before the resumed one's (session-state.ts says how n is chosen). (Not
+// `pipeline.started`: that is the engine's own event, in the pipeline's own stream.)
 export interface IStreamMarker {
   sessionId: string
   turn: number
   turnAttempt: number
   seq: number
-  type: 'subagent.started' | 'subagent.ended' | 'pipeline.call.started' | 'pipeline.call.ended'
+  type:
+    | 'subagent.started'
+    | 'subagent.waiting'
+    | 'subagent.resumed'
+    | 'subagent.ended'
+    | 'pipeline.call.started'
+    | 'pipeline.call.waiting'
+    | 'pipeline.call.resumed'
+    | 'pipeline.call.ended'
   body: Record<string, unknown>
 }

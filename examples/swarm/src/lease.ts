@@ -43,6 +43,10 @@ export interface ITurnScope {
   // dispatches, so this is the round's count).
   subagents?: { maxPerRound: number; remaining: number; dispatched: number }
   pipelines?: { maxPerRound: number; remaining: number; dispatched: number }
+  // A child's run whose workflow waits for a person's answers (CHILD_ASK=park, a child new
+  // enough): an ask of its approval mode parks it (subagents.ts, childAsk). Without it an ask is a
+  // denial.
+  mayPark?: boolean
 }
 
 const scopes = new AsyncLocalStorage<ITurnScope>()

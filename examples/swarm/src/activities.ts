@@ -20,6 +20,9 @@
 // A run that PARKS (a person's question under the approval mode, a deferred tool result, a static
 // subagent call) resolves; the activity records its items (swarm_parked) and returns `parked`.
 // The workflow collects the answers and runs the activity again, which resumes the run with them.
+// A child's run (runSubagent, runPipelineNode) parks the same way when its workflow says it may
+// wait (`park`, CHILD_ASK=park): its items are recorded under the SESSION (the gateway looks an
+// answer up there), owned by the child's workflow id (the answer goes to that child).
 import { createHash } from 'node:crypto'
 import { Context } from '@temporalio/activity'
 import { ApplicationFailure, type ActivityCancellationDetails } from '@temporalio/common'
@@ -42,16 +45,24 @@ import {
   type PipelineNode,
 } from '@dudko.dev/agent'
 import type { IEventStore } from './db/events.ts'
-import type { IParkedStore } from './db/parked.ts'
+import type { IParkedOwner, IParkedStore } from './db/parked.ts'
 import type { IRunRow, IRunStore } from './db/runs.ts'
+import type { ChildAsk } from './child-ask.ts'
 import { withTurnScope, type ITurnScope, type TurnIntent } from './lease.ts'
 import { errorMessage, type ILogger } from './log.ts'
 import { PIPELINE_TEXT_MAX_CHARS } from './pipeline-state.ts'
 import { canonicalJson } from './pipelines.ts'
-import { pipelineWorkflowIdOf, subagentWorkflowIdOf, TURN_REFUSED } from './session-api.ts'
+import {
+  childWorkflowIdOf,
+  pipelineWorkflowIdOf,
+  subagentWorkflowIdOf,
+  TURN_REFUSED,
+} from './session-api.ts'
 import type {
   IAnswer,
   IChildBudget,
+  IChildParked,
+  IChildRun,
   IParkedRequest,
   IPipelineCall,
   IPipelineNodeInput,
@@ -214,6 +225,18 @@ export interface IActivityDeps {
   pickRoute?: typeof pickPipelineRoute
   // How often the route call heartbeats (it runs outside the run, so outside its lease).
   routeHeartbeatMs?: number
+  // CHILD_ASK: whether a child's run may wait for a person ('park', the default: the child's
+  // agent parks on an ask) or not ('deny': an ask is a denial, a run that parks anyway - a
+  // deferred tool result - is refused, as before child parking).
+  childAsk?: ChildAsk
+}
+
+// Where a child's park is recorded: under the session (the gateway's lookup), in the parent's turn
+// (a stop of that turn closes them), owned by the child's workflow (who the answer goes to).
+interface IParkIn {
+  sessionId: string
+  turn: number
+  owner: IParkedOwner
 }
 
 interface IRunOne {
@@ -227,6 +250,12 @@ interface IRunOne {
   started: Record<string, unknown>
   subagents?: IChildBudget
   pipelines?: IChildBudget
+  // A child's run: its items belong to the session, owned by the child. A child's run without it
+  // may not wait (`cannotWait`): a park is refused, and nothing is recorded for the gateway.
+  parkIn?: IParkIn
+  cannotWait?: boolean
+  // The run may park on an ask (a child's agent asks its turn scope; see subagents.ts).
+  mayPark?: boolean
 }
 
 const clip = (text: string, max: number): string =>
@@ -237,8 +266,10 @@ export const createActivities = (deps: IActivityDeps) => {
   const subagentNames = new Set(deps.subagents?.keys() ?? [])
   const pipelineNames = new Set(deps.pipelines?.keys() ?? [])
   const pickRoute = deps.pickRoute ?? pickPipelineRoute
+  const childAsk: ChildAsk = deps.childAsk ?? 'park'
 
-  // The run's items, recorded for the gateway, and the `parked` result.
+  // The run's items, recorded for the gateway, and the `parked` result. A child's items are all a
+  // client's to answer (a child has no children of its own), under the session, owned by it.
   const parkedResult = async (
     stream: string,
     turn: number,
@@ -246,18 +277,27 @@ export const createActivities = (deps: IActivityDeps) => {
     attempt: number,
     attemptBase: number,
     items: ParkedItem[],
+    parkIn?: IParkIn,
+    cannotWait = false,
   ): Promise<TurnResult> => {
-    const requests = requestsOf(items, subagentNames, pipelineNames)
+    const requests = parkIn
+      ? requestsOf(items, new Set(), new Set())
+      : requestsOf(items, subagentNames, pipelineNames)
+    if (cannotWait) {
+      // A child that may not wait: the caller refuses the park - nothing for the gateway.
+      return { status: 'parked', runId, attempt, turnAttempt: attemptBase + attempt, requests }
+    }
     await parked.record(
       requests.map((r) => ({
-        sessionId: stream,
+        sessionId: parkIn?.sessionId ?? stream,
         itemId: r.requestId,
-        turn,
+        turn: parkIn?.turn ?? turn,
         runId,
         kind: r.kind,
         answeredBy: r.subagent ? 'subagent' : r.pipeline ? 'pipeline' : 'client',
         ...(r.subagent ? { childId: subagentWorkflowIdOf(stream, runId, r.requestId) } : {}),
         ...(r.pipeline ? { childId: pipelineWorkflowIdOf(stream, runId, r.requestId) } : {}),
+        ...(parkIn ? { owner: parkIn.owner } : {}),
         item: {
           kind: r.kind,
           ...(r.question as object),
@@ -313,6 +353,8 @@ export const createActivities = (deps: IActivityDeps) => {
         s.attempt ?? 1,
         plan.row.attemptBase,
         s.parked?.items ?? [],
+        o.parkIn,
+        o.cannotWait,
       )
     }
     const intent: TurnIntent =
@@ -326,7 +368,7 @@ export const createActivities = (deps: IActivityDeps) => {
           }
     if (plan.kind === 'resume' && answerIds.length) {
       // The turn goes on with them: the gateway refuses another answer from now on.
-      await parked.markAnswered(stream, answerIds)
+      await parked.markAnswered(o.parkIn?.sessionId ?? stream, answerIds)
     }
 
     // A user's stop reaches the activity as a cancellation (cancelRequested): abort the run, which
@@ -361,6 +403,7 @@ export const createActivities = (deps: IActivityDeps) => {
       revoked,
       ...(o.subagents ? { subagents: { ...o.subagents, dispatched: 0 } } : {}),
       ...(o.pipelines ? { pipelines: { ...o.pipelines, dispatched: 0 } } : {}),
+      ...(o.mayPark ? { mayPark: true } : {}),
     }
     const runId = intent.runId
     // The run, once it exists: a resumed one from the start, a fresh one once its lease bound it.
@@ -423,6 +466,8 @@ export const createActivities = (deps: IActivityDeps) => {
         last.attempt ?? 1,
         intent.attemptBase,
         result.parked.items,
+        o.parkIn,
+        o.cannotWait,
       )
     }
     return {
@@ -452,10 +497,32 @@ export const createActivities = (deps: IActivityDeps) => {
       ...(input.pipelines ? { pipelines: input.pipelines } : {}),
     })
 
+  // A child's run that parked: `parked` when its workflow waits for answers (and CHILD_ASK lets
+  // it); else a refusal - the child cannot wait, so this is a misconfiguration (a deferred tool
+  // result in a child, or a child started before child parking).
+  const childParkedOf = (out: TurnResult & { status: 'parked' }, may: boolean, what: string) => {
+    if (!may) {
+      throw ApplicationFailure.nonRetryable(
+        `${what} parked: its run cannot wait for answers (CHILD_ASK=${childAsk}${childAsk === 'park' ? ', and this child started before child parking' : ''})`,
+        TURN_REFUSED,
+      )
+    }
+    const parkedOut: IChildParked = {
+      status: 'parked',
+      runId: out.runId,
+      attempt: out.attempt,
+      requests: out.requests,
+    }
+    return parkedOut
+  }
+
   // One static subagent call: its profile's agent on the task, as turn 1 of its own stream - so a
   // retry (the worker died) finds the child's run and resumes it, and a second start of the same
-  // child returns the answer it already has.
-  const runSubagent = async (input: ISubagentInput): Promise<SubagentOutcome> => {
+  // child returns the answer it already has. A run that parks on a person (`park`): its items are
+  // the session's, owned by this child; the workflow resumes the run with `answers`.
+  const runSubagent = async (
+    input: ISubagentInput & IChildRun,
+  ): Promise<SubagentOutcome | IChildParked> => {
     const agent = deps.subagents?.get(input.name)
     if (!agent) {
       throw ApplicationFailure.retryable(
@@ -463,26 +530,36 @@ export const createActivities = (deps: IActivityDeps) => {
         'SubagentUnknown',
       )
     }
+    const may = input.park === true && childAsk === 'park'
     const out = await runOne({
       stream: input.stream,
       turn: 1,
       agent,
       input: input.task,
       history: [],
+      ...(input.answers ? { answers: input.answers } : {}),
       started: {
         input: input.task,
         name: input.name,
         parent: { sessionId: input.sessionId, turn: input.turn, runId: input.parentRunId },
         itemId: input.itemId,
       },
+      ...(may
+        ? {
+            mayPark: true,
+            parkIn: {
+              sessionId: input.sessionId,
+              turn: input.turn,
+              owner: {
+                workflowId: childWorkflowIdOf(input.sessionId, input.parentRunId, input.itemId),
+                itemId: input.itemId,
+              },
+            },
+          }
+        : { cannotWait: true }),
     })
     if (out.status === 'parked') {
-      // A child has no one to ask and no subagents of its own: its approvals are decided by the
-      // worker's mode and rules (an 'ask' is a denial), so this is a misconfiguration.
-      throw ApplicationFailure.nonRetryable(
-        `subagent "${input.name}" parked: a subagent's run cannot wait for answers`,
-        TURN_REFUSED,
-      )
+      return childParkedOf(out, may, `subagent "${input.name}"`)
     }
     if (out.status === 'completed') {
       return {
@@ -557,7 +634,9 @@ export const createActivities = (deps: IActivityDeps) => {
   // its snapshot and its call journal (a write it made is not made again), and a second start of
   // the same visit returns the answer it already has. Then the route call. The worker's node must
   // be the one the run was planned with: a worker whose PIPELINES differ leaves it to another.
-  const runPipelineNode = async (input: IPipelineNodeInput): Promise<PipelineNodeOutcome> => {
+  const runPipelineNode = async (
+    input: IPipelineNodeInput & IChildRun,
+  ): Promise<PipelineNodeOutcome | IChildParked> => {
     const entry = deps.pipelines?.get(input.pipeline)?.nodes.get(input.node.id)
     if (!entry) {
       throw ApplicationFailure.retryable(
@@ -572,12 +651,29 @@ export const createActivities = (deps: IActivityDeps) => {
       )
     }
     const text = renderPipelineNodeInput(input.input)
+    const may = input.park === true && childAsk === 'park'
     const out = await runOne({
       stream: input.stream,
       turn: 1,
       agent: entry.agent,
       input: text,
       history: [],
+      ...(input.answers ? { answers: input.answers } : {}),
+      ...(may
+        ? {
+            mayPark: true,
+            parkIn: {
+              sessionId: input.sessionId,
+              turn: input.turn,
+              owner: {
+                workflowId: input.workflowId,
+                itemId: input.itemId,
+                nodeId: input.node.id,
+                visit: input.input.visit,
+              },
+            },
+          }
+        : { cannotWait: true }),
       started: {
         // The run's snapshot has all of it.
         input: clip(text, PIPELINE_TEXT_MAX_CHARS),
@@ -591,12 +687,7 @@ export const createActivities = (deps: IActivityDeps) => {
       },
     })
     if (out.status === 'parked') {
-      // A node has no one to ask and no children of its own: its approvals are decided by the
-      // worker's mode and rules (an 'ask' is a denial), so this is a misconfiguration.
-      throw ApplicationFailure.nonRetryable(
-        `pipeline "${input.pipeline}": node "${input.node.id}" parked - a pipeline node's run cannot wait for answers`,
-        TURN_REFUSED,
-      )
+      return childParkedOf(out, may, `pipeline "${input.pipeline}": node "${input.node.id}"`)
     }
     if (out.status !== 'completed') {
       return out
@@ -626,10 +717,15 @@ export const createActivities = (deps: IActivityDeps) => {
   }
 
   const endTurn = async (end: ITurnEnd): Promise<void> => {
-    const { sessionId, turn, ...body } = end
+    const { sessionId, turn, closes, ...body } = end
     await events.marker({ kind: 'ended', sessionId, turn, body })
-    // Whatever the turn still waited for is over with it (a stopped park).
+    // Whatever the turn still waited for is over with it (a stopped park) - its children's own
+    // items too (they are the session's, in the same turn).
     await parked.cancelTurn(sessionId, turn)
+    // A child: whatever it still waited for is over with it.
+    if (closes) {
+      await parked.cancelOwned(closes.sessionId, closes.owner)
+    }
   }
 
   const writeMarkers = async (markers: IStreamMarker[]): Promise<void> => {

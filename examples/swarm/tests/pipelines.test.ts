@@ -4,6 +4,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { isDeferredResult, type IAgentConfig, type PipelineDefinition } from '@dudko.dev/agent'
+import { childAskDecision } from '../src/child-ask.ts'
 import { withTurnScope, type ITurnScope } from '../src/lease.ts'
 import {
   canonicalJson,
@@ -226,6 +227,12 @@ test("a node's agent: the node over the worker, only what it names, nobody to as
     'Only this.',
   )
   assert.equal(pipelineNodeConfig(bare, { id: 'x' }).systemPrompt, undefined)
+  // CHILD_ASK=park: the node's ask parks the visit's run (when its workflow waits); 'deny', the
+  // default: nobody to ask.
+  const parks = pipelineNodeConfig(base, a, catalog, 'park')
+  assert.equal(parks.toolApproval?.mode, 'ask-writes')
+  assert.equal(parks.toolApproval?.onRequest, childAskDecision)
+  assert.equal(pipelineNodeConfig(base, a, catalog, 'deny').toolApproval?.onRequest, undefined)
 })
 
 test('the session agent: a pipeline is a tool next to the subagents', () => {

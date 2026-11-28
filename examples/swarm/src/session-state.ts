@@ -4,7 +4,9 @@
 import type { IConversationTurn } from '@dudko.dev/agent'
 import { answerProblem } from './answers.ts'
 import {
+  childWorkflowIdOf,
   pipelineEventsPath,
+  pipelineNodeEventsPath,
   pipelineStreamOf,
   pipelineWorkflowIdOf,
   subagentStreamOf,
@@ -13,6 +15,8 @@ import {
 import type {
   IAnswer,
   IChildBudget,
+  IChildParkNotice,
+  IChildWaiting,
   IParkedRequest,
   IPipelineInput,
   ISessionOptions,
@@ -43,11 +47,12 @@ export const PIPELINE_DEFAULTS = { maxPerRound: 2, maxPerSession: 20 } as const
 
 // Where the child markers go in a turn's order: the parked attempt's slot, from this seq on - far
 // above any seq the attempt's own events reach. `subagent.started` / `pipeline.call.started` take
-// SEQ + i (the i-th child of the park, of either kind), `subagent.ended` / `pipeline.call.ended`
-// SEQ + SPAN + j (the j-th to end, in the order the workflow saw them end). Every start of a park
-// is decided at once, before any child can end, and the workflow writes the markers in the order
-// they were queued, one after the other - so a reader that follows the stream never sees a marker
-// land behind its cursor.
+// SEQ + i (the i-th child of the park, of either kind); every marker after them - `*.ended`, and
+// `*.waiting` / `*.resumed` of a child that waits for a person - SEQ + SPAN + j (the j-th, in the
+// order the workflow saw them happen: ONE counter, `IParked.ended`). Every start of a park is
+// decided at once, before any child can end or wait, and the workflow writes the markers in the
+// order they were queued, one after the other - so a reader that follows the stream never sees a
+// marker land behind its cursor.
 export const SUBAGENT_MARKER_SEQ = 1_073_741_824
 export const SUBAGENT_MARKER_SPAN = 1_048_576
 
@@ -61,9 +66,12 @@ export interface IParked {
   // The parked attempt's slot in the turn's order (the subagent markers go there).
   turnAttempt?: number
   // The requests a child workflow (a subagent or a pipeline) was started for, in start order;
-  // and how many have ended.
+  // and how many markers came after the starts (the children that ended, waited, went on - one
+  // counter, so those markers stay in order; named for the first of them).
   children?: string[]
   ended?: number
+  // The children that wait for a person now (a subagent child, a pipeline's node visit).
+  waiting?: IChildWaiting[]
 }
 
 export interface ISessionState {
@@ -373,9 +381,30 @@ export const startChildren = (
   return out
 }
 
+// The next marker after the starts of the park: `*.ended`, `*.waiting`, `*.resumed`, in the order
+// the workflow saw them (one counter). None without the parked attempt's slot.
+const afterMarker = (
+  state: ISessionState,
+  parked: IParked,
+  marker: Pick<IStreamMarker, 'type' | 'body'>,
+): void => {
+  const n = parked.ended ?? 0
+  parked.ended = n + 1
+  if (parked.turnAttempt !== undefined) {
+    state.markers.push({
+      sessionId: state.sessionId,
+      turn: parked.turn,
+      turnAttempt: parked.turnAttempt,
+      seq: SUBAGENT_MARKER_SEQ + SUBAGENT_MARKER_SPAN + n,
+      ...marker,
+    })
+  }
+}
+
 // A child of the parked turn is over: the item's answer, and its `*.ended` marker queued in the
-// order the children end. False (nothing changes) for a child of a park that is over (stopped), a
-// request that is not that kind's child, or an item answered already.
+// order the children end; it waits for nobody any more. False (nothing changes) for a child of a
+// park that is over (stopped), a request that is not that kind's child, or an item answered
+// already.
 const childEnded = (
   state: ISessionState,
   requestId: string,
@@ -393,17 +422,10 @@ const childEnded = (
     return false
   }
   state.answers[requestId] = { requestId, value: answer(request), at: now, by: kind }
-  const n = parked.ended ?? 0
-  parked.ended = n + 1
-  if (parked.turnAttempt !== undefined) {
-    state.markers.push({
-      sessionId: state.sessionId,
-      turn: parked.turn,
-      turnAttempt: parked.turnAttempt,
-      seq: SUBAGENT_MARKER_SEQ + SUBAGENT_MARKER_SPAN + n,
-      ...marker(request),
-    })
+  if (parked.waiting?.some((w) => w.itemId === requestId)) {
+    parked.waiting = parked.waiting.filter((w) => w.itemId !== requestId)
   }
+  afterMarker(state, parked, marker(request))
   return true
 }
 
@@ -467,6 +489,101 @@ export const pipelineFinished = (
     }),
     now,
   )
+
+// A child of the parked turn tells the session it waits for a person (its run parked: `waiting`,
+// with its items) or goes on with the answers (`resumed`): the state shows what it waits for, and
+// the turn's stream gets `subagent.waiting` / `.resumed` (`pipeline.call.waiting` / `.resumed`,
+// with the node visit) in the parked attempt's slot, in order with the other child markers. Only
+// from a child this park started and that has not ended: its workflow id must be the one the
+// session gave it (session + run + item, and the node and visit) - a notice about anything else
+// is ignored (false).
+export const childPark = (state: ISessionState, notice: IChildParkNotice, now: number): boolean => {
+  const parked = state.parked
+  const request = parked?.requests.find((r) => r.requestId === notice.itemId)
+  const call = notice.kind === 'subagent' ? request?.subagent : request?.pipeline
+  if (!parked || !request || !call || !parked.children?.includes(notice.itemId)) {
+    return false
+  }
+  if (state.answers[notice.itemId]) {
+    return false
+  }
+  const node =
+    notice.kind === 'pipeline'
+      ? typeof notice.nodeId === 'string' && Number.isInteger(notice.visit)
+        ? { nodeId: notice.nodeId, visit: notice.visit as number }
+        : undefined
+      : undefined
+  if (notice.kind === 'pipeline' && !node) {
+    return false
+  }
+  if (notice.kind === 'subagent' && (notice.nodeId !== undefined || notice.visit !== undefined)) {
+    return false
+  }
+  if (notice.workflowId !== childWorkflowIdOf(state.sessionId, parked.runId, notice.itemId, node)) {
+    return false
+  }
+  const waiting = (parked.waiting ??= [])
+  const at = waiting.findIndex((w) => w.workflowId === notice.workflowId)
+  const who = {
+    itemId: notice.itemId,
+    name: call.name,
+    workflowId: notice.workflowId,
+    ...(node ? node : {}),
+    runId: notice.runId,
+  }
+  const prefix = notice.kind === 'subagent' ? 'subagent' : 'pipeline.call'
+  if (notice.state === 'waiting') {
+    const requests = Array.isArray(notice.requests) ? notice.requests : []
+    if (requests.length === 0) {
+      return false
+    }
+    const entry: IChildWaiting = {
+      ...who,
+      kind: notice.kind,
+      requests,
+      since: now,
+      events: node
+        ? pipelineNodeEventsPath(state.sessionId, notice.itemId, node.nodeId, node.visit)
+        : `/sessions/${state.sessionId}/subagents/${notice.itemId}/events`,
+    }
+    if (at >= 0) {
+      waiting[at] = entry
+    } else {
+      waiting.push(entry)
+    }
+    afterMarker(state, parked, {
+      type: `${prefix}.waiting` as IStreamMarker['type'],
+      body: {
+        ...who,
+        // What to answer (POST /sessions/:id/answers/:requestId); the questions are in the state
+        // (GET /sessions/:id, parked.waiting) and in the child's own stream (its run.parked).
+        requests: requests.map((r) => ({
+          requestId: r.requestId,
+          kind: r.kind,
+          ...toolNameOf(r),
+        })),
+        events: entry.events,
+      },
+    })
+    return true
+  }
+  if (notice.state !== 'resumed' || at < 0) {
+    return false
+  }
+  waiting.splice(at, 1)
+  afterMarker(state, parked, {
+    type: `${prefix}.resumed` as IStreamMarker['type'],
+    body: { ...who, answered: Array.isArray(notice.answered) ? notice.answered : [] },
+  })
+  return true
+}
+
+// The tool an item is about (an approval's request, a deferred call), for a marker.
+const toolNameOf = (r: IParkedRequest): { toolName?: string } => {
+  const q = (r.question ?? {}) as { toolName?: unknown; request?: { toolName?: unknown } }
+  const name = typeof q.request?.toolName === 'string' ? q.request.toolName : q.toolName
+  return typeof name === 'string' ? { toolName: name } : {}
+}
 
 // Children of the parked turn still running, subagents and pipelines (continue-as-new waits for
 // them: a new run of the workflow could not await them).
@@ -734,6 +851,7 @@ export const view = (state: ISessionState, ended = false): ISessionView => ({
           answered: state.parked.requests
             .map((r) => r.requestId)
             .filter((id) => state.answers[id] !== undefined),
+          ...(state.parked.waiting?.length ? { waiting: state.parked.waiting } : {}),
         },
       }
     : {}),

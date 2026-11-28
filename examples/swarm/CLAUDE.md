@@ -10,8 +10,8 @@ A reference deployment of `@dudko.dev/agent` as a swarm: a Temporal workflow per
 (`session`), one `agent.run` per turn as an activity (`runTurn`), turns that park (the core's
 journal + parking), static subagents as child workflows (`subagent` -> `runSubagent`) and pipelines
 as child workflows (`pipeline`, the core's graph engine as its scheduler, -> one `pipelineNode` per
-node visit -> `runPipelineNode`), state in Postgres, a stateless `node:http` gateway with SSE, one
-image with three roles, a Helm chart.
+node visit -> `runPipelineNode`) - children that park on a person too -, state in Postgres, a
+stateless `node:http` gateway with SSE, one image with three roles, a Helm chart.
 **Private, never published** (not in `.github/scripts/release-plan.mjs`; keep it out). No version
 bumps, no CHANGELOG.
 
@@ -23,12 +23,12 @@ bumps, no CHANGELOG.
 - **The workflow is deterministic.** `src/workflows.ts` imports only `@temporalio/workflow`,
   `@dudko.dev/agent/pipeline-engine` (the core's graph engine: no imports, deterministic by
   contract - NEVER the main entry, `tests/bundle.test.ts` fails on it), `session-api.ts`,
-  `session-state.ts` (which imports `answers.ts`, pure and import-free), `pipeline-state.ts` and
-  types; no Node, no clock but the workflow's `Date.now()`, no randomness. The logic lives in
-  `session-state.ts` / `pipeline-state.ts` (pure, unit-tested); the workflow wires it. A change
-  that alters the commands a running session replays (activities scheduled, their order, timers,
-  child workflows) needs `patched()` (ids in `session-api.ts`, `PATCH_*`) or a new workflow type -
-  sessions live for days.
+  `session-state.ts` and `child-state.ts` (both import `answers.ts`, pure and import-free),
+  `pipeline-state.ts` and types; no Node, no clock but the workflow's `Date.now()`, no randomness.
+  The logic lives in `session-state.ts` / `child-state.ts` / `pipeline-state.ts` (pure,
+  unit-tested); the workflow wires it. A change that alters the commands a running session replays
+  (activities scheduled, their order, timers, child workflows) needs `patched()` (ids in
+  `session-api.ts`, `PATCH_*`) or a new workflow type - sessions live for days.
   `tests/replay.test.ts` replays recorded histories (`tests/fixtures/*.history.json`) on the
   current code: a change that breaks one is a replay break. Record a new fixture for a new path.
 - **Session options are workflow input** (`ISessionOptions`, read by the gateway at start), never
@@ -55,13 +55,30 @@ bumps, no CHANGELOG.
   `answers.ts`, by the gateway AND by the workflow (`acceptAnswer`); an item a subagent answers
   takes no client answer. `planTurn`: a `waiting` snapshot without an answer for its items is
   reported as parked again (nothing runs).
+- **Children park too** (`CHILD_ASK`, worker: `park` default | `deny`; `child-ask.ts`). A child's
+  agent (`childAgentConfig`, `pipelineNodeConfig`) gets `onRequest: childAskDecision` under `park`
+  (it parks only when the run's turn scope says `mayPark`, which the activity sets from the
+  workflow's `park`, i.e. a child behind `PATCH_CHILD_PARKING`; else a denial), and NO `onRequest`
+  under `deny` (the agent as it was). Its activity records the items under the SESSION
+  (`swarm_parked.session_id`), in the PARENT's turn, owned by the child's workflow id (`owner_*`,
+  `sql/003_child_parking.sql`); a child that may not wait records nothing and is refused as
+  before. The child workflow waits on signals (`child-state.ts`: per-kind checks again, partial
+  answers keep it waiting, a re-park waits again, a closed wait takes nothing), resumes the SAME
+  run with `answers`, tells the session (`childParkSignal` -> `childPark`: the state's
+  `parked.waiting`, `*.waiting` / `*.resumed` markers on the SAME counter as `*.ended`), and its
+  `endTurn` closes what it still waited for (`closes`). The gateway signals the answer to the
+  child directly - after looking the item up in THAT session and RECOMPUTING the child's workflow
+  id from the request's session and the turn's own call (`childOwnerOf`, `childWorkflowIdOf`),
+  never trusting the row. Security boundary: every guard (the row's session, the call's session,
+  the recomputed id, the closed item, the workflow-side check, "every item answered") has a test
+  and a mutation check.
 - **Static subagents** (`SUBAGENTS`): the tool's `dispatch` only defers (within the caps of
   `ITurnInput.subagents`); the workflow starts one child per item (`startChildren`, ids from
   session + run + item), in a cancellation scope a stop cancels; a child's run and events are keyed
   by its stream (`<session>/<item>`), never the parent turn's slots; the parent's
-  `subagent.started` / `.ended` markers go in the parked attempt's slot at seq >= 2^30, written by
-  the workflow in order, BEFORE the resumed attempt starts. Continue-as-new waits for running
-  children.
+  `subagent.started` / `.ended` markers (and `.waiting` / `.resumed` of a child that waits for a
+  person) go in the parked attempt's slot at seq >= 2^30, written by the workflow in order, BEFORE
+  the resumed attempt starts. Continue-as-new waits for running children (and waiting ones).
 - **Pipelines** (`PIPELINES`, `pipelines.ts`): the tool defers like a subagent's (caps in
   `ITurnInput.pipelines`); the session starts a child `pipeline` per item (behind
   `PATCH_PIPELINES`; every start of a park, of both kinds, decided at once in `startChildren` -
@@ -92,13 +109,14 @@ bumps, no CHANGELOG.
 
 - `src/main.ts` — the role dispatch. `config.ts`, `env.ts`, `agent-config.ts` — the environment.
 - `src/session-types.ts`, `session-api.ts`, `session-state.ts`, `workflows.ts` (`session`,
-  `subagent`, `pipeline`, `pipelineNode`) — the session; `answers.ts` — the answer checks per kind
-  (gateway + workflow).
+  `subagent`, `pipeline`, `pipelineNode`) — the session; `child-state.ts` — a child's wait for a
+  person (the workflow side); `answers.ts` — the answer checks per kind (gateway + workflows).
 - `src/activities.ts` (`runTurn`, `runSubagent`, `pipelineDefinition`, `runPipelineNode`,
   `endTurn`, `writeMarkers`, `writeStream`, `planTurn`, `runIdOf`), `lease.ts` (the heartbeat
   lease, its fence and the turn scope), `subagents.ts` (SUBAGENTS: the tools, `dispatch`, the child
-  and session agent configs), `pipelines.ts` (PIPELINES: the tools, `dispatch`, the checks, a
-  node's agent config), `pipeline-state.ts` (the `pipeline` workflow's pure logic: the abort latch,
+  and session agent configs), `child-ask.ts` (CHILD_ASK: a child agent's `onRequest`),
+  `pipelines.ts` (PIPELINES: the tools, `dispatch`, the checks, a node's agent config),
+  `pipeline-state.ts` (the `pipeline` workflow's pure logic: the abort latch,
   the stream log, node input / output, outcomes), `worker.ts` (the worker and its agents - session,
   subagents, every pipeline node -, its health port, the SDK's logger).
 - `src/gateway.ts` (routes, the stream), `http.ts` (bodies, auth, CORS), `backend.ts` (Temporal

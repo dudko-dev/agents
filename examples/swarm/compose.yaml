@@ -113,6 +113,8 @@ services:
       <<: *env
       LEASE_TTL_MS: ${LEASE_TTL_MS:-15000}
       WORKER_SHUTDOWN_GRACE_MS: ${WORKER_SHUTDOWN_GRACE_MS:-30000}
+      # A child's ask (a subagent, a pipeline node): park (wait for a person) | deny.
+      CHILD_ASK: ${CHILD_ASK:-park}
     # SIGTERM drains: the running turns get WORKER_SHUTDOWN_GRACE_MS, so give Docker longer.
     stop_grace_period: 45s
     deploy:

@@ -12,7 +12,7 @@ test('the shipped migrations are named, ordered and create what the adapters use
   const files = await loadMigrations()
   assert.deepEqual(
     files.map((f) => f.name),
-    ['001_init.sql', '002_parking.sql'],
+    ['001_init.sql', '002_parking.sql', '003_child_parking.sql'],
   )
   const sql = files[0]!.sql
   for (const table of ['swarm_sessions', 'swarm_runs', 'swarm_events', 'swarm_limiter']) {
@@ -28,6 +28,17 @@ test('the shipped migrations are named, ordered and create what the adapters use
   }
   assert.match(parking, /UNIQUE \(run_id, entry_id\)/)
   assert.match(parking, /PRIMARY KEY \(session_id, item_id\)/)
+  // A child's own items: under the session, owned by the child workflow that waits for them.
+  const children = files[2]!.sql
+  for (const column of [
+    'owner_id text',
+    'owner_item text',
+    'owner_node text',
+    'owner_visit integer',
+  ]) {
+    assert.match(children, new RegExp(`ALTER TABLE swarm_parked ADD COLUMN ${column}`))
+  }
+  assert.match(children, /ON swarm_parked \(session_id, owner_id\)/)
 })
 
 test('plan: pending in order, nothing twice, an edited or unknown migration refused', () => {

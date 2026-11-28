@@ -11,6 +11,8 @@ import type { IParkedRow } from '../src/db/parked.ts'
 import { createNotifyHub, type IListenClient } from '../src/db/notify.ts'
 import {
   BackendUnavailableError,
+  ChildEndedError,
+  childOwnerOf,
   createGateway,
   listen,
   matchRoute,
@@ -72,7 +74,50 @@ const parkedRows = new Map<string, IParkedRow>([
     }),
   ],
 ])
+// The items children of s1's parked turn wait for: under the session, owned by the child.
+const SUB_CHILD = 'subagent-s1-r1-sub1'
+const NODE_CHILD = 'pipeline-s1-r1-pipe1.draft.1'
+const childRow = (itemId: string, owner: IParkedRow['owner'], extra: Partial<IParkedRow> = {}) =>
+  parkedRow(itemId, { runId: 'child-run', owner, ...extra })
+for (const [id, row] of [
+  ['c1', childRow('c1', { workflowId: SUB_CHILD, itemId: 'sub1' })],
+  [
+    'n1',
+    childRow(
+      'n1',
+      { workflowId: NODE_CHILD, itemId: 'pipe1', nodeId: 'draft', visit: 1 },
+      { kind: 'tool', item: { kind: 'tool', toolName: 'render' } },
+    ),
+  ],
+  ['cdone', childRow('cdone', { workflowId: SUB_CHILD, itemId: 'sub1' }, { state: 'answered' })],
+  ['cgone', childRow('cgone', { workflowId: SUB_CHILD, itemId: 'sub1' }, { state: 'cancelled' })],
+  // Owners that are not a child of s1's park: another session's workflow, the wrong kind, no such
+  // call, a node visit of another node than the row says.
+  ['cforged', childRow('cforged', { workflowId: 'subagent-s2-r1-sub1', itemId: 'sub1' })],
+  [
+    'ckind',
+    childRow('ckind', { workflowId: SUB_CHILD, itemId: 'sub1', nodeId: 'draft', visit: 1 }),
+  ],
+  ['corphan', childRow('corphan', { workflowId: 'subagent-s1-r1-nope', itemId: 'nope' })],
+  [
+    'cnode',
+    childRow('cnode', { workflowId: NODE_CHILD, itemId: 'pipe1', nodeId: 'other', visit: 1 }),
+  ],
+  // Rows of ANOTHER session, as a lookup that lost its session filter would hand them back: a
+  // child's item (naming s1's own child), the session's own item, and a child item whose call is
+  // another session's.
+  ['leak', childRow('leak', { workflowId: SUB_CHILD, itemId: 'sub1' }, { sessionId: 's2' })],
+  ['leakown', parkedRow('leakown', { sessionId: 's2' })],
+  [
+    'subleak',
+    parkedRow('subleak', { sessionId: 's2', kind: 'tool', answeredBy: 'subagent', item: {} }),
+  ],
+  ['cparent', childRow('cparent', { workflowId: 'subagent-s1-r1-subleak', itemId: 'subleak' })],
+] as const) {
+  parkedRows.set(id, row)
+}
 let parkedFails = false
+let childEnded = false
 
 const backend: ISessionBackend = {
   create: async (...args) => void calls.push({ name: 'create', args }),
@@ -81,6 +126,10 @@ const backend: ISessionBackend = {
     if (failWith) throw failWith
   },
   answer: async (...args) => void calls.push({ name: 'answer', args }),
+  answerChild: async (...args) => {
+    calls.push({ name: 'answerChild', args })
+    if (childEnded) throw new ChildEndedError(args[1])
+  },
   stop: async (...args) => void calls.push({ name: 'stop', args }),
   state: async (sessionId) => {
     if (!known.has(sessionId)) throw new SessionNotFoundError(sessionId)
@@ -100,7 +149,9 @@ const backend: ISessionBackend = {
     return sessionId === 's1' ? parkedRows.get(itemId) : undefined
   },
   subagents: async (sessionId) =>
-    sessionId === 's1' ? [...parkedRows.values()].filter((r) => r.answeredBy === 'subagent') : [],
+    sessionId === 's1'
+      ? [...parkedRows.values()].filter((r) => r.answeredBy === 'subagent' && r.sessionId === 's1')
+      : [],
   pipelines: async (sessionId) =>
     sessionId === 's1' ? [...parkedRows.values()].filter((r) => r.answeredBy === 'pipeline') : [],
   ready: async () => {
@@ -416,6 +467,110 @@ test('answers: checked against the pending item and its kind before the session 
   parkedFails = true
   assert.deepEqual(await code(await answer('q1', { approved: true })), [503, 'unavailable'])
   parkedFails = false
+})
+
+test("a child's item: the answer goes to the child that waits for it, once it is shown to be the session's", async () => {
+  calls.length = 0
+  const code = async (res: Response): Promise<[number, string]> => [
+    res.status,
+    ((await res.json()) as { error?: { code: string } }).error?.code ?? 'ok',
+  ]
+  const answer = (id: string, body: unknown, session = 's1') =>
+    post(`/sessions/${session}/answers/${id}`, JSON.stringify(body))
+  // Not the session's, not a child of its park, closed: all a 404, as an unknown item.
+  for (const id of [
+    'cforged',
+    'ckind',
+    'corphan',
+    'cnode',
+    'leak',
+    'leakown',
+    'cparent',
+    'cgone',
+  ]) {
+    assert.deepEqual(await code(await answer(id, { approved: true })), [404, 'not_found'], id)
+  }
+  assert.deepEqual(await code(await answer('c1', { approved: true }, 'other')), [404, 'not_found'])
+  // Answered already: 409; the wrong shape for its kind: 400.
+  assert.deepEqual(await code(await answer('cdone', { approved: true })), [409, 'already_answered'])
+  assert.deepEqual(await code(await answer('c1', { output: 'x' })), [400, 'invalid_answer'])
+  assert.deepEqual(await code(await answer('n1', { approved: true })), [400, 'invalid_answer'])
+  assert.equal(calls.length, 0, 'nothing refused reached a workflow')
+
+  // To the subagent child, and to the pipeline node visit - never to the session.
+  const sub = await answer('c1', { approved: true })
+  assert.equal(sub.status, 202)
+  assert.deepEqual(await sub.json(), {
+    requestId: 'c1',
+    kind: 'approval',
+    child: { itemId: 'sub1', workflowId: SUB_CHILD },
+  })
+  const node = await answer('n1', { output: { done: true } })
+  assert.equal(node.status, 202)
+  assert.deepEqual(((await node.json()) as { child: unknown }).child, {
+    itemId: 'pipe1',
+    workflowId: NODE_CHILD,
+    nodeId: 'draft',
+    visit: 1,
+  })
+  assert.deepEqual(calls, [
+    {
+      name: 'answerChild',
+      args: ['s1', SUB_CHILD, { requestId: 'c1', value: { approved: true }, at: 42 }],
+    },
+    {
+      name: 'answerChild',
+      args: ['s1', NODE_CHILD, { requestId: 'n1', value: { output: { done: true } }, at: 42 }],
+    },
+  ])
+  // The child is over by the time the answer comes: nothing waits for it any more.
+  childEnded = true
+  assert.deepEqual(await code(await answer('c1', { approved: true })), [404, 'not_found'])
+  childEnded = false
+})
+
+test('childOwnerOf: the workflow id is recomputed from the session, the call, its run (and the visit)', () => {
+  const parent = parkedRows.get('sub1')!
+  const pipeline = parkedRows.get('pipe1')!
+  const c1 = parkedRows.get('c1')!
+  const n1 = parkedRows.get('n1')!
+  assert.equal(childOwnerOf('s1', c1, parent), SUB_CHILD)
+  assert.equal(childOwnerOf('s1', n1, pipeline), NODE_CHILD)
+  // The session of the REQUEST, not a row's: s1's rows asked for s2, and s2's rows (with an
+  // owner s2 named) asked for s1.
+  assert.equal(childOwnerOf('s2', c1, parent), undefined)
+  const s2child = {
+    ...c1,
+    sessionId: 's2',
+    owner: { ...c1.owner!, workflowId: 'subagent-s2-r1-sub1' },
+  }
+  assert.equal(childOwnerOf('s2', s2child, { ...parent, sessionId: 's2' }), 'subagent-s2-r1-sub1')
+  assert.equal(childOwnerOf('s1', s2child, { ...parent, sessionId: 's2' }), undefined)
+  // The row's owner must be the one the session would have named.
+  assert.equal(
+    childOwnerOf('s1', { ...c1, owner: { ...c1.owner!, workflowId: 'x' } }, parent),
+    undefined,
+  )
+  assert.equal(childOwnerOf('s1', c1, { ...parent, runId: 'r2' }), undefined, 'another run')
+  assert.equal(childOwnerOf('s1', c1, { ...parent, itemId: 'sub2' }), undefined, 'another call')
+  assert.equal(childOwnerOf('s1', c1, { ...parent, turn: 2 }), undefined, 'another turn')
+  assert.equal(childOwnerOf('s1', c1, undefined), undefined, 'no call')
+  assert.equal(childOwnerOf('s1', c1, pipeline), undefined, 'a pipeline call, a subagent owner')
+  assert.equal(childOwnerOf('s1', n1, parent), undefined, 'a subagent call, a node owner')
+  assert.equal(
+    childOwnerOf('s1', { ...n1, owner: { ...n1.owner!, visit: 2 } }, pipeline),
+    undefined,
+  )
+  assert.equal(
+    childOwnerOf(
+      's1',
+      { ...n1, owner: { workflowId: NODE_CHILD, itemId: 'pipe1', nodeId: 'draft' } },
+      pipeline,
+    ),
+    undefined,
+    'a node without its visit',
+  )
+  assert.equal(childOwnerOf('s1', parkedRows.get('q1')!, parent), undefined, 'not a child item')
 })
 
 test('subagents: listed from the session, each with its own stream', async () => {

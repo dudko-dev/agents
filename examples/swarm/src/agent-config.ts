@@ -131,7 +131,7 @@ const PROFILE_KEYS = new Set([
 
 export const subagentProfilesFromEnv = (
   env: Env,
-  mcp: Record<string, IMcpServerConfig>,
+  base: Pick<IAgentConfig, 'tools' | 'mcpServers'>,
 ): Record<string, ISubagentProfile> => {
   const raw = json(env, 'SUBAGENTS')
   if (raw === undefined) {
@@ -191,7 +191,7 @@ export const subagentProfilesFromEnv = (
       ...(v.readOnly !== undefined ? { readOnly: v.readOnly as boolean } : {}),
     }
   }
-  checkSubagentProfiles(out, { mcpServers: mcp })
+  checkSubagentProfiles(out, base)
   return out
 }
 

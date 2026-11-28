@@ -56,7 +56,7 @@ approval mode, a Temporal address without a port, a root or writable container -
 | `session.*` | the session options: read by the gateway, fixed when a session starts (`SESSION_*`, `TURN_*`, `SUBAGENT_MAX_PER_*`, `PIPELINE_MAX_PER_*`) |
 | `gateway.*` | replicas, auth, CORS, body and stream bounds, the Service, `preStopSleepSeconds`, `terminationGracePeriodSeconds`, the HPA (`autoscaling`), resources, scheduling, `extraEnv` / `extraEnvFrom` |
 | `worker.*` | concurrency, `shutdownGraceSeconds` (+ `terminationExtraSeconds` = the pod's grace period), lease, the shared limiter, autoscaling (HPA on CPU, or KEDA), resources, scheduling, extra env |
-| `agent.*` | the agent's non-secret settings: provider, model(s), base URL, system prompt, `toolApproval` and `toolRules`, `mcpServers`, `subagents` (SUBAGENTS), `pipelines` (PIPELINES), caps, any other `AGENT_*` under `extra` |
+| `agent.*` | the agent's non-secret settings: provider, model(s), base URL, system prompt, `toolApproval` and `toolRules`, `childAsk` (CHILD_ASK: `park` - a child's ask waits for a person - or `deny`), `mcpServers`, `subagents` (SUBAGENTS), `pipelines` (PIPELINES), caps, any other `AGENT_*` under `extra` |
 | `migrate.*` | the hook Job: on/off, retries, deadline, resources |
 | `serviceAccount.*`, `podDisruptionBudget.*`, `ingress.*`, `networkPolicy.*` | as below |
 | `podSecurityContext`, `securityContext`, `tmp.sizeLimit` | the pods' security (below) |

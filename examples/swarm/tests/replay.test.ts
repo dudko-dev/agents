@@ -15,6 +15,15 @@
 //                                  of two started in one task (they end in the other order), a
 //                                  routed node, the node it routes to - and the stream's batches
 //   pipeline-node.history.json     one visit of the routed node: its activity, its turn.ended
+//   child-parking.history.json     recorded with this code: a turn parks on a subagent call, its
+//                                  child waits for a person - the child's notices (childPark), the
+//                                  patch marker (swarm-child-parking-v1), its waiting / resumed
+//                                  markers - then the child ends and the turn resumes
+//   subagent-parked.history.json   that child: the patch marker, its activity parks, it tells the
+//                                  session, takes the answer (a signal), tells it again, resumes the
+//                                  same run, then its turn.ended (closing its items)
+//   node-parking.history.json      the same with a pipeline call whose node visit waits
+//   pipeline-node-parked.history.json  that visit (draft): parks, answered, resumed
 //
 // A change that alters the commands a recorded session replays fails here: put it behind
 // patched() (session-api.ts, PATCH_*) or a new workflow type, and record a new fixture for it.
@@ -61,4 +70,23 @@ test('a pipeline workflow replays on this code: the engine schedules the same vi
 
 test('a pipeline node visit replays on this code', async () => {
   await replay('pipeline-node', 'pipeline-node-fixture')
+})
+
+test('a session whose subagent child waited for a person replays on this code', async () => {
+  await replay('child-parking')
+})
+
+test('a subagent child that parked and was answered replays on this code', async () => {
+  await replay('subagent-parked', 'subagent-fixture-child-parking-run-fixture-parent-p_sub')
+})
+
+test('a session whose pipeline node visit waited for a person replays on this code', async () => {
+  await replay('node-parking')
+})
+
+test('a pipeline node visit that parked and was answered replays on this code', async () => {
+  await replay(
+    'pipeline-node-parked',
+    'pipeline-fixture-node-parking-run-fixture-parent-p_pipe.draft.1',
+  )
 })

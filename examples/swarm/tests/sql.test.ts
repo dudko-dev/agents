@@ -21,6 +21,7 @@ import {
   loadJournalSql,
 } from '../src/db/journal.ts'
 import {
+  cancelOwnedSql,
   cancelTurnSql,
   markAnsweredSql,
   parkedItemSql,
@@ -292,10 +293,25 @@ test('parked items: one upsert per park, answered / cancelled only from pending'
       childId: 'subagent-s-r-p2',
       item: { kind: 'tool' },
     },
+    {
+      // A pipeline node visit's own item: the session's, owned by the visit's workflow.
+      sessionId: 's',
+      itemId: 'p3',
+      turn: 2,
+      runId: 'child-run',
+      kind: 'approval',
+      answeredBy: 'client',
+      owner: { workflowId: 'pipeline-s-r-p4.draft.1', itemId: 'p4', nodeId: 'draft', visit: 1 },
+      item: { kind: 'approval' },
+    },
   ])
-  assert.match(rec.text, /VALUES \(\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8::jsonb\), \(\$9,/)
+  assert.match(
+    rec.text,
+    /VALUES \(\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8::jsonb, \$9, \$10, \$11, \$12\), \(\$13,/,
+  )
   assert.match(rec.text, /ON CONFLICT \(session_id, item_id\) DO UPDATE .* state = 'pending'/)
-  assert.deepEqual(rec.values.slice(8, 15), [
+  assert.match(rec.text, /owner_id = EXCLUDED\.owner_id, owner_item = EXCLUDED\.owner_item/)
+  assert.deepEqual(rec.values.slice(12, 19), [
     's',
     2,
     'p2',
@@ -305,12 +321,22 @@ test('parked items: one upsert per park, answered / cancelled only from pending'
     'subagent-s-r-p2',
   ])
   assert.equal(rec.values[6], null)
+  assert.deepEqual(rec.values.slice(8, 12), [null, null, null, null], 'the session owns its own')
+  assert.deepEqual(rec.values.slice(32, 36), ['pipeline-s-r-p4.draft.1', 'p4', 'draft', 1])
   assert.match(
     markAnsweredSql('s', ['p1']).text,
     /item_id = ANY\(\$2::text\[\]\) AND state = 'pending'$/,
   )
   assert.match(cancelTurnSql('s', 2).text, /AND turn = \$2 AND state = 'pending'$/)
+  // The lookup is by session AND item: an item of another session is not found.
+  assert.match(parkedItemSql('s', 'p1').text, /WHERE session_id = \$1 AND item_id = \$2$/)
   assert.deepEqual(parkedItemSql('s', 'p1').values, ['s', 'p1'])
+  // A child's end closes what it still waits for: its own items, in its session, pending only.
+  assert.match(
+    cancelOwnedSql('s', 'subagent-s-r-p2').text,
+    /WHERE session_id = \$1 AND owner_id = \$2 AND state = 'pending'$/,
+  )
+  assert.deepEqual(cancelOwnedSql('s', 'w').values, ['s', 'w'])
   assert.match(subagentsOfSql('s').text, /answered_by = \$2 ORDER BY created_at, item_id$/)
   assert.deepEqual(subagentsOfSql('s').values, ['s', 'subagent'])
   assert.deepEqual(pipelinesOfSql('s').values, ['s', 'pipeline'])

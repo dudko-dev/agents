@@ -102,6 +102,7 @@ agent:
   synthesizerModel: small
   systemPrompt: Be brief.
   toolApproval: ask-writes
+  childAsk: deny
   toolRules:
     github__delete_*: deny
   mcpServers:

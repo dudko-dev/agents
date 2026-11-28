@@ -1,8 +1,10 @@
 // Static subagents: the tool's dispatch (defer within the caps), the child agent's config (only
-// the profile's tools, nobody to ask) and the session agent's (park on a person's question).
+// the profile's tools; an ask parks the child under CHILD_ASK=park, is a denial under deny) and
+// the session agent's (park on a person's question).
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { isDeferredResult, type IAgentConfig } from '@dudko.dev/agent'
+import { CHILD_CANNOT_WAIT, childAskDecision } from '../src/child-ask.ts'
 import { withTurnScope, type ITurnScope } from '../src/lease.ts'
 import {
   checkSubagentProfiles,
@@ -93,6 +95,31 @@ test('the child agent: the profile over the worker, only its tools, nobody to as
   assert.equal(bare.availableTools, undefined)
   assert.equal(bare.model, 'big')
   assert.equal(bare.systemPrompt, 'parent')
+})
+
+test("CHILD_ASK: under 'park' a child's ask parks its run - only when its workflow waits; under 'deny' nobody is asked", async () => {
+  const park = childAgentConfig(base, { description: 'd' }, 'park')
+  assert.equal(park.toolApproval?.mode, 'ask-writes')
+  assert.deepEqual(park.toolApproval?.rules, { 'github__*': 'deny' })
+  assert.equal(park.toolApproval?.onRequest, childAskDecision)
+  // Decided per run, by the turn scope the activity sets: a child whose workflow waits parks;
+  // one that does not (started before child parking), or a call outside a turn, is denied.
+  const ask = () => park.toolApproval!.onRequest!({} as never, {} as never)
+  assert.deepEqual(await withTurnScope({ ...scope(), mayPark: true }, async () => ask()), {
+    park: true,
+  })
+  const denied = { approved: false, reason: CHILD_CANNOT_WAIT }
+  assert.deepEqual(await withTurnScope(scope(), async () => ask()), denied)
+  assert.deepEqual(await ask(), denied)
+  // 'deny' (and the default): no onRequest at all - the core's own "nobody to ask" denial.
+  assert.equal(
+    childAgentConfig(base, { description: 'd' }, 'deny').toolApproval?.onRequest,
+    undefined,
+  )
+  assert.equal(childAgentConfig(base, { description: 'd' }).toolApproval?.onRequest, undefined)
+  // No approval config on the worker: nothing to ask, nothing added.
+  const plain = childAgentConfig({ ...base, toolApproval: undefined }, { description: 'd' }, 'park')
+  assert.equal(plain.toolApproval, undefined)
 })
 
 test('the session agent: the subagent tools and parking on an ask', async () => {

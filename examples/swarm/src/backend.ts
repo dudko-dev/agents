@@ -5,6 +5,7 @@ import { createParkedStore } from './db/parked.ts'
 import type { IQueryable } from './db/pool.ts'
 import {
   BackendUnavailableError,
+  ChildEndedError,
   SessionEndedError,
   SessionNotFoundError,
   type ISessionBackend,
@@ -84,6 +85,19 @@ export const createTemporalBackend = (o: {
       call(sessionId, () => handle(sessionId).signal(messageSignal, message)),
     answer: (sessionId, answer) =>
       call(sessionId, () => handle(sessionId).signal(answerSignal, answer)),
+    // To the child workflow that waits for the item (the gateway checked it is the session's).
+    answerChild: async (_sessionId, workflowId, answer) => {
+      try {
+        await o.client.withDeadline(Date.now() + deadlineMs, () =>
+          o.client.workflow.getHandle(workflowId).signal(answerSignal, answer),
+        )
+      } catch (err) {
+        if (err instanceof WorkflowNotFoundError) {
+          throw new ChildEndedError(workflowId)
+        }
+        throw new BackendUnavailableError(`temporal: ${(err as Error).message}`)
+      }
+    },
     stop: (sessionId, stop) => call(sessionId, () => handle(sessionId).signal(stopSignal, stop)),
     state: (sessionId) => call(sessionId, () => handle(sessionId).query(stateQuery)),
     parkedItem: (sessionId, itemId) => parked.item(sessionId, itemId),

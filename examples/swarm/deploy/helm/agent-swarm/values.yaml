@@ -190,6 +190,10 @@ agent:
   # autopilot | read-only | ask-writes | ask-all. An "ask" parks the turn until a person answers
   # it through the gateway (POST /sessions/:id/answers/:requestId).
   toolApproval: autopilot
+  # CHILD_ASK: what an "ask" of a CHILD's approval (a static subagent, a pipeline node visit)
+  # does. park: the child's own run parks and waits for a person's answer through the same route
+  # (no slot held; the parent turn waits for its child). deny: an ask is a denial (nobody to ask).
+  childAsk: park
   # JSON objects, as strings or as YAML maps (rendered as JSON).
   toolRules: {}
   # MCP servers: {"name": {"url": "...", "headers": {...}}}. Headers with secrets belong in a

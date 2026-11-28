@@ -69,6 +69,8 @@ test('the values schema refuses what must not deploy', async () => {
     ['securityContext.allowPrivilegeEscalation', true],
     ['securityContext.privileged', true],
     ['agent.toolApproval', 'yolo'],
+    ['agent.childAsk', 'ask'],
+    ['agent.childAsk', true],
     ['agent.providerType', 'xai'],
     ['gateway.auth', 'open'],
     ['temporal.address', 'no-port'],

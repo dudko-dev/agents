@@ -3,7 +3,8 @@
 //
 //   POST /sessions                          start a session (optionally with its first message)
 //   POST /sessions/:id/messages             { text, id? }      -> the session's inbox
-//   POST /sessions/:id/answers/:requestId   the answer         -> an item a parked turn waits for
+//   POST /sessions/:id/answers/:requestId   the answer         -> an item a parked turn waits for,
+//                                           or one a child of it waits for (signalled to that child)
 //   POST /sessions/:id/stop                 { end? }           -> stop the running turn
 //   GET  /sessions/:id                      the session's state (a workflow query)
 //   GET  /sessions/:id/events?after=<cursor>  SSE: replay from Postgres, then live (LISTEN/NOTIFY)
@@ -25,6 +26,7 @@ import type { IParkedRow } from './db/parked.ts'
 import { corsHeaders, createBearerCheck, HttpError, readJson, sendError, sendJson } from './http.ts'
 import { errorMessage, type ILogger } from './log.ts'
 import {
+  childWorkflowIdOf,
   pipelineEventsPath,
   pipelineNodeStreamOf,
   pipelineStreamOf,
@@ -37,6 +39,10 @@ export interface ISessionBackend {
   create: (sessionId: string, first?: IUserMessage) => Promise<void>
   message: (sessionId: string, message: IUserMessage) => Promise<void>
   answer: (sessionId: string, answer: IAnswer) => Promise<void>
+  // The answer to an item a child of the session's parked turn waits for: signalled to that child
+  // workflow (`workflowId`, checked by the gateway to be the session's). ChildEndedError when the
+  // child is over.
+  answerChild: (sessionId: string, workflowId: string, answer: IAnswer) => Promise<void>
   stop: (sessionId: string, stop: IStopRequest) => Promise<void>
   state: (sessionId: string) => Promise<ISessionView>
   // The session was started here (Postgres): the event stream of an unknown id is a 404.
@@ -71,6 +77,14 @@ export class SessionEndedError extends Error {
   constructor(sessionId: string) {
     super(`session ${sessionId} has ended`)
     this.name = 'SessionEndedError'
+  }
+}
+
+// The child an item names is over (stopped, ended): nothing waits for the item any more.
+export class ChildEndedError extends Error {
+  constructor(workflowId: string) {
+    super(`child workflow ${workflowId} has ended`)
+    this.name = 'ChildEndedError'
   }
 }
 
@@ -228,6 +242,9 @@ const mapBackendError = (err: unknown): HttpError => {
   if (err instanceof HttpError) return err
   if (err instanceof SessionNotFoundError) return new HttpError(404, 'not_found', err.message)
   if (err instanceof SessionEndedError) return new HttpError(409, 'session_ended', err.message)
+  if (err instanceof ChildEndedError) {
+    return new HttpError(404, 'not_found', 'nothing waits for that item any more')
+  }
   if (err instanceof BackendUnavailableError) {
     return new HttpError(503, 'unavailable', err.message, { 'retry-after': '2' })
   }
@@ -418,12 +435,30 @@ export const createGateway = (deps: IGatewayDeps): IGateway => {
         case 'answer': {
           const value = objectBody(await readJson(req, config.maxBodyBytes), true)
           const item = await parkedItem(r.sessionId, r.requestId)
-          if (!item || item.state === 'cancelled') {
-            throw new HttpError(
+          const missing = (): HttpError =>
+            new HttpError(
               404,
               'not_found',
               `no parked turn of session ${r.sessionId} waits for ${r.requestId}`,
             )
+          // The row is the session's (the lookup is by session; checked again), and still open.
+          if (!item || item.sessionId !== r.sessionId || item.state === 'cancelled') {
+            throw missing()
+          }
+          // A child's item: the answer goes to the child that waits for it - once it is shown to
+          // be a child of THIS session's parked turn: the call it answers is the session's too,
+          // and the child's workflow id is the one the session named it with (childOwnerOf).
+          // Anything else is unknown.
+          let owner: string | undefined
+          if (item.owner) {
+            const parent = await parkedItem(r.sessionId, item.owner.itemId)
+            owner =
+              parent && parent.sessionId === r.sessionId
+                ? childOwnerOf(r.sessionId, item, parent)
+                : undefined
+            if (!owner) {
+              throw missing()
+            }
           }
           if (item.state === 'answered') {
             throw new HttpError(409, 'already_answered', `${r.requestId} is answered already`)
@@ -446,8 +481,22 @@ export const createGateway = (deps: IGatewayDeps): IGateway => {
           if (problem) {
             throw new HttpError(400, 'invalid_answer', problem)
           }
-          await backend.answer(r.sessionId, { requestId: r.requestId, value, at: now() })
-          sendJson(res, 202, { requestId: r.requestId, kind: item.kind }, cors)
+          const answer: IAnswer = { requestId: r.requestId, value, at: now() }
+          if (owner) {
+            await backend.answerChild(r.sessionId, owner, answer)
+          } else {
+            await backend.answer(r.sessionId, answer)
+          }
+          sendJson(
+            res,
+            202,
+            {
+              requestId: r.requestId,
+              kind: item.kind,
+              ...(owner && item.owner ? { child: childOf(item.owner) } : {}),
+            },
+            cors,
+          )
           return
         }
         case 'stop': {
@@ -537,6 +586,45 @@ export const createGateway = (deps: IGatewayDeps): IGateway => {
     },
   }
 }
+
+// The child workflow an item of a child's own park goes to - or undefined when it cannot be shown
+// to be a child of the request's session. The workflow id is never taken from the item's row
+// alone: it is recomputed from the session of the REQUEST (`sessionId`, not a row's), the parked
+// turn's item the child answers (`parent`: its run and its id) and, for a pipeline node visit, the
+// node and the visit - the same function the session named the child with - and must equal the
+// owner the row names. The parent must be a call of the child's kind, in the same turn. (The
+// route checks first that both rows are the session's.)
+export const childOwnerOf = (
+  sessionId: string,
+  item: IParkedRow,
+  parent: IParkedRow | undefined,
+): string | undefined => {
+  const owner = item.owner
+  if (!owner || !parent) {
+    return undefined
+  }
+  if (parent.itemId !== owner.itemId || parent.turn !== item.turn) {
+    return undefined
+  }
+  const node =
+    owner.nodeId !== undefined && owner.visit !== undefined
+      ? { nodeId: owner.nodeId, visit: owner.visit }
+      : undefined
+  if (owner.nodeId !== undefined || owner.visit !== undefined) {
+    if (!node || parent.answeredBy !== 'pipeline') return undefined
+  } else if (parent.answeredBy !== 'subagent') {
+    return undefined
+  }
+  const expected = childWorkflowIdOf(sessionId, parent.runId, parent.itemId, node)
+  return expected === owner.workflowId ? expected : undefined
+}
+
+// Which child an answer went to (the 202's `child`).
+const childOf = (owner: NonNullable<IParkedRow['owner']>): Record<string, unknown> => ({
+  itemId: owner.itemId,
+  workflowId: owner.workflowId,
+  ...(owner.nodeId !== undefined ? { nodeId: owner.nodeId, visit: owner.visit } : {}),
+})
 
 // A static subagent call as GET /sessions/:id/subagents lists it.
 export const subagentView = (row: IParkedRow): Record<string, unknown> => {

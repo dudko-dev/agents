@@ -3,6 +3,7 @@
 import { hostname } from 'node:os'
 import type { IAgentConfig } from '@dudko.dev/agent'
 import { agentConfigFromEnv, pipelinesFromEnv, subagentProfilesFromEnv } from './agent-config.ts'
+import { CHILD_ASKS, type ChildAsk } from './child-ask.ts'
 import type { ILimiterConfig, LimiterScope } from './db/limiter.ts'
 import { bool, ConfigError, int, list, num, oneOf, secret, str, type Env } from './env.ts'
 import { isLogLevel, type LogLevel } from './log.ts'
@@ -54,6 +55,9 @@ export interface IWorkerConfig {
   subagents?: Record<string, ISubagentProfile>
   // Pipelines (PIPELINES): name -> description + definition.
   pipelines?: Record<string, IPipelineConfig>
+  // CHILD_ASK: an "ask" of a child's approval mode (a subagent child, a pipeline node) parks the
+  // child's run until a person answers ('park', the default) or is a denial ('deny').
+  childAsk?: ChildAsk
   temporal: ITemporalConfig
   database: IDatabaseConfig
   logLevel: LogLevel
@@ -190,7 +194,7 @@ export const workerConfig = (env: Env): IWorkerConfig => {
   const bundle = str(env, 'WORKFLOW_BUNDLE_PATH')
   const limiter = limiterConfig(env)
   const agent = agentConfigFromEnv(env)
-  const subagents = subagentProfilesFromEnv(env, agent.mcpServers)
+  const subagents = subagentProfilesFromEnv(env, { mcpServers: agent.mcpServers })
   return {
     identity: str(env, 'WORKER_IDENTITY') ?? `${hostname()}-${process.pid}`,
     maxConcurrentTurns: int(env, 'WORKER_MAX_CONCURRENT_TURNS', 10, { min: 1 }),
@@ -204,6 +208,7 @@ export const workerConfig = (env: Env): IWorkerConfig => {
     agent,
     subagents,
     pipelines: pipelinesFromEnv(env, { mcpServers: agent.mcpServers }, Object.keys(subagents)),
+    childAsk: oneOf(env, 'CHILD_ASK', CHILD_ASKS, 'park'),
     temporal: temporalConfig(env),
     database: databaseConfig(env),
     logLevel: logLevelOf(env),

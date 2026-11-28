@@ -650,6 +650,12 @@
             "ask-all"
           ]
         },
+        "childAsk": {
+          "enum": [
+            "park",
+            "deny"
+          ]
+        },
         "toolRules": {
           "oneOf": [
             {
