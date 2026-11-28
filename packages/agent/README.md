@@ -296,6 +296,8 @@ const agent = await createAgent({
 
 [`examples/scale-out-memory.ts`](./examples/scale-out-memory.ts) has in-memory reference implementations of both hooks - a lease map with a TTL and a token bucket with a per-run budget - to show the wiring and the contract without a broker (single process only; the same logic in a shared store is the multi-worker version).
 
+A whole deployment built on these hooks - sessions as Temporal workflows, each turn one `agent.run` in an activity whose heartbeat is the `runLease`, snapshots, events (`LISTEN/NOTIFY`) and a shared token bucket in Postgres, a stateless gateway with SSE, one Docker image and a Compose file - is in the monorepo: [`examples/swarm`](https://github.com/dudko-dev/agents/tree/main/examples/swarm).
+
 ### OpenTelemetry
 
 The agent emits OTel spans for `agent.run`, `agent.plan`, `agent.execute_step`, `agent.replan`, and `agent.synthesize` via the `@opentelemetry/api` package. With no SDK installed, the calls are no-ops; install your favorite OTel exporter (jaeger, otlp, console) and you get traces and parent-child relationships out of the box. Span attributes are documented in [`src/tracing.ts`](./src/tracing.ts).

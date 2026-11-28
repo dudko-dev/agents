@@ -1,0 +1,101 @@
+name: Swarm example
+
+# examples/swarm: the Node agent as a swarm on Temporal + Postgres. ci.yml already runs its
+# typecheck, format, build and unit tests with every other project; this adds what needs services
+# - the integration tests against a real Postgres (a service container) and a Temporal dev server
+# (downloaded by @temporalio/testing) - and the image build. Nothing is pushed: publishing the
+# image is a workflow of its own.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'examples/swarm/**'
+      - 'packages/agent/**'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - '.github/workflows/swarm.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'examples/swarm/**'
+      - 'packages/agent/**'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - '.github/workflows/swarm.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: '${{ github.workflow }} @ ${{ github.event.pull_request.head.ref || github.ref }}'
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Typecheck, unit and integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: swarm
+          POSTGRES_PASSWORD: swarm
+          POSTGRES_DB: swarm
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U swarm -d swarm"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      DATABASE_URL: postgres://swarm:swarm@localhost:5432/swarm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # nx builds @dudko.dev/agent first (the swarm depends on it through workspace:*).
+      - run: pnpm nx run-many -t typecheck format:check build test -p swarm
+      - run: pnpm nx run swarm:test:integration
+
+  image:
+    name: Docker image (no push)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: swarm
+          POSTGRES_PASSWORD: swarm
+          POSTGRES_DB: swarm
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U swarm -d swarm"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build (context = the repo root)
+        run: docker build -f examples/swarm/Dockerfile -t agent-swarm:ci .
+      # The image starts as `node` on a read-only root filesystem and applies the schema.
+      - name: Smoke - migrate
+        run: >-
+          docker run --rm --network host --read-only --tmpfs /tmp
+          -e DATABASE_URL=postgres://swarm:swarm@localhost:5432/swarm
+          agent-swarm:ci migrate
+      - name: Smoke - an unknown role is refused
+        run: |
+          set +e
+          docker run --rm agent-swarm:ci
+          test $? -eq 2
+      - name: Compose file
+        run: docker compose -f examples/swarm/compose.yaml config -q

@@ -1,0 +1,133 @@
+# The whole swarm on one machine: Postgres, the Temporal DEV server, the one-shot migration, the
+# gateway and N workers.
+#
+#   cp .env.example .env        # fill in a provider key and GATEWAY_TOKENS; .env is gitignored
+#   docker compose up --build --scale worker=3
+#
+# The Temporal dev server keeps everything in memory and is for trying the swarm out. Production
+# uses a real Temporal cluster (self-hosted, with its own database) - point TEMPORAL_ADDRESS at it.
+name: agent-swarm
+
+x-swarm: &swarm
+  image: ${SWARM_IMAGE:-agent-swarm:local}
+  build:
+    context: ../..
+    dockerfile: examples/swarm/Dockerfile
+  # The image needs no writable filesystem but /tmp (the agent's per-run sandbox).
+  read_only: true
+  tmpfs:
+    - /tmp
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  restart: unless-stopped
+
+x-env: &env
+  # Local only: the compose network's Postgres. Elsewhere this is a secret (DATABASE_URL_FILE).
+  DATABASE_URL: postgres://swarm:swarm@postgres:5432/swarm
+  TEMPORAL_ADDRESS: temporal:7233
+  TEMPORAL_NAMESPACE: default
+  TEMPORAL_TASK_QUEUE: swarm
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: swarm
+      POSTGRES_PASSWORD: swarm
+      POSTGRES_DB: swarm
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U swarm -d swarm']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  temporal:
+    image: temporalio/temporal:1.10.1
+    command: ['server', 'start-dev', '--ip', '0.0.0.0', '--namespace', 'default']
+    ports:
+      - '127.0.0.1:8233:8233' # the Temporal UI: http://localhost:8233
+    healthcheck:
+      test: ['CMD', 'temporal', 'operator', 'cluster', 'health', '--address', '127.0.0.1:7233']
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  migrate:
+    <<: *swarm
+    command: ['migrate']
+    environment:
+      <<: *env
+    restart: 'no'
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  gateway:
+    <<: *swarm
+    command: ['gateway']
+    environment:
+      <<: *env
+      # Only the gateway's own secret (from .env): it never sees a provider key. Unset, the
+      # gateway refuses to start and says so.
+      GATEWAY_TOKENS: ${GATEWAY_TOKENS:-}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      SESSION_IDLE_TIMEOUT_MS: ${SESSION_IDLE_TIMEOUT_MS:-86400000}
+      TURN_HEARTBEAT_TIMEOUT_MS: ${TURN_HEARTBEAT_TIMEOUT_MS:-20000}
+    ports:
+      - '127.0.0.1:8080:8080'
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:8080/readyz').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 4s
+      retries: 20
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      temporal:
+        condition: service_healthy
+
+  worker:
+    <<: *swarm
+    command: ['worker']
+    # The provider keys and the agent's settings (AGENT_*, MCP_SERVERS, LIMITER_*).
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      <<: *env
+      LEASE_TTL_MS: ${LEASE_TTL_MS:-15000}
+      WORKER_SHUTDOWN_GRACE_MS: ${WORKER_SHUTDOWN_GRACE_MS:-30000}
+    # SIGTERM drains: the running turns get WORKER_SHUTDOWN_GRACE_MS, so give Docker longer.
+    stop_grace_period: 45s
+    deploy:
+      replicas: ${WORKERS:-2}
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:8081/readyz').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 4s
+      retries: 20
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      temporal:
+        condition: service_healthy
+
+volumes:
+  pgdata:
