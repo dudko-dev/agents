@@ -871,7 +871,31 @@ const runAgentLoopInner = async (
   // Skip onRunStart on resume - the original run already fired it. We don't
   // want consumers seeing two starts for the same runId.
   if (!resumed) {
-    await callPersistence('onRunStart', buildSnapshot('executing'))
+    if (rootJournal && persistence?.onRunStart) {
+      // persistence.journal: NOT fail-open. A run whose start is not on record can never be
+      // resumed (no snapshot) and its id never reused (it has journal entries), so a write its
+      // tools made would be made again by the run that replaces it. It stops before its first
+      // step instead - so far only model calls have been made, and they are on record.
+      if (held?.lost) {
+        throw held.lost
+      }
+      try {
+        await persistence.onRunStart(buildSnapshot('executing'))
+      } catch (err) {
+        const e = new Error(
+          `[start] persistence.onRunStart threw while recording run ${runId}; with a call journal a run that is not on record cannot be resumed, so it stops before its first step: ${asError(err).message}`,
+          { cause: err },
+        )
+        proxiedCtx.emit({ type: 'error', error: e, phase: 'plan' })
+        await callPersistence(
+          'onRunComplete',
+          buildSnapshot('failed', { error: e.message, completedAt: Date.now() }),
+        )
+        throw e
+      }
+    } else {
+      await callPersistence('onRunStart', buildSnapshot('executing'))
+    }
   }
 
   // Capture the post-iteration "next loop entry" state. Called at every
