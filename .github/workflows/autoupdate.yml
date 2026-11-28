@@ -188,8 +188,46 @@ jobs:
           # the release.yml chained to it never fires. Dispatch it directly;
           # it skips a version npm already has.
           MERGE_SHA=$(gh pr view "$PR_URL" --json mergeCommit --jq .mergeCommit.oid)
+          echo "merge_sha=$MERGE_SHA" >> "$GITHUB_OUTPUT"
           gh workflow run release.yml --ref main -f ref="$MERGE_SHA"
           echo "dispatched release.yml for $MERGE_SHA"
+      # The swarm image (swarm-image.yml) follows every Release run through `workflow_run`, but the
+      # release dispatched above was started with GITHUB_TOKEN, and its runs start no workflows: the
+      # image of a release made here was never built. Wait until the release has tagged the agent at
+      # the merge commit, then dispatch the image for that tag. When this update did not bump the
+      # agent, its version's tag already points at an older commit: nothing to build. A release
+      # that fails or takes too long leaves a warning, never a red run (dispatch it by hand then).
+      - name: Dispatch the swarm image for the agent's release
+        if: steps.merge_pr.outputs.merge_sha != ''
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MERGE_SHA: ${{ steps.merge_pr.outputs.merge_sha }}
+        run: |
+          set -euo pipefail
+          VERSION=$(gh api "repos/$GITHUB_REPOSITORY/contents/packages/agent/package.json?ref=$MERGE_SHA" \
+            --jq .content | base64 -d | jq -r .version)
+          TAG="agent-v$VERSION"
+          # An annotated tag is compared by the commit it points at (its ^{} line).
+          tagged() {
+            git ls-remote --tags origin "refs/tags/$TAG" "refs/tags/$TAG^{}" |
+              awk -v t="refs/tags/$TAG" '$2 == t "^{}" { d = $1 } $2 == t { p = $1 } END { print (d != "" ? d : p) }'
+          }
+          AT=$(tagged)
+          if [ -n "$AT" ] && [ "$AT" != "$MERGE_SHA" ]; then
+            echo "$TAG already tags $AT: this update released no new agent, no image to build"
+            exit 0
+          fi
+          for i in $(seq 1 40); do
+            [ "$(tagged)" = "$MERGE_SHA" ] && break
+            sleep 30
+          done
+          if [ "$(tagged)" != "$MERGE_SHA" ]; then
+            echo "::warning::$TAG does not tag $MERGE_SHA after 20 minutes: the swarm image was not dispatched (run swarm-image.yml with ref $TAG once the release is out)"
+            exit 0
+          fi
+          gh workflow run swarm-image.yml --ref main -f ref="$TAG"
+          echo "dispatched swarm-image.yml for $TAG"
       # The autoupdater proves an update only with its own command list on one
       # Node version, while CI also runs the test matrix and any extra jobs. An
       # update CI rejected used to stop here and sit open for good; hand it to

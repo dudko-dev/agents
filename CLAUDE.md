@@ -149,7 +149,9 @@ tool. Do not infer success from "the change looks right".
   When the checks are red it dispatches `claude.yml`, which fixes the branch (up to 3 attempts).
   Events made with `GITHUB_TOKEN` start no workflows, which is why these two dispatch `ci.yml`,
   `live-model.yml` and `release.yml` explicitly — do not replace the dispatches with comment
-  mentions or rely on `pull_request` / `push` triggers there.
+  mentions or rely on `pull_request` / `push` triggers there. The same goes for the swarm image:
+  a Release run autoupdate dispatched fires no `workflow_run`, so autoupdate waits for the agent's
+  release tag at the merge commit and dispatches `swarm-image.yml` with it.
 - On an autoupdate branch (`chore/autoupdate-<run_id>`): make the checks green with compatibility
   fixes only, never change product behaviour or versions; if that is impossible, say so in a PR
   comment instead of guessing.

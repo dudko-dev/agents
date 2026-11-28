@@ -15,8 +15,10 @@ name: Swarm image
 # When: the release tags. release.yml pushes `agent-v<version>` with GITHUB_TOKEN, and events made
 # with GITHUB_TOKEN start no workflows, so a tag push never arrives from there: this workflow also
 # runs after every Release run (workflow_run, which does start) and publishes when that run tagged
-# the agent at its commit. A tag pushed by a person starts it directly. Never on pull requests:
-# swarm.yml builds the image without a push.
+# the agent at its commit. A Release run that was itself started with GITHUB_TOKEN (the weekly
+# autoupdate dispatches it) fires no workflow_run either: autoupdate.yml waits for its tag and
+# dispatches this workflow with that tag. A tag pushed by a person starts it directly. Never on
+# pull requests: swarm.yml builds the image without a push.
 on:
   push:
     tags: ['agent-v*']
