@@ -323,6 +323,8 @@ const agent = await createAgent({
 
 [`examples/scale-out-memory.ts`](./examples/scale-out-memory.ts) has in-memory reference implementations of both hooks - a lease map with a TTL and a token bucket with a per-run budget - to show the wiring and the contract without a broker (single process only; the same logic in a shared store is the multi-worker version).
 
+A whole deployment built on these hooks - sessions as Temporal workflows, each turn one `agent.run` in an activity whose heartbeat is the `runLease`, snapshots, events (`LISTEN/NOTIFY`) and a shared token bucket in Postgres, a stateless gateway with SSE, one Docker image and a Compose file - is in the monorepo: [`examples/swarm`](https://github.com/dudko-dev/agents/tree/main/examples/swarm).
+
 ### Parking a run: a person's answer or a result from outside
 
 A run that needs something it cannot have now - a person's yes, the result of a long job, a webhook, a review in another system - can **park**: it stops without failing, frees its worker, and is resumed later with the answer, by any worker, hours or days later. Parking needs the [call journal](#the-call-journal-exact-resume): the resume replays the run up to where it parked, so the model cannot ask for something else on the way back.

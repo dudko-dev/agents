@@ -155,7 +155,8 @@ export const SPAWN_INPUT_SCHEMA = {
         'Optional: the names of YOUR tools the helper may use. Only tools you have can be named. Omit it for the default set; pass [] for a helper that only reasons.',
     },
   },
-  required: ['task'],
+  // A mutable array: JSON Schema 7's `required` is `string[]`, and `as const` would make it readonly.
+  required: ['task'] as string[],
   additionalProperties: false,
 } as const
 
