@@ -16,7 +16,7 @@ import type {
 import type { McpProtocolMode } from './mcp-shared.ts'
 import type { McpSkillConsent, McpSkillConsentView, McpSkillsSetting } from './mcp-skills.ts'
 import type { IRunLease, RunLeaseLostReason } from './run-lease.ts'
-import type { ISharedLimits } from './shared-limits.ts'
+import type { ISharedLimits, ModelCallStage } from './shared-limits.ts'
 import type { ISubagentsConfig } from './subagent-dynamic-shared.ts'
 
 export type ProviderType =
@@ -238,7 +238,9 @@ export type ToolApprovalMode = 'autopilot' | 'ask-writes' | 'ask-all' | 'read-on
 export type ToolPermission = 'allow' | 'ask' | 'deny'
 
 export interface IToolApprovalRequest {
-  // Unique per request.
+  // Unique per request. With `persistence.journal` it is also STABLE: derived from where the
+  // question is asked in the run (its journal position), so the same question has the same id
+  // after a resume - the id `answers` names (see "Parking a run").
   id: string
   toolName: string
   // The tool input AFTER inputSanitizer.
@@ -276,8 +278,14 @@ export interface IToolApprovalContext {
 
 // `remember: true` on an approval allows the tool for the rest of this agent
 // instance's life without asking again.
-export type ToolApprovalDecision =
+export type ToolApprovalAnswer =
   boolean | { approved: boolean; reason?: string; remember?: boolean }
+
+// What `onRequest` may answer: an answer, or `{ park: true }` - "the answer will come later, from
+// outside the run". The run then parks at the end of the tool round (needs
+// `persistence.journal`; without it, or for a question asked outside a tool call, it is a
+// denial). See the README, "Parking a run".
+export type ToolApprovalDecision = ToolApprovalAnswer | { park: true }
 
 export interface IToolApprovalConfig {
   // Default 'autopilot'. Switch at runtime with agent.setToolApprovalMode().
@@ -285,7 +293,9 @@ export interface IToolApprovalConfig {
   // Exact tool names or '*' globs, e.g. { 'github__delete_*': 'deny' }.
   // The most specific match wins (exact > longest glob) and beats the mode.
   rules?: Record<string, ToolPermission>
-  // Called for every 'ask'. Without it an 'ask' is a denial.
+  // Called for every 'ask'. Without it an 'ask' is a denial. `{ park: true }` instead of an
+  // answer parks the run at the end of the tool round, to be resumed with the answer later
+  // (needs persistence.journal; else, or outside a tool call, it is a denial).
   onRequest?: (
     req: IToolApprovalRequest,
     ctx: IToolApprovalContext,
@@ -848,6 +858,9 @@ type AgentEventBody =
       approved: boolean
       reason?: string
       automatic: boolean
+      // The question was not answered: `onRequest` said `{ park: true }` (or a resumed run has no
+      // answer for it yet), and the run parks at the end of the tool round with it.
+      parked?: true
     }
   // An MCP server asked the user for input during a tool call (`onElicitation` is being called).
   // `message`, `requestedSchema` and `url` are the SERVER's text: cleaned and capped, for a UI
@@ -959,6 +972,12 @@ type AgentEventBody =
   // nothing more: another worker may own it now. Fires once, before the run rejects with a
   // RunLeaseError (`lost: true`).
   | { type: 'lease.lost'; owner: string; reason: RunLeaseLostReason; error?: string }
+  // The run parked (persistence.journal): it stops without failing, its snapshot is 'waiting',
+  // and `agent.run()` resolves with `result.parked`. `items` are what it waits for.
+  | { type: 'run.parked'; items: ParkedItem[]; at: number }
+  // A resumed run stopped replaying its journal: the request made at `position` is not the one
+  // recorded there, so from here the run is live. Positions only, never content.
+  | { type: 'journal.diverged'; position: string; kind: 'model' | 'tool'; stage?: ModelCallStage }
   | { type: 'error'; error: Error; phase: 'plan' | 'execute' | 'replan' | 'synthesize' | 'init' }
   // A pipeline's own events (createPipeline): the run, each node visit, each edge decision.
   | PipelineEvent
@@ -1018,6 +1037,45 @@ export interface IAgentRunOptions {
   // the next boundary, control.stopSubagent(id) stops one subagent. Make it with
   // createRunControl(); one control per run.
   control?: RunControl
+  // With resumeFromRunId, for a run that parked: the answers to its pending items, by item id.
+  // An 'approval' item takes a ToolApprovalAnswer; a 'tool' item takes its result,
+  // `{ output }` or `{ error }` (untrusted: checked, cleaned and capped like any tool result).
+  // An id that is not pending is refused; an item left unanswered parks the run again. Needs
+  // persistence.journal. See the README, "Parking a run".
+  answers?: Record<string, ParkAnswer>
+}
+
+// The answer to a parked 'tool' item: the result the tool would have returned, or its failure.
+export type ToolResultAnswer = { output: unknown } | { error: string }
+
+export type ParkAnswer = ToolApprovalAnswer | ToolResultAnswer
+
+// One thing a parked run waits for. `id` is stable: derived from the item's journal position, so
+// the same item has the same id however often the run is resumed.
+//   'approval' - a question of the approval gate: a tool call to allow, or an MCP server's skill to
+//                let in (`request.skill`). Answer with a ToolApprovalAnswer.
+//   'tool'     - a tool call whose result comes from outside (the tool returned deferResult()).
+//                Answer with a ToolResultAnswer.
+export type ParkedItem =
+  | { id: string; kind: 'approval'; request: IToolApprovalRequest }
+  | {
+      id: string
+      kind: 'tool'
+      toolName: string
+      // The input AFTER inputSanitizer.
+      input: unknown
+      // What the tool said about the result to come (deferResult({ note })).
+      note?: string
+      step?: IPlanStep
+      // Set when a helper the model started made the call.
+      subagent?: { id: string; depth: number }
+    }
+
+// A parked run: which run, what it waits for, and since when (epoch ms).
+export interface IParkedRun {
+  runId: string
+  items: ParkedItem[]
+  at: number
 }
 
 export interface IAgentRunResult {
@@ -1033,6 +1091,9 @@ export interface IAgentRunResult {
   // to show the model (they arrived while the answer was being written). Send them as the
   // next run. A run that throws (abort, failure) cannot return it - read control.pending().
   undelivered?: string[]
+  // Set when the run PARKED instead of finishing (persistence.journal): `text` is '' and the
+  // run waits for `parked.items`. Resume it with `resumeFromRunId` and `answers`.
+  parked?: IParkedRun
 }
 
 // Snapshot of a run handed to IPersistence hooks. Each hook receives the
@@ -1046,11 +1107,12 @@ export interface IAgentRunResult {
 export interface IRunSnapshot {
   runId: string
   startedAt: number
-  // 'executing' is the only non-terminal status the runtime writes; the
-  // others are written exactly once when the run resolves. ('planning' is
+  // 'executing' and 'waiting' are the non-terminal statuses the runtime writes;
+  // the others are written exactly once when the run resolves. ('planning' is
   // intentionally omitted - we never persist before the plan is in hand,
-  // so there's no row in that state to query for.)
-  status: 'executing' | 'complete' | 'failed' | 'cancelled'
+  // so there's no row in that state to query for.) 'waiting': the run parked
+  // (persistence.journal) and waits for `parked.items`; resume it with `answers`.
+  status: 'executing' | 'waiting' | 'complete' | 'failed' | 'cancelled'
   input: string
   history?: IConversationTurn[]
   plan?: IPlan
@@ -1090,6 +1152,9 @@ export interface IRunSnapshot {
   // With config.runLease: the owner whose run wrote it (a store can refuse a write of anyone
   // else - fencing).
   leaseOwner?: string
+  // Status 'waiting': what the run waits for. The rest of the snapshot is the run as it stood at
+  // the start of the step that parked: a resume replays that step from the journal.
+  parked?: IParkedRun
 }
 
 // Optional persistence facade. Write hooks fire at run start, after each
@@ -1112,8 +1177,99 @@ export interface IPersistence {
   // other write hooks this one is NOT fail-open: a throw fails the resume (before anything ran) -
   // an attempt that is not on record would be reused by the next resume.
   onRunResume?: (snapshot: IRunSnapshot) => void | Promise<void>
+  // The run parked: the snapshot with status 'waiting' and `parked`. Without it the same write
+  // goes to onStepComplete. NOT fail-open: a throw fails the run - a park that is not on record
+  // could not be resumed with its answers.
+  onRunPark?: (snapshot: IRunSnapshot) => void | Promise<void>
   // Optional read hook used by agent.run({ resumeFromRunId }). Returns the
   // saved snapshot, or null when not found. Implementations that don't want
   // to support resume can simply omit this method.
   loadRun?: (runId: string) => IRunSnapshot | null | Promise<IRunSnapshot | null>
+  // The call journal: every language-model response and every tool result of a run, appended as
+  // it happens, so that a resume REPLAYS the step a crash (or a park) interrupted instead of
+  // running it again: no request goes out for a recorded model call, no recorded tool call runs
+  // twice. Needs loadRun. Appends are fail-closed: one that throws ends the run as failed. It
+  // also makes parking possible. See src/journal.ts and the README, "Resume after crash".
+  journal?: IRunJournal
 }
+
+// Where a run's journal is kept: an append-only list per run, read back whole on resume, in the
+// order it was appended. Entries are plain JSON (bytes as base64, dates as ISO strings).
+export interface IRunJournal {
+  append: (runId: string, entry: IJournalEntry) => void | Promise<void>
+  load: (runId: string) => IJournalEntry[] | Promise<IJournalEntry[]>
+}
+
+interface IJournalEntryBase {
+  // Unique in the run: `a<attempt>:<kind>:<position>`.
+  id: string
+  // Where in the run the call was made, the same on every attempt: `<segment>.<n>` is the n-th
+  // model call of a segment (`0` before the loop, `1`, `2`, ... the loop's iterations, `f` the
+  // answer), `.t<i>` the i-th tool call of that model response, `.q<j>` a question asked inside
+  // that tool call, `.m<k>` a model call made inside it, `/c<k>/` a run started inside it (a
+  // helper, an in-process subagent).
+  position: string
+  // The attempt that appended it (IRunSnapshot.attempt).
+  attempt: number
+  // Epoch ms.
+  at: number
+}
+
+// A language-model call and the response the run continued with.
+export interface IJournalModelEntry extends IJournalEntryBase {
+  kind: 'model'
+  stage: ModelCallStage
+  // sha256 of the request (prompt, tools, tool choice, response format), stable serialization.
+  hash: string
+  call: 'stream' | 'generate'
+  // What the SDK needs to continue: the stream's parts (text, reasoning, tool calls, ...) or the
+  // generated content, the finish reason and the provider's metadata.
+  response: {
+    parts?: Record<string, unknown>[]
+    content?: Record<string, unknown>[]
+    finishReason: unknown
+    providerMetadata?: unknown
+    meta?: { id?: string; modelId?: string; timestamp?: string }
+  }
+  // What the call cost when it ran. A replay is not charged again.
+  usage: IUsage
+}
+
+// A tool call and its result, as the model saw it (after the output cap).
+export interface IJournalToolEntry extends IJournalEntryBase {
+  kind: 'tool'
+  // The id of the model entry whose response asked for the call.
+  parent: string
+  tool: string
+  // sha256 of the tool name and its arguments.
+  hash: string
+  ok: boolean
+  // ok: what the model was shown, and the result itself when it is small.
+  model?: unknown
+  output?: unknown
+  // !ok: the error the model was shown.
+  error?: { name: string; message: string }
+  // The result came from outside: the answer to a deferred call.
+  answered?: true
+}
+
+// Something the run parked on: a question nobody answered yet, a tool call whose result comes
+// from outside.
+export interface IJournalPendingEntry extends IJournalEntryBase {
+  kind: 'pending'
+  parent: string
+  hash: string
+  item: ParkedItem
+}
+
+// The answer to a question of the approval gate (from `onRequest`, or from `answers`).
+export interface IJournalAnswerEntry extends IJournalEntryBase {
+  kind: 'answer'
+  parent: string
+  hash: string
+  itemId: string
+  answer: { approved: boolean; reason?: string; remember?: boolean }
+}
+
+export type IJournalEntry =
+  IJournalModelEntry | IJournalToolEntry | IJournalPendingEntry | IJournalAnswerEntry

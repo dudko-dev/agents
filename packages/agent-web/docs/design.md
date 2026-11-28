@@ -209,6 +209,25 @@ runs is a tree of orders. The fields are optional on the type because events out
 (a pipeline's own events) carry none; the Node sibling has the same names and rules, and
 on the server they are what its scale-out hooks (a run lease, shared limits) build on.
 
+### The call journal and parking: names reserved, server-only
+
+The Node sibling has a **call journal** (`persistence.journal`: every model response and tool
+result recorded as the run goes, so a resume replays the interrupted step instead of running
+it again) and **parking** (a run that waits for a person's answer, or for a tool's result from
+outside, stops without failing and is resumed later with `answers`, by any worker). Its names
+are reserved here and mean the same if they ever come: `persistence.journal` (`append` /
+`load`), `IJournalEntry`, `deferResult()`, `{ park: true }` from `onRequest`, the run status
+`'waiting'`, `result.parked`, `run({ answers })`, the events `run.parked` and
+`journal.diverged`. This package has none of them, and does not accept them.
+
+Why server-only: both exist so that a run can outlive the process that started it - a worker
+that crashed, a worker freed while a run waits hours or days - and be picked up by another
+one. A page's run lives and dies with its tab: there is no other worker to hand it to, a park
+that frees nothing has nothing to free, and the guarantee rests on a store that is written
+before every side effect and is fail-closed, which IndexedDB in a tab that may be closed at any
+moment does not give. A browser host that needs a long wait keeps the run going (the wait clock
+already stops the limits while a person decides), or hands the work to a server agent.
+
 ## Steering a run (`RunControl`)
 
 `run()` returns when the run is over, so a host with something to say mid-run

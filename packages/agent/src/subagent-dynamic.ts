@@ -16,6 +16,7 @@ import { randomUUID } from 'node:crypto'
 import { isReadOnlyTool, markReadOnly } from './approval.ts'
 import { runContext, type IRunContext } from './context.ts'
 import type { IAgentInternalContext, IRunState, ISpawnScope } from './internal.ts'
+import { markJournalRerun } from './journal.ts'
 import { FORGET_SKILL_TOOL, SAVE_SKILL_TOOL } from './learning.ts'
 import { resolveLimits } from './limits.ts'
 import { collectMcpInstructions, renderMcpInstructions } from './mcp-shared.ts'
@@ -328,5 +329,7 @@ export const createDynamicSubagentTool = (deps: IDynamicSubagentDeps): Tool => {
   // Starting a helper changes nothing by itself: every call the helper makes passes the same
   // gate as the parent's would. So 'ask-writes' and 'read-only' let the spawn through (and still
   // ask about / refuse the helper's writes); 'ask-all' and a rule on spawn_subagent apply to it.
-  return markReadOnly(spawn)
+  // persistence.journal: the helper's run is a run inside this call - on a replay the call runs
+  // again and the helper's calls replay from the journal (journal.ts).
+  return markJournalRerun(markReadOnly(spawn))
 }

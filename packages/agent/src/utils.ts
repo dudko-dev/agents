@@ -42,7 +42,8 @@ const isRetriable = (err: unknown, seen: Set<unknown> = new Set()): boolean => {
   seen.add(err)
 
   const e = err as { statusCode?: number; status?: number; name?: string; cause?: unknown }
-  if (e.name === 'AbortError') {
+  // A stop, a park and a failed journal append are never tried again (journal.ts).
+  if (e.name === 'AbortError' || e.name === 'RunParkedSignal' || e.name === 'JournalError') {
     return false
   }
   const status = e.statusCode ?? e.status

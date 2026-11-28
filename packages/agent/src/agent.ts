@@ -10,6 +10,7 @@ import { buildModelFromStage, resolveStage } from './provider.ts'
 import { runAgentLoop } from './runner.ts'
 import { resolveRunLease } from './run-lease.ts'
 import { checkSharedLimits, stageModel } from './shared-limits.ts'
+import { checkJournal } from './journal.ts'
 import { createLearning } from './learning.ts'
 import { MODEL_TIERS, resolveEscalation } from './tiers.ts'
 import { createSandboxTools, RUN_JS_TOOL } from './sandbox.ts'
@@ -165,6 +166,7 @@ export const createAgent = async (
   // is a configuration error.
   const lease = resolveRunLease(config.runLease)
   checkSharedLimits(config.sharedLimits)
+  checkJournal(config.persistence)
   // The request shows the input AFTER inputSanitizer (idempotent by
   // contract); a throwing sanitizer redacts rather than leaks.
   const sanitizeForApproval = async (name: string, input: unknown): Promise<unknown> => {
@@ -186,6 +188,7 @@ export const createAgent = async (
     approval,
     maxToolCalls: config.maxToolCalls,
     maxToolOutputChars: compaction.maxToolOutputChars,
+    sanitize: sanitizeForApproval,
   }
   // The agent's notebook: lessons it writes join `skills` (mutated in place) and are tools of its own.
   const learning = config.learning

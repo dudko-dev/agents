@@ -141,6 +141,38 @@
       count, nothing after settle; `remoteSubagentUsageOf`: non-negative counts); usage charged
       ONCE from the result (forwarded `usage` events are not charged); a stop aborts `signal` and
       does not wait for the dispatch. Every guard has a test in `tests/subagent-remote.test.ts`.
+    - `journal.ts` (`persistence.journal`, Node only; the browser sibling only reserves the names, its
+      `docs/design.md` says why): the CALL JOURNAL and PARKING. Every language-model response is
+      appended before any tool call it contains runs (`journalMiddleware`, applied by `limitedModel`
+      OUTSIDE the sharedLimits middleware, only while a run with a journal is in force: the stream's
+      `tool-call` parts are held until the response is on record), every tool result right after the
+      tool returns, before the model sees it (`runJournaledToolCall`, from `tool-wrap.ts`). Appends
+      are fail-closed (`JournalError`: the run's journal stop aborts it, the runner fails it). Positions
+      are attempt-independent (`<segment>.<n>` - `0` before the loop, the iteration, `f` the answer;
+      n counts RECORDED calls only, so a retry shares its failed call's position -, `.t<i>`, `.q<j>`,
+      `.m<k>`, `/c<k>/` a run inside a tool call); a tool entry names its response (`parent`), so a
+      call is never answered from another branch. On resume the run REPLAYS: a matching model call
+      gets the recorded response (no request, no sharedLimits, zero usage - its recorded usage goes to
+      the run's total only, drained at the stage's next `usage` event in `runner.ts`), a matching tool
+      call the recorded result (counted against maxToolCalls); a mismatch emits ONE
+      `journal.diverged` (positions only) and the scope goes live. Built-ins are not recorded (they
+      run again); a tool that runs a run inside it (`markJournalRerun`: `spawn_subagent`, in-process
+      subagents) runs again and THAT run replays under its own prefix. Parking: `{ park: true }` from
+      `onRequest` (the gate in `approval.ts`, `askSkill` too; only from a tool call of the run,
+      `journalQuestion`) or `deferResult()` from a tool (also a remote `dispatch`) makes the call
+      PENDING (a `pending` entry; the call hands the SDK `PENDING`, which the executor skips); at the
+      end of the ROUND (the next model call in that scope, or `journalRoundEnd` when the step's loop
+      ends) the scope parks - a nested one marks its call (`childParked`) and its caller's round, the
+      root stops (`stopped: park`) and the runner writes the BOUNDARY snapshot (the run at the step's
+      start) as `'waiting'` (`onRunPark`, else `onStepComplete`; fail-closed), emits `run.parked`
+      and resolves with `result.parked`. `answers` are checked in `openJournal` before the attempt
+      goes on record (an id not pending is refused; one already answered is ignored); approvals are
+      recorded as `answer` entries, tool answers (untrusted: shape, invisible characters,
+      `outputSanitizer`, the tool's output cap) as `tool` entries. Item ids hash run, position,
+      parent and request: stable across attempts. No timers or retries for pending items. OFF
+      without the hook: the models are not even wrapped; with it a fresh run's wire is the same
+      (`tests/journal.test.ts` compares). Every guard has a test in `tests/journal.test.ts` and a
+      mutation check.
     - `examples/scale-out-memory.ts`: in-memory reference implementations (lease map with TTL,
       token bucket + per-run budget), typechecked with the package and exercised by
       `tests/scale-out-example.test.ts`.

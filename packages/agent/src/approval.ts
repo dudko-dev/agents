@@ -2,6 +2,12 @@ import { randomUUID } from 'node:crypto'
 import { runContext } from './context.ts'
 import type { IRunState } from './internal.ts'
 import {
+  isParkDecision,
+  journalQuestion,
+  RunParkedSignal,
+  type IJournalQuestion,
+} from './journal.ts'
+import {
   createMcpSkillGrants,
   isMcpSkillName,
   type McpSkillConsentView,
@@ -220,13 +226,28 @@ export interface IApprovalController {
   }>
 }
 
+// What the events say of a question the run parks on.
+const PARKED_REASON = 'parked: the answer comes from outside the run'
+
+// The journal's view of a question (persistence.journal), or why it cannot park.
+const questionOf = (
+  what: Parameters<typeof journalQuestion>[0],
+): { q?: IJournalQuestion; refusal: string } => {
+  const asked = journalQuestion(what)
+  return 'id' in asked ? { q: asked, refusal: '' } : { refusal: asked.refusal }
+}
+
 const normalizeDecision = (
   d: ToolApprovalDecision | undefined,
 ): { approved: boolean; reason?: string; remember?: boolean } =>
   typeof d === 'boolean'
     ? { approved: d }
     : d && typeof d === 'object'
-      ? { approved: d.approved === true, reason: d.reason, remember: d.remember }
+      ? {
+          approved: (d as { approved?: unknown }).approved === true,
+          reason: (d as { reason?: string }).reason,
+          remember: (d as { remember?: boolean }).remember,
+        }
       : { approved: false, reason: 'invalid approval decision' }
 
 /** How long a question waits for a decision when `toolApproval.timeoutMs` is not set: 5 minutes. */
@@ -343,7 +364,13 @@ export const createApprovalController = (
       return
     }
     const emit: EventHandler = store?.emit ?? deps.fallbackEmit ?? (() => {})
-    const id = randomUUID()
+    // persistence.journal: a question has a stable id (its place in the run) and may be on
+    // record already - answered, or parked on - from an earlier attempt.
+    const { q, refusal } =
+      decision.permission === 'ask'
+        ? questionOf({ kind: 'tool', toolName: name, input })
+        : { q: undefined, refusal: '' }
+    const id = q?.id ?? randomUUID()
     const deny = (reason: string, automatic: boolean): never => {
       emit({ type: 'tool.approval-resolved', id, name, approved: false, reason, automatic })
       throw new ToolDeniedError(reason)
@@ -356,8 +383,11 @@ export const createApprovalController = (
         true,
       )
     }
+    // An answer on record or given with the resume, or a question parked on and still open:
+    // nobody is asked.
+    const known = q?.recorded ?? q?.given
     const onRequest = config?.onRequest
-    if (!onRequest) {
+    if (!onRequest && known === undefined && !q?.pending) {
       deny(
         decision.source === 'mcp-skill'
           ? "code runs only with a person's approval while the run acts on an MCP server's skill, and no approval handler is configured"
@@ -392,43 +422,76 @@ export const createApprovalController = (
       ...(subagent ? { subagent } : {}),
       ...(decision.source === 'mcp-skill' ? { mcpSkills } : {}),
     }
+    // The run parks at the end of the tool round with this question (journal.ts).
+    const park = async (question: IJournalQuestion): Promise<never> => {
+      await question.park(request)
+      emit({
+        type: 'tool.approval-resolved',
+        id,
+        name,
+        approved: false,
+        reason: PARKED_REASON,
+        automatic: false,
+        parked: true,
+      })
+      throw new RunParkedSignal()
+    }
     let raw: ToolApprovalDecision
-    // The host's own signal: aborted when the question ends without its answer (the bound, a
-    // stop, a failed handler), so a prompt left open can be taken down. Never after an answer.
-    const asked = new AbortController()
-    const ctx: IToolApprovalContext = { signal: asked.signal }
-    // A person is being asked: the step's time limit (and a subagent's) is about models and
-    // tools, and does not run meanwhile. The wait has its own bound, `timeoutMs`.
-    const resume = store?.state?.clock?.pause()
-    try {
-      raw = await awaitDecision(
-        Promise.resolve().then(() => onRequest(request, ctx)),
-        timeoutMs,
-        opts.signal,
-      )
-    } catch (err) {
-      // Before the resolved event: a host that closes its prompt hears of it first.
-      asked.abort(err)
-      if (err instanceof ApprovalTimeout) {
-        deny(`no decision within ${timeoutMs}ms`, true)
+    if (q && (known !== undefined || q.pending)) {
+      if (known === undefined) {
+        return park(q)
       }
-      if (opts.signal?.aborted) {
-        emit({
-          type: 'tool.approval-resolved',
-          id,
-          name,
-          approved: false,
-          reason: 'aborted',
-          automatic: true,
-        })
-        throw err
+      raw = known
+    } else {
+      // The host's own signal: aborted when the question ends without its answer (the bound, a
+      // stop, a failed handler), so a prompt left open can be taken down. Never after an answer.
+      const asked = new AbortController()
+      const ctx: IToolApprovalContext = { signal: asked.signal }
+      // A person is being asked: the step's time limit (and a subagent's) is about models and
+      // tools, and does not run meanwhile. The wait has its own bound, `timeoutMs`.
+      const resume = store?.state?.clock?.pause()
+      try {
+        raw = await awaitDecision(
+          Promise.resolve().then(() => (onRequest as NonNullable<typeof onRequest>)(request, ctx)),
+          timeoutMs,
+          opts.signal,
+        )
+      } catch (err) {
+        // Before the resolved event: a host that closes its prompt hears of it first.
+        asked.abort(err)
+        if (err instanceof ApprovalTimeout) {
+          deny(`no decision within ${timeoutMs}ms`, true)
+        }
+        if (opts.signal?.aborted) {
+          emit({
+            type: 'tool.approval-resolved',
+            id,
+            name,
+            approved: false,
+            reason: 'aborted',
+            automatic: true,
+          })
+          throw err
+        }
+        deny(`approval handler failed: ${(err as Error)?.message ?? String(err)}`, true)
+        return
+      } finally {
+        resume?.()
       }
-      deny(`approval handler failed: ${(err as Error)?.message ?? String(err)}`, true)
-      return
-    } finally {
-      resume?.()
+      if (isParkDecision(raw)) {
+        // Parking needs the journal and a tool call to come back to: elsewhere it is a denial.
+        if (!q) {
+          deny(`cannot park: ${refusal}`, true)
+          return
+        }
+        return park(q)
+      }
     }
     const d = normalizeDecision(raw)
+    // On record before the call goes on: a crash after the answer does not ask again.
+    if (q && q.recorded === undefined) {
+      await q.record(d)
+    }
     // An "always allow" given to a call asked because of an MCP skill is remembered as usual; it
     // does not lift the rule above, which asks again next time.
     if (d.approved && d.remember) {
@@ -454,10 +517,13 @@ export const createApprovalController = (
   const askSkill: IApprovalController['askSkill'] = async (input, skill, opts) => {
     const store = runContext.getStore()
     const emit: EventHandler = store?.emit ?? deps.fallbackEmit ?? (() => {})
-    const id = randomUUID()
     const name = 'load_skill'
+    // persistence.journal: the question's stable id, and what is on record for it.
+    const { q, refusal } = questionOf({ kind: 'skill', toolName: name, input, skill })
+    const id = q?.id ?? randomUUID()
+    const known = q?.recorded ?? q?.given
     const onRequest = config?.onRequest
-    if (!onRequest) {
+    if (!onRequest && known === undefined && !q?.pending) {
       const reason = 'no approval handler configured'
       emit({ type: 'tool.approval-resolved', id, name, approved: false, reason, automatic: true })
       return { approved: false, reason, by: 'no-handler' }
@@ -485,38 +551,78 @@ export const createApprovalController = (
       ...(subagent ? { subagent } : {}),
       skill,
     }
-    const asked = new AbortController()
-    const resume = store?.state?.clock?.pause()
+    const park = async (question: IJournalQuestion): Promise<never> => {
+      await question.park(request)
+      emit({
+        type: 'tool.approval-resolved',
+        id,
+        name,
+        approved: false,
+        reason: PARKED_REASON,
+        automatic: false,
+        parked: true,
+      })
+      throw new RunParkedSignal()
+    }
     let raw: ToolApprovalDecision
-    try {
-      raw = await awaitDecision(
-        Promise.resolve().then(() => onRequest(request, { signal: asked.signal })),
-        timeoutMs,
-        opts.signal,
-      )
-    } catch (err) {
-      asked.abort(err)
-      if (opts.signal?.aborted) {
-        emit({
-          type: 'tool.approval-resolved',
-          id,
-          name,
-          approved: false,
-          reason: 'aborted',
-          automatic: true,
-        })
-        throw err
+    if (q && (known !== undefined || q.pending)) {
+      if (known === undefined) {
+        return park(q)
       }
-      const reason =
-        err instanceof ApprovalTimeout
-          ? `no decision within ${timeoutMs}ms`
-          : `approval handler failed: ${(err as Error)?.message ?? String(err)}`
-      emit({ type: 'tool.approval-resolved', id, name, approved: false, reason, automatic: true })
-      return { approved: false, reason, by: 'no-answer' }
-    } finally {
-      resume?.()
+      raw = known
+    } else {
+      const asked = new AbortController()
+      const resume = store?.state?.clock?.pause()
+      try {
+        raw = await awaitDecision(
+          Promise.resolve().then(() =>
+            (onRequest as NonNullable<typeof onRequest>)(request, { signal: asked.signal }),
+          ),
+          timeoutMs,
+          opts.signal,
+        )
+      } catch (err) {
+        asked.abort(err)
+        if (opts.signal?.aborted) {
+          emit({
+            type: 'tool.approval-resolved',
+            id,
+            name,
+            approved: false,
+            reason: 'aborted',
+            automatic: true,
+          })
+          throw err
+        }
+        const reason =
+          err instanceof ApprovalTimeout
+            ? `no decision within ${timeoutMs}ms`
+            : `approval handler failed: ${(err as Error)?.message ?? String(err)}`
+        emit({ type: 'tool.approval-resolved', id, name, approved: false, reason, automatic: true })
+        return { approved: false, reason, by: 'no-answer' }
+      } finally {
+        resume?.()
+      }
+      if (isParkDecision(raw)) {
+        if (!q) {
+          const reason = `cannot park: ${refusal}`
+          emit({
+            type: 'tool.approval-resolved',
+            id,
+            name,
+            approved: false,
+            reason,
+            automatic: true,
+          })
+          return { approved: false, reason, by: 'no-answer' }
+        }
+        return park(q)
+      }
     }
     const d = normalizeDecision(raw)
+    if (q && q.recorded === undefined) {
+      await q.record(d)
+    }
     emit({
       type: 'tool.approval-resolved',
       id,
