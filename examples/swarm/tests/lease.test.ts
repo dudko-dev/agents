@@ -7,17 +7,22 @@ import { createHeartbeatLease, withTurnScope, type ITurnScope } from '../src/lea
 
 const opts = { owner: 'w', ttlMs: 3000 }
 
-const make = (bindOk = true) => {
+const make = (bindOk = true, fenceOk = true) => {
   const bound: IRunBinding[] = []
+  const fenced: string[] = []
   const lease = createHeartbeatLease({
     bindRun: async (b) => {
       bound.push(b)
       return bindOk
     },
+    fenceRun: async (runId) => {
+      fenced.push(runId)
+      return fenceOk ? 2 : undefined
+    },
     ttlMs: 9000,
     owner: 'worker-1',
   })
-  return { lease, bound }
+  return { lease, bound, fenced }
 }
 
 const scope = (extra: Partial<ITurnScope> = {}): ITurnScope & { beats: unknown[] } => {
@@ -69,12 +74,21 @@ test('a slot already bound (a worker that lost the turn) is refused', async () =
 })
 
 test('a resume takes only the run the turn resumes, and one run per turn activity', async () => {
-  const { lease, bound } = make()
+  const { lease, bound, fenced } = make()
   const s = scope({ intent: { kind: 'resume', runId: 'r9', attemptBase: 0 } })
   assert.equal(await withTurnScope(s, () => Promise.resolve(lease.acquire('other', opts))), false)
+  assert.deepEqual(fenced, [], 'another run is refused before anything is written')
   assert.equal(await withTurnScope(s, () => Promise.resolve(lease.acquire('r9', opts))), true)
   assert.deepEqual(bound, [], 'a resumed run is already bound')
+  assert.deepEqual(fenced, ['r9'], 'the resume raised the fence when it took the run')
   assert.equal(await withTurnScope(s, () => Promise.resolve(lease.acquire('r10', opts))), false)
+})
+
+test('a resume of a run that is not bound (the fence finds no row) is refused', async () => {
+  const { lease } = make(true, false)
+  const s = scope({ intent: { kind: 'resume', runId: 'r9', attemptBase: 0 } })
+  assert.equal(await withTurnScope(s, () => Promise.resolve(lease.acquire('r9', opts))), false)
+  assert.equal(lease.scopeOf('r9'), undefined)
 })
 
 test('once Temporal takes the turn away, acquire and renew say no', async () => {

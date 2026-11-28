@@ -3,19 +3,24 @@
 //
 //   POST /sessions                          start a session (optionally with its first message)
 //   POST /sessions/:id/messages             { text, id? }      -> the session's inbox
-//   POST /sessions/:id/answers/:requestId   any JSON object    -> an answer to a parked question
+//   POST /sessions/:id/answers/:requestId   the answer         -> an item a parked turn waits for
 //   POST /sessions/:id/stop                 { end? }           -> stop the running turn
 //   GET  /sessions/:id                      the session's state (a workflow query)
 //   GET  /sessions/:id/events?after=<cursor>  SSE: replay from Postgres, then live (LISTEN/NOTIFY)
+//   GET  /sessions/:id/subagents            the session's static subagent calls (Postgres)
+//   GET  /sessions/:id/subagents/:itemId/events?after=<cursor>  SSE: one child's own stream
 //   GET  /healthz  /readyz                  no auth
 import { randomUUID } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { IGatewayConfig } from './config.ts'
 import { formatCursor, parseCursor, type ICursor } from './cursor.ts'
+import { answerProblem } from './answers.ts'
 import type { IStreamRow } from './db/events.ts'
 import type { ISubscription } from './db/notify.ts'
+import type { IParkedRow } from './db/parked.ts'
 import { corsHeaders, createBearerCheck, HttpError, readJson, sendError, sendJson } from './http.ts'
 import { errorMessage, type ILogger } from './log.ts'
+import { subagentStreamOf } from './session-api.ts'
 import type { IAnswer, ISessionView, IStopRequest, IUserMessage } from './session-types.ts'
 
 // What the gateway needs from Temporal (and the session table). The real one is backend.ts.
@@ -27,6 +32,10 @@ export interface ISessionBackend {
   state: (sessionId: string) => Promise<ISessionView>
   // The session was started here (Postgres): the event stream of an unknown id is a 404.
   exists: (sessionId: string) => Promise<boolean>
+  // An item a parked turn of the session waits for (Postgres: no worker needed), and the
+  // session's static subagent calls.
+  parkedItem: (sessionId: string, itemId: string) => Promise<IParkedRow | undefined>
+  subagents: (sessionId: string) => Promise<IParkedRow[]>
   // Throws when Temporal or Postgres cannot be reached.
   ready: () => Promise<void>
 }
@@ -66,8 +75,9 @@ export const ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/
 
 type Route =
   | { name: 'create' }
-  | { name: 'message' | 'stop' | 'state' | 'events'; sessionId: string }
+  | { name: 'message' | 'stop' | 'state' | 'events' | 'subagents'; sessionId: string }
   | { name: 'answer'; sessionId: string; requestId: string }
+  | { name: 'subagentEvents'; sessionId: string; requestId: string }
   | { name: 'healthz' | 'readyz' }
 
 const ROUTES: { pattern: RegExp; method: string; route: (m: RegExpExecArray) => Route }[] = [
@@ -98,6 +108,16 @@ const ROUTES: { pattern: RegExp; method: string; route: (m: RegExpExecArray) => 
     pattern: /^\/sessions\/([^/]+)\/events$/,
     method: 'GET',
     route: (m) => ({ name: 'events', sessionId: m[1]! }),
+  },
+  {
+    pattern: /^\/sessions\/([^/]+)\/subagents$/,
+    method: 'GET',
+    route: (m) => ({ name: 'subagents', sessionId: m[1]! }),
+  },
+  {
+    pattern: /^\/sessions\/([^/]+)\/subagents\/([^/]+)\/events$/,
+    method: 'GET',
+    route: (m) => ({ name: 'subagentEvents', sessionId: m[1]!, requestId: m[2]! }),
   },
 ]
 
@@ -187,13 +207,27 @@ export const createGateway = (deps: IGatewayDeps): IGateway => {
   const authorized =
     config.auth.mode === 'bearer' ? createBearerCheck(config.auth.tokens) : () => true
   const streams = new Set<AbortController>()
+  // Postgres reads of the gateway: a failure is an outage for the client (503).
+  const unavailableOn = async <T>(fn: () => Promise<T>): Promise<T> => {
+    try {
+      return await fn()
+    } catch (err) {
+      if (err instanceof HttpError) throw err
+      throw new BackendUnavailableError(`postgres: ${errorMessage(err)}`)
+    }
+  }
+  const parkedItem = (sessionId: string, itemId: string) =>
+    unavailableOn(() => backend.parkedItem(sessionId, itemId))
+  const sessionExists = (sessionId: string) => unavailableOn(() => backend.exists(sessionId))
 
+  // One stream: a session's, or a subagent child's own (its stream id in place of a session's).
   const events = async (
     req: IncomingMessage,
     res: ServerResponse,
     sessionId: string,
     url: URL,
     cors: Record<string, string>,
+    exists: () => Promise<boolean> = () => backend.exists(sessionId),
   ): Promise<void> => {
     // A reconnecting EventSource sends Last-Event-ID; it wins over the URL's `after`.
     const lastId = req.headers['last-event-id']
@@ -208,8 +242,8 @@ export const createGateway = (deps: IGatewayDeps): IGateway => {
         'retry-after': '5',
       })
     }
-    if (!(await backend.exists(sessionId))) {
-      throw new HttpError(404, 'not_found', `no session ${sessionId}`)
+    if (!(await exists())) {
+      throw new HttpError(404, 'not_found', `no such stream: ${sessionId}`)
     }
     const ac = new AbortController()
     streams.add(ac)
@@ -336,8 +370,30 @@ export const createGateway = (deps: IGatewayDeps): IGateway => {
         }
         case 'answer': {
           const value = objectBody(await readJson(req, config.maxBodyBytes), true)
+          const item = await parkedItem(r.sessionId, r.requestId)
+          if (!item || item.state === 'cancelled') {
+            throw new HttpError(
+              404,
+              'not_found',
+              `no parked turn of session ${r.sessionId} waits for ${r.requestId}`,
+            )
+          }
+          if (item.state === 'answered') {
+            throw new HttpError(409, 'already_answered', `${r.requestId} is answered already`)
+          }
+          if (item.answeredBy === 'subagent') {
+            throw new HttpError(
+              409,
+              'answered_by_subagent',
+              `a subagent answers ${r.requestId}; stop the turn to give up on it`,
+            )
+          }
+          const problem = answerProblem(item.kind, value)
+          if (problem) {
+            throw new HttpError(400, 'invalid_answer', problem)
+          }
           await backend.answer(r.sessionId, { requestId: r.requestId, value, at: now() })
-          sendJson(res, 202, { requestId: r.requestId }, cors)
+          sendJson(res, 202, { requestId: r.requestId, kind: item.kind }, cors)
           return
         }
         case 'stop': {
@@ -355,6 +411,22 @@ export const createGateway = (deps: IGatewayDeps): IGateway => {
         }
         case 'events': {
           await events(req, res, r.sessionId, url, cors)
+          return
+        }
+        case 'subagents': {
+          if (!(await sessionExists(r.sessionId))) {
+            throw new HttpError(404, 'not_found', `no session ${r.sessionId}`)
+          }
+          const rows = await unavailableOn(() => backend.subagents(r.sessionId))
+          sendJson(res, 200, { subagents: rows.map((row) => subagentView(row)) }, cors)
+          return
+        }
+        case 'subagentEvents': {
+          const stream = subagentStreamOf(r.sessionId, r.requestId)
+          await events(req, res, stream, url, cors, async () => {
+            const item = await parkedItem(r.sessionId, r.requestId)
+            return item?.answeredBy === 'subagent'
+          })
           return
         }
       }
@@ -386,6 +458,20 @@ export const createGateway = (deps: IGatewayDeps): IGateway => {
     closeStreams: () => {
       for (const ac of streams) ac.abort()
     },
+  }
+}
+
+// A static subagent call as GET /sessions/:id/subagents lists it.
+export const subagentView = (row: IParkedRow): Record<string, unknown> => {
+  const item = (row.item ?? {}) as { subagent?: Record<string, unknown> }
+  return {
+    itemId: row.itemId,
+    turn: row.turn,
+    runId: row.runId,
+    state: row.state,
+    ...(row.childId ? { workflowId: row.childId } : {}),
+    ...(item.subagent ?? {}),
+    events: `/sessions/${row.sessionId}/subagents/${row.itemId}/events`,
   }
 }
 

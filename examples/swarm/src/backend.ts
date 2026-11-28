@@ -1,6 +1,7 @@
 // The gateway's backend: Temporal for the sessions (start, signals, the state query) and the
 // session table in Postgres (the event stream of an unknown id is a 404 without asking Temporal).
 import { WorkflowNotFoundError, type Client } from '@temporalio/client'
+import { createParkedStore } from './db/parked.ts'
 import type { IQueryable } from './db/pool.ts'
 import {
   BackendUnavailableError,
@@ -50,6 +51,7 @@ export const createTemporalBackend = (o: {
     }
   }
   const handle = (sessionId: string) => o.client.workflow.getHandle(workflowIdOf(sessionId))
+  const parked = createParkedStore(o.db)
 
   return {
     create: async (sessionId, first) => {
@@ -84,6 +86,8 @@ export const createTemporalBackend = (o: {
       call(sessionId, () => handle(sessionId).signal(answerSignal, answer)),
     stop: (sessionId, stop) => call(sessionId, () => handle(sessionId).signal(stopSignal, stop)),
     state: (sessionId) => call(sessionId, () => handle(sessionId).query(stateQuery)),
+    parkedItem: (sessionId, itemId) => parked.item(sessionId, itemId),
+    subagents: (sessionId) => parked.subagents(sessionId),
     exists: async (sessionId) => {
       try {
         return await exists(sessionId)

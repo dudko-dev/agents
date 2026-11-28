@@ -1,0 +1,19 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+{{- range $role := list "gateway" "worker" }}
+---
+# A drain takes one {{ $role }} at a time: a worker's turns move (SIGTERM drains them), a
+# gateway's streams reconnect to another replica.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "swarm.component" (list $ $role) }}
+  labels:
+    {{- include "swarm.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $role }}
+spec:
+  maxUnavailable: {{ (index $.Values.podDisruptionBudget $role).maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "swarm.selector" (list $ $role) | nindent 6 }}
+{{- end }}
+{{- end }}

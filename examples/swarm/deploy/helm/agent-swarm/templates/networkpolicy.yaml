@@ -1,0 +1,71 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $np := .Values.networkPolicy -}}
+# The gateway: its port from `gatewayFrom` (anyone when empty); out to DNS, Postgres, Temporal.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "swarm.component" (list . "gateway") }}
+  labels:
+    {{- include "swarm.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "swarm.selector" (list . "gateway") | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports:
+        - { port: 8080, protocol: TCP }
+      {{- with $np.gatewayFrom }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  egress:
+    {{- include "swarm.baseEgress" (list . true) | nindent 4 }}
+---
+# The workers: no ingress (the kubelet's probes are not pod traffic); out to DNS, Postgres,
+# Temporal and the provider / MCP servers.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "swarm.component" (list . "worker") }}
+  labels:
+    {{- include "swarm.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "swarm.selector" (list . "worker") | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    {{- include "swarm.baseEgress" (list . true) | nindent 4 }}
+    - ports:
+        {{- range $np.provider.ports }}
+        - { port: {{ . }}, protocol: TCP }
+        {{- end }}
+      {{- with $np.provider.to }}
+      to:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- with $np.extraWorkerEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+---
+# The migrate Job: DNS and Postgres only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "swarm.component" (list . "migrate") }}
+  labels:
+    {{- include "swarm.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "swarm.selector" (list . "migrate") | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    {{- include "swarm.baseEgress" (list . false) | nindent 4 }}
+{{- end }}

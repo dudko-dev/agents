@@ -10,12 +10,14 @@ export interface IUserMessage {
   at: number
 }
 
-// A person's answer to a question a turn asked (see "Parking" in the README). Stored by the
-// workflow now; consumed once the core can park a run.
+// The answer to an item a parked turn waits for (see "Parking" in the README): a person's decision
+// (an 'approval' item) or a tool's result from outside (a 'tool' item) - checked by answers.ts.
+// A static subagent's child workflow answers its own item the same way (`by: 'subagent'`).
 export interface IAnswer {
   requestId: string
   value: unknown
   at: number
+  by?: 'client' | 'subagent'
 }
 
 // Stop the turn that is running (and drop the messages queued behind it). `end` also ends the
@@ -42,10 +44,16 @@ export interface ISessionOptions {
   historyMaxChars: number
   // Messages that may wait behind a running turn; more are dropped (and counted).
   maxQueuedMessages: number
+  // Static subagents (child workflows): calls in one round of a turn, and in the whole session.
+  // Optional: a session started before they existed has neither and gets the defaults
+  // (SUBAGENT_DEFAULTS in session-state.ts).
+  subagentMaxPerRound?: number
+  subagentMaxPerSession?: number
 }
 
-// What one turn is given. `answers` is the parking seam: the answers to the questions a parked
-// turn asked, passed when the turn goes on (unused until the core can park a run).
+// What one turn is given. `answers`: a parked turn goes on with the answers to every item it waits
+// for (the activity resumes its run with them). `subagents`: how many static subagent calls the
+// turn's next round may make (the caps, minus what the session has started already).
 export interface ITurnInput {
   sessionId: string
   turn: number
@@ -53,15 +61,47 @@ export interface ITurnInput {
   history: IConversationTurn[]
   messageIds: string[]
   answers?: Record<string, IAnswer>
+  subagents?: { maxPerRound: number; remaining: number }
 }
 
-// A question a parked turn is waiting on.
+// An item a parked turn waits for. `requestId` is the core's stable item id.
 export interface IParkedRequest {
   requestId: string
-  kind: string
-  // What the person is shown (the tool and its input, an MCP server's question, ...).
+  // 'approval': a person's decision on a tool call; 'tool': a tool's result from outside.
+  kind: 'approval' | 'tool'
+  // What there is to answer: the approval request (the tool and its input, the step), or the
+  // deferred call (the tool, its input, its note). The core's item without `id` and `kind`.
   question: unknown
+  // Set when a static subagent answers it: the workflow runs it as a child workflow.
+  subagent?: ISubagentCall
 }
+
+// A call of a static subagent (SUBAGENTS), as the parent model made it.
+export interface ISubagentCall {
+  name: string
+  task: string
+  profile?: string
+}
+
+// What a child workflow `subagent` is given: one agent.run of the profile `name` on `task`.
+// `stream` keys its run and its events in Postgres (its own stream, not the parent turn's).
+export interface ISubagentInput {
+  sessionId: string
+  turn: number
+  parentRunId: string
+  itemId: string
+  stream: string
+  name: string
+  task: string
+  profile?: string
+  options: Pick<ISessionOptions, 'turnTimeoutMs' | 'heartbeatTimeoutMs' | 'maxTurnAttempts'>
+}
+
+// How a child came out; the parent turns it into the item's answer ({ output } or { error }).
+export type SubagentOutcome =
+  | { status: 'completed'; runId: string; attempt: number; text: string; usage: IUsage }
+  | { status: 'stopped'; runId?: string; attempt?: number; usage?: IUsage }
+  | { status: 'failed'; error: string }
 
 // How a turn ended, as the activity reports it. A failure is not a value: the activity throws
 // (retryable or not) and the workflow records `failed` once Temporal gives up.
@@ -76,9 +116,16 @@ export type TurnResult =
       compactedHistory?: IConversationTurn[]
     }
   | { status: 'stopped'; runId?: string; attempt?: number; usage?: IUsage }
-  // The next step (parking, a parallel core PR): the run stopped on a person's question; it goes
-  // on, as the same turn and the same run, once every request has an answer.
-  | { status: 'parked'; runId: string; attempt: number; requests: IParkedRequest[] }
+  // The run parked: it waits for every request's answer, then goes on as the same turn and the
+  // same run. `turnAttempt` is the slot of the parked attempt in the turn's order (the subagent
+  // markers go there, after the attempt's own events).
+  | {
+      status: 'parked'
+      runId: string
+      attempt: number
+      turnAttempt?: number
+      requests: IParkedRequest[]
+    }
 
 export type TurnStatus = 'completed' | 'stopped' | 'failed' | 'parked'
 
@@ -121,6 +168,21 @@ export interface ISessionView {
   // Messages dropped because the queue was full.
   dropped: number
   parked?: { turn: number; runId: string; requests: IParkedRequest[]; answered: string[] }
+  // Static subagent calls started in this session (counted against subagentMaxPerSession).
+  subagentsStarted?: number
   history: IConversationTurn[]
   turns: ITurnRecord[]
+}
+
+// A marker the workflow puts in a session's stream about a static subagent: `subagent.started`
+// when its child workflow starts, `subagent.ended` when it is over. In the parked attempt's slot
+// of the turn (`turnAttempt`) at seq SUBAGENT_MARKER_SEQ + n, after every event of that attempt and
+// before the resumed one's (session-state.ts says how n is chosen).
+export interface IStreamMarker {
+  sessionId: string
+  turn: number
+  turnAttempt: number
+  seq: number
+  type: 'subagent.started' | 'subagent.ended'
+  body: Record<string, unknown>
 }

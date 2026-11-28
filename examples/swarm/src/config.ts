@@ -2,11 +2,12 @@
 // there, in .env.example and in compose.yaml if the stack needs it.
 import { hostname } from 'node:os'
 import type { IAgentConfig } from '@dudko.dev/agent'
-import { agentConfigFromEnv } from './agent-config.ts'
+import { agentConfigFromEnv, subagentProfilesFromEnv } from './agent-config.ts'
 import type { ILimiterConfig, LimiterScope } from './db/limiter.ts'
 import { bool, ConfigError, int, list, num, oneOf, secret, str, type Env } from './env.ts'
 import { isLogLevel, type LogLevel } from './log.ts'
 import type { ISessionOptions } from './session-types.ts'
+import type { ISubagentProfile } from './subagents.ts'
 
 export interface ITemporalConfig {
   address: string
@@ -48,6 +49,8 @@ export interface IWorkerConfig {
   eventMaxBytes: number
   limiter?: ILimiterConfig
   agent: IAgentConfig
+  // Static subagents (SUBAGENTS): name -> profile.
+  subagents?: Record<string, ISubagentProfile>
   temporal: ITemporalConfig
   database: IDatabaseConfig
   logLevel: LogLevel
@@ -108,6 +111,8 @@ export const sessionOptions = (env: Env): ISessionOptions => ({
   maxTurnsPerRun: int(env, 'SESSION_MAX_TURNS_PER_RUN', 100, { min: 1 }),
   historyMaxChars: int(env, 'SESSION_HISTORY_MAX_CHARS', 200_000, { min: 1000 }),
   maxQueuedMessages: int(env, 'SESSION_MAX_QUEUED_MESSAGES', 50, { min: 1, max: 1000 }),
+  subagentMaxPerRound: int(env, 'SUBAGENT_MAX_PER_ROUND', 4, { min: 1, max: 64 }),
+  subagentMaxPerSession: int(env, 'SUBAGENT_MAX_PER_SESSION', 50, { min: 0, max: 10_000 }),
 })
 
 export const gatewayAuth = (env: Env): GatewayAuth => {
@@ -179,6 +184,7 @@ export const workerConfig = (env: Env): IWorkerConfig => {
   const leaseTtlMs = int(env, 'LEASE_TTL_MS', 15_000, { min: 1000, max: 2_147_483_647 })
   const bundle = str(env, 'WORKFLOW_BUNDLE_PATH')
   const limiter = limiterConfig(env)
+  const agent = agentConfigFromEnv(env)
   return {
     identity: str(env, 'WORKER_IDENTITY') ?? `${hostname()}-${process.pid}`,
     maxConcurrentTurns: int(env, 'WORKER_MAX_CONCURRENT_TURNS', 10, { min: 1 }),
@@ -189,7 +195,8 @@ export const workerConfig = (env: Env): IWorkerConfig => {
     leaseTtlMs,
     eventMaxBytes: int(env, 'EVENT_MAX_BYTES', 262_144, { min: 1024 }),
     ...(limiter ? { limiter } : {}),
-    agent: agentConfigFromEnv(env),
+    agent,
+    subagents: subagentProfilesFromEnv(env, agent.mcpServers),
     temporal: temporalConfig(env),
     database: databaseConfig(env),
     logLevel: logLevelOf(env),

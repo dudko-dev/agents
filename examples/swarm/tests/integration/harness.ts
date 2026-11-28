@@ -18,13 +18,27 @@ import { startWorker, type IRunningWorker } from '../../src/worker.ts'
 import {
   startLocalOpenAI,
   systemOf,
+  toolNames,
+  toolResults,
   userOf,
   type IChatRequest,
   type ILocalOpenAI,
   type Script,
 } from '../../../../packages/agent/tests/helpers/openai-server.ts'
 
-export { startLocalOpenAI, userOf, type IChatRequest, type ILocalOpenAI, type Script }
+export {
+  startLocalOpenAI,
+  toolNames,
+  toolResults,
+  userOf,
+  type IChatRequest,
+  type ILocalOpenAI,
+  type Script,
+}
+
+// The executor's rounds of a step: the i-th answer once i rounds are done (assistant turns).
+export const roundOf = (req: IChatRequest): number =>
+  req.messages.filter((m) => m.role === 'assistant').length
 export { readSse, type ISseEvent } from '../helpers/sse.ts'
 
 export const DATABASE_URL = process.env.DATABASE_URL ?? ''

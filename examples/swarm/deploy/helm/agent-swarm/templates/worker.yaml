@@ -1,0 +1,195 @@
+{{- $w := .Values.worker -}}
+{{- $keda := and $w.autoscaling.enabled $w.autoscaling.keda.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "swarm.component" (list . "worker") }}
+  labels:
+    {{- include "swarm.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  {{- if not $w.autoscaling.enabled }}
+  replicas: {{ $w.replicaCount }}
+  {{- end }}
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      {{- include "swarm.selector" (list . "worker") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "swarm.podLabels" (list . "worker") | nindent 8 }}
+        {{- with $w.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with $w.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "swarm.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      {{- include "swarm.podCommon" . | trim | nindent 6 }}
+      # SIGTERM drains: the running turns get WORKER_SHUTDOWN_GRACE_MS, then move to another
+      # worker. Kubernetes must wait longer than that.
+      terminationGracePeriodSeconds: {{ add $w.shutdownGraceSeconds $w.terminationExtraSeconds }}
+      containers:
+        - name: worker
+          image: {{ include "swarm.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: [worker]
+          ports:
+            - name: health
+              containerPort: {{ $w.healthPort }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "swarm.component" (list . "common") }}
+            - configMapRef:
+                name: {{ include "swarm.component" (list . "worker") }}
+            {{- with $w.extraEnvFrom }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            # In Temporal and in each snapshot's lease_owner.
+            - name: WORKER_IDENTITY
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            {{- include "swarm.secretEnv" (list . "worker") | trim | nindent 12 }}
+            {{- with $w.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          # /readyz: polling Temporal. /healthz: the worker has not failed.
+          readinessProbe:
+            httpGet: { path: /readyz, port: health }
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /healthz, port: health }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            {{- toYaml $w.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            {{- include "swarm.mounts" . | nindent 12 }}
+      volumes:
+        {{- include "swarm.tmpVolume" . | nindent 8 }}
+        {{- include "swarm.secretVolume" (list . "worker") | nindent 8 }}
+      {{- with $w.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $w.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $w.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $w.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if and $w.autoscaling.enabled (not $keda) }}
+---
+# The fallback: CPU. With KEDA, worker.autoscaling.keda.enabled scales on the task queue.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "swarm.component" (list . "worker") }}
+  labels:
+    {{- include "swarm.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "swarm.component" (list . "worker") }}
+  minReplicas: {{ $w.autoscaling.minReplicas }}
+  maxReplicas: {{ $w.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ $w.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}
+{{- if $keda }}
+{{- $k := $w.autoscaling.keda }}
+{{- $auth := or .Values.secrets.temporalApiKey.name .Values.secrets.temporalTls.name }}
+---
+# KEDA >= v2.17.0: the `temporal` scaler reads the task queue's backlog from the frontend.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "swarm.component" (list . "worker") }}
+  labels:
+    {{- include "swarm.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  scaleTargetRef:
+    name: {{ include "swarm.component" (list . "worker") }}
+  minReplicaCount: {{ $k.minReplicaCount }}
+  maxReplicaCount: {{ $k.maxReplicaCount }}
+  pollingInterval: {{ $k.pollingInterval }}
+  cooldownPeriod: {{ $k.cooldownPeriod }}
+  triggers:
+    - type: temporal
+      metadata:
+        endpoint: {{ include "swarm.temporalAddress" . | quote }}
+        namespace: {{ .Values.temporal.namespace | quote }}
+        taskQueue: {{ .Values.temporal.taskQueue | quote }}
+        queueTypes: {{ $k.queueTypes | quote }}
+        targetQueueSize: {{ $k.targetQueueSize | quote }}
+        activationTargetQueueSize: {{ $k.activationTargetQueueSize | quote }}
+        {{- with .Values.temporal.tls.serverName }}
+        tlsServerName: {{ . | quote }}
+        {{- end }}
+      {{- if $auth }}
+      authenticationRef:
+        name: {{ include "swarm.component" (list . "worker") }}
+      {{- end }}
+{{- if $auth }}
+---
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: {{ include "swarm.component" (list . "worker") }}
+  labels:
+    {{- include "swarm.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  secretTargetRef:
+    {{- with .Values.secrets.temporalApiKey }}
+    {{- if .name }}
+    - parameter: apiKey
+      name: {{ .name }}
+      key: {{ .key }}
+    {{- end }}
+    {{- end }}
+    {{- with .Values.secrets.temporalTls }}
+    {{- if .name }}
+    - parameter: ca
+      name: {{ .name }}
+      key: ca.crt
+    {{- if .clientCertificate }}
+    - parameter: cert
+      name: {{ .name }}
+      key: tls.crt
+    - parameter: key
+      name: {{ .name }}
+      key: tls.key
+    {{- end }}
+    {{- end }}
+    {{- end }}
+{{- end }}
+{{- end }}

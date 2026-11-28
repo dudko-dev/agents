@@ -16,3 +16,6 @@ playwright-report/
 
 # wrangler dev (the Worker, run locally)
 .wrangler/
+
+# The swarm chart's dependencies: `helm dependency build` fetches them (Chart.lock pins them).
+examples/swarm/deploy/helm/*/charts/

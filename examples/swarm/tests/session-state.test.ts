@@ -9,16 +9,23 @@ import {
   ANSWERS_KEPT,
   capHistory,
   carry,
+  childFinished,
+  childrenRunning,
   finishTurn,
   hasWork,
   initialState,
   SEEN_KEPT,
   shouldContinueAsNew,
+  startChildren,
+  SUBAGENT_DEFAULTS,
+  SUBAGENT_MARKER_SEQ,
+  SUBAGENT_MARKER_SPAN,
   takeTurn,
   TURNS_KEPT,
   view,
 } from '../src/session-state.ts'
-import type { ISessionOptions } from '../src/session-types.ts'
+import { subagentStreamOf, subagentWorkflowIdOf } from '../src/session-api.ts'
+import type { IParkedRequest, ISessionOptions } from '../src/session-types.ts'
 
 const options = (extra: Partial<ISessionOptions> = {}): ISessionOptions => ({
   idleTimeoutMs: 0,
@@ -178,8 +185,8 @@ test('parking: the turn waits for every answer, then goes on as the same turn', 
   acceptMessage(s, msg('a', 'do it'))
   const t = takeTurn(s, 0)!
   const requests = [
-    { requestId: 'q1', kind: 'tool-approval', question: { tool: 'x' } },
-    { requestId: 'q2', kind: 'tool-approval', question: { tool: 'y' } },
+    { requestId: 'q1', kind: 'approval' as const, question: { toolName: 'x' } },
+    { requestId: 'q2', kind: 'approval' as const, question: { toolName: 'y' } },
   ]
   finishTurn(s, t, { status: 'parked', runId: 'r1', attempt: 1, requests }, 1)
   assert.equal(view(s).status, 'parked')
@@ -187,10 +194,10 @@ test('parking: the turn waits for every answer, then goes on as the same turn', 
   // New messages wait behind the parked turn.
   acceptMessage(s, msg('b'))
   assert.equal(hasWork(s), false)
-  acceptAnswer(s, { requestId: 'q1', value: { allow: true }, at: 2 })
+  assert.equal(acceptAnswer(s, { requestId: 'q1', value: { approved: true }, at: 2 }), 'accepted')
   assert.equal(hasWork(s), false)
   assert.deepEqual(view(s).parked?.answered, ['q1'])
-  acceptAnswer(s, { requestId: 'q2', value: { allow: false }, at: 3 })
+  acceptAnswer(s, { requestId: 'q2', value: { approved: false }, at: 3 })
   assert.equal(hasWork(s), true)
   const resumed = takeTurn(s, 4)!
   assert.equal(resumed.turn, 1)
@@ -213,7 +220,7 @@ test('stop while parked: the parked turn ends as stopped', () => {
       status: 'parked',
       runId: 'r1',
       attempt: 1,
-      requests: [{ requestId: 'q', kind: 'k', question: 1 }],
+      requests: [{ requestId: 'q', kind: 'approval', question: 1 }],
     },
     1,
   )
@@ -291,4 +298,266 @@ test('continue-as-new: only at a quiet point, after maxTurnsPerRun or when sugge
   assert.deepEqual(next.inbox, s.inbox)
   assert.equal(acceptMessage(next, msg('a')), 'duplicate', 'the dedupe memory is carried')
   assert.deepEqual(view(next).turns, view(s).turns)
+})
+
+// --- answers, subagents and their children ------------------------------------------------------
+
+const approval = (id: string): IParkedRequest => ({
+  requestId: id,
+  kind: 'approval',
+  question: { request: { toolName: 'write_note' } },
+})
+const external = (id: string): IParkedRequest => ({
+  requestId: id,
+  kind: 'tool',
+  question: { toolName: 'render' },
+})
+const sub = (id: string, task = id): IParkedRequest => ({
+  requestId: id,
+  kind: 'tool',
+  question: { toolName: 'researcher' },
+  subagent: { name: 'researcher', task },
+})
+const park = (
+  s: ReturnType<typeof initialState>,
+  requests: IParkedRequest[],
+  turnAttempt: number | null = 1,
+) => {
+  if (!s.running) {
+    acceptMessage(s, msg(`m${s.turn + 1}`))
+  }
+  const t = takeTurn(s, 0)!
+  finishTurn(
+    s,
+    t,
+    {
+      status: 'parked',
+      runId: 'r1',
+      attempt: 1,
+      ...(turnAttempt !== null ? { turnAttempt } : {}),
+      requests,
+    },
+    1,
+  )
+  return t
+}
+
+test('answers: while parked, only a pending request, in the shape of its kind', () => {
+  const s = initialState('s', options())
+  park(s, [approval('a'), external('t'), sub('k')])
+  const client = (requestId: string, value: unknown) =>
+    acceptAnswer(s, { requestId, value, at: 2, by: 'client' })
+  assert.equal(client('nope', { approved: true }), 'refused', 'not something the turn waits for')
+  assert.equal(client('a', { output: 'x' }), 'refused', 'the wrong kind')
+  assert.equal(client('a', { approved: true, remember: true }), 'refused')
+  assert.equal(client('t', { approved: true }), 'refused')
+  assert.equal(client('k', { output: 'mine' }), 'refused', 'a subagent answers it')
+  assert.equal(acceptAnswer(s, { requestId: 'k', value: { output: 'x' }, at: 2 }), 'refused')
+  assert.deepEqual(s.answers, {})
+  assert.equal(client('a', { approved: false, reason: 'no' }), 'accepted')
+  assert.equal(client('t', { error: 'render failed' }), 'accepted')
+  assert.deepEqual(Object.keys(s.answers).sort(), ['a', 't'])
+})
+
+test('answers: one that came before the park is kept only if it fits its request', () => {
+  const s = initialState('s', options())
+  acceptMessage(s, msg('m1'))
+  const t = takeTurn(s, 0)!
+  for (const [id, value] of [
+    ['a', { approved: true }],
+    ['b', { output: 'wrong kind' }],
+    ['k', { output: 'not yours' }],
+  ] as const) {
+    assert.equal(acceptAnswer(s, { requestId: id, value, at: 1, by: 'client' }), 'early')
+  }
+  assert.equal(
+    acceptAnswer(s, { requestId: 'k', value: { output: 'x' }, at: 1, by: 'subagent' }),
+    'refused',
+    'no child answers before its park',
+  )
+  finishTurn(
+    s,
+    t,
+    {
+      status: 'parked',
+      runId: 'r1',
+      attempt: 1,
+      requests: [approval('a'), approval('b'), sub('k')],
+    },
+    2,
+  )
+  assert.deepEqual(Object.keys(s.answers), ['a'])
+})
+
+test('children: one per subagent request, ids from session + run + item, markers in order', () => {
+  const s = initialState('s', options())
+  park(s, [sub('k1', 'one'), approval('a'), sub('k2', 'two')], 3)
+  const starts = startChildren(s, 5)
+  assert.deepEqual(
+    starts.map((c) => [c.requestId, c.workflowId, c.input.stream, c.input.task]),
+    [
+      ['k1', subagentWorkflowIdOf('s', 'r1', 'k1'), subagentStreamOf('s', 'k1'), 'one'],
+      ['k2', subagentWorkflowIdOf('s', 'r1', 'k2'), subagentStreamOf('s', 'k2'), 'two'],
+    ],
+  )
+  assert.equal(starts[0]!.input.options.maxTurnAttempts, 3)
+  assert.equal(s.subagentsStarted, 2)
+  assert.equal(childrenRunning(s), true)
+  assert.deepEqual(startChildren(s, 6), [], 'a second call starts nothing again')
+  assert.deepEqual(
+    s.markers.map((m) => [m.type, m.turnAttempt, m.seq, m.body.itemId]),
+    [
+      ['subagent.started', 3, SUBAGENT_MARKER_SEQ, 'k1'],
+      ['subagent.started', 3, SUBAGENT_MARKER_SEQ + 1, 'k2'],
+    ],
+  )
+  assert.equal(s.markers[0]!.body.events, '/sessions/s/subagents/k1/events')
+  s.markers = []
+  // The second ends first: its marker comes first, and it answers its item.
+  assert.equal(childFinished(s, 'k2', { status: 'failed', error: 'boom' }, 7), true)
+  assert.deepEqual(s.answers.k2?.value, { error: 'the subagent failed: boom' })
+  assert.equal(s.answers.k2?.by, 'subagent')
+  assert.equal(childFinished(s, 'k2', { status: 'failed', error: 'again' }, 8), false, 'once')
+  assert.equal(childFinished(s, 'a', { status: 'failed', error: 'x' }, 8), false, 'not a child')
+  childFinished(
+    s,
+    'k1',
+    { status: 'completed', runId: 'c1', attempt: 1, text: 'found it', usage },
+    9,
+  )
+  assert.deepEqual(s.answers.k1?.value, { output: 'found it' })
+  assert.deepEqual(
+    s.markers.map((m) => [m.type, m.seq, m.body.itemId, m.body.status]),
+    [
+      ['subagent.ended', SUBAGENT_MARKER_SEQ + SUBAGENT_MARKER_SPAN, 'k2', 'failed'],
+      ['subagent.ended', SUBAGENT_MARKER_SEQ + SUBAGENT_MARKER_SPAN + 1, 'k1', 'completed'],
+    ],
+  )
+  assert.equal(childrenRunning(s), false)
+  // The person's answer is the last one: then the turn goes on with all three.
+  assert.equal(parkedReadyAfter(s, 'a'), true)
+  const resumed = takeTurn(s, 10)!
+  assert.deepEqual(Object.keys(resumed.answers!).sort(), ['a', 'k1', 'k2'])
+  assert.deepEqual(resumed.subagents, {
+    maxPerRound: SUBAGENT_DEFAULTS.maxPerRound,
+    remaining: SUBAGENT_DEFAULTS.maxPerSession - 2,
+  })
+})
+
+const parkedReadyAfter = (s: ReturnType<typeof initialState>, id: string): boolean => {
+  acceptAnswer(s, { requestId: id, value: { approved: true }, at: 9, by: 'client' })
+  s.markers = []
+  return hasWork(s)
+}
+
+test('children: a stopped child answers with an error; a stop of the park drops late results', () => {
+  const s = initialState('s', options())
+  park(s, [sub('k1')])
+  startChildren(s, 1)
+  childFinished(s, 'k1', { status: 'stopped' }, 2)
+  assert.match(String((s.answers.k1?.value as { error: string }).error), /stopped/)
+
+  const t = initialState('t', options())
+  park(t, [sub('k1')])
+  startChildren(t, 1)
+  acceptStop(t, { at: 2 }, 2)
+  assert.equal(t.parked, undefined)
+  assert.equal(
+    childFinished(t, 'k1', { status: 'completed', runId: 'c', attempt: 1, text: 'late', usage }, 3),
+    false,
+  )
+  assert.deepEqual(t.answers, {})
+})
+
+test('children: the caps per round and per session refuse with a tool error, never a child', () => {
+  const s = initialState('s', options({ subagentMaxPerRound: 2, subagentMaxPerSession: 3 }))
+  park(s, [sub('a'), sub('b'), sub('c')])
+  const first = startChildren(s, 1)
+  assert.deepEqual(
+    first.map((c) => c.requestId),
+    ['a', 'b'],
+  )
+  assert.match(
+    String((s.answers.c?.value as { error: string }).error),
+    /at most 2 subagent calls in one round/,
+  )
+  assert.equal(s.subagentsStarted, 2)
+  // The next park: one left in the session.
+  for (const id of ['a', 'b']) {
+    childFinished(s, id, { status: 'completed', runId: id, attempt: 1, text: id, usage }, 2)
+  }
+  const resumed = takeTurn(s, 3)!
+  assert.deepEqual(resumed.subagents, { maxPerRound: 2, remaining: 1 })
+  finishTurn(
+    s,
+    resumed,
+    { status: 'parked', runId: 'r1', attempt: 2, turnAttempt: 2, requests: [sub('d'), sub('e')] },
+    4,
+  )
+  assert.deepEqual(
+    startChildren(s, 5).map((c) => c.requestId),
+    ['d'],
+  )
+  assert.match(
+    String((s.answers.e?.value as { error: string }).error),
+    /at most 3 subagent calls in one session/,
+  )
+  assert.equal(view(s).subagentsStarted, 3)
+})
+
+test('children: no markers without the parked slot; continue-as-new waits for running children', () => {
+  const s = initialState('s', options({ maxTurnsPerRun: 1 }))
+  park(s, [sub('k')], null)
+  startChildren(s, 1)
+  assert.equal(s.markers.length, 0, 'no slot, no marker')
+  assert.equal(shouldContinueAsNew(s, true), false, 'a child runs')
+  childFinished(s, 'k', { status: 'completed', runId: 'c', attempt: 1, text: 'x', usage }, 2)
+  assert.equal(shouldContinueAsNew(s, true), true)
+  s.markers.push({
+    sessionId: 's',
+    turn: 1,
+    turnAttempt: 1,
+    seq: 1,
+    type: 'subagent.ended',
+    body: {},
+  })
+  assert.equal(shouldContinueAsNew(s, true), false, 'markers are written first')
+  assert.equal(hasWork(s), true, 'a marker is work')
+  // What continue-as-new carries keeps the count and the queued markers.
+  const next = initialState('s', options(), carry(s))
+  assert.equal(next.subagentsStarted, 1)
+  assert.equal(next.markers.length, 1)
+})
+
+test('a session started before subagents existed gets the defaults', () => {
+  const s = initialState('s', options())
+  acceptMessage(s, msg('m'))
+  assert.deepEqual(takeTurn(s, 0)?.subagents, {
+    maxPerRound: SUBAGENT_DEFAULTS.maxPerRound,
+    remaining: SUBAGENT_DEFAULTS.maxPerSession,
+  })
+  const old = initialState('s', options(), {
+    ...carry(s),
+    markers: undefined,
+    subagentsStarted: undefined,
+  } as never)
+  assert.deepEqual(old.markers, [])
+  assert.equal(old.subagentsStarted, 0)
+})
+
+test('a child workflow id is a function of session, run and item - nothing else', () => {
+  const id = subagentWorkflowIdOf('s1', 'run-1', 'p_abc')
+  assert.equal(id, 'subagent-s1-run-1-p_abc')
+  assert.equal(subagentWorkflowIdOf('s1', 'run-1', 'p_abc'), id, 'the same call, the same child')
+  assert.notEqual(subagentWorkflowIdOf('s2', 'run-1', 'p_abc'), id)
+  assert.notEqual(subagentWorkflowIdOf('s1', 'run-2', 'p_abc'), id)
+  assert.notEqual(subagentWorkflowIdOf('s1', 'run-1', 'p_abd'), id)
+  assert.equal(subagentStreamOf('s1', 'p_abc'), 's1/p_abc')
+  // The same park seen twice (a replay, a retried start) names the same children.
+  const ids = () => {
+    const s = initialState('s', options())
+    park(s, [sub('k1'), sub('k2')])
+    return startChildren(s, 1).map((c) => c.workflowId)
+  }
+  assert.deepEqual(ids(), ids())
 })

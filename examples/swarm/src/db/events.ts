@@ -9,6 +9,7 @@
 // runs again under the next attempt.
 import type { AgentEvent } from '@dudko.dev/agent'
 import type { ICursor } from '../cursor.ts'
+import type { IStreamMarker } from '../session-types.ts'
 import { toJsonText } from './json.ts'
 import type { IQueryable, IStatement } from './pool.ts'
 import { TURN_END_ATTEMPT, TURN_START_ATTEMPT } from './runs.ts'
@@ -118,6 +119,19 @@ export const markerRow = (m: TurnMarker): IEventRow => {
   }
 }
 
+// A subagent marker the session workflow writes (session-state.ts chooses its slot and seq: the
+// parked attempt's, above every seq of that attempt). Written once: a retry is a no-op.
+export const streamMarkerRow = (m: IStreamMarker): IEventRow => ({
+  sessionId: m.sessionId,
+  turn: m.turn,
+  runId: `subagents-${m.turn}`,
+  attempt: m.turnAttempt,
+  seq: m.seq,
+  turnAttempt: m.turnAttempt,
+  type: m.type,
+  json: toJsonText({ ...m.body, type: m.type, turn: m.turn }),
+})
+
 export interface IEventWriter {
   push: (event: AgentEvent) => void
   // Resolves once everything pushed so far is written (or given up on). Never rejects.
@@ -205,6 +219,8 @@ export interface IStreamRow {
 export interface IEventStore {
   writer: (options: Omit<IEventWriterOptions, 'maxEventBytes'>) => IEventWriter
   marker: (m: TurnMarker) => Promise<void>
+  // Subagent markers, in order, one statement (at most INSERT_MAX_ROWS).
+  streamMarkers: (markers: IStreamMarker[]) => Promise<void>
   after: (sessionId: string, after: ICursor, limit: number) => Promise<IStreamRow[]>
 }
 
@@ -213,6 +229,14 @@ export const createEventStore = (db: IQueryable, maxEventBytes: number): IEventS
   marker: async (m) => {
     const { text, values } = insertEventsSql([markerRow(m)])
     await db.query(text, values)
+  },
+  streamMarkers: async (markers) => {
+    for (let i = 0; i < markers.length; i += INSERT_MAX_ROWS) {
+      const { text, values } = insertEventsSql(
+        markers.slice(i, i + INSERT_MAX_ROWS).map(streamMarkerRow),
+      )
+      await db.query(text, values)
+    }
   },
   after: async (sessionId, after, limit) => {
     const { text, values } = eventsAfterSql(sessionId, after, limit)
