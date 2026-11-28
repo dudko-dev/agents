@@ -11,9 +11,11 @@ A reference deployment of `@dudko.dev/agent` as a swarm: a Temporal workflow per
 journal + parking), static subagents as child workflows (`subagent` -> `runSubagent`) and pipelines
 as child workflows (`pipeline`, the core's graph engine as its scheduler, -> one `pipelineNode` per
 node visit -> `runPipelineNode`) - children that park on a person too -, state in Postgres, a
-stateless `node:http` gateway with SSE, one image with three roles, a Helm chart.
-**Private, never published** (not in `.github/scripts/release-plan.mjs`; keep it out). No version
-bumps, no CHANGELOG.
+stateless gateway with SSE (swarm-shared's fetch handler on `node:http`), one image with three
+roles, a Helm chart. Its platform-independent part - the session's logic, ids and types, the answer
+checks, the cursor, the HTTP API - is `swarm-shared` (`examples/swarm-shared`, its own
+`CLAUDE.md`), which the swarm on other platforms will share. **Private, never published** (not in
+`.github/scripts/release-plan.mjs`; keep it out). No version bumps, no CHANGELOG.
 
 ## Rules
 
@@ -22,13 +24,16 @@ bumps, no CHANGELOG.
   `packages/agent` (and its browser sibling), with its tests - not worked around here.
 - **The workflow is deterministic.** `src/workflows.ts` imports only `@temporalio/workflow`,
   `@dudko.dev/agent/pipeline-engine` (the core's graph engine: no imports, deterministic by
-  contract - NEVER the main entry, `tests/bundle.test.ts` fails on it), `session-api.ts`,
-  `session-state.ts` and `child-state.ts` (both import `answers.ts`, pure and import-free),
-  `pipeline-state.ts` and types; no Node, no clock but the workflow's `Date.now()`, no randomness.
-  The logic lives in `session-state.ts` / `child-state.ts` / `pipeline-state.ts` (pure,
-  unit-tested); the workflow wires it. A change that alters the commands a running session replays
-  (activities scheduled, their order, timers, child workflows) needs `patched()` (ids in
-  `session-api.ts`, `PATCH_*`) or a new workflow type - sessions live for days.
+  contract - NEVER the main entry, `tests/bundle.test.ts` fails on it), `session-api.ts` (the
+  Temporal names: workflow types, signals, queries, `PATCH_*`), `swarm-shared/workflow` (NEVER
+  `swarm-shared` itself, whose HTTP API `tests/bundle.test.ts` keeps out of the bundle: its
+  `session-state.ts`, `child-state.ts` and `pipeline-state.ts`, `answers.ts`, `session-ids.ts`, pure
+  and importing nothing but each other) and types; no Node, no clock but the workflow's
+  `Date.now()`, no randomness. The logic lives in swarm-shared (pure, unit-tested there); the
+  workflow wires it - a change to it there is a change to what sessions replay here. A change that
+  alters the commands a running session replays (activities scheduled, their order, timers, child
+  workflows) needs `patched()` (ids in `session-api.ts`, `PATCH_*`) or a new workflow type -
+  sessions live for days.
   `tests/replay.test.ts` replays recorded histories (`tests/fixtures/*.history.json`) on the
   current code: a change that breaks one is a replay break. Record a new fixture for a new path.
 - **Session options are workflow input** (`ISessionOptions`, read by the gateway at start), never
@@ -103,32 +108,46 @@ bumps, no CHANGELOG.
 - **Schema changes are a new `sql/NNN_name.sql`**: never edit an applied one (the runner refuses).
 - Every new env var: `src/config.ts` / `src/agent-config.ts`, a test in `tests/config.test.ts`,
   the README's tables, `.env.example` and `compose.yaml` if the stack needs it.
+- **The HTTP API is swarm-shared's** (`createGatewayHandler`): a route, a check or a limit is
+  changed there, with its tests (no sockets); `src/gateway.ts` only adapts `node:http` to it. The
+  adapter keeps what the handler cannot see: the body read from the socket only when a route reads
+  it (a refused one ends the read, the socket kept for the 413), the response's close before it
+  finished = the client gone (the request's signal, the body cancelled), 'drain' before the next
+  chunk, `closeStreams()` on shutdown, and a 400 for a request fetch cannot represent.
 - Imports with `.ts` extensions (type stripping); pnpm does not hoist - declare what you import.
+  `swarm-shared` is imported from its built `dist` (`build` first; nx orders it).
 
 ## Layout
 
 - `src/main.ts` — the role dispatch. `config.ts`, `env.ts`, `agent-config.ts` — the environment.
-- `src/session-types.ts`, `session-api.ts`, `session-state.ts`, `workflows.ts` (`session`,
-  `subagent`, `pipeline`, `pipelineNode`) — the session; `child-state.ts` — a child's wait for a
-  person (the workflow side); `answers.ts` — the answer checks per kind (gateway + workflows).
+- `src/session-api.ts` (the Temporal names: workflow types, signals, queries, `PATCH_*`,
+  `TURN_REFUSED`), `workflows.ts` (`session`, `subagent`, `pipeline`, `pipelineNode`) — the session
+  on Temporal. Its logic, shapes and ids are swarm-shared's: `session-types.ts`, `session-ids.ts`,
+  `session-state.ts`, `child-state.ts` (a child's wait for a person, the workflow side),
+  `pipeline-state.ts` (the `pipeline` workflow's pure logic: the abort latch, the stream log, node
+  input / output, outcomes), `answers.ts` (the answer checks per kind, gateway + workflows).
 - `src/activities.ts` (`runTurn`, `runSubagent`, `pipelineDefinition`, `runPipelineNode`,
   `endTurn`, `writeMarkers`, `writeStream`, `planTurn`, `runIdOf`), `lease.ts` (the heartbeat
   lease, its fence and the turn scope), `subagents.ts` (SUBAGENTS: the tools, `dispatch`, the child
   and session agent configs), `child-ask.ts` (CHILD_ASK: a child agent's `onRequest`),
   `pipelines.ts` (PIPELINES: the tools, `dispatch`, the checks, a node's agent config),
-  `pipeline-state.ts` (the `pipeline` workflow's pure logic: the abort latch,
-  the stream log, node input / output, outcomes), `worker.ts` (the worker and its agents - session,
-  subagents, every pipeline node -, its health port, the SDK's logger).
-- `src/gateway.ts` (routes, the stream), `http.ts` (bodies, auth, CORS), `backend.ts` (Temporal
-  + the session table), `gateway-main.ts`, `cursor.ts`.
+  `worker.ts` (the worker and its agents - session, subagents, every pipeline node -, its health
+  port, the SDK's logger). `log.ts` — swarm-shared's JSON logger on stdout.
+- `src/gateway.ts` — swarm-shared's fetch handler (the routes, the checks, the stream: its
+  `gateway.ts` / `http.ts`) behind a `node:http` <-> fetch adapter (the request body streamed on
+  demand, a signal for a client gone, backpressure on the response body, `listen`);
+  `backend.ts` (swarm-shared's `ISessionBackend` on Temporal + the session table),
+  `gateway-main.ts` (the role: the backend, the `IEventFeed` of `db/events.ts` + `db/notify.ts`).
 - `src/db/` — `pool.ts`, `migrate.ts`, `runs.ts` (snapshots, binding, fencing), `journal.ts` (the
   call journal, fenced), `parked.ts` (the parked items), `events.ts` (the log, the batching writer,
   the markers), `notify.ts` (the LISTEN fan-out), `limiter.ts`, `json.ts`.
 - `sql/` — migrations. `scripts/bundle-workflows.ts` — `build`; `scripts/prune-image.ts` — the
   image's last build step (drops the bundler, other platforms' core-bridge binaries, `.d.ts`,
   maps; keeps anything reachable without the bundler).
-- `Dockerfile` (+ `Dockerfile.dockerignore`, an allowlist: the build context is the repo root;
-  distroless runtime, uid 1000), `compose.yaml`, `.env.example`.
+- `Dockerfile` (+ `Dockerfile.dockerignore`, an allowlist: the build context is the repo root - a
+  file of swarm-shared the build needs is listed there too; it builds the agent and swarm-shared,
+  then the bundle, and `pnpm deploy` copies both packages' `dist` into `node_modules`; distroless
+  runtime, uid 1000), `compose.yaml`, `.env.example`.
 - `deploy/helm/agent-swarm` — the Helm chart (its README has every value; `values.schema.json`
   guards them; `ci/all-on-values.yaml` renders every flag). A new env var the chart should set goes
   in `templates/configmap.yaml` and `values.yaml` + schema (`tests/chart.test.ts` fails on a
@@ -147,7 +166,7 @@ bumps, no CHANGELOG.
   (SIGSTOP) instead and wakes it (SIGCONT) once the retry has finished the turn.
 
 ```bash
-pnpm nx run-many -t typecheck format:check build test -p swarm
+pnpm nx run-many -t typecheck format:check build test -p swarm,swarm-shared
 DATABASE_URL=postgres://... pnpm nx run swarm:test:integration
 docker build -f examples/swarm/Dockerfile .   # from the repo root
 helm repo add temporal https://go.temporal.io/helm-charts   # once; the chart's dependency

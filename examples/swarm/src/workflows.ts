@@ -1,5 +1,6 @@
 // The session workflow: one per conversation. Deterministic and small - the logic is in
-// session-state.ts; this file is the Temporal wiring.
+// swarm-shared (`swarm-shared/workflow`: session-state.ts, child-state.ts, pipeline-state.ts, the
+// same on every platform); this file is the Temporal wiring.
 //
 //   wait for a message (or an answer to a parked turn) -> run ONE turn as an activity -> append it
 //   to the history -> write the turn.ended marker -> wait again
@@ -17,8 +18,9 @@
 //
 // A child whose run parks on a person (an "ask" of the approval mode) waits like the session does,
 // holding no slot: its workflow takes the answers the gateway signals to it, checks each one, and
-// resumes the same run once every item has its answer (child-state.ts); it tells the session when
-// it starts and stops waiting (childParkSignal: the state shows it, the stream gets a marker).
+// resumes the same run once every item has its answer (swarm-shared's child-state.ts); it tells
+// the session when it starts and stops waiting (childParkSignal: the state shows it, the stream
+// gets a marker).
 import {
   ActivityCancellationType,
   allHandlersFinished,
@@ -41,34 +43,61 @@ import {
   runPipelineGraph,
   type PipelineNodeRunner,
 } from '@dudko.dev/agent/pipeline-engine'
-import type { SwarmActivities } from './activities.ts'
 import {
+  acceptAnswer,
   acceptChildAnswer,
+  acceptMessage,
+  acceptStop,
+  carry,
+  childFinished,
+  childPark,
   childParked,
   childReady,
+  childrenRunning,
   childView,
+  childWorkflowIdOf,
   closeChildWait,
-  initialChildWait,
-  takeChildAnswers,
-  type IChildWait,
-} from './child-state.ts'
-import {
-  createAbortLatch,
   completedOutcomeOf,
+  createAbortLatch,
   createStreamLog,
   emptyUsage,
   failedOutcomeOf,
+  finishTurn,
+  hasWork,
+  initialChildWait,
+  initialState,
   isAbortError,
   nodeInputOf,
   nodeOutputOf,
+  pipelineFinished,
+  shouldContinueAsNew,
+  startChildren,
   sumUsage,
+  takeChildAnswers,
+  takeTurn,
+  view,
+  workflowIdOf,
+  type IAnswer,
+  type IChildParked,
+  type IChildParkNotice,
+  type IChildWait,
+  type IPipelineInput,
+  type IPipelineNodeInput,
+  type ISessionCarry,
+  type ISessionOptions,
+  type ISessionView,
+  type ISubagentInput,
   type ITally,
-} from './pipeline-state.ts'
+  type PipelineNodeOutcome,
+  type PipelineOutcome,
+  type SubagentOutcome,
+  type TurnOutcome,
+} from 'swarm-shared/workflow'
+import type { SwarmActivities } from './activities.ts'
 import {
   answerSignal,
   childParkSignal,
   childStateQuery,
-  childWorkflowIdOf,
   messageSignal,
   PATCH_CHILD_PARKING,
   PATCH_PIPELINES,
@@ -79,40 +108,7 @@ import {
   stopSignal,
   SUBAGENT_WORKFLOW,
   TURN_REFUSED,
-  workflowIdOf,
 } from './session-api.ts'
-import {
-  acceptAnswer,
-  acceptMessage,
-  acceptStop,
-  carry,
-  childFinished,
-  childPark,
-  childrenRunning,
-  finishTurn,
-  hasWork,
-  initialState,
-  pipelineFinished,
-  shouldContinueAsNew,
-  startChildren,
-  takeTurn,
-  view,
-  type ISessionCarry,
-  type TurnOutcome,
-} from './session-state.ts'
-import type {
-  IAnswer,
-  IChildParked,
-  IChildParkNotice,
-  IPipelineInput,
-  IPipelineNodeInput,
-  ISessionOptions,
-  ISessionView,
-  ISubagentInput,
-  PipelineNodeOutcome,
-  PipelineOutcome,
-  SubagentOutcome,
-} from './session-types.ts'
 
 export interface ISessionInput {
   sessionId: string

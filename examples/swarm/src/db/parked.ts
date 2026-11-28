@@ -8,38 +8,11 @@
 //   pending   - the turn (or the child) waits for it
 //   answered  - the turn went on with its answer (marked when the resume starts)
 //   cancelled - the turn was stopped while it waited (or the child ended)
-import type { IParkedRequest } from '../session-types.ts'
+//
+// The row's shape is the gateway's (`IParkedRow`, swarm-shared): this is its Postgres store.
+import type { AnsweredBy, IParkedRequest, IParkedRow, ParkedState } from 'swarm-shared'
 import { toJsonText } from './json.ts'
 import type { IQueryable, IStatement } from './pool.ts'
-
-export type ParkedState = 'pending' | 'answered' | 'cancelled'
-
-// Who answers an item: a client (a person, an outside system) or a child workflow of the session.
-export type AnsweredBy = 'client' | 'subagent' | 'pipeline'
-
-// The child workflow that waits for an item (a child's own park): its workflow id, the parked
-// turn's item it answers, and - a pipeline node visit - the node and the visit.
-export interface IParkedOwner {
-  workflowId: string
-  itemId: string
-  nodeId?: string
-  visit?: number
-}
-
-export interface IParkedRow {
-  sessionId: string
-  itemId: string
-  turn: number
-  runId: string
-  kind: IParkedRequest['kind']
-  answeredBy: AnsweredBy
-  // The child workflow that answers it (answeredBy 'subagent' / 'pipeline').
-  childId?: string
-  // The child workflow that WAITS for it (a child's own item; answeredBy 'client').
-  owner?: IParkedOwner
-  item: unknown
-  state: ParkedState
-}
 
 const COLUMNS = [
   'session_id',

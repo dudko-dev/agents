@@ -29,7 +29,7 @@ export type TurnIntent =
 
 export interface ITurnScope {
   // The session - or, for a child's run (a subagent, a pipeline node's visit), its own stream
-  // (session-api.ts).
+  // (swarm-shared's session-ids.ts).
   sessionId: string
   turn: number
   intent: TurnIntent

@@ -1,8 +1,9 @@
 // The event stream's cursor: `<turn>:<attempt>:<seq>`. A session is many runs (one per turn), so
 // the turn comes first; inside a turn, the core's (attempt, seq) order. `attempt` is the TURN's
 // attempt - the run's own attempt, plus the attempts of earlier runs of the same turn when a turn
-// had to start from scratch (its worker died before the first snapshot; see db/runs.ts). Clients
-// treat a cursor as opaque: they send back the last `id:` they saw. Pure; no imports.
+// had to start from scratch (its worker died before the first snapshot; see examples/swarm's
+// db/runs.ts). Clients treat a cursor as opaque: they send back the last `id:` they saw. Pure; no
+// imports.
 
 export interface ICursor {
   turn: number

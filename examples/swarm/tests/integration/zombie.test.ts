@@ -18,10 +18,10 @@ import { fileURLToPath } from 'node:url'
 import { after, before, test } from 'node:test'
 import type { TestWorkflowEnvironment } from '@temporalio/testing'
 import type pg from 'pg'
+import { workflowIdOf } from 'swarm-shared'
 import { runIdOf } from '../../src/activities.ts'
 import { SUPERSEDED_FENCE } from '../../src/db/runs.ts'
 import type { IRunningGateway } from '../../src/gateway-main.ts'
-import { workflowIdOf } from '../../src/session-api.ts'
 import {
   api,
   childWorker,

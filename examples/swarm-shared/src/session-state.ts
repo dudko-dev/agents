@@ -1,6 +1,7 @@
 // The session workflow's logic as plain functions over plain data: no Temporal, no clock, no
-// randomness (the workflow passes `now`). `workflows.ts` only wires these to signals, a query, a
-// timer and the activities, so what a session does can be tested without a server.
+// randomness (the workflow passes `now`). A platform's workflow (examples/swarm's workflows.ts on
+// Temporal) only wires these to signals, a query, a timer and the activities, so what a session
+// does can be tested without a server - and is the same on every platform.
 import type { IConversationTurn } from '@dudko.dev/agent'
 import { answerProblem } from './answers.ts'
 import {
@@ -11,7 +12,7 @@ import {
   pipelineWorkflowIdOf,
   subagentStreamOf,
   subagentWorkflowIdOf,
-} from './session-api.ts'
+} from './session-ids.ts'
 import type {
   IAnswer,
   IChildBudget,

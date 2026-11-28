@@ -1,0 +1,20 @@
+{
+  // The build: src only, to dist (ESM + .d.ts, one file per module, `.ts` imports rewritten to
+  // `.js`). No Node types - Web APIs only (the WebWorker lib), so a node:* import, `process` or
+  // `Buffer` in src fails here.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "allowImportingTsExtensions": false,
+    "rewriteRelativeImportExtensions": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "inlineSources": true,
+    "rootDir": "src",
+    "outDir": "dist",
+    "lib": ["ES2022", "WebWorker"],
+    "types": []
+  },
+  "include": ["src/**/*"]
+}

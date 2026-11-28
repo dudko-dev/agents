@@ -34,7 +34,7 @@ import {
   pipelineWorkflowIdOf,
   subagentStreamOf,
   subagentWorkflowIdOf,
-} from '../src/session-api.ts'
+} from '../src/session-ids.ts'
 import type { IChildParkNotice, IParkedRequest, ISessionOptions } from '../src/session-types.ts'
 
 const options = (extra: Partial<ISessionOptions> = {}): ISessionOptions => ({

@@ -1,7 +1,8 @@
 // The pipeline workflow's logic as plain functions over plain data, like session-state.ts for the
-// session: no Temporal, no clock, no randomness. `workflows.ts` (`pipeline`) runs the core's graph
-// engine (`runPipelineGraph`, from `@dudko.dev/agent/pipeline-engine` - deterministic by contract)
-// as its scheduler, and wires these to the node children and the stream activity.
+// session: no Temporal, no clock, no randomness. The `pipeline` workflow (examples/swarm's
+// workflows.ts) runs the core's graph engine (`runPipelineGraph`, from
+// `@dudko.dev/agent/pipeline-engine` - deterministic by contract) as its scheduler, and wires these
+// to the node children and the stream activity.
 import type {
   PipelineEvent,
   PipelineNode,
@@ -14,7 +15,7 @@ import {
   pipelineNodeEventsPath,
   pipelineNodeStreamOf,
   pipelineNodeWorkflowIdOf,
-} from './session-api.ts'
+} from './session-ids.ts'
 import type {
   IPipelineInput,
   IPipelineNodeInput,

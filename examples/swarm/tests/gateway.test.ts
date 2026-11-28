@@ -1,32 +1,32 @@
-// The gateway over loopback with a fake backend and a fake event log: routing, auth, CORS, body
-// bounds, error mapping, and the event stream (replay after a cursor, Last-Event-ID, live wake-up,
-// keep-alive, the connection cap, shutdown).
+// The gateway over loopback - swarm-shared's fetch handler behind the node:http adapter - with a
+// fake backend and the LISTEN fan-out on a fake client: routing, auth, CORS, body bounds (by
+// Content-Length and while a chunked body streams), error mapping, and the event stream (replay
+// after a cursor, Last-Event-ID, live wake-up, keep-alive, the connection cap, a client that goes
+// away, backpressure through the socket, shutdown); and what node:http takes that fetch cannot
+// represent. The handler's own unit tests (no sockets) are swarm-shared's.
 import assert from 'node:assert/strict'
+import { once } from 'node:events'
 import { request } from 'node:http'
 import type { Server } from 'node:http'
+import { connect } from 'node:net'
 import { after, before, test } from 'node:test'
-import { compareCursors, type ICursor } from '../src/cursor.ts'
-import type { IStreamRow } from '../src/db/events.ts'
-import type { IParkedRow } from '../src/db/parked.ts'
-import { createNotifyHub, type IListenClient } from '../src/db/notify.ts'
 import {
   BackendUnavailableError,
   ChildEndedError,
-  childOwnerOf,
-  createGateway,
-  listen,
-  matchRoute,
+  compareCursors,
+  pipelineView,
   SessionEndedError,
   SessionNotFoundError,
-  pipelineView,
-  sseFrame,
   subagentView,
-  type IGateway,
+  type ICursor,
+  type IParkedRow,
   type ISessionBackend,
-} from '../src/gateway.ts'
-import { corsHeaders, createBearerCheck } from '../src/http.ts'
+  type ISessionView,
+  type IStreamRow,
+} from 'swarm-shared'
+import { createNotifyHub, type IListenClient } from '../src/db/notify.ts'
+import { createGateway, listen, type IGateway } from '../src/gateway.ts'
 import { silentLogger } from '../src/log.ts'
-import type { ISessionView } from '../src/session-types.ts'
 import { readSse } from './helpers/sse.ts'
 
 const TOKEN = 'unit-test-token-0123456789abcdef'
@@ -245,16 +245,47 @@ const post = (path: string, body?: string, headers: Record<string, string> = jso
 
 // --- routing and auth --------------------------------------------------------------------------
 
-test('routes: 404, 405 with Allow, ids that are not ids are 404', () => {
-  assert.deepEqual(matchRoute('GET', '/nope'), { ok: false, status: 404 })
-  assert.deepEqual(matchRoute('GET', '/sessions'), { ok: false, status: 405, allow: 'POST' })
-  assert.deepEqual(matchRoute('DELETE', '/sessions/s1'), { ok: false, status: 405, allow: 'GET' })
-  assert.deepEqual(matchRoute('GET', '/sessions/a.b'), { ok: false, status: 404 })
-  assert.deepEqual(matchRoute('GET', `/sessions/${'x'.repeat(65)}`), { ok: false, status: 404 })
-  assert.deepEqual(matchRoute('POST', '/sessions/s1/answers/r%2F1'), { ok: false, status: 404 })
-  const hit = matchRoute('POST', '/sessions/s1/answers/req_1')
-  assert.ok(hit.ok)
-  assert.deepEqual(hit.route, { name: 'answer', sessionId: 's1', requestId: 'req_1' })
+// One raw HTTP/1.1 exchange: what node:http takes that fetch would not send.
+const raw = (head: string): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const { port } = new URL(base)
+    const socket = connect(Number(port), '127.0.0.1', () =>
+      socket.write(`${head}\r\nHost: x\r\nConnection: close\r\n\r\n`),
+    )
+    let text = ''
+    socket.on('data', (d) => (text += d))
+    socket.on('error', reject)
+    socket.on('close', () => resolve(text))
+  })
+
+test('routes: 404, 405 with Allow, ids that are not ids are 404', async () => {
+  assert.equal((await fetch(`${base}/nope`)).status, 404)
+  const wrong = await fetch(`${base}/sessions`, { method: 'PUT', headers: auth })
+  assert.equal(wrong.status, 405)
+  assert.equal(wrong.headers.get('allow'), 'POST')
+  assert.equal((await fetch(`${base}/sessions/a.b`, { headers: auth })).status, 404)
+  assert.equal((await fetch(`${base}/sessions/${'x'.repeat(65)}`, { headers: auth })).status, 404)
+  assert.equal(
+    (await post('/sessions/s1/answers/r%2F1', JSON.stringify({ approved: true }))).status,
+    404,
+  )
+})
+
+test('what fetch cannot build: TRACE is routed as before, a target URL cannot parse is a 400', async () => {
+  // TRACE: no route takes it - 405 where the path is a route, 404 elsewhere, as node:http had it.
+  const trace = await raw('TRACE /sessions HTTP/1.1')
+  assert.match(trace, /^HTTP\/1\.1 405 /)
+  assert.match(trace, /\r\nallow: POST\r\n/i)
+  assert.match(await raw('TRACE /nope HTTP/1.1'), /^HTTP\/1\.1 404 /)
+  // An absolute-form target the URL parser refuses: a 400 (it took the process down before).
+  const bad = await raw('GET http://[ HTTP/1.1')
+  assert.match(bad, /^HTTP\/1\.1 400 /)
+  assert.match(bad, /"code":"bad_request"/)
+  // Credentials in an absolute-form target: routed by its path, as before (a Request has none).
+  assert.match(await raw('GET http://user:pass@x/sessions/s1 HTTP/1.1'), /^HTTP\/1\.1 401 /)
+  assert.match(await raw('GET http://user:pass@x/healthz HTTP/1.1'), /^HTTP\/1\.1 200 /)
+  // The gateway is still up.
+  assert.equal((await fetch(`${base}/healthz`)).status, 200)
 })
 
 test('health needs no token; readiness reports what is down', async () => {
@@ -290,23 +321,7 @@ test('the bearer token: missing, wrong, right, rotated', async () => {
   )
 })
 
-test('createBearerCheck: exact tokens only', () => {
-  const check = createBearerCheck([TOKEN])
-  assert.equal(check(`Bearer ${TOKEN}`), true)
-  assert.equal(check(`Bearer ${TOKEN}  `), true)
-  assert.equal(check(`Bearer ${TOKEN}x`), false)
-  assert.equal(check(`Bearer ${TOKEN.slice(0, -1)}`), false)
-  assert.equal(check(`Bearer ${TOKEN} extra`), false)
-  assert.equal(check(TOKEN), false)
-  assert.equal(check(undefined), false)
-  assert.equal(check('Bearer '), false)
-  assert.equal(createBearerCheck([])(`Bearer ${TOKEN}`), false)
-})
-
 test('CORS: listed origins only, preflight answers the methods and headers', async () => {
-  assert.deepEqual(corsHeaders(undefined, ['*'], false), {})
-  assert.deepEqual(corsHeaders('https://evil.example', ['https://app.example'], false), {})
-  assert.equal(corsHeaders('https://x', ['*'], false)['access-control-allow-origin'], '*')
   const pre = await fetch(`${base}/sessions`, {
     method: 'OPTIONS',
     headers: { origin: 'https://app.example' },
@@ -328,9 +343,25 @@ test('CORS: listed origins only, preflight answers the methods and headers', asy
 
 // --- bodies ------------------------------------------------------------------------------------
 
+const chunkedPost = (path: string, chunks: string[]): Promise<number> =>
+  new Promise<number>((resolve, reject) => {
+    const req = request(`${base}${path}`, { method: 'POST', headers: json }, (res) => {
+      res.resume()
+      resolve(res.statusCode ?? 0)
+    })
+    req.on('error', reject)
+    for (const chunk of chunks) req.write(chunk)
+    req.end()
+  })
+
 test('bodies are bounded, typed and objects', async () => {
   const big = await post('/sessions/s1/messages', JSON.stringify({ text: 'x'.repeat(2000) }))
   assert.equal(big.status, 413)
+  assert.equal(big.headers.get('connection'), 'close')
+  // A chunked body under the limit is streamed in whole.
+  calls.length = 0
+  assert.equal(await chunkedPost('/sessions/s1/messages', ['{"te', 'xt":', '"hi"}']), 202)
+  assert.equal((calls.at(-1)?.args[1] as { text: string }).text, 'hi')
   // A chunked body (no Content-Length) is counted as it streams.
   const chunked = await new Promise<number>((resolve, reject) => {
     const req = request(
@@ -529,50 +560,6 @@ test("a child's item: the answer goes to the child that waits for it, once it is
   childEnded = false
 })
 
-test('childOwnerOf: the workflow id is recomputed from the session, the call, its run (and the visit)', () => {
-  const parent = parkedRows.get('sub1')!
-  const pipeline = parkedRows.get('pipe1')!
-  const c1 = parkedRows.get('c1')!
-  const n1 = parkedRows.get('n1')!
-  assert.equal(childOwnerOf('s1', c1, parent), SUB_CHILD)
-  assert.equal(childOwnerOf('s1', n1, pipeline), NODE_CHILD)
-  // The session of the REQUEST, not a row's: s1's rows asked for s2, and s2's rows (with an
-  // owner s2 named) asked for s1.
-  assert.equal(childOwnerOf('s2', c1, parent), undefined)
-  const s2child = {
-    ...c1,
-    sessionId: 's2',
-    owner: { ...c1.owner!, workflowId: 'subagent-s2-r1-sub1' },
-  }
-  assert.equal(childOwnerOf('s2', s2child, { ...parent, sessionId: 's2' }), 'subagent-s2-r1-sub1')
-  assert.equal(childOwnerOf('s1', s2child, { ...parent, sessionId: 's2' }), undefined)
-  // The row's owner must be the one the session would have named.
-  assert.equal(
-    childOwnerOf('s1', { ...c1, owner: { ...c1.owner!, workflowId: 'x' } }, parent),
-    undefined,
-  )
-  assert.equal(childOwnerOf('s1', c1, { ...parent, runId: 'r2' }), undefined, 'another run')
-  assert.equal(childOwnerOf('s1', c1, { ...parent, itemId: 'sub2' }), undefined, 'another call')
-  assert.equal(childOwnerOf('s1', c1, { ...parent, turn: 2 }), undefined, 'another turn')
-  assert.equal(childOwnerOf('s1', c1, undefined), undefined, 'no call')
-  assert.equal(childOwnerOf('s1', c1, pipeline), undefined, 'a pipeline call, a subagent owner')
-  assert.equal(childOwnerOf('s1', n1, parent), undefined, 'a subagent call, a node owner')
-  assert.equal(
-    childOwnerOf('s1', { ...n1, owner: { ...n1.owner!, visit: 2 } }, pipeline),
-    undefined,
-  )
-  assert.equal(
-    childOwnerOf(
-      's1',
-      { ...n1, owner: { workflowId: NODE_CHILD, itemId: 'pipe1', nodeId: 'draft' } },
-      pipeline,
-    ),
-    undefined,
-    'a node without its visit',
-  )
-  assert.equal(childOwnerOf('s1', parkedRows.get('q1')!, parent), undefined, 'not a child item')
-})
-
 test('subagents: listed from the session, each with its own stream', async () => {
   const listed = await fetch(`${base}/sessions/s1/subagents`, { headers: auth })
   assert.equal(listed.status, 200)
@@ -603,11 +590,10 @@ test('subagents: listed from the session, each with its own stream', async () =>
   )
   const notChild = await readSse(`${base}/sessions/s1/subagents/q1/events`, auth, () => true)
   assert.equal(notChild.status, 404)
-  assert.ok(matchRoute('GET', '/sessions/s1/subagents/sub1/events').ok)
-  assert.deepEqual(matchRoute('GET', '/sessions/s1/subagents/a.b/events'), {
-    ok: false,
-    status: 404,
-  })
+  assert.equal(
+    (await fetch(`${base}/sessions/s1/subagents/a.b/events`, { headers: auth })).status,
+    404,
+  )
 })
 
 test('pipelines: listed from the session; their own streams and their node visits', async () => {
@@ -689,16 +675,6 @@ test('pipelines: listed from the session; their own streams and their node visit
     404,
   )
   // Route shapes: a node id is an id, a visit is 1..999.
-  assert.deepEqual(matchRoute('GET', '/sessions/s1/pipelines/p/nodes/n_1/3/events'), {
-    ok: true,
-    route: {
-      name: 'pipelineNodeEvents',
-      sessionId: 's1',
-      requestId: 'p',
-      nodeId: 'n_1',
-      visit: '3',
-    },
-  })
   for (const bad of [
     '/nodes/a.b/1/',
     '/nodes/a/0/',
@@ -706,26 +682,15 @@ test('pipelines: listed from the session; their own streams and their node visit
     '/nodes/a/1000/',
     '/nodes/a/x/',
   ]) {
-    assert.deepEqual(matchRoute('GET', `/sessions/s1/pipelines/p${bad}events`), {
-      ok: false,
-      status: 404,
-    })
+    const res = await fetch(`${base}/sessions/s1/pipelines/pipe1${bad}events`, { headers: auth })
+    assert.equal(res.status, 404, bad)
   }
-  assert.deepEqual(matchRoute('POST', '/sessions/s1/pipelines'), {
-    ok: false,
-    status: 405,
-    allow: 'GET',
-  })
+  const post405 = await fetch(`${base}/sessions/s1/pipelines`, { method: 'POST', headers: auth })
+  assert.equal(post405.status, 405)
+  assert.equal(post405.headers.get('allow'), 'GET')
 })
 
 // --- the event stream --------------------------------------------------------------------------
-
-test('sseFrame: the cursor is the id; the event is under data on one line', () => {
-  assert.equal(
-    sseFrame({ cursor: { turn: 2, attempt: 1, seq: 7 }, json: '{"type":"final"}' }),
-    'id: 2:1:7\ndata: {"cursor":"2:1:7","turn":2,"event":{"type":"final"}}\n\n',
-  )
-})
 
 test('events: replay after the cursor (paged), Last-Event-ID wins, then live', async () => {
   rows.set('s1', [
@@ -826,4 +791,66 @@ test('events: the connection cap answers 503; shutdown ends the open streams', a
   assert.ok(afterCalls >= before)
   await new Promise((r) => setTimeout(r, 50))
   assert.equal(hub.size(), 0)
+})
+
+const until = async (ok: () => boolean, what: string, ms = 3000): Promise<void> => {
+  const deadline = Date.now() + ms
+  while (!ok()) {
+    assert.ok(Date.now() < deadline, what)
+    await new Promise((r) => setTimeout(r, 10))
+  }
+}
+
+test('events: a client that goes away ends its stream, its subscription with it', async () => {
+  await until(() => hub.size() === 0, 'no stream open')
+  const ac = new AbortController()
+  const res = await fetch(`${base}/sessions/ended/events`, { headers: auth, signal: ac.signal })
+  const reader = res.body!.getReader()
+  assert.match(new TextDecoder().decode((await reader.read()).value), /^retry: 2000/)
+  assert.equal(hub.size(), 1)
+  ac.abort()
+  await until(() => hub.size() === 0, 'the stream of a client gone is closed')
+})
+
+test('events: backpressure through the socket - a client that does not read holds the replay back', async () => {
+  // 120 frames of 256 KB (60 reads of the log at SSE batch 2): far more than the socket buffers.
+  const big = 'x'.repeat(256 * 1024)
+  known.add('bp')
+  rows.set(
+    'bp',
+    Array.from({ length: 120 }, (_, i) => ({
+      cursor: { turn: 1, attempt: 1, seq: i + 1 },
+      json: JSON.stringify({ type: 'log', big }),
+    })),
+  )
+  const socket = connect(Number(new URL(base).port), '127.0.0.1')
+  await once(socket, 'connect')
+  const before = afterCalls
+  socket.write(
+    `GET /sessions/bp/events HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer ${TOKEN}\r\n\r\n`,
+  )
+  // The answer begins; then the client reads nothing for a while.
+  await new Promise<void>((resolve) =>
+    socket.once('data', () => {
+      socket.pause()
+      resolve()
+    }),
+  )
+  await new Promise((r) => setTimeout(r, 300))
+  const stalled = afterCalls - before
+  assert.ok(stalled < 30, `the replay waits for the client (${stalled} of 60 reads)`)
+  // Reading again lets it go on, to the last frame.
+  let tail = ''
+  await new Promise<void>((resolve) => {
+    socket.on('data', (d: Buffer) => {
+      const text = tail + d.toString('latin1')
+      if (text.includes('id: 1:1:120\n')) resolve()
+      tail = text.slice(-64)
+    })
+    socket.resume()
+  })
+  assert.ok(afterCalls - before >= 60, 'the whole log was read')
+  socket.destroy()
+  await until(() => hub.size() === 0, 'closed')
+  rows.delete('bp')
 })

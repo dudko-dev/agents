@@ -2,7 +2,9 @@
 // session. A stream subscribes BEFORE it replays, so a notification that arrives while it reads
 // is not lost: it leaves the subscription dirty and the next wait returns at once. A lost
 // connection is re-opened with backoff, and every stream is woken to re-read after it (anything
-// notified while it was down was missed).
+// notified while it was down was missed). The subscription is the gateway's IEventFeed's
+// (swarm-shared): what any platform's fan-out provides.
+import type { ISubscription, WaitResult } from 'swarm-shared'
 
 export interface IListenClient {
   connect: () => Promise<unknown>
@@ -11,14 +13,6 @@ export interface IListenClient {
   on(event: 'error', fn: (err: Error) => void): unknown
   on(event: 'end', fn: () => void): unknown
   end: () => Promise<void>
-}
-
-export type WaitResult = 'notified' | 'timeout' | 'closed'
-
-export interface ISubscription {
-  // Until a notification for the session (or one already pending), `ms`, or `signal`.
-  wait: (ms: number, signal?: AbortSignal) => Promise<WaitResult>
-  close: () => void
 }
 
 export interface INotifyHub {

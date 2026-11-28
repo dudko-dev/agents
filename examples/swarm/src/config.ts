@@ -2,13 +2,13 @@
 // there, in .env.example and in compose.yaml if the stack needs it.
 import { hostname } from 'node:os'
 import type { IAgentConfig } from '@dudko.dev/agent'
+import type { GatewayAuth, IApiConfig, ISessionOptions } from 'swarm-shared'
 import { agentConfigFromEnv, pipelinesFromEnv, subagentProfilesFromEnv } from './agent-config.ts'
 import { CHILD_ASKS, type ChildAsk } from './child-ask.ts'
 import type { ILimiterConfig, LimiterScope } from './db/limiter.ts'
 import { bool, ConfigError, int, list, num, oneOf, secret, str, type Env } from './env.ts'
 import { isLogLevel, type LogLevel } from './log.ts'
 import type { IPipelineConfig } from './pipelines.ts'
-import type { ISessionOptions } from './session-types.ts'
 import type { ISubagentProfile } from './subagents.ts'
 
 export interface ITemporalConfig {
@@ -24,16 +24,11 @@ export interface IDatabaseConfig {
   poolMax: number
 }
 
-export type GatewayAuth = { mode: 'bearer'; tokens: string[] } | { mode: 'none' }
-
-export interface IGatewayConfig {
+// The API's own settings (auth, CORS, bounds, the streams: swarm-shared's IApiConfig) and this
+// role's.
+export interface IGatewayConfig extends IApiConfig {
   host: string
   port: number
-  auth: GatewayAuth
-  corsOrigins: string[]
-  maxBodyBytes: number
-  messageMaxChars: number
-  sse: { maxConnections: number; keepAliveMs: number; batch: number }
   session: ISessionOptions
   temporal: ITemporalConfig
   database: IDatabaseConfig

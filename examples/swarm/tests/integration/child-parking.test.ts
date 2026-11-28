@@ -18,22 +18,24 @@ import type { TestWorkflowEnvironment } from '@temporalio/testing'
 import { tool } from 'ai'
 import type pg from 'pg'
 import { z } from 'zod'
+import {
+  compareCursors,
+  parseCursor,
+  pipelineNodeWorkflowIdOf,
+  pipelineWorkflowIdOf,
+  SUBAGENT_MARKER_SEQ,
+  subagentWorkflowIdOf,
+  workflowIdOf,
+  type IChildWaiting,
+  type ICursor,
+  type IParkedRequest,
+  type ISessionView,
+} from 'swarm-shared'
 import { insertSessionSql } from '../../src/backend.ts'
-import { compareCursors, parseCursor, type ICursor } from '../../src/cursor.ts'
 import { createParkedStore } from '../../src/db/parked.ts'
 import type { IRunningGateway } from '../../src/gateway-main.ts'
 import type { IPipelineConfig } from '../../src/pipelines.ts'
-import {
-  answerSignal,
-  childStateQuery,
-  pipelineNodeWorkflowIdOf,
-  pipelineWorkflowIdOf,
-  SESSION_WORKFLOW,
-  subagentWorkflowIdOf,
-  workflowIdOf,
-} from '../../src/session-api.ts'
-import { SUBAGENT_MARKER_SEQ } from '../../src/session-state.ts'
-import type { IChildWaiting, IParkedRequest, ISessionView } from '../../src/session-types.ts'
+import { answerSignal, childStateQuery, SESSION_WORKFLOW } from '../../src/session-api.ts'
 import type { ISubagentProfile } from '../../src/subagents.ts'
 import type { IRunningWorker } from '../../src/worker.ts'
 import {

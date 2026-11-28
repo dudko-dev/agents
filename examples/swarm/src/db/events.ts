@@ -8,8 +8,7 @@
 // durable state is the snapshot. Delivery is at-least-once anyway - the step a crash interrupted
 // runs again under the next attempt.
 import type { AgentEvent } from '@dudko.dev/agent'
-import type { ICursor } from '../cursor.ts'
-import type { IStreamBatch, IStreamMarker } from '../session-types.ts'
+import type { ICursor, IStreamBatch, IStreamMarker, IStreamRow } from 'swarm-shared'
 import { toJsonText } from './json.ts'
 import type { IQueryable, IStatement } from './pool.ts'
 import { TURN_END_ATTEMPT, TURN_START_ATTEMPT } from './runs.ts'
@@ -123,8 +122,8 @@ export const markerRow = (m: TurnMarker): IEventRow => {
   }
 }
 
-// A child marker the session workflow writes (session-state.ts chooses its slot and seq: the
-// parked attempt's, above every seq of that attempt). Written once: a retry is a no-op.
+// A child marker the session workflow writes (swarm-shared's session-state.ts chooses its slot and
+// seq: the parked attempt's, above every seq of that attempt). Written once: a retry is a no-op.
 export const streamMarkerRow = (m: IStreamMarker): IEventRow => ({
   sessionId: m.sessionId,
   turn: m.turn,
@@ -137,7 +136,8 @@ export const streamMarkerRow = (m: IStreamMarker): IEventRow => ({
 })
 
 // A pipeline's own stream is one "run" of the workflow: turn 1, attempt 1, the engine's events
-// numbered by the workflow (pipeline-state.ts). The run id column keys the stream's rows.
+// numbered by the workflow (swarm-shared's pipeline-state.ts). The run id column keys the
+// stream's rows.
 export const PIPELINE_STREAM_RUN = 'pipeline'
 
 // The rows of one batch of a pipeline's own stream: its turn.started (the first batch), then its
@@ -234,12 +234,6 @@ export const createEventWriter = (db: IQueryable, o: IEventWriterOptions): IEven
     },
     flush,
   }
-}
-
-export interface IStreamRow {
-  cursor: ICursor
-  // The stored event, as JSON text.
-  json: string
 }
 
 export interface IEventStore {

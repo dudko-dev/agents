@@ -23,7 +23,7 @@ import {
   STREAM_BATCH_MAX,
   sumUsage,
 } from '../src/pipeline-state.ts'
-import { pipelineNodeStreamOf, pipelineNodeWorkflowIdOf } from '../src/session-api.ts'
+import { pipelineNodeStreamOf, pipelineNodeWorkflowIdOf } from '../src/session-ids.ts'
 import type { IPipelineInput } from '../src/session-types.ts'
 
 const input: IPipelineInput = {

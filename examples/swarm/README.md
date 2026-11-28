@@ -69,8 +69,8 @@ copy what you need.
 - no message for `SESSION_IDLE_TIMEOUT_MS`: the session ends.
 
 The workflow is deterministic and small: its logic is plain functions in
-[`src/session-state.ts`](src/session-state.ts), [`src/workflows.ts`](src/workflows.ts) wires them
-to Temporal. Signals, not updates: the server accepts a signal while no worker runs, so the gateway
+[`swarm-shared`](../swarm-shared) ([`src/session-state.ts`](../swarm-shared/src/session-state.ts)),
+[`src/workflows.ts`](src/workflows.ts) wires them to Temporal. Signals, not updates: the server accepts a signal while no worker runs, so the gateway
 answers at once and a swarm scaled to zero still takes messages.
 
 **A turn is one activity, `runTurn`, and one ordinary `agent.run({ input, history })`** on the
@@ -88,14 +88,23 @@ hooks pointed at Temporal and Postgres:
 | a stop | the session cancels the activity; the activity aborts the run, which records `cancelled` | [`src/activities.ts`](src/activities.ts) |
 
 The activity's result is a discriminated union (`completed | stopped | parked`, see
-[`src/session-types.ts`](src/session-types.ts)); a failure is an exception, retried by Temporal
+[`session-types.ts`](../swarm-shared/src/session-types.ts)); a failure is an exception, retried by Temporal
 (`TURN_MAX_ATTEMPTS`) unless it is a refusal (a limit, refused credentials), which fails the turn at
 once. `parked` carries the items the run waits for; the workflow collects their answers (from
 clients, from child workflows) and runs the activity again, which resumes the run with them - see
 [Parking](#parking-a-persons-answer-a-result-from-outside).
 
-**The gateway** is the clients' only door: HTTP on `node:http`, no framework, any number of
-replicas. Sessions live in Temporal, events in Postgres; it holds nothing a restart would lose.
+**The gateway** is the clients' only door, any number of replicas. Sessions live in Temporal,
+events in Postgres; it holds nothing a restart would lose. The API itself - the routes, the checks,
+the event stream - is a fetch-style handler over Web APIs in [`swarm-shared`](../swarm-shared)
+(`(request: Request) => Promise<Response>`, the same on any platform); here it runs on `node:http`,
+no framework, behind a small adapter ([`src/gateway.ts`](src/gateway.ts)).
+
+**`swarm-shared`** ([`examples/swarm-shared`](../swarm-shared), private, never published) is the
+part of the swarm that does not depend on Temporal, Postgres or Node: the session's logic, its ids
+and types, the answer checks, the cursor and the HTTP API. It ships built JavaScript (the image
+copies it into `node_modules`, where Node strips no types); `build` makes it, and nx builds it
+before the swarm's typecheck, build and tests.
 
 **Postgres** holds six tables: `swarm_sessions` (the sessions the gateway started), `swarm_runs`
 (run snapshots, bound to their turn), `swarm_events` (the event log), `swarm_limiter` (the bucket)
@@ -736,25 +745,36 @@ under the same names - for anything else, build the `IAgentConfig` in code
 
 ## Development and tests
 
-This is the workspace project `swarm` (`examples/swarm`). Its source is TypeScript run directly by
-Node (type stripping); `build` only bundles the workflow code (`dist/workflow-bundle.js`).
+This is the workspace project `swarm` (`examples/swarm`), with `swarm-shared`
+(`examples/swarm-shared`) - its platform-independent part. The swarm's source is TypeScript run
+directly by Node (type stripping); its `build` only bundles the workflow code
+(`dist/workflow-bundle.js`). `swarm-shared`'s `build` compiles it to `dist` (ESM + `.d.ts`), which
+the swarm imports.
 
 ```bash
-pnpm nx run-many -t typecheck format:check build test -p swarm   # unit tests: nothing external
+pnpm nx run-many -t typecheck format:check build test -p swarm,swarm-shared   # nothing external
 DATABASE_URL=postgres://swarm:swarm@localhost:5432/swarm pnpm nx run swarm:test:integration
 ```
 
-- **Unit tests** (`tests/*.test.ts`): the session logic (parking, answers, children, caps, markers),
-  the answer checks per kind, the gateway over loopback with fakes (routing, auth, CORS, bounds, the
-  stream, answers, the subagent and pipeline routes), the cursor, the limiter's math and loop, the
-  SQL builders and the event writer, the lease and its fence, the activities in Temporal's
-  `MockActivityEnvironment` (parks, resumes, a partial resume, the child activity, a pipeline
-  node's run and route call), the subagent and pipeline tools and configs (every refusal), the
-  pipeline workflow's logic with the engine driven as the workflow drives it, the config, the
-  workflow bundle (the engine in it, none of the agent's main entry, `ai`, `zod` or MCP), the
-  image's prune step, the Helm chart's values schema and its variables, a child's wait for a person
+- **Unit tests of `swarm-shared`** (`examples/swarm-shared/tests/*.test.ts`): the session logic
+  (parking, answers, children, caps, markers), the answer checks per kind, the cursor, the pipeline
+  workflow's logic with the engine driven as the workflow drives it, a child's wait for a person
   (the answers it takes per kind, a partial answer, a re-park, a closed child; the session's
-  notices and markers about it; the gateway's lookup and routing of a child's item), and a
+  notices and markers about it), the HTTP API as a fetch handler driven with `new Request(...)` -
+  no sockets (routing, auth, CORS, bounds, error mapping, answers and the lookup and routing of a
+  child's item, the listings, the stream: replay, cursor, live, keep-alive, the cap,
+  backpressure, the client going away, shutdown) - and what the package ships (built files that
+  import nothing but each other; `./workflow` without the HTTP API, a clock or I/O).
+- **Unit tests** (`tests/*.test.ts`): the gateway over loopback - the shared handler behind the
+  `node:http` adapter - with fakes (routing, auth, CORS, bounds, the stream, backpressure through
+  the socket, a client that goes away, answers, the subagent and pipeline routes, what `node:http`
+  takes that fetch cannot build), the limiter's math and loop, the SQL builders and the event
+  writer, the lease and its fence, the activities in Temporal's `MockActivityEnvironment` (parks,
+  resumes, a partial resume, the child activity, a pipeline node's run and route call), the
+  subagent and pipeline tools and configs (every refusal), the config, the workflow bundle (the
+  engine and `swarm-shared/workflow` in it, none of the agent's main entry, `ai`, `zod`, MCP or
+  swarm-shared's HTTP API), the image's prune step, the Helm chart's values schema and its
+  variables, and a
   **replay** of recorded histories (`tests/fixtures/*.history.json`: a session from before static
   subagents, two with subagent children, one with a pipeline child, the pipeline workflow and a
   node visit, and - with children that waited for a person - two sessions, a subagent child and a
