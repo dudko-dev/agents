@@ -326,3 +326,14 @@ test('isAuthError finds a 401 / 403 on the error or down its cause chain, and on
   loop.cause = loop
   assert.equal(isAuthError(loop), false, 'a cyclic cause chain ends')
 })
+
+test('isAuthError is public: the main entry exports the function the runner uses', async () => {
+  const index = await import('../src/index.ts')
+  assert.equal(index.isAuthError, isAuthError)
+  // And the built package, as a host imports it (a specifier the typecheck does not resolve:
+  // dist is not built yet when it runs).
+  const specifier: string = '@dudko.dev/agent'
+  const built = (await import(specifier)) as typeof index
+  assert.equal(built.isAuthError({ name: 'RetryError', lastError: { statusCode: 403 } }), true)
+  assert.equal(built.isAuthError({ statusCode: 500 }), false)
+})

@@ -53,6 +53,16 @@
         "default": "./dist/sandbox-worker.cjs"
       }
     },
+    "./pipeline-engine": {
+      "import": {
+        "types": "./dist/pipeline-engine.d.ts",
+        "default": "./dist/pipeline-engine.js"
+      },
+      "require": {
+        "types": "./dist/pipeline-engine.d.cts",
+        "default": "./dist/pipeline-engine.cjs"
+      }
+    },
     "./bundle": {
       "types": "./dist/index.d.ts",
       "import": "./dist/agent-web.js"

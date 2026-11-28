@@ -1154,6 +1154,62 @@ export const preparePipeline = (definition: PipelineDefinition): PipelinePlan =>
   }
 }
 
+// What `from` reaches in ONE pass of every loop: along the edges, but never along a loop's way
+// back - an edge whose target every path from the entry to its source passes through (the target
+// dominates the source: it is the loop's head). A cycle with more than one way in has no head, so
+// no such edge, and stays a cycle. It depends on the graph, not on the order of `edges`.
+const passReach = (plan: PipelinePlan): ((from: string, to: string) => boolean) => {
+  const entry = plan.definition.entry
+  // The nodes the entry reaches, and each one's predecessors among them.
+  const order = [entry]
+  const preds = new Map<string, string[]>([[entry, []]])
+  for (let i = 0; i < order.length; i++) {
+    for (const { edge } of plan.outgoing.get(order[i]) ?? []) {
+      if (!preds.has(edge.to)) {
+        preds.set(edge.to, [])
+        order.push(edge.to)
+      }
+      ;(preds.get(edge.to) as string[]).push(order[i])
+    }
+  }
+  // The dominators: the entry's are itself; a node's are itself and what all its predecessors'
+  // have in common. Iterated until nothing changes (the sets only shrink).
+  const dom = new Map<string, Set<string>>()
+  for (const nodeId of order) dom.set(nodeId, new Set(nodeId === entry ? [entry] : order))
+  for (let changed = true; changed;) {
+    changed = false
+    for (const nodeId of order) {
+      if (nodeId === entry) continue
+      const [first, ...rest] = (preds.get(nodeId) as string[]).map((p) => dom.get(p) as Set<string>)
+      const next = new Set([nodeId])
+      for (const d of first) if (rest.every((set) => set.has(d))) next.add(d)
+      if (next.size < (dom.get(nodeId) as Set<string>).size) {
+        dom.set(nodeId, next)
+        changed = true
+      }
+    }
+  }
+  const closure = new Map<string, Set<string>>()
+  return (from, to) => {
+    let seen = closure.get(from)
+    if (!seen) {
+      const found = new Set<string>()
+      const queue = [from]
+      while (queue.length) {
+        const at = queue.pop() as string
+        for (const { edge } of plan.outgoing.get(at) ?? []) {
+          // A loop's way back: the next pass, not this one.
+          if (dom.get(at)?.has(edge.to) || found.has(edge.to)) continue
+          found.add(edge.to)
+          queue.push(edge.to)
+        }
+      }
+      closure.set(from, (seen = found))
+    }
+    return seen.has(to)
+  }
+}
+
 // What an aborted run does: 'reject' with an AbortError, or 'resolve' with what it has and
 // `stoppedBy: 'aborted'`. Each package's createPipeline follows its own agent.
 export type PipelineAbortBehaviour = 'reject' | 'resolve'
@@ -1429,9 +1485,11 @@ export const runPipelineGraph = async <E = never>(
 
   // join 'all': wait while another pending node can still reach this one through the graph (a
   // path to a node never needs to pass through it, so plain reachability is the whole test).
-  const deferred = (nodeId: string, all: string[]): boolean =>
+  const deferred = (nodeId: string, all: string[], reaches = plan.reaches): boolean =>
     (plan.nodes.get(nodeId)?.join ?? 'all') === 'all' &&
-    all.some((other) => other !== nodeId && plan.reaches(other, nodeId))
+    all.some((other) => other !== nodeId && reaches(other, nodeId))
+  // Made the first time every waiting node waits for another (passReach).
+  let inPass: ((from: string, to: string) => boolean) | undefined
 
   emit({ type: 'pipeline.started', ...(definition.name ? { pipeline: definition.name } : {}) })
   options.signal?.addEventListener('abort', onOuterAbort, { once: true })
@@ -1440,7 +1498,16 @@ export const runPipelineGraph = async <E = never>(
     while (pending.size > 0 && !halted) {
       const waiting = [...pending.keys()]
       let ready = waiting.filter((nodeId) => !deferred(nodeId, waiting))
-      // Everybody waits for somebody (a cycle): nobody would ever start, so all of them do.
+      // Everybody waits for somebody: they reach each other through a loop. A wait that goes back
+      // through a loop's head is for the loop's next pass, so only the waits within this pass
+      // count: the nodes nothing reaches within it start, and a join inside the loop goes on
+      // waiting for its slower branch.
+      if (ready.length === 0) {
+        const reaches = (inPass ??= passReach(plan))
+        ready = waiting.filter((nodeId) => !deferred(nodeId, waiting, reaches))
+      }
+      // Still everybody (a cycle with more than one way in has no head): nobody would ever
+      // start, so all of them do.
       if (ready.length === 0) ready = waiting
       const starting: Promise<void>[] = []
       for (const nodeId of ready) {

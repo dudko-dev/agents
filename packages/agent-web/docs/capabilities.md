@@ -1810,6 +1810,17 @@ if (unfinished) await agent.run('', { resumeFromRunId: unfinished.runId })
 - A stopped run (`cancelled`) and a failed one can be resumed; a `complete` one cannot.
   `IndexedDBRunStore` drops a completed run's snapshot (`keepCompleted: true` keeps it
   as an audit trail); `MemoryRunStore` does the same but does not survive a reload.
+- **Your own run id.** `run(goal, { runId })` starts a fresh run under an id you choose
+  instead of a random one - a host that keys runs by ids of its own (a conversation and a
+  turn) gives one, so that a retry finds the same run. The rule of every run id: 1-128
+  letters, digits, `_` or `-`. `run()` rejects before anything of the run (no model call,
+  no event, no write) for an id that breaks it, for `runId` together with `resumeFromRunId`
+  (a resume keeps the id of the run it resumes), and when `loadRun` has a snapshot for the
+  id: `Run "<id>" already exists (status "…"); resume it with resumeFromRunId` - a run on
+  record is never written over, and a `loadRun` that throws refuses the run too. A check,
+  not a lock: two runs started at the same moment under one id both pass it, and a
+  completed run whose snapshot the store dropped (above: without `keepCompleted`) leaves its
+  id free again.
 - The hooks are `onRunStart`, `onStepComplete`, `onRunComplete`, `onRunResume` and
   `loadRun` — the names the Node package uses — so a store of your own is a handful of
   methods. A write hook that throws is logged and the run carries on: persistence is
@@ -2518,17 +2529,24 @@ validation. It answers the same as `RegExp.test` on what it accepts.
 - **Join.** A node activated by several edges gets all their outputs in one visit. With
   `join: 'all'` an activated node is *deferred* while any other activated node can still reach it
   through the graph (conditions aside) - so a fan-in waits for its slower branch even when the
-  branches have different lengths. If every activated node is deferred (they wait for each other in
-  a cycle), all of them run. `join: 'any'` never defers: the node runs once per wave it is
-  activated in.
+  branches have different lengths. If every activated node is deferred (they reach each other
+  through a loop), only the waits within one pass of the loop count: a wait that holds only by
+  going round, back to the loop's *head* (the node every path from the entry into the loop
+  passes), is for the next pass and is dropped. If that still leaves every node deferred, all of
+  them run. `join: 'any'` never defers: the node runs once per wave it is activated in.
 - **Loops** are allowed. When starting a node would exceed `maxNodeVisits` for it, or `maxRuns` for
   the pipeline, that activation is dropped (`pipeline.node.skipped`); the run goes on with what is
   left, ends normally, and the result carries `stoppedBy: 'maxNodeVisits'` or `'maxRuns'`
   (`maxRuns` wins when both happened).
-- **A fan-in inside a loop** has a limit: when a `join: 'all'` node and a slower branch that leads
-  to it can also reach each other through the loop, they wait for each other, so both run and the
-  join fires without that branch. Use `join: 'any'` there, or keep the fan-in out of the cycle (a
-  loop around the whole fan-out and fan-in works).
+- **A fan-in inside a loop.** A loop that goes back to the fan-out or to any node before it
+  (`a → b → join`, `a → c → d → join`, `join → a`) works: on every pass the join waits for its
+  slower branch and runs once with both outputs, whatever the order of the edges. A loop that goes
+  back *into* a branch (`join → c` instead) has no head - it is entered at `c` and at the join -,
+  so the join and that branch wait for each other, both run, and the join fires without that
+  branch: loop back to a node before the fan-out, or use `join: 'any'` there. The pass rule is
+  asked only when every activated node waits: a node outside a loop that the loop feeds
+  (`a ↔ b`, `a → x`) still waits while the loop goes on, and runs once, with the output of every
+  pass.
 - **The end.** The run ends when nothing is activated. A *terminal* visit is one that activated
   nothing (no edge fired, or a cap dropped what it fired). `result.text` is the output of the last
   terminal node to finish; several of the same wave are joined under `## <name>` headings.
@@ -2590,6 +2608,18 @@ route call are exported too: `PIPELINE_ROUTER_SYSTEM`, `renderPipelineRoutePromp
 `matchPipelineRoute`. The engine is deterministic by contract (no clock, randomness, timers or I/O;
 `AbortController` and `DOMException` only where the runtime has them). The runner's contract and an
 example: [README](../README.md#running-the-graph-yourself).
+
+**The engine alone: `@dudko.dev/agent-web/pipeline-engine`.** An entry point of its own (ESM and
+CommonJS, with types) with the engine and nothing else: `preparePipeline`, `runPipelineGraph`,
+`validatePipeline`, `normalizePipeline`, `testPipelineCondition`, `renderPipelineNodeInput`,
+`renderPipelineRoutePrompt`, `matchPipelineRoute`, `PIPELINE_ROUTER_SYSTEM`, `PIPELINE_LIMITS`,
+`PipelineValidationError`, `PipelineNodeError` and every pipeline type. Its file imports nothing -
+not `ai`, `zod` or `idb`, no chunk of the package - so it loads where the main entry cannot: a
+bundled orchestrator, a workflow sandbox, anything with the language and nothing else
+(`tests/pipeline-determinism.test.ts` runs the built ESM and CommonJS files in such a sandbox).
+`pickPipelineRoute` and `createPipeline` call models and stay in the main entry. It is a copy of
+the engine the main entry carries, not the same objects: an error thrown by one is not
+`instanceof` the other's class - compare `error.name`.
 
 ## Autonomy
 

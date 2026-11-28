@@ -1,7 +1,7 @@
 export { createAgent } from './agent.ts'
 export type { IAgent, ICloseOptions, ICompactOptions, ICompactResult } from './agent.ts'
 export { getCurrentRunId, getCurrentRunSandbox } from './context.ts'
-export { addUsage, normalizeUsage, redactHeaders } from './utils.ts'
+export { addUsage, isAuthError, normalizeUsage, redactHeaders } from './utils.ts'
 export {
   beginMcpOAuth,
   checkAuthorizationResponseIssuer,

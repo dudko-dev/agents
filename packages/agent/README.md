@@ -240,6 +240,7 @@ Caveats:
 - **Attempts.** Every snapshot carries the `attempt` that wrote it (1 for the run as first started; a snapshot written before the field existed reads as 1); a resume runs as the next one, and its events say so. A snapshot whose `attempt` is not a positive integer is not resumed.
 - **Inputs are locked to the snapshot.** Both `options.input` and `options.history` passed to `agent.run({ resumeFromRunId })` are **silently ignored** in favor of the values stored at the original run start. This keeps the resumed prompt deterministic against the saved trace; pass an empty input (`input: ''`) to make the override explicit.
 - **runId hygiene.** Persisted `runId`s end up in filesystem paths (`<sandboxRoot>/<runId>/`) and are validated against `^[a-zA-Z0-9_-]{1,128}$`. A persistence adapter that returns a snapshot whose `runId` differs from the requested one, or that contains path-unsafe characters, is rejected.
+- **Your own run id.** `agent.run({ input, runId })` starts a fresh run under an id you choose instead of a random UUID - a host that keys runs by ids of its own (a session and a turn) gives one, so that a retry finds the same run: start it with `runId`, and if that is refused because the run exists, resume it with `resumeFromRunId`. The id follows the rule above (anything else is refused, a non-string too). `run()` rejects before anything of the run - no lease kept, no model call, no event, no write - for `runId` together with `resumeFromRunId` (a resume keeps the id of the run it resumes), when `persistence.loadRun` has a snapshot for the id (`Run "<id>" already exists (status "…"); resume it with resumeFromRunId…`: a run on record is never written over, whatever its status), and when `persistence.journal` has entries for an id `loadRun` does not know (a run under it stopped before its first snapshot: it cannot be resumed, and the two runs would share one journal - clear it, or use another id). A `loadRun` or `journal.load` that throws refuses the run as well. With `runLease` the lookup happens while the run's lease is held, so two workers cannot both find the id free; without one it is a check, not a lock. The run's sandbox directory is named by the id, so a fresh run under an id finds what a crashed run under it left there.
 
 #### The call journal: exact resume
 
@@ -1602,17 +1603,24 @@ validation. It answers the same as `RegExp.test` on what it accepts.
 - **Join.** A node activated by several edges gets all their outputs in one visit. With
   `join: 'all'` an activated node is *deferred* while any other activated node can still reach it
   through the graph (conditions aside) - so a fan-in waits for its slower branch even when the
-  branches have different lengths. If every activated node is deferred (they wait for each other in
-  a cycle), all of them run. `join: 'any'` never defers: the node runs once per wave it is
-  activated in.
+  branches have different lengths. If every activated node is deferred (they reach each other
+  through a loop), only the waits within one pass of the loop count: a wait that holds only by
+  going round, back to the loop's *head* (the node every path from the entry into the loop
+  passes), is for the next pass and is dropped. If that still leaves every node deferred, all of
+  them run. `join: 'any'` never defers: the node runs once per wave it is activated in.
 - **Loops** are allowed. When starting a node would exceed `maxNodeVisits` for it, or `maxRuns` for
   the pipeline, that activation is dropped (`pipeline.node.skipped`); the run goes on with what is
   left, ends normally, and the result carries `stoppedBy: 'maxNodeVisits'` or `'maxRuns'`
   (`maxRuns` wins when both happened).
-- **A fan-in inside a loop** has a limit: when a `join: 'all'` node and a slower branch that leads
-  to it can also reach each other through the loop, they wait for each other, so both run and the
-  join fires without that branch. Use `join: 'any'` there, or keep the fan-in out of the cycle (a
-  loop around the whole fan-out and fan-in works).
+- **A fan-in inside a loop.** A loop that goes back to the fan-out or to any node before it
+  (`a → b → join`, `a → c → d → join`, `join → a`) works: on every pass the join waits for its
+  slower branch and runs once with both outputs, whatever the order of the edges. A loop that goes
+  back *into* a branch (`join → c` instead) has no head - it is entered at `c` and at the join -,
+  so the join and that branch wait for each other, both run, and the join fires without that
+  branch: loop back to a node before the fan-out, or use `join: 'any'` there. The pass rule is
+  asked only when every activated node waits: a node outside a loop that the loop feeds
+  (`a ↔ b`, `a → x`) still waits while the loop goes on, and runs once, with the output of every
+  pass.
 - **The end.** The run ends when nothing is activated. A *terminal* visit is one that activated
   nothing (no edge fired, or a cap dropped what it fired). `result.text` is the output of the last
   terminal node to finish; several of the same wave are joined under `## <name>` headings.
@@ -1727,9 +1735,28 @@ answers. It needs nothing but the JavaScript language: where there is no `AbortC
 `ctx.signal` is a stand-in (`aborted`, `reason`, `onabort`, `throwIfAborted()`, `addEventListener` /
 `removeEventListener`), where there is no `DOMException` the abort error is an `Error` named
 `AbortError`, and of your `signal` only `aborted` and `addEventListener` / `removeEventListener`
-for `'abort'` are read. The engine itself is one file with no imports; this package's entry point
-loads the whole agent with it. `pickPipelineRoute` calls a model, so it is not part of that: it
-belongs where the node runs.
+for `'abort'` are read. `pickPipelineRoute` calls a model, so it is not part of that: it belongs
+where the node runs.
+
+**The engine alone: `@dudko.dev/agent/pipeline-engine`.** The main entry loads the whole agent -
+`ai`, `zod`, the MCP client, `node:*` -, which a bundled orchestrator cannot import (a workflow
+sandbox has the language and little else). The engine has an entry point of its own, ESM and
+CommonJS with types, whose file imports nothing:
+
+```ts
+// In the workflow: the scheduler only; every node runs outside it (an activity, a job).
+import { preparePipeline, runPipelineGraph } from '@dudko.dev/agent/pipeline-engine'
+```
+
+It exports `preparePipeline`, `runPipelineGraph`, `validatePipeline`, `normalizePipeline`,
+`testPipelineCondition`, `renderPipelineNodeInput`, `renderPipelineRoutePrompt`,
+`matchPipelineRoute`, `PIPELINE_ROUTER_SYSTEM`, `PIPELINE_LIMITS`, `PipelineValidationError`,
+`PipelineNodeError` and every pipeline type - the same names as the main entry.
+`tests/pipeline-determinism.test.ts` holds the built ESM and CommonJS files to the contract: no
+import and no `require` (a shared chunk would be one), and the same runs inside a `node:vm`
+context with only the language's globals. It is a copy of the engine the main entry carries, not
+the same objects: an error thrown by one is not `instanceof` the other's class - compare
+`error.name`.
 
 ## Autonomy
 
@@ -1939,7 +1966,7 @@ interface IAgent {
 }
 ```
 
-`IAgentRunResult` is `{ text, plan, trace, iterations, usage, compactedHistory?, undelivered?, parked? }` (`parked`: the run [parked](#parking-a-run-a-persons-answer-or-a-result-from-outside) and waits for `parked.items`). `run()` also takes `files` (audio attachments, with `media.transcriptionModel` - see [Media](#media-images-speech-and-transcription)) and, with `resumeFromRunId`, `answers` (the answers to a parked run's items, by id).
+`IAgentRunResult` is `{ runId, text, plan, trace, iterations, usage, compactedHistory?, undelivered?, parked? }` (`runId`: the run's id, the one its events and snapshots carry - always set by `run()`, optional in the type only so that a hand-made result stays valid; `parked`: the run [parked](#parking-a-run-a-persons-answer-or-a-result-from-outside) and waits for `parked.items`). `run()` also takes `files` (audio attachments, with `media.transcriptionModel` - see [Media](#media-images-speech-and-transcription)), `runId` (a fresh run under an id of yours - see [Your own run id](#resume-after-crash)) and, with `resumeFromRunId`, `answers` (the answers to a parked run's items, by id).
 
 A single agent instance supports concurrent `run()` calls — each gets its own `runId` (via `AsyncLocalStorage`), usage accumulator, abort signal, and `onEvent`. Tools and models are shared.
 
@@ -1948,6 +1975,7 @@ Top-level exports beyond `createAgent`:
 - `getCurrentRunId(): string | undefined` — read the active run's id from any code reachable from `agent.run()` (planner, executor, MCP `execute`, retry sleeps, …). Useful for correlating logs/metrics across concurrent runs on a single agent instance.
 - `getCurrentRunSandbox(): string | undefined` — absolute path to the active run's sandbox directory. Native tools that need to spill binary output should write into this path so files are auto-cleaned when the run completes (set `keepSandbox: true` to retain).
 - `redactHeaders(headers)` — small helper for masking `Authorization`, `X-Api-Key`, `Cookie`, etc. when logging request headers (e.g. inside an `outputSanitizer` or your own MCP transport wrapper).
+- `isAuthError(err): boolean` — whether an error is refused credentials: a `401` / `403` `statusCode` or `status` on the error or anywhere down its `cause` / `lastError` chain (the AI SDK's `RetryError` keeps the last attempt there). The test the agent itself uses to let such a failure through instead of degrading on it (a failed replanner, for one); a host that retries runs can use it to tell "the key is wrong" from "try again".
 - `createSubagentTool(options)` — [subagents](#subagents-worker_threads); `REMOTE_SUBAGENT_LIMITS` — what a [remote](#remote-subagents-isolation-remote) child may send back.
 - `RunLeaseError`, `RUN_LEASE_DEFAULT_TTL_MS`, `ModelCallRefusedError`, `isModelCallRefused(err)` — [the scale-out hooks](#running-on-many-workers-scale-out-hooks) (`runLease`, `sharedLimits`).
 - `deferResult({ note? })`, `isDeferredResult(value)`, `JournalError`, `JOURNAL_LIMITS` and the types `IRunJournal`, `IJournalEntry` (`IJournalModelEntry` / `IJournalToolEntry` / `IJournalPendingEntry` / `IJournalAnswerEntry`), `IParkedRun`, `ParkedItem`, `ParkAnswer`, `ToolApprovalAnswer`, `ToolResultAnswer` — [the call journal](#the-call-journal-exact-resume) and [parking](#parking-a-run-a-persons-answer-or-a-result-from-outside).
