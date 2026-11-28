@@ -1,7 +1,20 @@
+# 0.0.52 / 2026-11-28
+
+### :bug: Fixes
+- With `persistence.journal`, `persistence.onRunStart` is no longer fail-open: a run whose start cannot be written ends as failed before its first step (an `error` event of phase `'plan'`, the snapshot `failed`). Such a run could never be resumed (no snapshot) nor started again under its id (it has journal entries), so a run replacing it would have repeated its tools' writes. Without a journal nothing changes: the write stays a warning
+
 # 0.0.51 / 2026-11-28
 
 ### :tada: Enhancements
 - Updated dependencies: ai
+- Scale-out hooks, all optional (without them nothing changes): every event carries `seq` and `attempt`, a total order across crashes, and a resume records its attempt before it emits anything; `runLease` (acquire, renew, a lost lease aborts the run and writes nothing more, `lease.lost`); `sharedLimits` (`beforeModelCall` may delay or refuse every language-model call, `ModelCallRefusedError`; `afterModelCall` gets the usage); `createSubagentTool({ isolation: 'remote', dispatch })` runs a subagent elsewhere; `examples/scale-out-memory.ts`
+- A call journal, `persistence.journal` (`append`, `load`; needs `loadRun`): every model response and tool result is on record before it is acted on, and a resume replays them instead of calling the model or the tool again (`journal.diverged` on the first mismatch)
+- Parking: `onRequest` may answer `{ park: true }` and a tool may return `deferResult()`; the run parks at the end of the tool round with its pending items (`run.parked`, `result.parked`, status `'waiting'`) and `agent.run({ resumeFromRunId, answers })` goes on with the answers
+- Pipelines: the graph scheduler and the route call are public (`preparePipeline`, `runPipelineGraph`, `pickPipelineRoute`), so a host can run every node its own way; the engine is deterministic by contract, and is its own entry, `@dudko.dev/agent/pipeline-engine`, which imports nothing
+- `agent.run({ runId })`: a fresh run under the caller's id (refused when the id has a snapshot or journal entries); `isAuthError` exported
+
+### :bug: Fixes
+- Pipelines: a `join: 'all'` inside a loop around a fan-out started only one branch; edges back to a loop's head are now left out before the start-everyone fallback
 
 # 0.0.50 / 2026-11-27
 

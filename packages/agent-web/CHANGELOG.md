@@ -2,6 +2,12 @@
 
 ### :tada: Enhancements
 - Updated dependencies: ai
+- Every event carries `seq` and `attempt`, a total order across crashes, and a resume records its attempt before it emits anything (`IRunSnapshot.attempt`)
+- Pipelines: the graph scheduler and the route call are public (`preparePipeline`, `runPipelineGraph`, `pickPipelineRoute`), so a host can run every node its own way; the engine is deterministic by contract, and is its own entry, `@dudko.dev/agent-web/pipeline-engine`, which imports nothing
+- `run(goal, { runId })`: a fresh run under the caller's id (refused when the store already has the id); the names of the Node package's call journal and parking are reserved
+
+### :bug: Fixes
+- Pipelines: a `join: 'all'` inside a loop around a fan-out started only one branch; edges back to a loop's head are now left out before the start-everyone fallback
 
 # 0.0.42 / 2026-11-27
 
