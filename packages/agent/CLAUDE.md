@@ -46,7 +46,8 @@
     emitted as a `usage` event by the stage (`usageOfError` in `utils.ts`).
   - A replanner failure does not end the run (`runner.ts`): the decision becomes `continue`, the
     `replan.decision` event carries `failed: true` after an `error` event of phase 'replan'. A stop
-    and refused credentials (`isAuthError`: 401 / 403) still throw. `tests/replan-failure.test.ts`.
+    and refused credentials (`isAuthError`: 401 / 403; exported from the main entry for hosts) still
+    throw. `tests/replan-failure.test.ts`.
     The browser sibling uses the same names.
   - `call-options.ts` also owns the per-call output caps (`stageOutputCap`): `limits.perCall` wins (0 = no
     cap), otherwise a share of the context window between a floor and a ceiling (`OUTPUT_CAP_SHARES`), and
@@ -110,6 +111,12 @@
       records it BEFORE any event (`recordResume`: `onRunResume`, else `onStepComplete`) - NOT
       fail-open, a throw refuses the resume; `resolveResume` refuses an attempt that is not a
       positive integer. `tests/event-order.test.ts` (both packages).
+    - A caller's id for a fresh run (`run({ runId })`, both cores, same name): `runIdOf` decides the
+      id before anything (the runId rule, a non-string refused; refused with `resumeFromRunId`),
+      `assertRunIdFree` refuses an id `loadRun` has a snapshot for, or `journal.load` has entries
+      for, under the lease when there is one (read errors propagate). `IAgentRunResult.runId`
+      (optional in the type: hand-made results stay valid). Every guard has a test in
+      `tests/run-id.test.ts` and a mutation check.
     - `run-lease.ts` (`config.runLease`, Node only: `resolveRunLease` - ttl 1000..2^31-1, owner,
       methods - `holdRunLease` - acquire, renew every ttl/3, lost on false / throw / no answer
       within ttl, `release`, `RunLeaseError`). STRICT: acquired before anything of a run (a resume
@@ -343,7 +350,11 @@
     `pipeline.ts` is this package's adapter: a node run by `createAgent`, the route call
     (`generateStructured` on the planner model), `nodeResolver`. A definition is untrusted input: the
     caps, the `otherwise` rule, the condition input bound and the join deferral each need a test
-    and a mutation check. The scheduler is PUBLIC, the same names in both cores: `preparePipeline` +
+    and a mutation check, and so does the loop's pass rule: when EVERY waiting node waits for another,
+    `passReach` (dominators from the entry; an edge to a node that dominates its source is a loop's
+    way back and is left out) decides who starts, before the old "all of them start" - asked only
+    then, so a schedule where someone was ready is unchanged. The scheduler is PUBLIC, the same
+    names in both cores: `preparePipeline` +
     `runPipelineGraph(plan, runNode, { input, signal?, onEvent?, onAbort? })` (`onAbort` default
     'reject'; createPipeline passes this package's), so a host runs the graph with its own node
     runner; `pickPipelineRoute(node, text, { config, signal?, onEvent? })` is the route call on its
@@ -357,6 +368,12 @@
     compared by `pipeline-agent.test.ts`) scans the source and runs the engine in a `node:vm`
     context with only the language's globals, with and without `DOMException` / `AbortController`;
     a new global the engine needs goes into its `LANGUAGE_GLOBALS` only if the language defines it.
+    The engine is also the package's `./pipeline-engine` entry (ESM + CJS + d.ts): its JS from a
+    tsup block of its own (`splitting: false`: no chunk shared with the main entry), its d.ts from
+    the MAIN block's dts build (`dts.entry`) - the dts build of a block with `clean` deletes every
+    d.ts in dist when it starts, so a d.ts from another block can vanish. The same determinism test
+    resolves the subpath through `exports`, checks the built files import / require nothing (a
+    chunk counts) and runs them in the sandbox. Docs: README ("Running the graph yourself").
   - `tiers.ts` (`config.executorTiers` / `config.escalation`, the pure rules: `pickTier` - the
     planner's `complexity`, else `standard`; a missing tier falls back to the nearest configured one,
     the stronger of two; `escalationReasonOf` / `isEscalatableError` - what is a failure a stronger

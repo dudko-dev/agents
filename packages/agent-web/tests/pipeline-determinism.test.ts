@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
 import ts from 'typescript'
 import { preparePipeline, runPipelineGraph, type PipelineDefinition } from '../dist/index.js'
@@ -180,9 +182,18 @@ interface IEngine {
   runPipelineGraph: typeof runPipelineGraph
 }
 
+// A module's source as a CommonJS script, nothing else changed: the engine's own source with the
+// types erased, or a built ES module with its `export` turned into `exports.*` (an `import` would
+// become a `require`, which the sandbox does not have).
+const asScript = (source: string, fileName = 'engine.ts'): string =>
+  ts.transpileModule(source, {
+    fileName,
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText
+
 // A `node:vm` context with only LANGUAGE_GLOBALS (and `host`, given from this realm), and the
-// engine evaluated in it: its own source with the types erased, nothing else changed.
-const sandbox = (host: Record<string, unknown> = {}) => {
+// engine evaluated in it: by default its own source as a script (asScript).
+const sandbox = (host: Record<string, unknown> = {}, script = asScript(engineSource())) => {
   const context = vm.createContext({})
   vm.runInContext(
     `for (const name of Object.getOwnPropertyNames(globalThis)) {
@@ -192,11 +203,10 @@ const sandbox = (host: Record<string, unknown> = {}) => {
     context,
   )
   Object.assign(context, host)
-  const { outputText } = ts.transpileModule(engineSource(), {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-  })
   const engine = vm.runInContext(
-    `(function () { 'use strict'; var exports = {};\n${outputText}\nreturn exports })()`,
+    `(function () { 'use strict'; var module = { exports: {} }, exports = module.exports;
+${script}
+return module.exports })()`,
     context,
   ) as IEngine
   const inside = <T>(code: string): T => vm.runInContext(code, context) as T
@@ -591,5 +601,129 @@ test('determinism: without AbortController, a listener that throws breaks neithe
       await run(engine, JSON.stringify(scenario)),
       name,
     )
+  }
+})
+
+// ── the standalone entry ─────────────────────────────────────────────────────
+//
+// `<package>/pipeline-engine` is the engine alone, for an orchestrator that cannot load the agent
+// (a workflow sandbox): the built files themselves are held to the contract. They must import
+// nothing - a chunk shared with the main entry would be an import too -, read nothing the scan
+// forbids, and run in the sandbox exactly as the source does.
+
+const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+  name: string
+  exports: Record<string, { import: Record<string, string>; require: Record<string, string> }>
+}
+const SUBPATH = `${manifest.name}/pipeline-engine`
+const BUILT = {
+  esm: new URL('../dist/pipeline-engine.js', import.meta.url),
+  cjs: new URL('../dist/pipeline-engine.cjs', import.meta.url),
+}
+
+// The names a module exports, values and types apart: its `export` declarations, and the names
+// in its `export { ... }` / `export type { ... }` lists.
+const exportedNames = (source: string, fileName: string) => {
+  const file = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true)
+  const values: string[] = []
+  const types: string[] = []
+  for (const node of file.statements) {
+    if (ts.isExportDeclaration(node) && node.exportClause && ts.isNamedExports(node.exportClause)) {
+      for (const element of node.exportClause.elements) {
+        ;(node.isTypeOnly || element.isTypeOnly ? types : values).push(element.name.text)
+      }
+      continue
+    }
+    const exported = ts
+      .getModifiers(node as ts.HasModifiers)
+      ?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)
+    if (!exported) continue
+    if (ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node)) {
+      types.push(node.name.text)
+    } else if (ts.isClassDeclaration(node) || ts.isFunctionDeclaration(node)) {
+      if (node.name) values.push(node.name.text)
+    } else if (ts.isVariableStatement(node)) {
+      for (const d of node.declarationList.declarations) {
+        if (ts.isIdentifier(d.name)) values.push(d.name.text)
+      }
+    }
+  }
+  return { values: values.sort(), types: types.sort() }
+}
+
+test('determinism: ./pipeline-engine resolves through the exports, to files of its own with every export of the engine', async () => {
+  const entry = manifest.exports['./pipeline-engine']
+  assert.ok(entry, 'package.json exports "./pipeline-engine"')
+  assert.equal(import.meta.resolve(SUBPATH), BUILT.esm.href, 'import')
+  assert.equal(createRequire(import.meta.url).resolve(SUBPATH), fileURLToPath(BUILT.cjs), 'require')
+  assert.deepEqual(
+    [entry.import.default, entry.require.default],
+    ['./dist/pipeline-engine.js', './dist/pipeline-engine.cjs'],
+  )
+
+  const wanted = exportedNames(engineSource(), 'engine.ts')
+  const esm = (await import(SUBPATH)) as Record<string, unknown>
+  const cjs = createRequire(import.meta.url)(SUBPATH) as Record<string, unknown>
+  assert.deepEqual(Object.keys(esm).sort(), wanted.values, 'the ES module exports every value')
+  assert.deepEqual(
+    Object.keys(cjs).sort(),
+    wanted.values,
+    'the CommonJS module exports every value',
+  )
+  for (const types of [entry.import.types, entry.require.types]) {
+    const path = new URL(`../${types}`, import.meta.url)
+    assert.ok(existsSync(path), `${types} is built`)
+    const declared = exportedNames(readFileSync(path, 'utf8'), 'engine.d.ts')
+    assert.deepEqual(declared, wanted, `${types} declares every value and every type`)
+  }
+})
+
+test('determinism: the built ./pipeline-engine imports nothing - no module, no chunk - and reads nothing forbidden', () => {
+  for (const [format, url] of Object.entries(BUILT)) {
+    const source = readFileSync(url, 'utf8')
+    assert.deepEqual(violations(source), [], `dist/pipeline-engine (${format})`)
+    // What the scan looks for, said plainly for the built file: no static or dynamic import, no
+    // re-export from a file, no require.
+    const file = ts.createSourceFile('engine.js', source, ts.ScriptTarget.Latest, true)
+    const loads: string[] = []
+    const visit = (node: ts.Node): void => {
+      if (ts.isImportDeclaration(node) || (ts.isExportDeclaration(node) && node.moduleSpecifier)) {
+        loads.push(node.getText(file))
+      } else if (
+        ts.isCallExpression(node) &&
+        (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
+          (ts.isIdentifier(node.expression) && node.expression.text === 'require'))
+      ) {
+        loads.push(node.getText(file))
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(file)
+    assert.deepEqual(loads, [], `dist/pipeline-engine (${format}) loads no other module`)
+  }
+})
+
+test('determinism: the built ./pipeline-engine runs in the sandbox as the source does, ES module and CommonJS', async () => {
+  const scripts = {
+    esm: asScript(readFileSync(BUILT.esm, 'utf8'), 'engine.js'),
+    cjs: readFileSync(BUILT.cjs, 'utf8'),
+  }
+  const loaded = {
+    esm: (await import(SUBPATH)) as IEngine,
+    cjs: createRequire(import.meta.url)(SUBPATH) as IEngine,
+  }
+  for (const format of ['esm', 'cjs'] as const) {
+    const box = sandbox({}, scripts[format])
+    const inside = box.inside<typeof drive>(`(${drive.toString()})`)
+    for (const [name, scenario] of Object.entries(SCENARIOS)) {
+      const json = JSON.stringify(scenario)
+      const here = await drive({ preparePipeline, runPipelineGraph }, json)
+      assert.equal(await inside(box.engine, json), here, `${name}: ${format}, language only`)
+      assert.equal(
+        await drive(loaded[format], json),
+        here,
+        `${name}: ${format}, as a host loads it`,
+      )
+    }
   }
 })

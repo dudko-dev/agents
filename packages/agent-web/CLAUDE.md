@@ -52,7 +52,10 @@ behind every decision.
 - `src/tools/` — `define`, `prompted` (catalog + dispatch), `mode`, `types`.
 - `src/agent/` — `schemas`, `planner`/`executor`/`replanner`/`synthesizer`,
   `runner` (createAgent), `loop-types`, `control` (RunControl: mid-run messages,
-  stopping one subagent), `persistence` (run checkpoints / resume; `recordResume` puts a
+  stopping one subagent), `persistence` (run checkpoints / resume; `resolveRunId` checks a
+  caller's id for a fresh run, `RunOptions.runId` - the Node sibling's name and rules: the run id
+  rule, refused with `resumeFromRunId`, refused when `loadRun` has the id; `tests/run-id.test.ts`;
+  `recordResume` puts a
   resume's `attempt` on record - `onRunResume`, else `onStepComplete` - BEFORE any of its events,
   and is not best-effort: a throw refuses the resume), `internal` (per-run
   state and prompt plumbing the stages share; not public). Every event of a run is numbered in
@@ -126,7 +129,17 @@ behind every decision.
   `tests/pipeline-determinism.test.ts` (the same as the server's, which compares them) scans the
   source and runs the engine in a `node:vm` context with only the language's globals, with and
   without `DOMException` / `AbortController`. Docs: README ("Running the graph yourself"),
-  `docs/capabilities.md`, `docs/design.md`.
+  `docs/capabilities.md`, `docs/design.md`. When EVERY waiting node waits for another, the loop's
+  pass rule decides who starts (`passReach`: dominators from the entry, an edge to a node that
+  dominates its source is a loop's way back and is left out), before the old "all of them start";
+  asked only then, so a schedule where someone was ready is unchanged - a test and a mutation check,
+  like the join deferral. The engine is also the `./pipeline-engine` entry (ESM + CJS + d.ts): its JS
+  from a tsup block of its own (`splitting: false`: in the main block it would land in a chunk
+  shared with the core, and the entry would import it), its d.ts from the MAIN block's dts build
+  (`dts.entry`: the dts build of a block with `clean` deletes every d.ts in dist when it starts, so
+  a d.ts from another block can vanish). `tests/pipeline-determinism.test.ts` resolves the subpath
+  through `exports`, checks the built files import / require nothing (a chunk counts) and runs them
+  in the sandbox.
 - `src/sandbox/` — `config.sandbox` / the `run_js` tool: the model's code in QuickJS compiled to
   WebAssembly (optional peer `quickjs-emscripten`). `engine` (limits, the guest's runtime, the
   module resolver, the worker protocol, what may cross the boundary; pure, no imports) is a COPY of
@@ -419,7 +432,7 @@ waiting for it. OFF
 ```bash
 pnpm nx typecheck @dudko.dev/agent-web     # tsc --noEmit
 pnpm nx format:check @dudko.dev/agent-web  # prettier
-pnpm nx build @dudko.dev/agent-web         # tsup → dist (ESM + CJS + d.ts; entries: ., ./mcp, ./webmcp, ./sandbox-worker; + dist/agent-web.js)
+pnpm nx build @dudko.dev/agent-web         # tsup → dist (ESM + CJS + d.ts; entries: ., ./mcp, ./webmcp, ./sandbox-worker, ./pipeline-engine; + dist/agent-web.js)
 pnpm nx test @dudko.dev/agent-web          # node --test tests/*.test.ts (nx builds first: tests import dist)
 ```
 

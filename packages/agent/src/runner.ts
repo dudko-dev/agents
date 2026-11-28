@@ -175,8 +175,8 @@ const resolveSandboxDir = (ctx: IAgentInternalContext, runId: string): string =>
 // plus the slightly broader alphanumeric+_- charset commonly used by
 // custom persistence layers. Path separators, dots, and unicode are out.
 const RUN_ID_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/
-const assertSafeRunId = (id: string, source: string): void => {
-  if (!RUN_ID_PATTERN.test(id)) {
+const assertSafeRunId = (id: unknown, source: string): void => {
+  if (typeof id !== 'string' || !RUN_ID_PATTERN.test(id)) {
     throw new Error(
       `Unsafe runId from ${source}: must match ${RUN_ID_PATTERN}, got ${JSON.stringify(id)}`,
     )
@@ -234,6 +234,47 @@ export const resolveResume = async (
     )
   }
   return snapshot
+}
+
+// The run's id, decided before anything of the run happens: a resume keeps the id it names, a
+// fresh run takes options.runId or a random UUID. Throws on a caller's id that breaks the rule,
+// and on options.runId together with resumeFromRunId.
+export const runIdOf = (options: IAgentRunOptions): string => {
+  if (options.runId !== undefined) {
+    if (options.resumeFromRunId !== undefined) {
+      throw new Error(
+        'options.runId names a fresh run and cannot be combined with resumeFromRunId: a resume keeps the id of the run it resumes',
+      )
+    }
+    assertSafeRunId(options.runId, 'options.runId')
+    return options.runId
+  }
+  // randomUUID() is always safe; the assert is a hard guard all the same.
+  const runId = options.resumeFromRunId || randomUUID()
+  assertSafeRunId(runId, options.resumeFromRunId ? 'options.resumeFromRunId' : 'runId')
+  return runId
+}
+
+// A fresh run under the caller's id must not write over a run that is on record: refused when
+// persistence.loadRun has a snapshot for the id (resume it instead), or persistence.journal has
+// entries for it (a run under that id began and stopped before its first snapshot: its journal
+// would mix with this run's). Read errors propagate - a store that cannot say is not a "no".
+// Under config.runLease it runs with the run's lease held, so two workers cannot both find the
+// id free; without one it is a check, not a lock.
+export const assertRunIdFree = async (ctx: IAgentInternalContext, runId: string): Promise<void> => {
+  const persistence = ctx.config.persistence
+  const snapshot = await persistence?.loadRun?.(runId)
+  if (snapshot) {
+    throw new Error(
+      `Run "${runId}" already exists (status "${snapshot.status}"); resume it with resumeFromRunId instead of starting it again`,
+    )
+  }
+  const entries = await persistence?.journal?.load(runId)
+  if (entries && entries.length > 0) {
+    throw new Error(
+      `Run "${runId}" already has a call journal (${entries.length} entries) but no snapshot: it stopped before its plan was saved and cannot be resumed; clear its journal, or start the run under another id`,
+    )
+  }
 }
 
 // The attempt a resume of `snapshot` runs as: one more than the attempt that wrote it (a
@@ -305,15 +346,16 @@ export const runAgentLoop = async (
 ): Promise<IAgentRunResult> => {
   // Before anything is spent: a hand-made object in place of createRunControl() is refused.
   const port = portOf(options.control)
-  // A resume keeps its id. randomUUID() is always safe; the assert is a hard guard against any
-  // future caller that supplies a runId by other means.
-  const runId = options.resumeFromRunId || randomUUID()
-  assertSafeRunId(runId, options.resumeFromRunId ? 'options.resumeFromRunId' : 'runId')
+  const runId = runIdOf(options)
   // config.runLease: taken before anything of the run happens - its snapshot is read under it.
   // A refusal throws here: nothing ran, nothing was written.
   const held = ctx.lease ? await holdRunLease(ctx.lease, runId) : undefined
   let warnOutside = (message: string): void => ctx.emit({ type: 'log', level: 'warn', message })
   try {
+    // A caller's id for a fresh run: read under the lease, before anything is written.
+    if (options.runId !== undefined) {
+      await assertRunIdFree(ctx, runId)
+    }
     const resumed = await resolveResume(ctx, options)
     const attempt = resumed ? resumeAttemptOf(resumed) : 1
     // Every event of the run, numbered: (attempt, seq) is their total order across crashes.
@@ -893,6 +935,7 @@ const runAgentLoopInner = async (
     warnUnusedAnswers()
     proxiedCtx.emit({ type: 'run.parked', items: parked.items, at: parked.at })
     return {
+      runId,
       text: '',
       plan: currentPlan,
       trace: [...base.trace],
@@ -1343,6 +1386,7 @@ const runAgentLoopInner = async (
   )
 
   return {
+    runId,
     text,
     plan: currentPlan,
     trace,

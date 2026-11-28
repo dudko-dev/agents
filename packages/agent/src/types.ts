@@ -1033,6 +1033,12 @@ export interface IAgentRunOptions {
   // counters; the saved sandbox dir is recreated lazily but its prior
   // contents are gone unless keepSandbox was true on the original run.
   resumeFromRunId?: string
+  // A fresh run's id, in place of a random UUID: a host that keys runs by ids of its own (a
+  // session and a turn) gives one, so that a retry finds the same run. The rule of every runId,
+  // ^[a-zA-Z0-9_-]{1,128}$. Refused together with resumeFromRunId (a resume keeps the id it
+  // names), and refused when the id is taken: persistence.loadRun has a snapshot for it (resume
+  // that run instead), or persistence.journal has entries for it. Never written over.
+  runId?: string
   // Steer the run while it goes: control.send(text) puts a message in front of the model at
   // the next boundary, control.stopSubagent(id) stops one subagent. Make it with
   // createRunControl(); one control per run.
@@ -1079,6 +1085,10 @@ export interface IParkedRun {
 }
 
 export interface IAgentRunResult {
+  // The run's id: options.runId, the resumed run's, or the UUID a fresh run was given - the id of
+  // its events and snapshots, and what resumeFromRunId takes. agent.run always sets it; it is
+  // optional only so that a result made by hand (a test double) stays valid.
+  runId?: string
   text: string
   plan: IPlan
   trace: IStepResult[]

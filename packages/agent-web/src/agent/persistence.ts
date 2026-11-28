@@ -169,6 +169,34 @@ export const resolveResume = async (
   return snapshot
 }
 
+/**
+ * The id a caller gives a fresh run (`RunOptions.runId`), checked before anything of the run
+ * happens: the rule of every run id, refused together with `resumeFromRunId` (a resume keeps the
+ * id of the run it resumes), and refused when `persistence.loadRun` has a snapshot for it - resume
+ * that run instead; a run on record is never written over. A store that throws refuses the run
+ * too: no answer is not a "free". `undefined` when no id was given.
+ */
+export const resolveRunId = async (
+  persistence: RunPersistence | undefined,
+  runId: string | undefined,
+  resumeFromRunId: string | undefined,
+): Promise<string | undefined> => {
+  if (runId === undefined) return undefined
+  if (resumeFromRunId !== undefined) {
+    throw new Error(
+      'runId names a fresh run and cannot be combined with resumeFromRunId: a resume keeps the id of the run it resumes',
+    )
+  }
+  assertSafeRunId(runId, 'runId')
+  const snapshot = await persistence?.loadRun?.(runId)
+  if (snapshot) {
+    throw new Error(
+      `Run "${runId}" already exists (status "${snapshot.status}"); resume it with resumeFromRunId instead of starting it again`,
+    )
+  }
+  return runId
+}
+
 /** The attempt a resume of `snapshot` runs as: one more than the attempt that wrote it. */
 export const resumeAttemptOf = (snapshot: RunSnapshot): number => (snapshot.attempt ?? 1) + 1
 

@@ -69,6 +69,16 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
+    },
+    "./pipeline-engine": {
+      "import": {
+        "types": "./dist/pipeline-engine.d.ts",
+        "default": "./dist/pipeline-engine.js"
+      },
+      "require": {
+        "types": "./dist/pipeline-engine.d.cts",
+        "default": "./dist/pipeline-engine.cjs"
+      }
     }
   },
   "main": "./dist/index.cjs",

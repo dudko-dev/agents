@@ -811,7 +811,11 @@ that run's limits. Give `persistence` a store
 last checkpoint with `run('', { resumeFromRunId })` — the planner does not run again and
 no finished step is repeated; every event of a run carries `seq` and `attempt` (one more
 per resume, recorded by `onRunResume` before the resumed run emits anything), so
-`(attempt, seq)` orders a run's events across reloads. `createRunControl()` steers a run that is going: `send()`
+`(attempt, seq)` orders a run's events across reloads. `run(goal, { runId })` starts a fresh
+run under an id of yours (1-128 letters, digits, `_` or `-`) instead of a random one, so that a
+retry finds the same run: refused together with `resumeFromRunId`, and refused when `loadRun`
+already has that run (resume it instead - a run on record is never written over); see
+[Resuming](docs/capabilities.md#resuming-an-interrupted-run). `createRunControl()` steers a run that is going: `send()`
 puts a message in front of the model at the next boundary (the replanner re-checks the plan
 against it), `stopSubagent(id)` stops one subagent. `egress` (off by default) gives the model one safe `web_fetch` tool with allow / deny lists. `search` (off by default) adds `web_search` over a function of yours (any search API — recipes for Tavily, Brave and SearXNG are in the docs) or the built-in Google Search through Gemini grounding, which needs only a Gemini key and spends its tokens — the key stays in the credential store. `sandbox` (off by default) gives the model `run_js`: the code it wrote runs in QuickJS-in-WebAssembly inside a Web Worker that is killed at the deadline, so "I ran it" is a tool call you can see. `media` (off by default) mounts `generate_image`, `generate_speech` and `transcribe_audio` — each only when you configure its model — writes what they make into the virtual file system instead of the context, and turns attached audio into text for a model that cannot listen. `learning` (off by default) lets the agent write down what it figured out as skills of its own — in memory, or in the file system across sessions. Details, defaults and events:
 **[docs/capabilities.md](docs/capabilities.md)**.
@@ -938,9 +942,26 @@ answers. It needs nothing but the JavaScript language: where there is no `AbortC
 `ctx.signal` is a stand-in (`aborted`, `reason`, `onabort`, `throwIfAborted()`, `addEventListener` /
 `removeEventListener`), where there is no `DOMException` the abort error is an `Error` named
 `AbortError`, and of your `signal` only `aborted` and `addEventListener` / `removeEventListener`
-for `'abort'` are read. The engine itself is one file with no imports; this package's entry point
-loads the whole agent with it. `pickPipelineRoute` calls a model, so it is not part of that: it
-belongs where the node runs. Why: [docs/design.md](docs/design.md#pipelines-waves-a-join-rule-caps).
+for `'abort'` are read. `pickPipelineRoute` calls a model, so it is not part of that: it belongs
+where the node runs. Why: [docs/design.md](docs/design.md#pipelines-waves-a-join-rule-caps).
+
+**The engine alone: `@dudko.dev/agent-web/pipeline-engine`.** The main entry loads the whole
+agent - `ai`, `zod`, `idb` -, which a bundled orchestrator cannot import (a workflow sandbox has the
+language and little else). The engine has an entry point of its own, ESM and CommonJS with types,
+whose file imports nothing:
+
+```ts
+// In the workflow: the scheduler only; every node runs outside it (an activity, a job).
+import { preparePipeline, runPipelineGraph } from '@dudko.dev/agent-web/pipeline-engine'
+```
+
+It exports `preparePipeline`, `runPipelineGraph`, `validatePipeline`, `normalizePipeline`,
+`testPipelineCondition`, `renderPipelineNodeInput`, `renderPipelineRoutePrompt`,
+`matchPipelineRoute`, `PIPELINE_ROUTER_SYSTEM`, `PIPELINE_LIMITS`, `PipelineValidationError`,
+`PipelineNodeError` and every pipeline type - the same names as the main entry, and the Node
+sibling's `@dudko.dev/agent/pipeline-engine` is the same file. It is a copy of the engine the main
+entry carries, not the same objects: an error thrown by one is not `instanceof` the other's class -
+compare `error.name`. More: [docs/capabilities.md](docs/capabilities.md#pipelines-a-graph-of-agents).
 
 ## Configuration (highlights)
 
