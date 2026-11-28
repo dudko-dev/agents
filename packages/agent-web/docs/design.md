@@ -218,7 +218,12 @@ outside, stops without failing and is resumed later with `answers`, by any worke
 are reserved here and mean the same if they ever come: `persistence.journal` (`append` /
 `load`), `IJournalEntry`, `deferResult()`, `{ park: true }` from `onRequest`, the run status
 `'waiting'`, `result.parked`, `run({ answers })`, the events `run.parked` and
-`journal.diverged`. This package has none of them, and does not accept them.
+`journal.diverged`. This package has none of them, and refuses them rather than ignoring them:
+`createAgent` throws on `persistence.journal`, and on the server's `runLease` and `sharedLimits`
+(what scale-out builds on), `run()` throws on `answers` before anything of the run, and
+`{ park: true }` from an approval handler is a denial whose reason says that parking is the
+server package's. Code ported from a server agent then fails where it is set up, instead of
+running without the guarantee it was written for (`tests/server-only.test.ts`).
 
 Why server-only: both exist so that a run can outlive the process that started it - a worker
 that crashed, a worker freed while a run waits hours or days - and be picked up by another

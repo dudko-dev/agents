@@ -240,12 +240,19 @@ const decideByPolicy = (opts: {
   }
 }
 
+/** Why `{ park: true }` is a denial here: parking is the server package's (docs/design.md). */
+export const PARK_REFUSED_REASON =
+  "parking ({ park: true }) is the server package's (@dudko.dev/agent): a run in a page cannot wait for an answer outside it, so the call is denied"
+
 const normalizeDecision = (
   d: ToolApprovalDecision,
 ): { approved: boolean; reason?: string; remember?: boolean } =>
   typeof d === 'boolean'
     ? { approved: d }
-    : { approved: Boolean(d?.approved), reason: d?.reason, remember: d?.remember }
+    : // A host ported from the server agent: the call is denied as before, and now says why.
+      (d as { park?: unknown } | null)?.park === true
+      ? { approved: false, reason: PARK_REFUSED_REASON }
+      : { approved: Boolean(d?.approved), reason: d?.reason, remember: d?.remember }
 
 /** Mutable approval state shared by every run of one agent. */
 export interface ApprovalState {

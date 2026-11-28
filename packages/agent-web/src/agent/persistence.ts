@@ -233,3 +233,32 @@ export const recordResume = async (
     )
   }
 }
+
+// The Node sibling's server-only hooks (docs/design.md, "The call journal and parking: names
+// reserved, server-only"). Their names are reserved here and REFUSED: code written for the server
+// agent fails at createAgent / run instead of running without the guarantee it was written for
+// (a journal that is never written, a lease nobody holds, limits nobody counts).
+const SERVER_ONLY = "is the server package's (@dudko.dev/agent), not this browser package's"
+
+/** Throws when a config carries a hook only the Node sibling has. */
+export const refuseServerOnlyConfig = (config: object): void => {
+  const c = config as Record<string, unknown>
+  for (const key of ['runLease', 'sharedLimits'] as const) {
+    if (c[key] !== undefined) {
+      throw new Error(`${key} ${SERVER_ONLY}: a run in a page has no other worker to share with`)
+    }
+  }
+  const persistence = c.persistence as Record<string, unknown> | undefined
+  if (persistence?.journal !== undefined) {
+    throw new Error(
+      `persistence.journal ${SERVER_ONLY}: a page's run is not resumed by another worker, and IndexedDB in a tab that may close at any moment is not the fail-closed store a journal needs`,
+    )
+  }
+}
+
+/** Throws when run options carry what only the Node sibling's parked runs take. */
+export const refuseServerOnlyRunOptions = (opts: object): void => {
+  if ((opts as Record<string, unknown>).answers !== undefined) {
+    throw new Error(`run({ answers }) ${SERVER_ONLY}: there are no parked runs here to answer`)
+  }
+}
