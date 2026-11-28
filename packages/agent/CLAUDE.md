@@ -154,7 +154,10 @@
       OUTSIDE the sharedLimits middleware, only while a run with a journal is in force: the stream's
       `tool-call` parts are held until the response is on record), every tool result right after the
       tool returns, before the model sees it (`runJournaledToolCall`, from `tool-wrap.ts`). Appends
-      are fail-closed (`JournalError`: the run's journal stop aborts it, the runner fails it). Positions
+      are fail-closed (`JournalError`: the run's journal stop aborts it, the runner fails it), and so
+      is a journaled ROOT run's `onRunStart` (a run with no snapshot can never be resumed and its id,
+      with journal entries, never reused: a throw fails it before its first step, phase 'plan';
+      without a journal it stays fail-open). Positions
       are attempt-independent (`<segment>.<n>` - `0` before the loop, the iteration, `f` the answer;
       n counts RECORDED calls only, so a retry shares its failed call's position -, `.t<i>`, `.q<j>`,
       `.m<k>`, `/c<k>/` a run inside a tool call); a tool entry names its response (`parent`), so a

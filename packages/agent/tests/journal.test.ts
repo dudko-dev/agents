@@ -1277,6 +1277,66 @@ test('park: a park that cannot go on record fails the run', async () => {
   })
 })
 
+// A run whose start is not on record can never be resumed (no snapshot) nor started again under its
+// id (it has journal entries): what its tools wrote, the run that replaces it would write again.
+test('journal: a start that cannot go on record fails the run before its first step - no tool runs', async () => {
+  const store = makeStore()
+  store.persistence.onRunStart = () => {
+    throw new Error('db down')
+  }
+  const sent = counted('send_email')
+  await withLlm(script({ rounds: [call('send_email', { to: 'a@x' })] }), async ({ llm, open }) => {
+    const agent = await open(
+      config(llm.baseURL, {
+        persistence: store.persistence,
+        tools: { send_email: sent.make(() => 'sent') },
+      }),
+    )
+    const { events, onEvent } = collect()
+    await assert.rejects(
+      agent.run({ input: 'mail a', onEvent }),
+      /\[start\] persistence\.onRunStart threw while recording run .*cannot be resumed.*: db down/,
+    )
+    assert.equal(sent.calls.length, 0)
+    // The planner answered (and is on record); nothing after it was asked.
+    assert.deepEqual(stagesSince(llm.requests, 0), ['planner'])
+    assert.deepEqual(
+      store.appends.map((e) => `${e.kind}:${e.position}`),
+      ['model:0.0'],
+    )
+    const done = store.writes.find((w) => w.hook === 'onRunComplete')
+    assert.equal(done?.status, 'failed')
+    assert.match(done?.error ?? '', /\[start\]/)
+    assert.ok(
+      ofType(events, 'error').some((e) => e.phase === 'plan' && /\[start\]/.test(e.error.message)),
+    )
+  })
+})
+
+test('journal: without a journal a start that cannot go on record is still only a warning', async () => {
+  const store = makeStore()
+  const { journal: _journal, ...persistence } = store.persistence
+  void _journal
+  persistence.onRunStart = () => {
+    throw new Error('db down')
+  }
+  const sent = counted('send_email')
+  await withLlm(script({ rounds: [call('send_email', { to: 'a@x' })] }), async ({ llm, open }) => {
+    const agent = await open(
+      config(llm.baseURL, { persistence, tools: { send_email: sent.make(() => 'sent') } }),
+    )
+    const { events, onEvent } = collect()
+    const result = await agent.run({ input: 'mail a', onEvent })
+    assert.equal(result.text, 'All done.')
+    assert.equal(sent.calls.length, 1)
+    assert.ok(
+      ofType(events, 'log').some((e) =>
+        /\[persistence\] onRunStart threw: db down/.test(e.message),
+      ),
+    )
+  })
+})
+
 test('journal: once the lease is lost, nothing more is appended', async () => {
   const store = makeStore()
   const tools = {
