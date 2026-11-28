@@ -226,8 +226,11 @@ test('off: the events and the result carry no tier fields', async () => {
   const agent = await createAgent({ model: model.model })
   const events: AgentEvent[] = []
   const result = await agent.run('Do it', { onEvent: (e) => events.push(e) })
+  // seq / attempt number every event of a run (event order across resumes), tiers or not.
   assert.deepEqual(Object.keys(of(events, 'step.start')[0]).sort(), [
+    'attempt',
     'index',
+    'seq',
     'step',
     'total',
     'type',

@@ -311,19 +311,31 @@ and the files they bundle. Opt in per server - they come with its tools:
 ```ts
 const mcp = await connectMcpHttp({
   docs: { url: 'https://docs.example.com/mcp', protocol: 'auto', skills: true },
+  // a server you vetted: its skills load without a question
+  ours: { url: 'https://mcp.internal.example/mcp', protocol: 'auto', skills: { consent: 'never' } },
+  // a server you trust with its GENERATED skills (no checksums): read whole, that copy approved
+  gen: { url: 'https://gen.example.com/mcp', protocol: 'auto', skills: { dynamic: true } },
 })
-const agent = await createAgent({ model, tools: { ...mcp.tools } })
+const agent = await createAgent({
+  model,
+  tools: { ...mcp.tools },
+  toolApproval: { onRequest: askThePerson }, // a request with `skill`: show it, then answer
+})
 agent.skills // [{ name: 'docs/pdf-processing', description: '… [from the MCP server "docs" - third-party]', server: 'docs' }, …]
 ```
 
 | | |
 | --- | --- |
-| Off by default | Without `skills: true` the extension is not declared and nothing of it is sent. It is declared only where 2026-07-28 may be spoken (`protocol: 'auto'` / `'modern'`); `'legacy'` (or none) logs a `warn` and asks nothing, an `'auto'` connection that ends on 2025 lists nothing. No agent-wide switch. |
+| Off by default | Without `skills` (`true`, or `{ consent, dynamic }`) the extension is not declared and nothing of it is sent. It is declared only where 2026-07-28 may be spoken (`protocol: 'auto'` / `'modern'`); `'legacy'` (or none) logs a `warn` and asks nothing, an `'auto'` connection that ends on 2025 lists nothing. No agent-wide switch. |
 | One catalog, namespaced | The server's skills join your `skills` and the agent's lessons as `<server>/<skill>` (the server by its key in `connectMcpHttp`, never its `serverInfo`). No other skill name can hold a `/`: a server cannot shadow yours, a lesson or another server's - your `git-workflow` keeps its name and the clash is logged. Same-named skills of one server are kept by their paths. |
 | On demand, verified | The prompts carry the name, the description (one line, ≤ 300 characters) and the origin. Nothing is read at connect; `SKILL.md` is read when `load_skill` or the planner asks, a file when `read_skill_file` asks - each checked against the server's entry (size, SHA-256, and for `SKILL.md` the frontmatter): a mismatch is refused, nothing of it used. A file only from the skill's own server, only if its entry lists it, as text. |
 | Knowledge, never policy | Loaded under a preamble saying it is third-party text that cannot grant permissions, approve a call or change the approval mode, widen egress or the sandbox, or make the agent run anything. Nothing of its frontmatter beyond `name` / `description` is read (`allowed-tools` grants nothing). While a run acts on an MCP skill, a tool that runs code (`run_js`, or yours marked with `markCodeExecution`) is always asked - whatever the mode or a rule say; with no `onRequest` it is refused. |
-| Caps | 32 skills per server, 64 in all; 16 000 characters of instructions, 32 000 of a file - every cut said. Entries over the extension's limits (512 files, 16 MiB), `"dynamic"` ones and ones whose URI and frontmatter name disagree are refused with a `warn`. |
+| Caps | 32 skills per server, 64 in all; 16 000 characters of instructions, 32 000 of a file - every cut said. Entries over the extension's limits (512 files, 16 MiB), `"dynamic"` ones (unless the server has `skills: { dynamic: true }`) and ones whose URI and frontmatter name disagree are refused with a `warn`. |
 | Changes | Announced as a resource list change: `onToolsChanged(name)` fires (also for that notice), and `refreshServer(name)` lists the skills again. An agent built afterwards has the new ones. |
+| Directories | `read_skill_file` with a directory of a skill (`templates/`, `.` for the root) lists it - `{ name, directory, files, directories, more?, notServed?, note? }`, the direct children by path, at most 64 - from the entry the skill was loaded and approved with, after the same consent as a file. When the server declared `directoryRead`, `resources/directory/read` goes to THAT server too (`skill://<path>/<dir>`, no trailing slash), only to see whether the skill changed there: what it lists beyond the entry is never shown - a fixed `note` says how many, a `warn` is logged (counts only) and `onToolsChanged(name)` fires once for that loaded skill; what the entry holds and the server no longer lists is kept and named in `notServed`. A failed directory read: the listing from the entry alone, and a log line. Without `directoryRead` the method is never called. A generated skill's directories are listed from its snapshot (below), the same way. |
+| Generated skills (opt-in) | A `"dynamic"` entry - the server generates the skill and publishes no checksums - is declined unless THAT server has `skills: { dynamic: true }` (no agent-wide switch: you trust servers with this one by one). It joins the catalog like any other, its line ending `[from the MCP server "x" - third-party, no checksums]`. When it would enter the context - BEFORE anyone is asked - the agent reads all of it once: `SKILL.md` (frontmatter compared with the entry's) and, if the server declared `directoryRead`, its directory tree (direct children each time, only `inode/directory` children inside the skill, never twice) and every file found. Bounds: 512 files and 16 MiB read per skill (the extension's limits, counted on what is read), 64 directories, 8 levels deep, and 64 MiB held by all of one agent's copies (`MCP_SKILL_SNAPSHOTS_MAX_BYTES`) - past any of them it is declined: nobody is asked, the model is told why, a `warn` says it. The agent computes each file's size and SHA-256 itself; that copy (its "snapshot") is the skill's entry from then on: the consent request carries `dynamic: true` and the copy's size, files and text, a yes binds to the copy's digests (another copy that differs in one byte - after a refresh, in a new agent - is asked about again under `'once-per-skill'`; the same bytes are not), and the model gets that copy only: its body, and every file served from memory, never read from the server again. Without `directoryRead` the copy is `SKILL.md` alone (`noFileListing: true`; no other file can be read). Nothing of a copy is written to IndexedDB, a checkpoint, an event or a log: a resumed run in a new agent reads a new one. `'never'` works too (a vetted server). |
+| A person sees it first | Before a server's skill enters the model's context (`load_skill`, the planner's pick, a resumed run, `read_skill_file`), its verified `SKILL.md` is put to `toolApproval.onRequest`: a request with `toolName: 'load_skill'` and `skill` (`McpSkillConsentView`: server, name, description, size, files, `byUri`, `nestedIn`, `consent`, and `body` - the very text the model would read). Yes lets it in; `remember: true` = "Always for this server" (nested skills excepted); no keeps all of it out and the model is told. Asked whatever the approval mode says - autopilot too; without `onRequest` it is not loaded. When: `skills: { consent }` per server, else `mcpSkills: { consent }` on the agent, else `'once-per-skill'` (the first time per skill in the agent's life, again if its files change); `'ask'` (every run); `'never'` (a vetted server). A nested skill is asked about on its own. |
+| By URI | A skill the listing leaves out, named by URI in a server's text: `load_skill({ server, uri })` (its description says so). A `skill://…/SKILL.md` URI and a server whose skills are on - checked before any request - and room under the per-server cap; then `skills/get` to THAT server only (its `-32602` reaches the model), the same entry rules, verification, consent (`byUri`) and preamble. It stays in the catalog, under a name no other skill has. |
 
 A server's skills come with its tools, like its instructions: a server whose tools are all
 filtered out (or that has none) offers none. Details: [docs/capabilities.md](docs/capabilities.md#mcp-skills-experimental),
@@ -797,7 +809,13 @@ tools — a helper can only have less than the run that starts it, and its spend
 that run's limits. Give `persistence` a store
 (`new IndexedDBRunStore()`) and a run interrupted by a reload or a crash resumes from its
 last checkpoint with `run('', { resumeFromRunId })` — the planner does not run again and
-no finished step is repeated. `createRunControl()` steers a run that is going: `send()`
+no finished step is repeated; every event of a run carries `seq` and `attempt` (one more
+per resume, recorded by `onRunResume` before the resumed run emits anything), so
+`(attempt, seq)` orders a run's events across reloads. `run(goal, { runId })` starts a fresh
+run under an id of yours (1-128 letters, digits, `_` or `-`) instead of a random one, so that a
+retry finds the same run: refused together with `resumeFromRunId`, and refused when `loadRun`
+already has that run (resume it instead - a run on record is never written over); see
+[Resuming](docs/capabilities.md#resuming-an-interrupted-run). `createRunControl()` steers a run that is going: `send()`
 puts a message in front of the model at the next boundary (the replanner re-checks the plan
 against it), `stopSubagent(id)` stops one subagent. `egress` (off by default) gives the model one safe `web_fetch` tool with allow / deny lists. `search` (off by default) adds `web_search` over a function of yours (any search API — recipes for Tavily, Brave and SearXNG are in the docs) or the built-in Google Search through Gemini grounding, which needs only a Gemini key and spends its tokens — the key stays in the credential store. `sandbox` (off by default) gives the model `run_js`: the code it wrote runs in QuickJS-in-WebAssembly inside a Web Worker that is killed at the deadline, so "I ran it" is a tool call you can see. `media` (off by default) mounts `generate_image`, `generate_speech` and `transcribe_audio` — each only when you configure its model — writes what they make into the virtual file system instead of the context, and turns attached audio into text for a model that cannot listen. `learning` (off by default) lets the agent write down what it figured out as skills of its own — in memory, or in the file system across sessions. Details, defaults and events:
 **[docs/capabilities.md](docs/capabilities.md)**.
@@ -858,6 +876,93 @@ Conditions (`always`, `contains`, `matches`, `route`, `otherwise`), the scheduli
 join, the loop caps), validation and the events: **[docs/capabilities.md](docs/capabilities.md#pipelines-a-graph-of-agents)**.
 Loading a definition someone else wrote: [docs/security.md](docs/security.md#pipelines-a-definition-is-data).
 
+### Running the graph yourself
+
+`createPipeline` is a scheduler with `createAgent` as its node runner. Both halves are public, so a
+host can keep the scheduler and run every node its own way - a worker, a server job, another tab -
+and make the route call where the node ran:
+
+```ts
+import { createAgent, pickPipelineRoute, preparePipeline, runPipelineGraph } from '@dudko.dev/agent-web'
+
+const plan = preparePipeline(definition) // validates (PipelineValidationError) and compiles
+const result = await runPipelineGraph(
+  plan,
+  async (node, input, ctx) => {
+    // input: { request, from: [{ nodeId, name?, text }], visit } - renderPipelineNodeInput(input)
+    // is the text a createPipeline node is given.
+    const text = await worker.run(node.id, input, { signal: ctx.signal }) // your runner
+    if (!node.routes?.length) return { text }
+    // The route call createPipeline makes: the node's decision model, then its planner model.
+    const config = configOf(node) // the node's BrowserAgentConfig
+    const { route, usage } = await pickPipelineRoute(node, text, {
+      agent: await agentOf(node, config), // createAgent(config), kept per node
+      config,
+      signal: ctx.signal,
+      onEvent: ctx.emit,
+    })
+    return { text, usage, route }
+  },
+  { input: 'A release note for v2', signal, onEvent, onAbort: 'resolve' },
+)
+```
+
+The runner's contract:
+
+- **When it is called.** Once per visit, never for an activation a cap refused (`plan.maxNodeVisits`
+  / `plan.maxRuns`: the definition's `limits` or the defaults). All visits of a wave are started, in
+  the order their nodes were first activated, before any is awaited; the next wave starts when all
+  of them have settled. A visit's answer is applied (events, trace, edges) when it settles.
+- **What it returns.** `{ text, usage?, route? }`. `text` is what the edges test (not a string
+  counts as `''`); `usage` is added to `result.usage`, every numeric field; `route` must be one of
+  `node.routes`' labels exactly as written - anything else, or none, is no route. To pick one with a
+  model of your own: `PIPELINE_ROUTER_SYSTEM` and `renderPipelineRoutePrompt(node, text)` are the
+  prompt, `matchPipelineRoute(node, answer)` turns the answer into a label.
+- **When it fails.** A runner that rejects fails the run with a `PipelineNodeError` (`nodeId`,
+  `visit`, `cause`), whatever `onAbort` says: the other visits' `ctx.signal` aborts, and what they
+  return afterwards is ignored.
+- **Abort.** `signal` aborts the visits in flight (their `ctx.signal`) and settles the run at once,
+  without waiting for them: it rejects with an `AbortError` (`onAbort: 'reject'`, the default, as
+  the Node sibling's `createPipeline` does) or resolves with what it has and `stoppedBy: 'aborted'`
+  (`'resolve'`, as `createPipeline` does here). Aborted before it starts: no visit at all.
+- **Events.** `onEvent` gets the `pipeline.*` events `createPipeline` sends; `ctx.emit(event)`
+  forwards one of the node's own, with `nodeId` and `visit`, until the run is over.
+
+`pickPipelineRoute(node, text, { agent, config, signal?, onEvent? })` resolves with
+`{ route?, usage }`: the agent's decision model first (`config.decisionModel`, when it is
+confident of a label), else its planner model - structured output, then plain text - with the
+config's budget, temperature and `chatTimeoutMs`. No label, or a failed call, is no route; an
+abort rejects with an `AbortError`.
+
+**Deterministic by contract.** The engine - `preparePipeline`, `runPipelineGraph`, the conditions -
+reads no clock, no randomness and no timer, and does no I/O: the same definition, input and runner
+answers, arriving in the same order (and an abort at the same point), give the same calls, events,
+trace and result. So it can be a deterministic scheduler, replayed from a log of the runner's
+answers. It needs nothing but the JavaScript language: where there is no `AbortController`,
+`ctx.signal` is a stand-in (`aborted`, `reason`, `onabort`, `throwIfAborted()`, `addEventListener` /
+`removeEventListener`), where there is no `DOMException` the abort error is an `Error` named
+`AbortError`, and of your `signal` only `aborted` and `addEventListener` / `removeEventListener`
+for `'abort'` are read. `pickPipelineRoute` calls a model, so it is not part of that: it belongs
+where the node runs. Why: [docs/design.md](docs/design.md#pipelines-waves-a-join-rule-caps).
+
+**The engine alone: `@dudko.dev/agent-web/pipeline-engine`.** The main entry loads the whole
+agent - `ai`, `zod`, `idb` -, which a bundled orchestrator cannot import (a workflow sandbox has the
+language and little else). The engine has an entry point of its own, ESM and CommonJS with types,
+whose file imports nothing:
+
+```ts
+// In the workflow: the scheduler only; every node runs outside it (an activity, a job).
+import { preparePipeline, runPipelineGraph } from '@dudko.dev/agent-web/pipeline-engine'
+```
+
+It exports `preparePipeline`, `runPipelineGraph`, `validatePipeline`, `normalizePipeline`,
+`testPipelineCondition`, `renderPipelineNodeInput`, `renderPipelineRoutePrompt`,
+`matchPipelineRoute`, `PIPELINE_ROUTER_SYSTEM`, `PIPELINE_LIMITS`, `PipelineValidationError`,
+`PipelineNodeError` and every pipeline type - the same names as the main entry, and the Node
+sibling's `@dudko.dev/agent/pipeline-engine` is the same file. It is a copy of the engine the main
+entry carries, not the same objects: an error thrown by one is not `instanceof` the other's class -
+compare `error.name`. More: [docs/capabilities.md](docs/capabilities.md#pipelines-a-graph-of-agents).
+
 ## Configuration (highlights)
 
 | Option | Default | Purpose |
@@ -873,7 +978,8 @@ Loading a definition someone else wrote: [docs/security.md](docs/security.md#pip
 | `toolSelectionStrategy` | `'auto'` | `all` \| `plan-narrowed` \| `search` \| `auto` (search above `toolSearchThreshold`, 40, or once the definitions take ¼ of the window) |
 | `appSampling` | on, with caps | the caps of `agent.sampleForApp` (an MCP App asking the model): `{ maxTokens: 1024, maxRequestsPerMinute: 5, maxRequests: 30, maxInputChars: 16000, reasoningTokens: 2048 }`, per app (`reasoningTokens`: room on top of an app's `maxTokens` for a model seen reasoning - its reasoning counts against the cap); `false` refuses every request. Nothing happens unless a host calls it, and every request goes to its `approve` first. See [An app asks the model](docs/capabilities.md#an-app-asks-the-model) |
 | `toolApproval` | autopilot | consent policy: `{ mode, rules, onRequest, timeoutMs }`; `agent.setToolApprovalMode()`. A question waits `timeoutMs` for a decision, then is denied: default 300000 (`TOOL_APPROVAL_TIMEOUT_MS`), `0` or `Infinity` = until the run is stopped (as is a value above 2^31 - 1, the most a timer holds); negative or `NaN` fails `createAgent`. `onRequest(req, { signal })`: the signal aborts when the question ends without an answer (`TimeoutError` for the bound, `AbortError` for a stop). See [Tool consent](docs/capabilities.md#tool-consent-and-autopilot) |
-| `skills` | — | SKILL.md bundles (`defineSkill` / `parseSkillMarkdown` / `loadSkillFromUrl`). An MCP server's skills come with its tools (`skills: true` on the server of `connectMcpHttp`, experimental) and join them as `<server>/<skill>` - see [MCP skills](#mcp-skills-experimental-a-servers-instructions-as-skills) |
+| `skills` | — | SKILL.md bundles (`defineSkill` / `parseSkillMarkdown` / `loadSkillFromUrl`). An MCP server's skills come with its tools (`skills: true` or `{ consent, dynamic }` on the server of `connectMcpHttp`, experimental; `dynamic: true` also takes its generated skills, each read whole into a snapshot before anyone is asked) and join them as `<server>/<skill>` - see [MCP skills](#mcp-skills-experimental-a-servers-instructions-as-skills) |
+| `mcpSkills` | `{ consent: 'once-per-skill' }` | experimental: when a person is asked (`toolApproval.onRequest`, a request with `skill`) before an MCP server's skill enters the model's context, for servers whose `skills: { consent }` does not say - `'once-per-skill'`, `'ask'` (every run) or `'never'` - see [MCP skills](#mcp-skills-experimental-a-servers-instructions-as-skills) |
 | `egress` | off | what the **model** may fetch (`web_fetch`): `true` = any public host over https, or `{ allow, deny, protocols, allowPrivateNetwork, fetch, ... }`; a browser can't pin DNS, so prefer an `allow` list — see [Egress](docs/capabilities.md#egress-what-the-model-may-fetch) |
 | `search` | off | the model may **search the web** (`web_search`: a short list of title / url / snippet): `{ engine: fn }` - a search engine of yours, any API - or `{ provider: 'google', credentialRef, model, baseURL, maxResults, allowPrivateNetwork, readOnly, fetch }` - Google Search through Gemini grounding: one extra `generateContent` call per search on a Gemini key (default model `gemini-2.5-flash-lite`), which **spends model tokens** (`usage` phase `'search'`) and returns **Google redirect links**, not the pages' URLs. No key ships with the library and none is written in the config (`credentialRef` names it in `credentials`); the request reaches only that API; with `egress`, results the model could not fetch are left out. Recipes for Tavily / Brave / SearXNG as an `engine`, the free-tier models and what the redirect links mean — see [Search](docs/capabilities.md#search-finding-the-page-to-fetch) |
 | `media` | off | image generation, speech and transcription as tools, each mounted only when its model is set: `{ imageModel, speechModel, transcriptionModel, maxCalls, timeoutMs, files, folder, voice, speechFormat, transcribeAttachments }`. A model is an AI SDK image / speech / transcription model object or a `ProviderModelSpec` (key by `credentialRef`). Generated files go to the virtual file system and the model gets a path, never the bytes; attached audio is transcribed to text; calls are counted in `usage.mediaCalls` (and the other media fields) and capped per run — see [Media](docs/capabilities.md#media-images-speech-and-transcription) |
@@ -893,7 +999,7 @@ Loading a definition someone else wrote: [docs/security.md](docs/security.md#pip
 | `describeState` | — | serialize world state into prompt context |
 | `memory` | — | `ContextStore` (`IndexedDBStore` / `MemoryStore`); recent turns are read back into the planner prompt |
 | `sessionId` | — | names the stored conversation in `memory`, and the bucket `agent.sessionUsage()` counts into |
-| `persistence` | — | checkpoint runs (`IndexedDBRunStore` / `MemoryRunStore`) so `run(goal, { resumeFromRunId })` continues after a reload — see [Resuming](docs/capabilities.md#resuming-an-interrupted-run) |
+| `persistence` | — | checkpoint runs (`IndexedDBRunStore` / `MemoryRunStore`) so `run(goal, { resumeFromRunId })` continues after a reload; hooks `onRunStart` / `onStepComplete` / `onRunComplete` / `onRunResume` (a resume's new `attempt`, before any event) / `loadRun` — see [Resuming](docs/capabilities.md#resuming-an-interrupted-run) |
 | `maxIterations` / `maxStepsPerTask` / `maxRevisions` | 8 / 4 / 2 | loop caps |
 | `chatTimeoutMs` | 120000 | per-call watchdog; for the executor, the whole step (its tool calls included). Stopped while a tool call waits for a person (an approval, an MCP question): the step goes on with the time it had left - see [Tool consent](docs/capabilities.md#tool-consent-and-autopilot) |
 | `temperature` | provider default | sampling temperature for every stage |

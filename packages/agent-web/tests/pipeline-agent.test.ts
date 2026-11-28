@@ -1,12 +1,17 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  createAgent,
   createPipeline,
   defineSkill,
   MemoryStore,
   nodeResolver,
+  pickPipelineRoute,
   PipelineNodeError,
+  preparePipeline,
+  runPipelineGraph,
   type AgentEvent,
+  type IDecisionModel,
   type PipelineDefinition,
 } from '../dist/index.js'
 import { scriptedModel, stageOf, type CallInfo, type Reply } from './helpers/scripted-model.ts'
@@ -311,4 +316,110 @@ test('pipeline: a node whose name is not registered fails the run', async () => 
     { resolveNode: nodeResolver({ base: { model: scriptedModel(() => ({ text: '' })).model } }) },
   )
   await assert.rejects(pipeline.run({ input: 'x' }), /node "a" failed.*unknown model/)
+})
+
+// ── the route call on its own (a host that runs the graph itself) ────────────
+
+const reviewer = definition.nodes[0]
+
+// The node's agent, as a host has it where the node ran.
+const nodeAgent = async (routeAnswer: string, extra: Record<string, unknown> = {}) => {
+  const m = scriptedModel(script(routeAnswer))
+  const config = { model: m.model, ...extra }
+  return { m, config, agent: await createAgent(config) }
+}
+
+test('pickPipelineRoute: picks a label with the node planner model, structured output first', async () => {
+  const { m, config, agent } = await nodeAgent(JSON.stringify({ route: 'revise' }))
+  const picked = await pickPipelineRoute(reviewer, 'The draft needs a second pass.', {
+    agent,
+    config,
+  })
+  assert.equal(picked.route, 'revise')
+  assert.equal(picked.usage.totalTokens, 15, 'one call, 10 in / 5 out')
+  const routerCalls = m.calls.filter(isRouter)
+  assert.equal(routerCalls.length, 1)
+  assert.ok(routerCalls[0].options.responseFormat, 'a structured-output call')
+  assert.match(routerCalls[0].user, /- approve: good to publish/)
+  assert.match(routerCalls[0].user, /The draft needs a second pass/)
+})
+
+test('pickPipelineRoute: plain text as the fallback; an answer that is not a label is no route', async () => {
+  const plain = await nodeAgent('Revise.')
+  const fallback = await pickPipelineRoute(reviewer, 'x', plain)
+  assert.equal(fallback.route, 'revise')
+  assert.equal(fallback.usage.totalTokens, 30, 'the refused structured attempt counts too')
+
+  const unknown = await nodeAgent(JSON.stringify({ route: 'ship-it' }))
+  const none = await pickPipelineRoute(reviewer, 'x', unknown)
+  assert.equal(none.route, undefined)
+  assert.equal(unknown.m.calls.filter(isRouter).length, 2)
+
+  const free = await pickPipelineRoute({ id: 'plain' }, 'x', unknown)
+  assert.equal(free.route, undefined)
+  assert.equal(free.usage.totalTokens, 0)
+  assert.equal(unknown.m.calls.filter(isRouter).length, 2, 'a node without routes made no call')
+
+  await assert.rejects(
+    pickPipelineRoute(reviewer, 'x', { ...unknown, signal: AbortSignal.abort() }),
+    {
+      name: 'AbortError',
+    },
+  )
+})
+
+test('pickPipelineRoute: a confident decision model answers first; an unsure one hands over', async () => {
+  const sure: IDecisionModel = { decide: async () => ({ choice: 'approve', confidence: 0.95 }) }
+  const quick = await nodeAgent(JSON.stringify({ route: 'revise' }), { decisionModel: sure })
+  const events: AgentEvent[] = []
+  const fast = await pickPipelineRoute(reviewer, 'Ready.', {
+    ...quick,
+    onEvent: (e) => events.push(e),
+  })
+  assert.equal(fast.route, 'approve')
+  assert.equal(quick.m.calls.filter(isRouter).length, 0, 'no route call')
+  assert.deepEqual(
+    events.map((e) => e.type),
+    ['usage', 'decision'],
+  )
+
+  const unsure: IDecisionModel = { decide: async () => ({ choice: 'approve', confidence: 0.3 }) }
+  const slow = await nodeAgent(JSON.stringify({ route: 'revise' }), { decisionModel: unsure })
+  const handed = await pickPipelineRoute(reviewer, 'Ready?', {
+    ...slow,
+    onEvent: () => {
+      throw new Error('a handler that throws changes nothing')
+    },
+  })
+  assert.equal(handed.route, 'revise', "the route call's answer")
+  assert.equal(slow.m.calls.filter(isRouter).length, 1)
+  assert.equal(handed.usage.decisionCalls, 1, 'both are counted')
+})
+
+test('runPipelineGraph + pickPipelineRoute: a host runs the nodes itself and routes like createPipeline', async () => {
+  const { m, config, agent } = await nodeAgent(JSON.stringify({ route: 'approve' }))
+  const ran: string[] = []
+  const result = await runPipelineGraph(
+    preparePipeline(definition),
+    async (node, input, ctx) => {
+      // The node "runs elsewhere" (a job, a worker): here, a fixed answer.
+      ran.push(`${node.id}#${input.visit}`)
+      const text = `${node.id} answered`
+      if (!node.routes?.length) return { text }
+      const { route, usage } = await pickPipelineRoute(node, text, {
+        agent,
+        config,
+        signal: ctx.signal,
+        onEvent: ctx.emit,
+      })
+      return { text, usage, ...(route ? { route } : {}) }
+    },
+    { input: 'Check my text', onAbort: 'resolve' },
+  )
+  assert.deepEqual(ran, ['reviewer#1', 'publisher#1'])
+  assert.deepEqual(result.outputs.reviewer, [
+    { visit: 1, text: 'reviewer answered', route: 'approve' },
+  ])
+  assert.equal(result.text, 'publisher answered')
+  assert.equal(m.calls.length, 1, 'the route call is the only model call')
 })

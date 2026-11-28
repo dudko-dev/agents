@@ -1,6 +1,8 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import type { RunControlPort } from './control.ts'
 import type { IRunState } from './internal.ts'
+import type { IJournalScope } from './journal.ts'
+import type { ISharedLimits } from './shared-limits.ts'
 import type { EventHandler, IPlanStep } from './types.ts'
 
 export interface IRunContext {
@@ -22,6 +24,16 @@ export interface IRunContext {
   // The run's control, when the host passed one: subagents register here so they
   // can be listed and stopped.
   control?: RunControlPort
+  // The run the HOST started: this run's own id, or - for a run started inside another run (a
+  // helper, an in-process subagent) - that run's root. What config.sharedLimits is told.
+  rootRunId?: string
+  // The sharedLimits hook in force for the model calls of this run: its agent's own, else the
+  // one of the run it runs inside (shared-limits.ts).
+  sharedLimits?: ISharedLimits
+  // persistence.journal: where this run's calls are recorded and replayed from (journal.ts). The
+  // run the host started has the root scope; a run started inside one of its tool calls (a helper,
+  // an in-process subagent) a scope of its own in the same journal.
+  journal?: IJournalScope
 }
 
 // Per-run context. Propagates through awaits, so any code reachable from

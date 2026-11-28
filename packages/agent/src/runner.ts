@@ -19,8 +19,14 @@ import { checkLimits, resolveLimits } from './limits.ts'
 import { createInitialPlan, filterPlanSkills, planStepCap } from './planner.ts'
 import { renderTrace, renderTraceSteps } from './prompts.ts'
 import { decideNextAction, decideWithDecisionModel, type ReplanDecision } from './replanner.ts'
-import { isMcpSkillName } from './mcp-skills.ts'
-import { activateSkill, isMcpSkill, isMcpSkillLoaded, prepareMcpSkills } from './skills.ts'
+import { createMcpSkillRunConsent, isMcpSkillName } from './mcp-skills.ts'
+import {
+  activateSkill,
+  isMcpSkill,
+  isMcpSkillAllowed,
+  mcpSkillConsentScope,
+  prepareMcpSkills,
+} from './skills.ts'
 import { synthesizeAnswer } from './synthesizer.ts'
 import {
   createStepWrites,
@@ -38,6 +44,7 @@ import type {
   IAgentRunOptions,
   IAgentRunResult,
   IConversationTurn,
+  IParkedRun,
   IPersistence,
   IPlan,
   IRunSnapshot,
@@ -49,6 +56,15 @@ import { ATTR, withSpan } from './tracing.ts'
 import { attachRunFiles } from './media.ts'
 import { accumulateUsage, clipText, combineSignals, isAuthError, normalizeUsage } from './utils.ts'
 import { createWaitClock } from './wait-clock.ts'
+import { holdRunLease, type IHeldRunLease } from './run-lease.ts'
+import { stageModel } from './shared-limits.ts'
+import {
+  openJournal,
+  startJournalSegment,
+  takeReplayedUsage,
+  unusedAnswers,
+  type IJournalScope,
+} from './journal.ts'
 
 // The default ('failure') replan trigger fires when:
 //   - the executor explicitly signalled a blocker (via the [BLOCKER] sentinel,
@@ -159,8 +175,8 @@ const resolveSandboxDir = (ctx: IAgentInternalContext, runId: string): string =>
 // plus the slightly broader alphanumeric+_- charset commonly used by
 // custom persistence layers. Path separators, dots, and unicode are out.
 const RUN_ID_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/
-const assertSafeRunId = (id: string, source: string): void => {
-  if (!RUN_ID_PATTERN.test(id)) {
+const assertSafeRunId = (id: unknown, source: string): void => {
+  if (typeof id !== 'string' || !RUN_ID_PATTERN.test(id)) {
     throw new Error(
       `Unsafe runId from ${source}: must match ${RUN_ID_PATTERN}, got ${JSON.stringify(id)}`,
     )
@@ -207,7 +223,121 @@ export const resolveResume = async (
       `Run "${options.resumeFromRunId}" has no saved plan (status="${snapshot.status}"); cannot resume`,
     )
   }
+  // The attempt numbers the run's events across crashes: one the store mangled could make two
+  // attempts share a number, and the order of the run's events would be ambiguous.
+  if (
+    snapshot.attempt !== undefined &&
+    !(Number.isSafeInteger(snapshot.attempt) && snapshot.attempt >= 1)
+  ) {
+    throw new Error(
+      `Run "${options.resumeFromRunId}" has an invalid attempt (${JSON.stringify(snapshot.attempt)}); it must be a positive integer`,
+    )
+  }
   return snapshot
+}
+
+// The run's id, decided before anything of the run happens: a resume keeps the id it names, a
+// fresh run takes options.runId or a random UUID. Throws on a caller's id that breaks the rule,
+// and on options.runId together with resumeFromRunId.
+export const runIdOf = (options: IAgentRunOptions): string => {
+  if (options.runId !== undefined) {
+    if (options.resumeFromRunId !== undefined) {
+      throw new Error(
+        'options.runId names a fresh run and cannot be combined with resumeFromRunId: a resume keeps the id of the run it resumes',
+      )
+    }
+    assertSafeRunId(options.runId, 'options.runId')
+    return options.runId
+  }
+  // randomUUID() is always safe; the assert is a hard guard all the same.
+  const runId = options.resumeFromRunId || randomUUID()
+  assertSafeRunId(runId, options.resumeFromRunId ? 'options.resumeFromRunId' : 'runId')
+  return runId
+}
+
+// A fresh run under the caller's id must not write over a run that is on record: refused when
+// persistence.loadRun has a snapshot for the id (resume it instead), or persistence.journal has
+// entries for it (a run under that id began and stopped before its first snapshot: its journal
+// would mix with this run's). Read errors propagate - a store that cannot say is not a "no".
+// Under config.runLease it runs with the run's lease held, so two workers cannot both find the
+// id free; without one it is a check, not a lock.
+export const assertRunIdFree = async (ctx: IAgentInternalContext, runId: string): Promise<void> => {
+  const persistence = ctx.config.persistence
+  const snapshot = await persistence?.loadRun?.(runId)
+  if (snapshot) {
+    throw new Error(
+      `Run "${runId}" already exists (status "${snapshot.status}"); resume it with resumeFromRunId instead of starting it again`,
+    )
+  }
+  const entries = await persistence?.journal?.load(runId)
+  if (entries && entries.length > 0) {
+    throw new Error(
+      `Run "${runId}" already has a call journal (${entries.length} entries) but no snapshot: it stopped before its plan was saved and cannot be resumed; clear its journal, or start the run under another id`,
+    )
+  }
+}
+
+// The attempt a resume of `snapshot` runs as: one more than the attempt that wrote it (a
+// snapshot written before attempts were recorded was the first).
+export const resumeAttemptOf = (snapshot: IRunSnapshot): number => (snapshot.attempt ?? 1) + 1
+
+// A resume starts: its attempt goes on record BEFORE any of its events, so a crash before its
+// first checkpoint still leaves the next resume a higher number. onRunResume, else onStepComplete.
+// Not fail-open, unlike the other writes: an attempt that is not on record would be reused.
+const recordResume = async (
+  ctx: IAgentInternalContext,
+  resumed: IRunSnapshot,
+  attempt: number,
+  held: IHeldRunLease | undefined,
+  warn: (message: string) => void,
+): Promise<void> => {
+  const persistence = ctx.config.persistence
+  const hook = persistence?.onRunResume
+    ? ('onRunResume' as const)
+    : persistence?.onStepComplete
+      ? ('onStepComplete' as const)
+      : undefined
+  if (!persistence || !hook) {
+    warn(
+      `[resume] persistence has neither onRunResume nor onStepComplete: attempt ${attempt} of run ${resumed.runId} is not on record until the run ends`,
+    )
+    return
+  }
+  if (held?.lost) {
+    throw held.lost
+  }
+  // What a parked run waited for is the journal's to know from here (its answers go on record).
+  const {
+    error: _error,
+    completedAt: _completedAt,
+    text: _text,
+    parked: _parked,
+    ...rest
+  } = resumed
+  void [_error, _completedAt, _text, _parked]
+  try {
+    await persistence[hook]?.({
+      ...rest,
+      status: 'executing',
+      attempt,
+      ...(held ? { leaseOwner: held.owner } : {}),
+    })
+  } catch (err) {
+    throw new Error(
+      `[resume] persistence.${hook} threw while recording attempt ${attempt} of run ${resumed.runId}; the resume was refused: ${asError(err).message}`,
+      { cause: err },
+    )
+  }
+}
+
+// What the inner loop is handed by runAgentLoop: the event sink (runId, seq, attempt), the
+// attempt and the lease the run holds.
+interface IRunFrame {
+  dispatch: (event: AgentEvent) => void
+  attempt: number
+  held?: IHeldRunLease
+  // persistence.journal: this run's scope (journal.ts).
+  journal?: IJournalScope
 }
 
 export const runAgentLoop = async (
@@ -216,53 +346,142 @@ export const runAgentLoop = async (
 ): Promise<IAgentRunResult> => {
   // Before anything is spent: a hand-made object in place of createRunControl() is refused.
   const port = portOf(options.control)
-  const resumed = await resolveResume(ctx, options)
-  const runId = resumed?.runId ?? randomUUID()
-  // Belt-and-braces: resolveResume already validates resumed.runId, but the
-  // fresh-run path also lands here. randomUUID() is always safe; the assert
-  // is a no-op under that path and a hard guard against any future caller
-  // that supplies a runId by other means.
-  assertSafeRunId(runId, 'runId')
-  const startedAt = resumed?.startedAt ?? Date.now()
-  const sandboxDir = resolveSandboxDir(ctx, runId)
-  return runContext.run(
-    { runId, startedAt, sandboxDir, ...(port ? { control: port } : {}) },
-    async () => {
-      return withSpan(
-        'agent.run',
-        {
-          [ATTR.RUN_ID]: runId,
-          [ATTR.PROVIDER]: ctx.config.providerType,
-          [ATTR.MODEL]: ctx.config.model,
-        },
-        async (span) => {
-          try {
-            const result = await runAgentLoopInner(ctx, options, resumed, port)
-            // The run is over: what it never showed the model goes back to the host.
-            if (port) {
-              result.undelivered = port.detach()
-            }
-            span.setAttribute(ATTR.ITERATIONS, result.iterations)
-            span.setAttribute(ATTR.USAGE_TOTAL_TOKENS, result.usage.totalTokens)
-            span.setAttribute(ATTR.USAGE_INPUT_TOKENS, result.usage.inputTokens)
-            span.setAttribute(ATTR.USAGE_OUTPUT_TOKENS, result.usage.outputTokens)
-            return result
-          } finally {
-            // A run that threw cannot return `undelivered`; detaching here makes control.send
-            // refuse from now on and leaves the leftovers readable through control.pending().
-            port?.detach()
-            // Best-effort cleanup. If the run never wrote anything, rm with
-            // force:true is a no-op; if it did, we drop the whole subtree. The
-            // catch is intentional - we'd rather leak a temp dir than throw on
-            // teardown and mask the real run result.
-            if (!ctx.config.keepSandbox) {
-              await rm(sandboxDir, { recursive: true, force: true }).catch(() => {})
-            }
+  const runId = runIdOf(options)
+  // config.runLease: taken before anything of the run happens - its snapshot is read under it.
+  // A refusal throws here: nothing ran, nothing was written.
+  const held = ctx.lease ? await holdRunLease(ctx.lease, runId) : undefined
+  let warnOutside = (message: string): void => ctx.emit({ type: 'log', level: 'warn', message })
+  try {
+    // A caller's id for a fresh run: read under the lease, before anything is written.
+    if (options.runId !== undefined) {
+      await assertRunIdFree(ctx, runId)
+    }
+    const resumed = await resolveResume(ctx, options)
+    const attempt = resumed ? resumeAttemptOf(resumed) : 1
+    // Every event of the run, numbered: (attempt, seq) is their total order across crashes.
+    let seq = 0
+    const onEvent = options.onEvent ?? (() => {})
+    const dispatch = (event: AgentEvent): void => {
+      const tagged: AgentEvent = { ...event, runId, seq: ++seq, attempt }
+      try {
+        onEvent(tagged)
+      } catch {}
+      try {
+        ctx.emit(tagged)
+      } catch {}
+    }
+    warnOutside = (message) => dispatch({ type: 'log', level: 'warn', message })
+    held?.onLost((err, detail) =>
+      dispatch({
+        type: 'lease.lost',
+        owner: err.owner,
+        reason: err.reason,
+        ...(detail ? { error: detail } : {}),
+      }),
+    )
+    // A run started inside another run (a helper, an in-process subagent) is spent for that
+    // run's root, and under its sharedLimits when its own agent has none.
+    const outer = runContext.getStore()
+    // persistence.journal: loaded, and `answers` checked against what is pending, before the
+    // attempt goes on record - an answer that cannot be taken refuses the resume. A run started
+    // from a tool call of a journaled run gets a scope of its own in that run's journal.
+    const journal = await openJournal({
+      hook: ctx.config.persistence?.journal,
+      runId,
+      attempt,
+      ...(resumed ? { resumed } : {}),
+      ...(options.answers ? { answers: options.answers } : {}),
+      ...(outer?.journal ? { outer: outer.journal } : {}),
+      lost: () => held?.lost,
+      ...(ctx.config.outputSanitizer ? { outputSanitizer: ctx.config.outputSanitizer } : {}),
+      warn: warnOutside,
+    })
+    if (resumed) {
+      await recordResume(ctx, resumed, attempt, held, warnOutside)
+    }
+    const startedAt = resumed?.startedAt ?? Date.now()
+    const sandboxDir = resolveSandboxDir(ctx, runId)
+    const rootRunId = outer?.rootRunId ?? outer?.runId ?? runId
+    const sharedLimits = ctx.config.sharedLimits ?? outer?.sharedLimits
+    // A lost lease stops the run at once, its tools included; so does a park or a failed journal
+    // append.
+    const runOptions: IAgentRunOptions =
+      held || journal
+        ? {
+            ...options,
+            signal: combineSignals([options.signal, held?.signal, journal?.stop.signal]),
           }
-        },
-      )
-    },
-  )
+        : options
+    const result = await runContext.run(
+      {
+        runId,
+        startedAt,
+        sandboxDir,
+        rootRunId,
+        ...(sharedLimits ? { sharedLimits } : {}),
+        ...(port ? { control: port } : {}),
+        ...(journal ? { journal } : {}),
+      },
+      async () => {
+        return withSpan(
+          'agent.run',
+          {
+            [ATTR.RUN_ID]: runId,
+            // A model object names itself: its provider and model id.
+            [ATTR.PROVIDER]:
+              typeof ctx.config.model === 'string'
+                ? ctx.config.providerType
+                : ctx.config.model.provider,
+            [ATTR.MODEL]:
+              typeof ctx.config.model === 'string' ? ctx.config.model : ctx.config.model.modelId,
+          },
+          async (span) => {
+            try {
+              const result = await runAgentLoopInner(ctx, runOptions, resumed, port, {
+                dispatch,
+                attempt,
+                ...(held ? { held } : {}),
+                ...(journal ? { journal } : {}),
+              })
+              // The run is over: what it never showed the model goes back to the host.
+              if (port) {
+                result.undelivered = port.detach()
+              }
+              span.setAttribute(ATTR.ITERATIONS, result.iterations)
+              span.setAttribute(ATTR.USAGE_TOTAL_TOKENS, result.usage.totalTokens)
+              span.setAttribute(ATTR.USAGE_INPUT_TOKENS, result.usage.inputTokens)
+              span.setAttribute(ATTR.USAGE_OUTPUT_TOKENS, result.usage.outputTokens)
+              return result
+            } finally {
+              // A run that threw cannot return `undelivered`; detaching here makes control.send
+              // refuse from now on and leaves the leftovers readable through control.pending().
+              port?.detach()
+              // Best-effort cleanup. If the run never wrote anything, rm with
+              // force:true is a no-op; if it did, we drop the whole subtree. The
+              // catch is intentional - we'd rather leak a temp dir than throw on
+              // teardown and mask the real run result.
+              if (!ctx.config.keepSandbox) {
+                await rm(sandboxDir, { recursive: true, force: true }).catch(() => {})
+              }
+            }
+          },
+        )
+      },
+    )
+    // Lost at the very end, after the last await of the run: it still does not count as done here.
+    if (held?.lost) {
+      throw held.lost
+    }
+    return result
+  } catch (err) {
+    // Whatever the abort looked like on its way out, a lost lease is what ended the run.
+    if (held?.lost) {
+      throw held.lost
+    }
+    throw err
+  } finally {
+    await held?.release(warnOutside)
+  }
 }
 
 // The run's effective tool strategy: 'auto' resolved against the live
@@ -277,6 +496,7 @@ const runAgentLoopInner = async (
   options: IAgentRunOptions,
   resumed: IRunSnapshot | undefined,
   port: RunControlPort | undefined,
+  frame: IRunFrame,
 ): Promise<IAgentRunResult> => {
   const { signal } = options
   // On resume the saved input wins so the resumed run prompts the planner /
@@ -290,7 +510,14 @@ const runAgentLoopInner = async (
     : options.history
       ? [...options.history]
       : undefined
-  const onEvent = options.onEvent ?? (() => {})
+  const { dispatch, attempt, held, journal } = frame
+  // The journal of the run the host started (not of a run inside one of its calls): only it
+  // parks, and only its total takes the replayed calls' usage.
+  const rootJournal = journal && !journal.nested ? journal : undefined
+  const journalFatal = (): Error | undefined => {
+    const stop = journal?.session.stopped
+    return stop?.kind === 'fatal' ? stop.error : undefined
+  }
   const compaction = resolveCompaction(ctx.config.compaction)
   const limits = resolveLimits(ctx.config)
   const maxToolCalls = ctx.config.maxToolCalls
@@ -309,6 +536,7 @@ const runAgentLoopInner = async (
     strategy: runToolStrategy(ctx),
     discovered: [],
     activeSkills: [...(resumed?.activeSkills ?? [])],
+    mcpSkillConsent: createMcpSkillRunConsent(),
     traceSummary: resumed?.traceSummary,
     traceSummaryUpTo: resumed?.traceSummaryUpTo ?? 0,
     userUpdates: (resumed?.userUpdates ?? []).map((u) => ({ ...u })),
@@ -328,14 +556,16 @@ const runAgentLoopInner = async (
       if (event.type === 'usage') {
         accumulateUsage(totalUsage, event.usage)
         ctx.onUsage?.(event.usage)
+        // What the replayed calls cost when they ran: in the run's total once, at the moment the
+        // stage that made them reports (as it was then) - never in the agent's or the hosts'.
+        const replayed = rootJournal ? takeReplayedUsage(rootJournal) : undefined
+        if (replayed) {
+          accumulateUsage(totalUsage, replayed)
+        }
       }
-      const tagged = { ...event, runId: runContext.getStore()?.runId }
-      try {
-        onEvent(tagged)
-      } catch {}
-      try {
-        ctx.emit(tagged)
-      } catch {}
+      // Tagged with this run's id and numbered (seq / attempt) - also when a subagent's event
+      // is forwarded from inside the child's own run context.
+      dispatch(event)
     },
   }
   const store = runContext.getStore()
@@ -369,24 +599,26 @@ const runAgentLoopInner = async (
   const activate = (name: string, by: 'plan' | 'tool'): void => {
     activateSkill(ctx.skills ?? [], name, by, state, proxiedCtx.emit)
   }
-  // An MCP server's skill is read (and verified) before it is activated: the planner's picks
-  // here, and a resumed run's active ones below. One that cannot be read is left out.
+  // An MCP server's skill is read (and verified) - and let in by the person, where its consent
+  // says so - before it is activated: the planner's picks here, and a resumed run's active ones
+  // below. One that is not let in is left out.
   const warnSkill = (message: string): void =>
     proxiedCtx.emit({ type: 'log', level: 'warn', message })
+  const skillScope = mcpSkillConsentScope(ctx.approval, state.mcpSkillConsent, ctx.mcpSkillConsent)
   const activatePlanned = async (names: readonly string[] | undefined): Promise<void> => {
     if (!names?.length) {
       return
     }
-    await prepareMcpSkills(ctx.skills ?? [], names, warnSkill, signal)
+    await prepareMcpSkills(ctx.skills ?? [], names, warnSkill, skillScope, signal)
     for (const name of names) {
       activate(name, 'plan')
     }
   }
   if (state.activeSkills.some(isMcpSkillName)) {
-    await prepareMcpSkills(ctx.skills ?? [], state.activeSkills, warnSkill, signal)
+    await prepareMcpSkills(ctx.skills ?? [], state.activeSkills, warnSkill, skillScope, signal)
     state.activeSkills = state.activeSkills.filter((name) => {
       const skill = ctx.skills?.find((s) => s.name === name)
-      return !skill || !isMcpSkill(skill) || isMcpSkillLoaded(skill)
+      return !skill || !isMcpSkill(skill) || isMcpSkillAllowed(skill, state.mcpSkillConsent)
     })
   }
 
@@ -400,6 +632,11 @@ const runAgentLoopInner = async (
   ): Promise<void> => {
     const fn = persistence?.[label]
     if (!fn) {
+      return
+    }
+    // config.runLease: once the lease is lost, nothing more is written - terminal or not. Another
+    // worker may own the run now, and this snapshot would overwrite its state.
+    if (held?.lost) {
       return
     }
     try {
@@ -439,7 +676,7 @@ const runAgentLoopInner = async (
   // back as result.compactedHistory.
   let compactedHistory: IConversationTurn[] | undefined
   if (!resumed && history?.length && compaction.auto) {
-    const r = await compactHistory(history, ctx.synthesizerModel, {
+    const r = await compactHistory(history, stageModel(ctx, 'compaction', ctx.synthesizerModel), {
       thresholdTokens: compaction.thresholdTokens,
       overheadTokens: await promptOverhead(),
       maxInputTokens: summaryInputTokens,
@@ -484,7 +721,7 @@ const runAgentLoopInner = async (
     const r = await summarizeTrace(
       trace.slice(from, upTo),
       state.traceSummary,
-      ctx.synthesizerModel,
+      stageModel(ctx, 'compaction', ctx.synthesizerModel),
       {
         summaryMaxTokens: compactionMaxTokens(ctx.config, compaction.summaryMaxTokens),
         maxInputTokens: summaryInputTokens,
@@ -550,16 +787,19 @@ const runAgentLoopInner = async (
   } else {
     try {
       plan = await createInitialPlan(input, history, proxiedCtx, signal)
-    } catch (err) {
+    } catch (caught) {
+      // A failed journal append ends the run as failed, whatever the call it stopped threw.
+      const fatal = journalFatal()
+      const err = fatal ?? caught
       proxiedCtx.emit({ type: 'error', error: asError(err), phase: 'plan' })
-      if (isAbortError(err) || signal?.aborted) {
+      if (fatal || isAbortError(err) || signal?.aborted) {
         // Pre-plan failure: no currentPlan / trace yet, so we hand-build the
         // snapshot rather than going through buildSnapshot below (which
         // closes over those mutable bindings).
         await callPersistence('onRunComplete', {
           runId,
           startedAt,
-          status: 'cancelled',
+          status: fatal ? 'failed' : 'cancelled',
           input,
           history,
           trace: [],
@@ -569,6 +809,8 @@ const runAgentLoopInner = async (
           revisions: 0,
           error: (err as Error).message,
           completedAt: Date.now(),
+          attempt,
+          ...(held ? { leaseOwner: held.owner } : {}),
         })
         throw err
       }
@@ -626,13 +868,39 @@ const runAgentLoopInner = async (
     ...(state.userUpdates.length ? { userUpdates: state.userUpdates.map((u) => ({ ...u })) } : {}),
     ...(state.escalations ? { escalations: state.escalations } : {}),
     ...(state.subagentsSpawned ? { subagentsSpawned: state.subagentsSpawned } : {}),
+    attempt,
+    ...(held ? { leaseOwner: held.owner } : {}),
     ...extra,
   })
 
   // Skip onRunStart on resume - the original run already fired it. We don't
   // want consumers seeing two starts for the same runId.
   if (!resumed) {
-    await callPersistence('onRunStart', buildSnapshot('executing'))
+    if (rootJournal && persistence?.onRunStart) {
+      // persistence.journal: NOT fail-open. A run whose start is not on record can never be
+      // resumed (no snapshot) and its id never reused (it has journal entries), so a write its
+      // tools made would be made again by the run that replaces it. It stops before its first
+      // step instead - so far only model calls have been made, and they are on record.
+      if (held?.lost) {
+        throw held.lost
+      }
+      try {
+        await persistence.onRunStart(buildSnapshot('executing'))
+      } catch (err) {
+        const e = new Error(
+          `[start] persistence.onRunStart threw while recording run ${runId}; with a call journal a run that is not on record cannot be resumed, so it stops before its first step: ${asError(err).message}`,
+          { cause: err },
+        )
+        proxiedCtx.emit({ type: 'error', error: e, phase: 'plan' })
+        await callPersistence(
+          'onRunComplete',
+          buildSnapshot('failed', { error: e.message, completedAt: Date.now() }),
+        )
+        throw e
+      }
+    } else {
+      await callPersistence('onRunStart', buildSnapshot('executing'))
+    }
   }
 
   // Capture the post-iteration "next loop entry" state. Called at every
@@ -643,8 +911,103 @@ const runAgentLoopInner = async (
     await callPersistence('onStepComplete', buildSnapshot('executing'))
   }
 
+  // persistence.journal: the run as it stood at the start of the step in flight - what a park
+  // writes (status 'waiting'): a resume replays the step from there.
+  let boundary: IRunSnapshot | undefined
+  // The run parks: what the round waits for goes on record, and run() resolves with it.
+  const parkRun = async (journalScope: IJournalScope): Promise<IAgentRunResult> => {
+    const parked: IParkedRun = { runId, items: [...journalScope.session.items], at: Date.now() }
+    const base = boundary ?? buildSnapshot('executing')
+    const { completedAt: _completedAt, error: _error, text: _text, ...rest } = base
+    void [_completedAt, _error, _text]
+    const snapshot: IRunSnapshot = {
+      ...rest,
+      status: 'waiting',
+      // What the user said during the step is kept: forgetting it would be worse than a replay
+      // that diverges on it.
+      ...(state.userUpdates.length
+        ? { userUpdates: state.userUpdates.map((u) => ({ ...u })) }
+        : {}),
+      parked,
+    }
+    const hook = persistence?.onRunPark
+      ? ('onRunPark' as const)
+      : persistence?.onStepComplete
+        ? ('onStepComplete' as const)
+        : undefined
+    if (!hook) {
+      proxiedCtx.emit({
+        type: 'log',
+        level: 'warn',
+        message: `[park] persistence has neither onRunPark nor onStepComplete: run ${runId} parked, but its snapshot is not on record`,
+      })
+    } else {
+      if (held?.lost) {
+        throw held.lost
+      }
+      try {
+        await persistence?.[hook]?.(snapshot)
+      } catch (err) {
+        // A park that is not on record cannot be resumed with its answers: the run fails.
+        const e = new Error(
+          `[park] persistence.${hook} threw while parking run ${runId}; the run could not park: ${asError(err).message}`,
+          { cause: err },
+        )
+        proxiedCtx.emit({ type: 'error', error: e, phase: 'execute' })
+        await callPersistence(
+          'onRunComplete',
+          buildSnapshot('failed', { error: e.message, completedAt: Date.now() }),
+        )
+        throw e
+      }
+    }
+    warnUnusedAnswers()
+    proxiedCtx.emit({ type: 'run.parked', items: parked.items, at: parked.at })
+    return {
+      runId,
+      text: '',
+      plan: currentPlan,
+      trace: [...base.trace],
+      iterations: base.iterations,
+      usage: totalUsage,
+      parked,
+    }
+  }
+  // An answer this resume was given for an item the run never reached (it diverged before it).
+  const warnUnusedAnswers = (): void => {
+    for (const id of rootJournal ? unusedAnswers(rootJournal) : []) {
+      proxiedCtx.emit({
+        type: 'log',
+        level: 'warn',
+        message: `[resume] the answer for "${id}" was not used: the run did not come to that item again (its replay diverged before it)`,
+      })
+    }
+  }
+  // The run stopped for the journal's sake: it parked, or an append failed.
+  const journalStop = async (
+    phase: 'execute' | 'replan' | 'synthesize',
+  ): Promise<IAgentRunResult | undefined> => {
+    const fatal = journalFatal()
+    if (fatal) {
+      proxiedCtx.emit({ type: 'error', error: fatal, phase })
+      await callPersistence(
+        'onRunComplete',
+        buildSnapshot('failed', { error: fatal.message, completedAt: Date.now() }),
+      )
+      throw fatal
+    }
+    if (rootJournal?.session.stopped?.kind === 'park') {
+      return parkRun(rootJournal)
+    }
+    return undefined
+  }
+
   while (iterations < ctx.config.maxIterations) {
     if (signal?.aborted) {
+      const stopped = await journalStop('execute')
+      if (stopped) {
+        return stopped
+      }
       throw new DOMException('Aborted', 'AbortError')
     }
     if (stepIndex >= currentPlan.steps.length) {
@@ -653,10 +1016,16 @@ const runAgentLoopInner = async (
     if (reportBudget()) {
       break
     }
+    if (rootJournal) {
+      boundary = { ...buildSnapshot('executing'), trace: [...trace], usage: { ...totalUsage } }
+    }
     // Increment AFTER the early-break checks so iterations counts only
     // iterations that actually ran a step; an early break on token cap or
     // last-step doesn't inflate result.iterations by 1.
     iterations++
+    if (journal) {
+      startJournalSegment(journal, String(iterations))
+    }
 
     const step = currentPlan.steps[stepIndex]
     if (store) {
@@ -795,6 +1164,15 @@ const runAgentLoopInner = async (
         }
       }
     } catch (err) {
+      // persistence.journal: the run parked (or an append failed) - not a stop of the user's.
+      // A run inside a tool call that parked just ends: the call above it parks the run.
+      if (journal?.nested && journal.parked) {
+        throw err
+      }
+      const stopped = await journalStop('execute')
+      if (stopped) {
+        return stopped
+      }
       // Distinguish run-level abort (propagate) from step-level abort
       // (treat as blocker so the replanner gets a chance to recover).
       if (signal?.aborted) {
@@ -831,6 +1209,12 @@ const runAgentLoopInner = async (
           }),
         )
         throw err
+      }
+    }
+    if (journal?.session.stopped) {
+      const stopped = await journalStop('execute')
+      if (stopped) {
+        return stopped
       }
     }
     trace.push(result)
@@ -921,6 +1305,10 @@ const runAgentLoopInner = async (
           freshUpdates,
         ))
     } catch (err) {
+      const stopped = await journalStop('replan')
+      if (stopped) {
+        return stopped
+      }
       proxiedCtx.emit({ type: 'error', error: asError(err), phase: 'replan' })
       // A stop is a stop, and credentials the provider refuses will not work for the next call
       // either: those end the run, as before.
@@ -993,12 +1381,19 @@ const runAgentLoopInner = async (
   }
 
   let text: string
+  if (journal) {
+    startJournalSegment(journal, 'f')
+  }
   try {
     // Last chance to be heard before the answer is written.
     deliver('final')
     await maybeCompactTrace(trace)
     text = await synthesizeAnswer(input, currentPlan, trace, history, proxiedCtx, signal)
   } catch (err) {
+    const stopped = await journalStop('synthesize')
+    if (stopped) {
+      return stopped
+    }
     proxiedCtx.emit({ type: 'error', error: asError(err), phase: 'synthesize' })
     await callPersistence(
       'onRunComplete',
@@ -1009,6 +1404,7 @@ const runAgentLoopInner = async (
     )
     throw err
   }
+  warnUnusedAnswers()
   proxiedCtx.emit({ type: 'final', text })
   await callPersistence(
     'onRunComplete',
@@ -1019,6 +1415,7 @@ const runAgentLoopInner = async (
   )
 
   return {
+    runId,
     text,
     plan: currentPlan,
     trace,

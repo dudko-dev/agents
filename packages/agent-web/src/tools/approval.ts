@@ -1,5 +1,10 @@
 import type { Tool } from 'ai'
 import type { IPlanStep } from '../agent/loop-types.js'
+import {
+  createMcpSkillGrants,
+  type McpSkillConsentView,
+  type McpSkillGrants,
+} from '../mcp/skills.js'
 
 /**
  * Tool consent. Every tool call passes a gate that decides allow / ask / deny:
@@ -48,6 +53,16 @@ export interface ToolApprovalRequest {
    * skill must not lead to code running here without a person's approval).
    */
   mcpSkills?: string[]
+  /**
+   * Set when the request is not about a tool call but about an MCP server's skill that is about
+   * to enter the model's context (`load_skill`, the planner's pick, a resumed run; `skills` on a
+   * server, consent `'ask'` / `'once-per-skill'`): the server, the skill, its description and
+   * size and the very text the model would read - the SERVER's words, to show as plain text.
+   * `toolName` is `'load_skill'`. Approve to let it in (`remember: true` = every skill of that
+   * server for the agent's life, nested ones excepted), deny to keep it out. Asked whatever the
+   * approval mode and the rules say.
+   */
+  skill?: McpSkillConsentView
 }
 
 /** Who asks when an MCP App asks (see `ToolApprovalRequest.app`). */
@@ -240,6 +255,8 @@ export interface ApprovalState {
   readonly timeoutMs: number
   /** Tools the user chose to "always allow". */
   readonly remembered: Set<string>
+  /** What a person allowed of MCP servers' skills for the agent's life (helpers share it). */
+  readonly mcpSkillGrants: McpSkillGrants
 }
 
 /** Throws on a `timeoutMs` that is not a usable number: a configuration error, at `createAgent`. */
@@ -248,6 +265,7 @@ export const createApprovalState = (config: ToolApprovalConfig | undefined): App
   config: config ?? {},
   timeoutMs: resolveApprovalTimeout(config?.timeoutMs),
   remembered: new Set<string>(),
+  mcpSkillGrants: createMcpSkillGrants(),
 })
 
 let seq = 0
@@ -362,6 +380,82 @@ export const gateToolCall = async (
     automatic: false,
   })
   if (!decision.approved) throw new ToolDeniedError(decision.reason)
+}
+
+/**
+ * Ask the person whether an MCP server's skill may enter the model's context: the same
+ * `onRequest`, `timeoutMs` and events as a tool call (the request carries `skill`, `toolName` is
+ * `load_skill`), but no mode, no rule and no "always allow" of the tools' - a yes with `remember`
+ * is "Always for this server", kept by the caller. Resolves with the answer (`by` says whether a
+ * person gave it); throws only when the run was stopped.
+ */
+export const askMcpSkillConsent = async (
+  state: ApprovalState,
+  call: {
+    input: unknown
+    skill: McpSkillConsentView
+    step?: IPlanStep
+    subagent?: { id: string; depth: number }
+  },
+  events: ApprovalEvents,
+  signal?: AbortSignal,
+): Promise<{
+  approved: boolean
+  remember?: boolean
+  reason?: string
+  by: 'person' | 'no-handler' | 'no-answer'
+}> => {
+  const id = `approval-${Date.now().toString(36)}-${(seq += 1)}`
+  const name = 'load_skill'
+  const onRequest = state.config.onRequest
+  if (!onRequest) {
+    const reason = 'no approval handler configured'
+    events.resolved({ id, name, approved: false, reason, automatic: true })
+    return { approved: false, reason, by: 'no-handler' }
+  }
+  const req: ToolApprovalRequest = {
+    id,
+    toolName: name,
+    input: call.input,
+    readOnly: true,
+    ...(call.step ? { step: call.step } : {}),
+    ...(call.subagent ? { subagent: call.subagent } : {}),
+    skill: call.skill,
+  }
+  events.requested(req)
+  const asked = new AbortController()
+  const resume = events.wait?.()
+  let decision: { approved: boolean; reason?: string; remember?: boolean }
+  try {
+    decision = normalizeDecision(
+      await withDeadline(
+        Promise.resolve(onRequest(req, { signal: asked.signal })),
+        state.timeoutMs,
+        signal,
+      ),
+    )
+  } catch (err) {
+    asked.abort(err)
+    resume?.()
+    const reason = err instanceof Error ? err.message : String(err)
+    events.resolved({ id, name, approved: false, reason, automatic: true })
+    if (signal?.aborted) throw err
+    return { approved: false, reason, by: 'no-answer' }
+  }
+  resume?.()
+  events.resolved({
+    id,
+    name,
+    approved: decision.approved,
+    reason: decision.reason,
+    automatic: false,
+  })
+  return {
+    approved: decision.approved,
+    ...(decision.remember ? { remember: true } : {}),
+    ...(decision.reason ? { reason: decision.reason } : {}),
+    by: 'person',
+  }
 }
 
 // Named like the reasons of `AbortSignal.timeout` / `abort()`: they are the host signal's too.

@@ -7,6 +7,7 @@ import type {
   IPlanStep,
   IUsage,
   McpAppToolResult,
+  McpSkillConsentView,
   ModelTier,
   ReplanMode,
   TierReason,
@@ -270,7 +271,18 @@ export interface ApprovalView {
    * a message.
    */
   app?: { server: string; tool: string; resourceUri: string }
+  /**
+   * Set when the request is about an MCP server's skill about to enter the model's context, not
+   * a tool call (the core's `ToolApprovalRequest.skill`): the server, the skill, its description,
+   * size and files, and - while the request is pending - `body`, the very text the model would
+   * read. All of it is the SERVER's text: show it as plain text. `body` is dropped once the
+   * request is decided, so a saved conversation does not keep a server's instructions.
+   */
+  skill?: SkillConsentView
 }
+
+/** What a person is shown of an MCP server's skill (the core's `McpSkillConsentView`). */
+export type SkillConsentView = Omit<McpSkillConsentView, 'body'> & { body?: string }
 
 /**
  * A question an MCP server put to the user in the middle of a tool call (MCP elicitation; the

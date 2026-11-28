@@ -1,16 +1,37 @@
 import { jsonSchema, tool, type ToolSet } from 'ai'
 import { clip } from './llm/util.js'
 import {
+  assignAddedMcpSkillName,
   assignMcpSkillNames,
+  createMcpSkillSnapshotMemory,
+  decideMcpSkillConsent,
   mcpSkillBodyText,
+  mcpSkillConsentView,
+  mcpSkillDeniedMessage,
   mcpSkillDescription,
+  mcpSkillEnclosingUri,
   mcpSkillFileText,
+  mcpSkillGrantKey,
+  mcpSkillLoadByUriNote,
   mcpSkillPreamble,
-  resolveMcpSkillFile,
+  mcpSkillRoomRefusal,
+  mcpSkillUriRefusal,
+  recordMcpSkillConsent,
+  resolveMcpSkillConsent,
+  resolveMcpSkillPath,
+  resolveMcpSkillServer,
   selectMcpSkills,
+  skillDirectoryListing,
+  skillDirectoryOf,
+  type McpSkillConsent,
+  type McpSkillConsentView,
+  type McpSkillGrants,
   type McpSkillLoaded,
   type McpSkillRecord,
+  type McpSkillRunConsent,
+  type McpSkillSnapshotMemory,
   type McpSkillSource,
+  type SkillDirectoryListing,
 } from './mcp/skills.js'
 
 /**
@@ -185,19 +206,30 @@ export const learnedPreamble = (skill: Skill): string => {
   )
 }
 
-// ── skills an MCP server serves (`skills: true` on its config) ────────────────
+// ── skills an MCP server serves (`skills` on its config) ──────────────────────
 //
 // They join the same list as the host's skills and the lessons, named `<server>/<skill>` (a name
 // with a "/" is an MCP skill's: no other kind can hold one). Their instructions are NOT held: a
 // skill's SKILL.md is read - and verified against its entry by the connection - the first time
-// the skill is loaded (load_skill, or the planner picking it), and a file of it only when
-// read_skill_file asks for it. What the connection gives is kept here, per skill object.
+// the skill is loaded (load_skill, or the planner picking it), shown to a person, and put in the
+// model's context only on a yes (consent: see mcp/skills.ts); a file of it is read only when
+// read_skill_file asks for it, once the skill was let in. What the connection gives is kept here,
+// per skill object. A generated skill (`skills: { dynamic: true }`) is read whole into a snapshot
+// at that first load - before the person is asked - and its files are served from it; the
+// snapshots of one agent share a memory cap (`memory`). Nothing of one is written anywhere.
 
 interface McpSkillState {
   source: McpSkillSource
   record: McpSkillRecord
+  /** Given by URI (`skills/get`), not listed. */
+  byUri?: boolean
+  /** What the agent's snapshots of generated skills hold (shared by all its MCP skills). */
+  memory: McpSkillSnapshotMemory
+  /** Read and verified - not yet in any context. */
+  fetched?: McpSkillLoaded
+  fetching?: Promise<McpSkillLoaded>
+  /** Let into a context once (a person said yes, or the consent is 'never'): `content` is set. */
   loaded?: McpSkillLoaded
-  loading?: Promise<McpSkillLoaded>
 }
 
 const mcpSkillStates = new WeakMap<Skill, McpSkillState>()
@@ -205,102 +237,360 @@ const mcpSkillStates = new WeakMap<Skill, McpSkillState>()
 /** Whether a skill is one an MCP server serves (made by `createMcpSkills`, never by a config). */
 export const isMcpSkill = (skill: Skill): boolean => mcpSkillStates.has(skill)
 
-/** Whether its instructions were read (and verified) - only then can it be active. */
+/**
+ * Whether its instructions were read, verified and let into a context - only then can it be
+ * active, and only in a run that let it in ({@link isMcpSkillAllowed}).
+ */
 export const isMcpSkillLoaded = (skill: Skill): boolean =>
   mcpSkillStates.get(skill)?.loaded !== undefined
 
+/** Whether this run let the skill's text in: its consent key is among the run's allowed ones. */
+export const isMcpSkillAllowed = (skill: Skill, run: McpSkillRunConsent | undefined): boolean => {
+  const state = mcpSkillStates.get(skill)
+  return Boolean(
+    state?.loaded && run?.allowed.has(mcpSkillGrantKey(state.source.server, state.loaded.entry)),
+  )
+}
+
+/** What the person answered (`askMcpSkillConsent`). */
+export interface McpSkillAnswer {
+  approved: boolean
+  /** "Always for this server". */
+  remember?: boolean
+  reason?: string
+  /** Who answered: a person, nobody (no handler), or nobody in time / the handler failed. */
+  by: 'person' | 'no-handler' | 'no-answer'
+}
+
+/**
+ * What a run hands the MCP skill paths so that a person can be asked: the agent's policy, the
+ * session's grants (shared with helpers), the run's own record, and the question itself.
+ */
+export interface McpSkillConsentScope {
+  agentConsent?: McpSkillConsent
+  grants: McpSkillGrants
+  run: McpSkillRunConsent
+  ask: (input: unknown, skill: McpSkillConsentView, signal?: AbortSignal) => Promise<McpSkillAnswer>
+}
+
+/** A skill's text was not let into the context: what the model is told. */
+export class McpSkillDeniedError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'McpSkillDeniedError'
+  }
+
+  toJSON(): string {
+    return this.message
+  }
+}
+
+const mcpSkillOf = (
+  source: McpSkillSource,
+  record: McpSkillRecord,
+  name: string,
+  byUri: boolean,
+  memory: McpSkillSnapshotMemory,
+): Skill => {
+  const skill: Skill = {
+    name,
+    description: mcpSkillDescription(record.description, source.server, record.dynamic === true),
+    content: '',
+    mcp: { server: source.server, uri: record.uri },
+  }
+  mcpSkillStates.set(skill, { source, record, memory, ...(byUri ? { byUri: true } : {}) })
+  return skill
+}
+
+// The memory of the agent the MCP skills among `skills` belong to (a helper's: its caller's).
+const memoryOf = (skills: readonly Skill[]): McpSkillSnapshotMemory | undefined => {
+  for (const skill of skills) {
+    const memory = mcpSkillStates.get(skill)?.memory
+    if (memory) return memory
+  }
+  return undefined
+}
+
 /**
  * The skills the given servers serve, as catalog entries: named `<server>/<skill>`
- * (`assignMcpSkillNames`), capped per server and in all (`selectMcpSkills` - the notices go to
+ * (`assignMcpSkillNames`; one a server gave by URI after its listed ones,
+ * `assignAddedMcpSkillName`), capped per server and in all (`selectMcpSkills` - the notices go to
  * `warn`), described with their origin. `names` are the names already taken (the host's skills
  * and the lessons): a bare name they share with an MCP skill is said - a collision is surfaced,
- * never resolved silently; the MCP skill keeps its own, namespaced name.
+ * never resolved silently; the MCP skill keeps its own, namespaced name. `memory`: what the
+ * agent's snapshots of generated skills hold (`MCP_SKILL_SNAPSHOTS_MAX_BYTES` in all).
  */
 export const createMcpSkills = (
   sources: readonly McpSkillSource[],
   names: Iterable<string>,
   warn: (message: string) => void,
+  memory: McpSkillSnapshotMemory = createMcpSkillSnapshotMemory(),
 ): Skill[] => {
   const own = new Set(names)
   const taken = new Set(own)
   const { kept, notices } = selectMcpSkills(
-    sources.map((source) => ({ server: source.server, skills: [...source.skills] })),
+    sources.map((source) => ({
+      server: source.server,
+      skills: [...source.skills, ...(source.added ?? [])],
+    })),
   )
   for (const notice of notices) warn(notice)
   const out: Skill[] = []
   for (const source of sources) {
     const records = kept.filter((k) => k.server === source.server).map((k) => k.skill)
-    const assigned = assignMcpSkillNames(source.server, records, taken)
-    records.forEach((record, i) => {
+    const added = new Set(source.added ?? [])
+    const listed = records.filter((r) => !added.has(r))
+    const assigned = new Map<McpSkillRecord, string>()
+    assignMcpSkillNames(source.server, listed, taken).forEach((name, i) =>
+      assigned.set(listed[i], name),
+    )
+    for (const record of records) {
+      if (added.has(record)) {
+        assigned.set(record, assignAddedMcpSkillName(source.server, record, taken))
+      }
+    }
+    for (const record of records) {
+      const name = assigned.get(record) as string
       if (own.has(record.name)) {
         warn(
-          `[mcp] ${source.server}: its skill "${record.name}" has the name of one of this agent's own skills; the agent's keeps the name, the server's is "${assigned[i]}"`,
+          `[mcp] ${source.server}: its skill "${record.name}" has the name of one of this agent's own skills; the agent's keeps the name, the server's is "${name}"`,
         )
       }
-      const skill: Skill = {
-        name: assigned[i],
-        description: mcpSkillDescription(record.description, source.server),
-        content: '',
-        mcp: { server: source.server, uri: record.uri },
-      }
-      mcpSkillStates.set(skill, { source, record })
-      out.push(skill)
-    })
+      out.push(mcpSkillOf(source, record, name, added.has(record), memory))
+    }
   }
   return out
 }
 
 /**
- * Read and verify an MCP skill's instructions (once per skill object; a failed read is not
- * kept). Throws when the connection refuses them (a digest, size or frontmatter mismatch, a
- * skill no longer listed): nothing of it reaches the model then.
+ * Add the skill a server names by URI to `skills` (`load_skill({ server, uri })`): the URI is
+ * checked (`mcpSkillUriRefusal`) and the server must be one whose skills are on - both before any
+ * request; the catalog must have room for one more of that server (the caps count it like a
+ * listed one); then `skills/get` goes to that server ONLY, and the entry passes the rules a listed
+ * one does. It gets a name no other skill has (`assignAddedMcpSkillName`) and stays for the
+ * agent's life. A skill the catalog already holds (the same server and URI) is returned as it is.
+ * A generated skill's snapshot counts against the memory of the agent's other MCP skills, else
+ * `memory`.
  */
-export const loadMcpSkill = async (skill: Skill, signal?: AbortSignal): Promise<void> => {
-  const state = mcpSkillStates.get(skill)
-  if (!state || state.loaded) return
-  state.loading ??= state.source.load(state.record.uri, signal ? { signal } : undefined)
+export const addMcpSkillByUri = async (
+  skills: Skill[],
+  sources: readonly McpSkillSource[],
+  requested: { server?: unknown; uri?: unknown },
+  signal?: AbortSignal,
+  memory?: McpSkillSnapshotMemory,
+): Promise<Skill> => {
+  const refused = mcpSkillUriRefusal(requested.uri)
+  if (refused) throw new Error(`load_skill: ${refused}`)
+  const able = sources.filter((s) => typeof s.get === 'function')
+  const target = resolveMcpSkillServer(
+    requested.server,
+    able.map((s) => s.server),
+  )
+  if ('refused' in target) throw new Error(`load_skill: ${target.refused}`)
+  const source = able.find((s) => s.server === target.server) as McpSkillSource
+  const uri = requested.uri as string
+  const held = (): Skill | undefined =>
+    skills.find((s) => s.mcp?.server === source.server && s.mcp.uri === uri)
+  const known = held()
+  if (known) return known
+  const room = mcpSkillRoomRefusal(
+    source.server,
+    skills.filter((s) => s.mcp?.server === source.server).length,
+    skills.filter((s) => s.mcp).length,
+  )
+  if (room) throw new Error(`load_skill: ${room}`)
+  const get = source.get as NonNullable<McpSkillSource['get']>
+  const record = await get(uri, signal ? { signal } : undefined)
+  // Another call may have added it meanwhile.
+  const meanwhile = held()
+  if (meanwhile) return meanwhile
+  const name = assignAddedMcpSkillName(source.server, record, new Set(skills.map((s) => s.name)))
+  const skill = mcpSkillOf(
+    source,
+    record,
+    name,
+    true,
+    memoryOf(skills) ?? memory ?? createMcpSkillSnapshotMemory(),
+  )
+  skills.push(skill)
+  return skill
+}
+
+/**
+ * Read and verify a SKILL.md (once per skill object; a failed read is not kept) - a generated
+ * skill's whole snapshot, counted against the agent's memory. No context.
+ */
+const fetchMcpSkill = async (
+  state: McpSkillState,
+  signal?: AbortSignal,
+): Promise<McpSkillLoaded> => {
+  if (state.fetched) return state.fetched
+  state.fetching ??= state.source.load(state.record.uri, {
+    ...(signal ? { signal } : {}),
+    memory: state.memory,
+  })
   try {
-    const loaded = await state.loading
-    skill.content = mcpSkillBodyText(loaded.body, loaded.files)
-    state.loaded = loaded
+    state.fetched = await state.fetching
+    return state.fetched
   } catch (err) {
-    state.loading = undefined
+    state.fetching = undefined
     throw err
   }
 }
 
 /**
- * Load the MCP skills among `names` before they are activated (the planner's picks, a resumed
- * run's active skills). One that cannot be loaded is reported and left out: it is not activated.
+ * Let an MCP skill's text into the current run's context: read and verify its SKILL.md (throws on
+ * a mismatch - nothing of it is used), then, unless its consent is 'never' or the person already
+ * said yes (`decideMcpSkillConsent`), ask the person through the approval gate - showing the
+ * server, the skill, its description, its size and the very text the model would read. Only on a
+ * yes is `content` set and the run's record updated; a no, or nobody to ask, throws
+ * {@link McpSkillDeniedError}. A nested skill is asked about on its own. `input` is what the
+ * request shows as load_skill's.
+ */
+export const acquireMcpSkill = async (
+  skill: Skill,
+  skills: readonly Skill[],
+  scope: McpSkillConsentScope | undefined,
+  opts: { input?: unknown; signal?: AbortSignal } = {},
+): Promise<void> => {
+  const state = mcpSkillStates.get(skill)
+  if (!state) return
+  const fetched = await fetchMcpSkill(state, opts.signal)
+  const server = state.source.server
+  const consent = resolveMcpSkillConsent(state.source.consent, scope?.agentConsent)
+  const key = mcpSkillGrantKey(server, fetched.entry)
+  const admit = (): void => {
+    skill.content = mcpSkillBodyText(fetched.body, fetched.files)
+    state.loaded = fetched
+    scope?.run.allowed.add(key)
+  }
+  if (consent === 'never') return admit()
+  if (!scope) {
+    throw new McpSkillDeniedError(mcpSkillDeniedMessage(skill.name, server, 'no-one-to-ask'))
+  }
+  const known = [...state.source.skills, ...(state.source.added ?? [])].map((r) => r.uri)
+  const outer = mcpSkillEnclosingUri(state.record.uri, known)
+  const decision = decideMcpSkillConsent({
+    consent,
+    server,
+    key,
+    nested: outer !== undefined,
+    grants: scope.grants,
+    run: scope.run,
+  })
+  if (decision === 'deny') {
+    throw new McpSkillDeniedError(mcpSkillDeniedMessage(skill.name, server, 'denied-earlier'))
+  }
+  if (decision === 'allow') return admit()
+  // One question per skill and run: a second load of it waits for the first one's answer.
+  const open = scope.run.pending.get(key)
+  if (open) {
+    if (await open) return admit()
+    throw new McpSkillDeniedError(mcpSkillDeniedMessage(skill.name, server, 'denied-earlier'))
+  }
+  let settle: (approved: boolean) => void = () => {}
+  scope.run.pending.set(
+    key,
+    new Promise<boolean>((resolve) => {
+      settle = resolve
+    }),
+  )
+  try {
+    const enclosing = outer
+      ? (skills.find((s) => s.mcp?.server === server && s.mcp.uri === outer)?.name ?? outer)
+      : undefined
+    const view = mcpSkillConsentView({
+      server,
+      name: skill.name,
+      entry: fetched.entry,
+      body: fetched.body,
+      consent,
+      ...(state.byUri ? { byUri: true } : {}),
+      ...(enclosing ? { nestedIn: enclosing } : {}),
+      ...(fetched.snapshot ? { snapshot: fetched.snapshot } : {}),
+    })
+    const answer = await scope.ask(opts.input ?? { name: skill.name }, view, opts.signal)
+    if (answer.by === 'person') {
+      recordMcpSkillConsent({
+        consent,
+        server,
+        key,
+        approved: answer.approved,
+        remember: answer.remember === true,
+        grants: scope.grants,
+        run: scope.run,
+      })
+    }
+    settle(answer.approved)
+    if (!answer.approved) {
+      const why =
+        answer.by === 'person'
+          ? 'denied'
+          : answer.by === 'no-handler'
+            ? 'no-one-to-ask'
+            : 'no-answer'
+      throw new McpSkillDeniedError(mcpSkillDeniedMessage(skill.name, server, why, answer.reason))
+    }
+    admit()
+  } catch (err) {
+    settle(false)
+    throw err
+  } finally {
+    scope.run.pending.delete(key)
+  }
+}
+
+/**
+ * Let the MCP skills among `names` in before they are activated (the planner's picks, a resumed
+ * run's active skills): `acquireMcpSkill`, with the person asked where the consent says so. One
+ * that cannot be let in is reported and left out: it is not activated.
  */
 export const prepareMcpSkills = async (
   skills: Skill[],
   names: Iterable<string>,
   warn: (message: string) => void,
+  scope: McpSkillConsentScope | undefined,
   signal?: AbortSignal,
 ): Promise<void> => {
-  for (const name of names) {
+  for (const name of [...names]) {
     const skill = skills.find((s) => s.name === name)
-    if (!skill || !isMcpSkill(skill) || isMcpSkillLoaded(skill)) continue
+    if (!skill || !isMcpSkill(skill) || isMcpSkillAllowed(skill, scope?.run)) continue
     try {
-      await loadMcpSkill(skill, signal)
+      await acquireMcpSkill(skill, skills, scope, { input: { name }, signal })
     } catch (err) {
+      if (signal?.aborted) throw err
       warn(`[skills] ${name} is not loaded: ${err instanceof Error ? err.message : String(err)}`)
     }
   }
 }
 
-// One file of a loaded MCP skill, as text under its own header (loaded first if need be).
+// One file of an MCP skill, as text under its own header - or, for a directory of it, its listing
+// from the entry the skill was loaded with. The skill is let in first (asked about if need be): a
+// file or a directory of a skill the person refused is not read. A path that is a listed file is
+// that file. The server's live view of the directory is asked only when it declared
+// `directoryRead` (`source.readDirectory`), and only to say whether the skill changed there.
 const readMcpSkillFile = async (
   skill: Skill,
+  skills: readonly Skill[],
   requested: string,
+  scope: McpSkillConsentScope | undefined,
   signal?: AbortSignal,
-): Promise<string> => {
-  await loadMcpSkill(skill, signal)
+): Promise<string | SkillDirectoryListing> => {
+  if (!isMcpSkillAllowed(skill, scope?.run)) {
+    await acquireMcpSkill(skill, skills, scope, { input: { name: skill.name }, signal })
+  }
   const state = mcpSkillStates.get(skill) as McpSkillState
   const loaded = state.loaded as McpSkillLoaded
-  const target = resolveMcpSkillFile(loaded.files, requested)
+  const target = resolveMcpSkillPath(loaded.files, requested)
   if ('refused' in target) throw new Error(`skill "${skill.name}": ${target.refused}`)
+  if ('dir' in target) {
+    const drift = await state.source.readDirectory?.(
+      loaded,
+      target.dir,
+      signal ? { signal } : undefined,
+    )
+    return skillDirectoryListing(skill.name, target.dir, target, drift)
+  }
   const text = await state.source.readFile(loaded, target.path, signal ? { signal } : undefined)
   return mcpSkillFileText(state.source.server, state.record.uri, target.path, text)
 }
@@ -347,43 +637,112 @@ export const renderActiveSkills = (skills: Skill[]): string => {
   return parts.join('\n\n')
 }
 
+/** What `createSkillTools` needs of the MCP servers whose skills are on (`skills` on a server). */
+export interface SkillToolsMcp {
+  /**
+   * The servers' skill sources (`collectMcpSkillSources`), fixed for the agent: they are named in
+   * load_skill's description (run-stable), which then takes `{ server, uri }` too.
+   */
+  sources: readonly McpSkillSource[]
+  /** The run's consent scope: a person is asked through the agent's approval gate. */
+  scope?: McpSkillConsentScope
+  /** What the agent's snapshots of generated skills hold (a skill added by URI counts there). */
+  memory?: McpSkillSnapshotMemory
+}
+
 /**
  * The built-in `load_skill` / `read_skill_file` tools. `onLoad` fires when a
- * skill is loaded so the runner can keep it active for later steps.
+ * skill is loaded so the runner can keep it active for later steps. With `mcp`, an MCP server's
+ * skill enters the context only once the person let it in (`acquireMcpSkill`), and a skill a
+ * server names by URI can be loaded with `{ server, uri }`.
  */
-export const createSkillTools = (skills: Skill[], onLoad?: (skill: Skill) => void): ToolSet => {
+export const createSkillTools = (
+  skills: Skill[],
+  onLoad?: (skill: Skill) => void,
+  mcp?: SkillToolsMcp,
+): ToolSet => {
   // Looked up live: with `config.learning` the array grows while the run is going.
   const find = (name: string): Skill | undefined => skills.find((s) => s.name === name)
   const known = (): string => skills.map((s) => s.name).join(', ')
-  const loadSkill = tool({
-    description:
-      'Load the full instructions of a skill from the SKILLS list before doing work it covers.',
-    inputSchema: jsonSchema<{ name: string }>({
-      type: 'object',
-      properties: { name: { type: 'string', description: 'The skill name' } },
-      required: ['name'],
-      additionalProperties: false,
-    }),
-    execute: async ({ name }, options) => {
-      const skill = find(name)
-      if (!skill) throw new Error(`unknown skill "${name}"; available: ${known()}`)
-      // An MCP server's skill: its SKILL.md is read and verified now (throws on a mismatch).
-      await loadMcpSkill(skill, (options as { abortSignal?: AbortSignal } | undefined)?.abortSignal)
-      onLoad?.(skill)
-      return {
-        name: skill.name,
-        content: `${skillPreamble(skill)}${skill.content}`,
-        files: filesOf(skill),
-      }
-    },
-  })
+  const servers = (mcp?.sources ?? []).filter((s) => typeof s.get === 'function')
+  const byUri = servers.length > 0
+  const describe =
+    'Load the full instructions of a skill from the SKILLS list before doing work it covers.'
+  const load = async (skill: Skill, input: unknown, signal: AbortSignal | undefined) => {
+    // An MCP server's skill: its SKILL.md is read and verified now (throws on a mismatch), and
+    // enters the context only once the person let it in.
+    if (isMcpSkill(skill)) await acquireMcpSkill(skill, skills, mcp?.scope, { input, signal })
+    onLoad?.(skill)
+    return {
+      name: skill.name,
+      content: `${skillPreamble(skill)}${skill.content}`,
+      files: filesOf(skill),
+    }
+  }
+  const signalOf = (options: unknown): AbortSignal | undefined =>
+    (options as { abortSignal?: AbortSignal } | undefined)?.abortSignal
+  const loadSkill = byUri
+    ? tool({
+        description: `${describe} ${mcpSkillLoadByUriNote(servers.map((s) => s.server))}`,
+        inputSchema: jsonSchema<{ name?: string; server?: string; uri?: string }>({
+          type: 'object',
+          properties: {
+            name: { type: 'string', description: 'The skill name, from the SKILLS list' },
+            server: {
+              type: 'string',
+              description: 'With uri: the MCP server that named the skill',
+            },
+            uri: {
+              type: 'string',
+              description: "With server: the skill:// URI of the skill's SKILL.md",
+            },
+          },
+          additionalProperties: false,
+        }),
+        execute: async ({ name, server, uri }, options) => {
+          if (uri !== undefined || server !== undefined) {
+            const skill = await addMcpSkillByUri(
+              skills,
+              servers,
+              { server, uri },
+              signalOf(options),
+              mcp?.memory,
+            )
+            return load(skill, { server, uri }, signalOf(options))
+          }
+          if (typeof name !== 'string' || !name) {
+            throw new Error('load_skill: give "name" (from the SKILLS list), or "server" and "uri"')
+          }
+          const skill = find(name)
+          if (!skill) throw new Error(`unknown skill "${name}"; available: ${known()}`)
+          return load(skill, { name }, signalOf(options))
+        },
+      })
+    : tool({
+        description: describe,
+        inputSchema: jsonSchema<{ name: string }>({
+          type: 'object',
+          properties: { name: { type: 'string', description: 'The skill name' } },
+          required: ['name'],
+          additionalProperties: false,
+        }),
+        execute: async ({ name }, options) => {
+          const skill = find(name)
+          if (!skill) throw new Error(`unknown skill "${name}"; available: ${known()}`)
+          return load(skill, { name }, signalOf(options))
+        },
+      })
   const readFile = tool({
-    description: "Read one of a skill's bundled files (paths are listed by load_skill).",
+    description:
+      'Read one of a skill\'s bundled files (paths are listed by load_skill); a directory path ("templates/", "." for the root) returns its listing.',
     inputSchema: jsonSchema<{ name: string; path: string }>({
       type: 'object',
       properties: {
         name: { type: 'string', description: 'The skill name' },
-        path: { type: 'string', description: 'The file path, relative to the skill' },
+        path: {
+          type: 'string',
+          description: 'The file path, relative to the skill, or a directory to list',
+        },
       },
       required: ['name', 'path'],
       additionalProperties: false,
@@ -394,16 +753,17 @@ export const createSkillTools = (skills: Skill[], onLoad?: (skill: Skill) => voi
       // An MCP server's skill: the file is read from that server only, if its entry lists it,
       // and verified - as text, never run.
       if (isMcpSkill(skill)) {
-        return readMcpSkillFile(
-          skill,
-          path,
-          (options as { abortSignal?: AbortSignal } | undefined)?.abortSignal,
-        )
+        return readMcpSkillFile(skill, skills, path, mcp?.scope, signalOf(options))
       }
       const file = skill.files?.find((f) => f.path === path)
       if (!file) {
-        const listed = (skill.files ?? []).map((f) => f.path).join(', ') || 'none'
-        throw new Error(`skill "${name}" has no file "${path}"; files: ${listed}`)
+        const paths = (skill.files ?? []).map((f) => f.path)
+        // Not a file of it: perhaps a directory (the root: ".", "/").
+        const directory = skillDirectoryOf(paths, path)
+        if (directory) return skillDirectoryListing(skill.name, directory.dir, directory)
+        throw new Error(
+          `skill "${name}" has no file "${path}"; files: ${paths.join(', ') || 'none'}`,
+        )
       }
       return file.content
     },
@@ -411,7 +771,11 @@ export const createSkillTools = (skills: Skill[], onLoad?: (skill: Skill) => voi
   for (const t of [loadSkill, readFile]) {
     ;(t as { readOnly?: boolean }).readOnly = true
     ;(t as { promptHint?: string }).promptHint =
-      t === loadSkill ? '{ name: string }' : '{ name: string, path: string }'
+      t === loadSkill
+        ? byUri
+          ? '{ name?: string, server?: string, uri?: string }'
+          : '{ name: string }'
+        : '{ name: string, path: string }'
   }
   return { load_skill: loadSkill, read_skill_file: readFile }
 }

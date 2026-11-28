@@ -18,7 +18,8 @@ import type { IPlan, IPlanStep, IStepResult, IUsage } from './loop-types.js'
  * stored — pass them again to `run()` when resuming.
  *
  * Persistence is observability, not a correctness boundary: a hook that throws is
- * logged and the run carries on.
+ * logged and the run carries on. The one exception is `onRunResume`: a resume whose attempt
+ * cannot be put on record is refused (see `recordResume`).
  */
 
 export type RunStatus = 'executing' | 'complete' | 'failed' | 'cancelled'
@@ -72,6 +73,13 @@ export interface RunSnapshot {
   escalations?: number
   /** Helpers the model started so far (counts against `subagents.dynamic.maxChildren` on resume). */
   subagentsSpawned?: number
+  /**
+   * The attempt that wrote the snapshot: 1 for the run as first started, one more for every
+   * resume - the `attempt` of its events. A resume records its attempt BEFORE any of its events
+   * (`onRunResume`), so a crash at any point never lets two attempts share a number. Absent on a
+   * snapshot written before the field existed: read as 1.
+   */
+  attempt?: number
   /** Final answer (status `complete`). */
   text?: string
   /** What ended the run (status `failed`). */
@@ -86,6 +94,14 @@ export interface RunPersistence {
   onStepComplete?: (snapshot: RunSnapshot) => void | Promise<void>
   /** The run resolved: `complete`, `failed` (it threw) or `cancelled` (it was stopped). */
   onRunComplete?: (snapshot: RunSnapshot) => void | Promise<void>
+  /**
+   * A resume is starting: the loaded snapshot with the NEW `attempt` (status `executing`),
+   * written before the resumed run emits anything, so that a crash before its first checkpoint
+   * still leaves the attempt on record. Without it the same write goes to `onStepComplete`.
+   * Unlike the other write hooks this one is NOT best-effort: a throw fails the resume (nothing
+   * ran) - an attempt that is not on record would be reused by the next resume.
+   */
+  onRunResume?: (snapshot: RunSnapshot) => void | Promise<void>
   /**
    * What `run(goal, { resumeFromRunId })` reads. Return `null` when there is none.
    * An implementation that does not want to support resume can leave it out.
@@ -140,5 +156,80 @@ export const resolveResume = async (
       `Run "${resumeFromRunId}" has no steps left to run (status="${snapshot.status}"); nothing to resume`,
     )
   }
+  // The attempt numbers the run's events across crashes: one the store mangled could make two
+  // attempts share a number, and the order of the run's events would be ambiguous.
+  if (
+    snapshot.attempt !== undefined &&
+    !(Number.isSafeInteger(snapshot.attempt) && snapshot.attempt >= 1)
+  ) {
+    throw new Error(
+      `Run "${resumeFromRunId}" has an invalid attempt (${JSON.stringify(snapshot.attempt)}); it must be a positive integer`,
+    )
+  }
   return snapshot
+}
+
+/**
+ * The id a caller gives a fresh run (`RunOptions.runId`), checked before anything of the run
+ * happens: the rule of every run id, refused together with `resumeFromRunId` (a resume keeps the
+ * id of the run it resumes), and refused when `persistence.loadRun` has a snapshot for it - resume
+ * that run instead; a run on record is never written over. A store that throws refuses the run
+ * too: no answer is not a "free". `undefined` when no id was given.
+ */
+export const resolveRunId = async (
+  persistence: RunPersistence | undefined,
+  runId: string | undefined,
+  resumeFromRunId: string | undefined,
+): Promise<string | undefined> => {
+  if (runId === undefined) return undefined
+  if (resumeFromRunId !== undefined) {
+    throw new Error(
+      'runId names a fresh run and cannot be combined with resumeFromRunId: a resume keeps the id of the run it resumes',
+    )
+  }
+  assertSafeRunId(runId, 'runId')
+  const snapshot = await persistence?.loadRun?.(runId)
+  if (snapshot) {
+    throw new Error(
+      `Run "${runId}" already exists (status "${snapshot.status}"); resume it with resumeFromRunId instead of starting it again`,
+    )
+  }
+  return runId
+}
+
+/** The attempt a resume of `snapshot` runs as: one more than the attempt that wrote it. */
+export const resumeAttemptOf = (snapshot: RunSnapshot): number => (snapshot.attempt ?? 1) + 1
+
+/**
+ * A resume starts: its attempt goes on record BEFORE any of its events (`onRunResume`, else
+ * `onStepComplete`). Throws when the store cannot record it - an attempt that is not on record
+ * would be reused by the next resume, and two attempts would share a number.
+ */
+export const recordResume = async (
+  persistence: RunPersistence | undefined,
+  resumed: RunSnapshot,
+  attempt: number,
+  warn: (message: string) => void,
+): Promise<void> => {
+  const hook = persistence?.onRunResume
+    ? ('onRunResume' as const)
+    : persistence?.onStepComplete
+      ? ('onStepComplete' as const)
+      : undefined
+  if (!persistence || !hook) {
+    warn(
+      `persistence has neither onRunResume nor onStepComplete: attempt ${attempt} of run ${resumed.runId} is not on record until the run ends`,
+    )
+    return
+  }
+  const { error: _error, completedAt: _completedAt, text: _text, ...rest } = resumed
+  void [_error, _completedAt, _text]
+  try {
+    await persistence[hook]?.call(persistence, { ...rest, status: 'executing', attempt })
+  } catch (err) {
+    throw new Error(
+      `persistence.${hook} threw while recording attempt ${attempt} of run ${resumed.runId}; the resume was refused: ${err instanceof Error ? err.message : String(err)}`,
+      { cause: err },
+    )
+  }
 }

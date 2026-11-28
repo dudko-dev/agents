@@ -694,10 +694,38 @@ the server writes them, and can change them at any time.
 
 **What is enforced**
 
-- **Opt-in, per server, off by default.** Without `skills: true` the extension is not declared and
-  nothing of it is requested. There is no agent-wide switch: a new server never brings skills by
-  default. The per-server flag is the "explicit user policy" the extension says governs whether a
-  skill is loaded at all.
+- **Opt-in, per server, off by default.** Without `skills` (`true` / `{ consent, dynamic }`) the extension
+  is not declared and nothing of it is requested. There is no agent-wide switch to turn it on: a
+  new server never brings skills by default. The per-server flag is the "explicit user policy" the
+  extension says governs whether a skill is loaded at all.
+- **A person sees it before the model does.** Unless the host set `consent: 'never'` (for that
+  server, or agent-wide), a server's skill enters the model's context only after a person was
+  shown it - the server, the skill, its description and size, and the very text the model would
+  read (`skill.body` is the model's text, cleaned and capped the same way: what is approved is what
+  is sent) - and said yes, through `toolApproval.onRequest`. The approval mode does not lower it:
+  `autopilot` asks too, a rule allowing everything does not apply to it. Nobody to ask (no
+  `onRequest`), no answer in time, a handler that fails: not loaded. A no is final for the run - a
+  second load of the same skill is refused without a second question, so a model cannot wear a
+  person down - and the model is told nothing of it is in its context. A `read_skill_file` of a
+  skill nobody allowed asks first too: a file is part of the skill. The SKILL.md is fetched when
+  the model asks for the skill (the point of need, as the extension's lazy-retrieval rule asks)
+  so that it can be shown; it is not in any context until the yes.
+- **A consent covers what was shown, and that only.** Under `'once-per-skill'` a yes is bound to
+  the server, the URI and every file's digest (`mcpSkillGrantKey`): a skill the server changes -
+  one file rotated, added or removed - is asked about again (the extension's content-bound
+  approval). "Always for this server" covers that server's skills for the agent's life, never
+  another server's and never a **nested** skill (a `SKILL.md` inside another skill of the
+  server): approving the enclosing skill, or the server, does not approve it - it is asked about
+  on its own. Grants live in memory, for the agent's life; nothing is persisted.
+- **A URI reaches the server the model names, and only it.** A skill the listing leaves out can be
+  loaded by its URI (`load_skill({ server, uri })`), because a server may point at skills it does
+  not list. Before any request: the URI must be `skill://…/<name>/SKILL.md` (no other scheme - the
+  model read it in third-party text, and an `https:` or `file:` URI there would only be a lure),
+  the server must be one whose `skills` are on (a server you did not opt in is never asked, even if
+  it serves skills), and the per-server cap must have room. Then `skills/get` goes to that server
+  ONLY - never to another that might serve the same URI, so a skill cannot make the agent fetch
+  from a server it does not come from - and the entry passes every rule, check, preamble and
+  consent a listed one does. Its name never takes one in use.
 - **A namespace a server cannot leave.** Its skills are `<server>/<skill>`, the server named by
   YOUR key for it, never by what it calls itself. No other kind of skill name can hold a `/`, so a
   server cannot take the name of one of your skills, of a lesson the agent wrote, or of another
@@ -725,14 +753,49 @@ the server writes them, and can change them at any time.
   is checked against the server's entry before the model sees a byte of it: size, SHA-256 digest,
   and for `SKILL.md` the frontmatter field by field. An entry whose URI and name disagree, that does
   not list its files (`"dynamic"`), lists a file outside the skill, or is over the extension's
-  limits is refused at listing.
+  limits is refused at listing. **The one exception is opt-in, per server:** with
+  `skills: { dynamic: true }` a generated skill's entry is taken, and the skill is read into a
+  snapshot instead (below) - there is nothing of the server's to verify it against.
 - **Origin-bound reads.** A file is read from the skill's own server, only if the entry the skill
   was loaded with lists it: never a URI, an absolute path or `..`. A skill cannot make the agent
   read another server's resources, or a file the server added after the skill was loaded.
+- **A directory read is a live observation, never the manifest.** `read_skill_file` on a
+  directory lists it from the entry the skill was loaded and approved with, after the same
+  consent as a file. Only a server that declared `directoryRead` is sent `resources/directory/read`
+  - for a directory that entry holds, under the skill's own root, on THAT server - and its answer
+  is used only to tell whether the skill changed there: a child it lists that the entry does not
+  is never shown to the model (not its name, URI, description or MIME type), never read, and
+  never added to what may be read; the model gets a sentence of ours with a count, the log a line
+  with counts. The only change it can cause is that the server's skills are listed again between
+  runs - and a skill whose entry changed is asked about again. A child the entry holds and the
+  server no longer lists is named (it is the entry's own path). A failed directory read changes
+  nothing but a log line. At most 640 of its entries are looked at.
+- **`"dynamic"` skills are declined, on purpose - unless the host trusts that server with them.**
+  Their entry lists no files and no digests, so nothing can be verified and a consent cannot bind
+  to their content (the extension: they "cannot be content-bound"). Without
+  `skills: { dynamic: true }` on that server (the default) they are refused at listing, with the
+  log line they always had. There is no agent-wide switch: a server is trusted with this one by
+  one.
+- **A generated skill is approved and used as ONE copy.** With `dynamic: true`, when such a skill
+  would enter the context the agent first reads all of it - before anyone is asked - and keeps
+  that copy (a "snapshot") in memory: `SKILL.md` (its frontmatter still compared with the
+  entry's) and, if the server serves directory reads, every file of its directory tree, within
+  bounds (512 files and 16 MiB read per skill, 64 directories, 8 levels, 64 MiB for all of one
+  agent's copies; past any, it is declined, nobody is asked, the model is told, a `warn` says
+  why). The agent computes each file's size and SHA-256 itself and that manifest is the skill's
+  held entry: the person is shown the copy (size, files, the very text), says yes to the copy's
+  digests - a later copy that differs in a byte is asked about again, the same one is not - and
+  the model is given that copy only: the body, and every file from memory, never read from the
+  server again; a path the copy does not hold is refused. This protects one thing: **what the
+  model reads is what was approved, and it cannot change after the approval** - a server cannot
+  show the person one text and serve the model another, however it generates them. A server that
+  cannot list directories gives `SKILL.md` alone, and the person is told.
 - **Bounded.** 32 skills per server and 64 in all in the catalog; 300 characters per catalog line,
   16 000 of instructions, 32 000 of a file - every cut said.
 - **Held in memory only.** Nothing of a skill is written to disk, IndexedDB or a checkpoint (a run
-  checkpoint holds the skill's NAME; a resumed run reads and verifies the skill again).
+  checkpoint holds the skill's NAME; a resumed run reads and verifies the skill again). A generated
+  skill's copy too: memory only, never an event or a log, and a resumed run in a new agent reads a
+  new copy (and asks again if it differs).
 
 **What is NOT protected**
 
@@ -743,6 +806,22 @@ the server writes them, and can change them at any time.
 - **Digests are not a signature.** They come from the same server as the content (the extension
   says so): a match proves the two are consistent, not that either is honest, and an intermediary
   that rewrites both is not detected. They catch a skill that changed since it was listed.
+- **A generated skill's copy is what the server chose to send at that moment.** The snapshot
+  binds the approval to the bytes the agent read; it says nothing about them. The server picks
+  the content when the snapshot is taken (it can tailor it to the moment, or to this client), and
+  there is no integrity against the server or anything between it and the page - the digests are
+  the agent's own, of what arrived. And the whole skill is read up front - every file, before
+  anyone is asked and whether or not the model will need it (the extension's lazy-retrieval rule
+  is set aside for these skills: a copy must be complete to be approved) - so more data is
+  fetched, within the bounds above. Turn `dynamic` on only for a server you trust to generate
+  instructions for your agent.
+- **What a person approves.** The card shows the skill's text; a person who clicks "Allow" without
+  reading it has approved it all the same, and "Always for this server" trusts that server with
+  every skill it will serve while the agent lives. `consent: 'never'` turns the question off for a
+  server: use it only for a server you vetted.
+- **A skill named in a server's own text.** The model may be told (by the server's instructions or
+  skill) to load another skill of THAT server by URI; that skill is still asked about, verified
+  and namespaced, but it is the server's choice of words that led there.
 - **Code-execution tools you do not mark.** The rule above covers `run_js` and the tools you mark;
   a host tool that runs code but is not marked is an ordinary tool. A subagent you configured
   (`createSubagentTool`) is its own agent with its own policy.

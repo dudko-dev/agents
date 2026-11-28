@@ -52,8 +52,15 @@ behind every decision.
 - `src/tools/` — `define`, `prompted` (catalog + dispatch), `mode`, `types`.
 - `src/agent/` — `schemas`, `planner`/`executor`/`replanner`/`synthesizer`,
   `runner` (createAgent), `loop-types`, `control` (RunControl: mid-run messages,
-  stopping one subagent), `persistence` (run checkpoints / resume), `internal` (per-run
-  state and prompt plumbing the stages share; not public).
+  stopping one subagent), `persistence` (run checkpoints / resume; `resolveRunId` checks a
+  caller's id for a fresh run, `RunOptions.runId` - the Node sibling's name and rules: the run id
+  rule, refused with `resumeFromRunId`, refused when `loadRun` has the id; `tests/run-id.test.ts`;
+  `recordResume` puts a
+  resume's `attempt` on record - `onRunResume`, else `onStepComplete` - BEFORE any of its events,
+  and is not best-effort: a throw refuses the resume), `internal` (per-run
+  state and prompt plumbing the stages share; not public). Every event of a run is numbered in
+  ONE place (`emit` in `runCore`: `seq` from 1 per attempt, `attempt` +1 per resume) - the Node
+  sibling's names and rules (`tests/event-order.test.ts` in both packages).
 - `src/memory/` — `store`, `sessions` (IndexedDBStore), `runs` (IndexedDBRunStore /
   MemoryRunStore), `compress` (compaction + `estimateTokens`).
 - `src/tools/approval.ts` (consent gate), `search.ts` (find_tools / large
@@ -109,7 +116,30 @@ behind every decision.
   `index` is this package's adapter: a node run by `createAgent`, the route call
   (`generateStructured`, then plain text), `nodeResolver`. A definition is untrusted input (see
   docs/security.md): the caps, the `otherwise` rule, the condition input bound and the join
-  deferral each need a test and a mutation check.
+  deferral each need a test and a mutation check. The scheduler is PUBLIC, the same names as the
+  Node sibling: `preparePipeline` + `runPipelineGraph(plan, runNode, { input, signal?, onEvent?,
+  onAbort? })` (`onAbort` default 'reject'; createPipeline passes 'resolve'), so a host runs the
+  graph with its own node runner; `pickPipelineRoute(node, text, { agent, config, signal?,
+  onEvent? })` is the route call on its own (decision model, then the planner model), and
+  createPipeline is built on exactly these. The engine is a DETERMINISTIC scheduler by contract
+  (its header): no clock (`Date`, `performance`), no randomness (`Math.random`, `crypto`), no
+  timers, no I/O, no imports, no global the language does not define - `DOMException` /
+  `AbortController` only where the runtime has them (an `Error` named AbortError, a stand-in
+  signal). A run depends only on the definition, the input and the runner's answers in order.
+  `tests/pipeline-determinism.test.ts` (the same as the server's, which compares them) scans the
+  source and runs the engine in a `node:vm` context with only the language's globals, with and
+  without `DOMException` / `AbortController`. Docs: README ("Running the graph yourself"),
+  `docs/capabilities.md`, `docs/design.md`. When EVERY waiting node waits for another, the loop's
+  pass rule decides who starts (`passReach`: dominators from the entry, an edge to a node that
+  dominates its source is a loop's way back and is left out), before the old "all of them start";
+  asked only then, so a schedule where someone was ready is unchanged - a test and a mutation check,
+  like the join deferral. The engine is also the `./pipeline-engine` entry (ESM + CJS + d.ts): its JS
+  from a tsup block of its own (`splitting: false`: in the main block it would land in a chunk
+  shared with the core, and the entry would import it), its d.ts from the MAIN block's dts build
+  (`dts.entry`: the dts build of a block with `clean` deletes every d.ts in dist when it starts, so
+  a d.ts from another block can vanish). `tests/pipeline-determinism.test.ts` resolves the subpath
+  through `exports`, checks the built files import / require nothing (a chunk counts) and runs them
+  in the sandbox.
 - `src/sandbox/` — `config.sandbox` / the `run_js` tool: the model's code in QuickJS compiled to
   WebAssembly (optional peer `quickjs-emscripten`). `engine` (limits, the guest's runtime, the
   module resolver, the worker protocol, what may cross the boundary; pure, no imports) is a COPY of
@@ -352,16 +382,38 @@ waiting for it. OFF
   on a server's entries, the `<server>/<skill>` names (by the HOST's label; no host skill or lesson
   name can hold a "/"), the caps, `mcpSkillPreamble` (knowledge, never policy), the file rule (only
   what the entry the skill was LOADED with lists), the mark that carries a server's skills on its
-  tools (`markMcpSkills` / `collectMcpSkillSources`: merging `mcp.tools` is all a host does) and
-  one server's catalog over the SDK's `SkillsClient` (`createMcpSkillCatalog`; the SDK verifies
-  size, digest, frontmatter). A COPY of the server's `src/mcp-skills.ts`, byte for byte - change
+  tools (`markMcpSkills` / `collectMcpSkillSources`: merging `mcp.tools` is all a host does),
+  one server's catalog over the SDK's `SkillsClient` (`createMcpSkillCatalog`, with `get` -
+  `skills/get` to that server only, kept in `source.added`; the SDK verifies size, digest,
+  frontmatter), a skill by URI (`mcpSkillUriRefusal`: `skill://` only; `resolveMcpSkillServer`;
+  `mcpSkillRoomRefusal`; `assignAddedMcpSkillName`) and the consent before a skill's text enters
+  the context (`McpSkillConsent`: `'once-per-skill'` default / `'ask'` / `'never'`;
+  `decideMcpSkillConsent`, `recordMcpSkillConsent`, `mcpSkillGrantKey` - server, URI, every digest -,
+  `mcpSkillEnclosingUri` for nested skills, `mcpSkillConsentView`), and a directory of a skill
+  (`read_skill_file` on a directory, every kind of skill: `skillDirectoryRef`, `skillDirectoryOf`,
+  `resolveMcpSkillPath` - a listed file wins -, `skillDirectoryListing`; listed from the HELD
+  entry; with `directoryRead` declared the catalog's `readDirectory` asks that server
+  (`resources/directory/read`) only for staleness - `compareMcpSkillDirectory` counts what it
+  lists beyond the entry, never names it, marks `notServed`; a change fires `onToolsChanged` once
+  per held entry), and GENERATED skills (`"dynamic"`): declined unless the server's
+  `skills: { dynamic: true }` (no agent-wide switch); then read into a SNAPSHOT before anyone is
+  asked (`startMcpSkillWalk` / `takeMcpSkillWalkListing` - the walk's bounds: 512 files, 64
+  directories, depth 8 -, `mcpSkillSnapshotBytesRefusal` - 16 MiB read, 64 MiB per agent -,
+  `mcpSkillSha256` over WebCrypto, `mcpSkillSnapshotEntry` = the held entry, files served from
+  memory, nothing written; `mcpSkillTag(server, true)`, the view's `dynamic` / `noFileListing`).
+  A COPY of the server's `src/mcp-skills.ts`, byte for byte - change
   both (the server's `tests/mcp-skills-shared.test.ts` compares them and tests every rule).
   `http.ts` wires it: the extension declared only with `skills: true` and a `protocol` that may
   speak 2026-07-28, listed only on a 2026-07-28 connection, the SDK's
   `@modelcontextprotocol/client/ext/skills` imported dynamically there; a change arrives as
   `notifications/resources/list_changed` (`resourcesListChanged` on the listen stream) and goes
   through `onToolsChanged` / `refreshServer`. `skills.ts` keeps an MCP skill's state per skill
-  object; the runner collects them from `baseTools` at `createAgent` (a helper gets its caller's
+  object (`acquireMcpSkill`: read, verify, ASK, then let in; `addMcpSkillByUri`;
+  `isMcpSkillAllowed` per run; the agent's `McpSkillSnapshotMemory`, made by the runner, in each
+  skill's state); the question is `askMcpSkillConsent` in `tools/approval.ts`
+  (`onRequest`, the request's `skill`, `ApprovalState.mcpSkillGrants` shared with helpers; the
+  mode and the rules play no part); `config.mcpSkills.consent` is the agent-wide default; the
+  runner makes the per-run `McpSkillConsentScope`. The runner collects them from `baseTools` at `createAgent` (a helper gets its caller's
   through `config.skills`, `isMcpSkill`), reads a planner's pick before activating it, and hands
   `wrapToolsForRun` `mcpSkills` (its own active MCP skills + `SpawnSeed.mcpSkills`): a tool that
   runs code (`markCodeExecution`: `run_js`) is ALWAYS asked while there is one. OFF without
@@ -380,7 +432,7 @@ waiting for it. OFF
 ```bash
 pnpm nx typecheck @dudko.dev/agent-web     # tsc --noEmit
 pnpm nx format:check @dudko.dev/agent-web  # prettier
-pnpm nx build @dudko.dev/agent-web         # tsup → dist (ESM + CJS + d.ts; entries: ., ./mcp, ./webmcp, ./sandbox-worker; + dist/agent-web.js)
+pnpm nx build @dudko.dev/agent-web         # tsup → dist (ESM + CJS + d.ts; entries: ., ./mcp, ./webmcp, ./sandbox-worker, ./pipeline-engine; + dist/agent-web.js)
 pnpm nx test @dudko.dev/agent-web          # node --test tests/*.test.ts (nx builds first: tests import dist)
 ```
 

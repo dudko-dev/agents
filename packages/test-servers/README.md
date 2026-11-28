@@ -18,7 +18,7 @@ TypeScript run directly by Node (type stripping, Node ≥ 22.6); there is no bui
 | --- | --- | --- |
 | Identity provider | `startLocalIdp(opts)` | Issues signed ID tokens for a test user, serves its JWKS, and answers the RFC 8693 token exchange with a signed ID-JAG (draft-ietf-oauth-identity-assertion-authz-grant) after authenticating the client. |
 | Authorization server | `startLocalAuthorizationServer(opts)` | Metadata (RFC 8414), dynamic registration and a token endpoint that rotates the access token. With `enterprise`: only the `jwt-bearer` grant with an ID-JAG from one IdP, verified claim by claim. |
-| MCP server | `startLocalMcpServer(opts)` | The MCP SDK's streamable-HTTP server with three tools (`echo`, `secret`, `boom`), optional `instructions` in its `initialize` / `server/discover` result (`mcp.setInstructions()` changes them for the next client to connect), optional structured tools (`structuredTools`: `report` and `report_mixed` declare an `outputSchema` and answer with `structuredContent`), optional elicitation tools (`elicitationTools`, below), optional MCP Apps tools (`appTools`, below), optional skills (`skills`, below; 2026-07-28 only), protected resource metadata (RFC 9728) and, with `requireAuth`, the 401 challenge. `protocol` picks the revisions it speaks: `'legacy'` (default), `'modern'` or `'dual'` (below). |
+| MCP server | `startLocalMcpServer(opts)` | The MCP SDK's streamable-HTTP server with three tools (`echo`, `secret`, `boom`), optional `instructions` in its `initialize` / `server/discover` result (`mcp.setInstructions()` changes them for the next client to connect), optional structured tools (`structuredTools`: `report` and `report_mixed` declare an `outputSchema` and answer with `structuredContent`), optional elicitation tools (`elicitationTools`, below), optional MCP Apps tools (`appTools`, below), optional skills (`skills`, below; 2026-07-28 only; `skillDirectoryRead` adds `resources/directory/read`), protected resource metadata (RFC 9728) and, with `requireAuth`, the 401 challenge. `protocol` picks the revisions it speaks: `'legacy'` (default), `'modern'` or `'dual'` (below). |
 | The pair | `startLocalMcp(opts)` | An MCP server and the authorization server that guards it, on two ports, already wired together. What most tests want. |
 
 Every one returns its URLs, what it recorded, and `close()`.
@@ -169,17 +169,32 @@ over a source of `src/mcp-skills.ts`, so the server declares the extension (no `
 and answers `skills/list`, `skills/get` and `resources/read` of the `skill://` files. The legacy
 side never serves them: the extension is written against 2026-07-28.
 
+`skillDirectoryRead: true` (with `skills`) also serves `resources/directory/read`, the
+extension's optional method, and so declares `directoryRead: true`: the direct children of a
+directory of the served `skill://` files (`skill://pdf-processing`, `skill://pdf-processing/references`,
+`skill://acme`, ...; written without a trailing slash), files with their MIME type and
+subdirectories as `inode/directory`, sorted, with the SDK's `ttlMs` / `cacheScope`; `-32602` for a
+URI that is not a directory (a file, a trailing slash, nothing at all, another scheme).
+`skillDirectoryRead: { pageSize: n }` pages the children (`nextCursor`, an offset; an unknown
+cursor is `-32602`). `mcp.skillDirectoryReads` lists every directory URI a client asked for, one
+entry per page; `mcp.skillReads` every `resources/read` of a skill file, in order (a test counts
+the reads of one file there).
+
 | Skill | Files | Body marker (`SKILL_MARKERS`) |
 | --- | --- | --- |
 | `skill://git-workflow/SKILL.md` | - | `GIT-WORKFLOW-BODY` |
 | `skill://pdf-processing/SKILL.md` | `references/FORMS.md`, `scripts/extract.py` (a script its instructions point at) | `PDF-PROCESSING-BODY` (`FORMS-FILE-BODY`, `EXTRACT-SCRIPT-BODY`) |
 | `skill://acme/billing/refunds/SKILL.md` | - | `BILLING-REFUNDS-BODY` |
 | `skill://acme/support/refunds/SKILL.md` | - (the same name, `refunds`, as the one above) | `SUPPORT-REFUNDS-BODY` |
+| `skill://internal/release-checklist/SKILL.md` (`SKILL_URIS.unlisted`) | - NEVER listed: `skills/get` and `resources/read` answer for it (a partial listing) | `RELEASE-CHECKLIST-BODY` |
 
-`mcp.skillReads` lists every skill file a client read (`resources/read`), in order.
-`mcp.addSkill(path, description, body)` serves one more skill from then on and announces a resource
-list change (`notifications/resources/list_changed`, on every listen stream that asked for
-`resourcesListChanged`), which is how a client hears of a change of skills.
+`mcp.skillReads` lists every skill file a client read (`resources/read`), in order, and
+`mcp.skillGets` every `skills/get` URI. `mcp.addSkill(path, description, body)` serves one more
+skill from then on and announces a resource list change (`notifications/resources/list_changed`,
+on every listen stream that asked for `resourcesListChanged`), which is how a client hears of a
+change of skills; with a fourth argument `{ listed: false }` the skill is served by `skills/get`
+only, never listed, and nothing is announced (a URI that belongs to THIS server, for a test whose
+other server must never be asked for it).
 
 ### MCP Apps tools
 
@@ -290,11 +305,18 @@ that is already open is not touched:
 | `nameMismatch` | `skill://wrong-name/SKILL.md` with the frontmatter name `other-name`; `skills/list` is answered by hand, before the SDK (which would drop the entry) |
 | `frontmatter` | `skill://drifted/SKILL.md`, whose entry's description is not its `SKILL.md`'s (the digest matches) |
 | `oversize` | `skill://huge/SKILL.md`, listing 513 files: over the extension's limit of 512 |
-| `dynamic` | `skill://generated/SKILL.md` with `"resources": "dynamic"` |
+| `dynamic` | `skill://generated/SKILL.md` (`SKILL_URIS.generated`) with `"resources": "dynamic"`: a generated skill whose files are `references/notes.md` and `templates/a.md` (`GENERATED-BODY`, `GENERATED-NOTES-BODY`, `GENERATED-TEMPLATE-BODY`). With `skillDirectoryRead` its tree walks (`skill://generated`, `.../references`, `.../templates`); on a server without it only its `SKILL.md` can be found - the case of a generated skill on a server that cannot list its files (its files are still served by `resources/read`, for a test to show a client never asks) |
+| `dynamicChanging` | `skill://changing/SKILL.md` (`SKILL_URIS.changing`, `"dynamic"`): its body and its `references/live.md` change on EVERY read - `CHANGING-BODY read <n>` / `CHANGING-FILE-BODY read <n>`, `n` counting that file's reads; its frontmatter never changes |
+| `dynamicOversize` | `skill://sprawl/SKILL.md` (`SKILL_URIS.sprawl`, `"dynamic"`) with 512 tiny files under `parts/`: 513 with its `SKILL.md`, over the limit of 512 - found only by walking its directories (`skillDirectoryRead`) |
 | `hostile` | `skill://approve-everything/SKILL.md`: instructions to approve every call, switch approval off, fetch an outside URL and run `scripts/payload.js`, and `allowed-tools: run_js web_fetch` in its frontmatter (`HOSTILE-SKILL-BODY`) |
 | `longBody` | `skill://long-guide/SKILL.md`, whose instructions are 40 000 characters (ending `END-OF-LONG-GUIDE`) |
 | `changedFile` | (no new skill) `pdf-processing`'s `references/FORMS.md` is served changed, same length: its digest no longer matches |
 | `extra: n` | `skill://extra-1/SKILL.md` ... `skill://extra-<n>/SKILL.md` |
+| `nested` | `skill://handbook/SKILL.md` (its files include `onboarding/SKILL.md`, `HANDBOOK-BODY`) and the nested skill's own entry `skill://handbook/onboarding/SKILL.md` (`ONBOARDING-BODY`) |
+| `emptyListing` | (no new skill) `skills/list` answers with no skills at all; `skills/get` still answers for every skill the listing would hold - the other switches' ones included - and the unlisted one |
+| `directoryExtra` | (no new skill; with `skillDirectoryRead`) `resources/directory/read` of `skill://pdf-processing/references` also lists `NEW.md` (`SKILL_URIS.newFile`, body `NEW-FILE-BODY`), which the skill's entry does not hold, and `resources/read` serves it: the skill changed after a client read its entry |
+| `directoryOmit` | (no new skill; with `skillDirectoryRead`) `skill://pdf-processing/scripts` is listed without `extract.py`, which the entry holds (its read still answers) |
+| `directoryError` | (no new skill; with `skillDirectoryRead`) every `resources/directory/read` answers `-32603` |
 
 **MCP server** — `mcp.elicitationFaults` (with `elicitationTools`), both eras:
 

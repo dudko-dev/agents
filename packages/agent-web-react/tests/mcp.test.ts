@@ -11,6 +11,7 @@ import {
   mcpOAuthProviderOptions,
   mcpOAuthRecordOf,
   mcpOAuthRegistrationOf,
+  mcpSkillsSettingOf,
   newMcpOAuthProvider,
   readCallbackParams,
   stripOAuthParams,
@@ -664,6 +665,41 @@ test("skills: the core takes McpHttpServerConfig.skills - the mounted tools carr
     assert.deepEqual(server.skillReads, [], 'nothing of a skill is read at connect')
     await on.close()
     await off.close()
+  } finally {
+    await server.close()
+  }
+})
+
+test("skills: { dynamic: true } as the hooks pass it reaches the core - the server's generated skills join the catalog", async () => {
+  const { startLocalMcpServer } = await import('@dudko.dev/test-servers')
+  const mod = (await import('@dudko.dev/agent-web/mcp')) as unknown as {
+    connectMcpHttp: (servers: Record<string, unknown>) => Promise<{
+      tools: Record<string, object>
+      close: () => Promise<void>
+    }>
+  }
+  const MARK = Symbol.for('@dudko.dev/agent:mcp-skills')
+  const server = await startLocalMcpServer({ protocol: 'modern', skills: true })
+  server.skillFaults.dynamic = true
+  const generatedOf = async (skills: unknown) => {
+    const mcp = await mod.connectMcpHttp({
+      docs: { url: server.url, protocol: 'modern', skills },
+    })
+    try {
+      const source = (mcp.tools.docs__echo as Record<symbol, { skills: { uri: string }[] }>)[MARK]
+      return source.skills.filter((k) => k.uri === 'skill://generated/SKILL.md')
+    } finally {
+      await mcp.close()
+    }
+  }
+  try {
+    // What `add` / `connect` and the remembered list hand the core (`mcpSkillsSettingOf`).
+    const on = mcpSkillsSettingOf({ dynamic: true })
+    assert.deepEqual(on, { dynamic: true })
+    assert.equal((await generatedOf(on)).length, 1)
+    assert.equal((await generatedOf(mcpSkillsSettingOf({ dynamic: false }))).length, 0)
+    assert.equal((await generatedOf(true)).length, 0, 'declined without it')
+    assert.deepEqual(server.skillReads, [], 'nothing of it read at connect')
   } finally {
     await server.close()
   }

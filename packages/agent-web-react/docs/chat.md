@@ -103,6 +103,7 @@ full size) and file chips. The header shows the conversation's total.
 | `showStatus` | `true` | the status dot in the header |
 | `showContext` | `false` | context meter above the composer (`number` = budget bar) |
 | `showElicitation` | `true` | a question an MCP server puts to the user, beside the consent cards (needs `elicitations` and `onElicitationAnswer`; see [below](#questions-from-mcp-servers-elicitation)) |
+| `showSkillPreview` | `true` | in the consent card of an MCP server's skill, the collapsed preview of the text the agent would read (see [Tool consent](#tool-consent)) |
 | `activityOpen` | `false` | keep finished answers' activity expanded |
 | `emptyState` | `labels.emptyState` | what the transcript shows before the first message (any node) |
 | `defaultHistoryOpen` | wide panel: yes · narrow: no | whether the saved-chats sidebar starts open |
@@ -938,8 +939,32 @@ commands switch the mode live, even mid-run.
 
 `<ToolApprovalPrompt>` (usable on its own) takes `approvals` (e.g. `useAgent().pendingApprovals`), `onApprove(id, { remember })` and
 `onDeny(id, reason)` (wire them to `useAgent().approve` / `.deny`), `allowRemember` (default
-true; false hides "Always allow") and `showHelper` (default true: a request made by a helper the
-model started says which helper asks - see [the tree](#subagents-and-helpers-the-tree)).
+true; false hides "Always allow" - and "Always for this server" on a skill's card), `showHelper` (default true: a request made by a helper the
+model started says which helper asks - see [the tree](#subagents-and-helpers-the-tree)) and
+`showSkillPreview` (default true; also on `<AgentChat>`).
+
+**An MCP server's skill.** With `skills` on a server (`useMcp` / `useMcpServers`, experimental),
+the core asks before a skill of that server enters the agent's context for the first time - the
+same gate, the same `pendingApprovals`, a request whose `name` is `load_skill` and whose `skill`
+(`SkillConsentView`) says what: `server`, `name` (`<server>/<skill>`), `skill`, `uri`,
+`description`, `size` / `totalSize` (bytes), `files` / `fileCount`, `body` (the very text the model
+would read, cleaned and capped - present only while the request is pending: once it is decided the
+reducer drops it, so a saved conversation keeps who and what, not the server's instructions),
+`byUri` (the agent asked for it by its address, not in the server's list), `nestedIn` (it sits in
+another skill of that server, whose approval did not cover it), `dynamic` (a generated skill of a
+server added with `skills: { dynamic: true }`: no checksums - the size, files and text are those of
+the copy the core just read, and only that copy is used; the card says so in one line,
+`skillConsentDynamic`), `noFileListing` (with `dynamic`: the server cannot list the skill's files,
+the copy is its `SKILL.md` alone; `skillConsentNoFileListing`) and `consent` (`'once-per-skill'`:
+a yes holds for the agent's life while the skill is unchanged; `'ask'`: for this task). The card
+is its own: "The server “docs” offers the skill “pdf-processing”", the description and size, a
+collapsed `<details>` with the text in a `<pre>` (text nodes only, never markup) and the files,
+a note that it is the server's text, and **Allow once** (`approve(id)`), **Always for this
+server** (`approve(id, { remember: true })`: that server's other skills for the agent's life,
+nested ones excepted) and **Deny** (`deny(id)`: nothing of it enters; the agent is told). It is
+asked whatever the approval mode - autopilot too - unless the server (or the agent's
+`mcpSkills.consent`) says `consent: 'never'`. Replace it with `renderApproval` (the card is the
+`fallback`) or hide the preview with `showSkillPreview={false}`.
 
 **A request nobody answers** is denied by the core after `toolApproval.timeoutMs` (default five
 minutes; `0` or `Infinity`: it waits until the run is stopped). Its card turns into a denial (the
@@ -1086,7 +1111,7 @@ tokens inside an element with class `awr-theme`.
 | `lessonsOf` | the agent's own skills (`agent.listLearnedSkills()`) as `LessonView[]` - what the hook seeds the notebook with |
 | `useVirtualFiles` | a live listing of a `VirtualFileSystem` + upload / remove / read |
 | `useSpeechToText` | Web Speech API: `{ supported, listening, interim, start, stop, toggle }` |
-| `useMcp` / `useMcpServers` | one or several MCP servers, merged tools — import from `@dudko.dev/agent-web-react/mcp`. With `apps: true` they declare MCP Apps and return `apps` for `<AgentChat mcpApps>`. `instructions` (on `useMcp`, and on each of `useMcpServers().servers`) is what the server told the agent in its handshake - third-party text that goes into the agent's prompt: show it to the user as the server's words. `protocol` (`useMcp`) / `servers[i].protocol` and `protocols` (`useMcpServers`) are the negotiated MCP revisions; a server is connected with `protocol: 'legacy' \| 'auto' \| 'modern'` (`connect` / `add`) and, experimentally, `skills: true` (its MCP skills join the agent's catalog as `<server>/<skill>`, so the run's skills - `message.skills` - name the server; `servers[i].skills`) and `apps: false` (that server's apps off, the hook's `apps` the default; `servers[i].apps`). `pendingElicitations` / `answerElicitation` are the servers' [questions to the user](#questions-from-mcp-servers-elicitation). Options: `clientName`, `clientMetadataUrl` (a client ID metadata document, CIMD, used as the OAuth `client_id` where the authorization server supports it; per server through `oauth.clientMetadataUrl`; `oauth.registration: 'auto' \| 'cimd' \| 'dcr'` per server - whichever the server supports, the document only, or dynamic registration only - and `oauthRegistration` / `servers[i].oauthRegistration` say which way was taken), `onLog`, `elicitation` (`true` or the core's settings; off by default), `apps` (off by default) — see the README |
+| `useMcp` / `useMcpServers` | one or several MCP servers, merged tools — import from `@dudko.dev/agent-web-react/mcp`. With `apps: true` they declare MCP Apps and return `apps` for `<AgentChat mcpApps>`. `instructions` (on `useMcp`, and on each of `useMcpServers().servers`) is what the server told the agent in its handshake - third-party text that goes into the agent's prompt: show it to the user as the server's words. `protocol` (`useMcp`) / `servers[i].protocol` and `protocols` (`useMcpServers`) are the negotiated MCP revisions; a server is connected with `protocol: 'legacy' \| 'auto' \| 'modern'` (`connect` / `add`) and, experimentally, `skills: true` or `{ consent, dynamic }` (its MCP skills join the agent's catalog as `<server>/<skill>`, so the run's skills - `message.skills` - name the server; `servers[i].skills`; a skill is let into the agent's context only once a person allowed it, see [consent](#tool-consent)) and `apps: false` (that server's apps off, the hook's `apps` the default; `servers[i].apps`). `pendingElicitations` / `answerElicitation` are the servers' [questions to the user](#questions-from-mcp-servers-elicitation). Options: `clientName`, `clientMetadataUrl` (a client ID metadata document, CIMD, used as the OAuth `client_id` where the authorization server supports it; per server through `oauth.clientMetadataUrl`; `oauth.registration: 'auto' \| 'cimd' \| 'dcr'` per server - whichever the server supports, the document only, or dynamic registration only - and `oauthRegistration` / `servers[i].oauthRegistration` say which way was taken), `onLog`, `elicitation` (`true` or the core's settings; off by default), `apps` (off by default) — see the README |
 | `elicitationFields`, `elicitationInitialDraft`, `elicitationFormAnswer`, `elicitationLink`, `formatCountdown` | the elicitation prompt's pure logic ([above](#questions-from-mcp-servers-elicitation)) |
 | `mcpOAuthProviderOptions` | the options the MCP hooks hand the core's OAuth provider for one server (pure; same subpath) |
 | `useMcpAppHost` | MCP Apps: reads an app from its server, puts its tool calls through the agent's gate, holds its link / message / file / sampling requests ([above](#mcp-apps-a-servers-interface-in-the-chat)); `sandbox: { url, timeoutMs? }` runs apps on an origin of their own ([above](#an-app-on-an-origin-of-its-own)); `downloads`, `sampling` + `sample` turn on what an app may ask for besides ([above](#what-an-app-may-ask-for-besides-a-tool-call)). `mcpAppsRouter` (`./mcp`) is the stable `apps` the MCP hooks return |
@@ -1146,6 +1171,13 @@ component or `<AgentLabelsProvider>`); whatever you leave out falls back to `def
   `htmlShorter`, `htmlFrameName` *(fn: path)*.
 - **Consent:** `approvalLead`, `approve`, `alwaysAllow`, `deny`, `declinedReason`, `readOnlyTool`,
   `consentWaiting`, `consentAllowed`, `consentDenied` *(fn: reason?)*.
+- **An MCP server's skill (its consent card):** `skillConsentLead` *(fn: server, skill)*,
+  `skillConsentSize` *(fn: bytes, files)*, `skillConsentByUri`, `skillConsentNested`
+  *(fn: enclosing)*, `skillConsentDynamic` (a generated skill: no checksums, the copy read is
+  what is approved), `skillConsentNoFileListing` (its server cannot list its files),
+  `skillConsentPreview`, `skillConsentFiles` *(fn: paths, more)*, `skillConsentNote`
+  *(fn: server, consent)*, `skillConsentAllow`, `skillConsentAlways`, `skillConsentDeny`,
+  `skillConsentDeclined`.
 - **Questions from MCP servers:** `elicitationTitle` (the prompt's accessible name),
   `elicitationLead` *(fn: server)*, `elicitationLeadHelper` *(fn: server, role?)*, `elicitationDuring`,
   `elicitationCount` *(fn: index, total)*, `elicitationFrom` *(fn: server; the caption over the

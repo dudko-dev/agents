@@ -58,7 +58,12 @@ import {
   type ITranscriptBlock,
   type MediaKind,
 } from './media-shared.ts'
-import { buildMediaModelFromStage, resolveStage, type MediaModelKind } from './provider.ts'
+import {
+  buildMediaModelFromStage,
+  isModelObject,
+  resolveStage,
+  type MediaModelKind,
+} from './provider.ts'
 import type { AgentEvent, IAgentConfig, IAgentStageOverride } from './types.ts'
 
 // A media model as a stage block: like `planner` (omitted fields inherit the top-level provider,
@@ -131,9 +136,6 @@ export interface IMedia {
   // The run's input with the transcripts of its audio attachments under it.
   attach: (input: string, files: IRunFile[], signal?: AbortSignal) => Promise<string>
 }
-
-const isModelObject = (value: unknown): boolean =>
-  typeof value === 'object' && value !== null && 'specificationVersion' in value
 
 const resolveModel = async (
   config: IAgentConfig,

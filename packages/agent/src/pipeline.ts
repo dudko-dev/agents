@@ -20,7 +20,8 @@ import {
   type PipelineNodeRunner,
   type PipelineResult,
 } from './pipeline-engine.ts'
-import { buildModelFromStage, resolveStage } from './provider.ts'
+import { buildModelFromStage, resolveStageModel } from './provider.ts'
+import { limitedModel } from './shared-limits.ts'
 import { generateStructured } from './structured.ts'
 import type {
   AgentEvent,
@@ -41,7 +42,9 @@ import {
 
 // A pipeline: a graph of agents with conditions and loops, described in plain JSON. The graph
 // engine (validation, conditions, scheduling) is `pipeline-engine.ts`, the same file as the
-// browser sibling's; this file is the adapter that runs a node with this package's createAgent.
+// browser sibling's; this file is the adapter that runs a node with this package's createAgent,
+// and the route call after it (`pickPipelineRoute`, public for hosts that run the graph themselves
+// with `runPipelineGraph`).
 
 export interface PipelineOptions {
   // The seam: run a node yourself. When given, the pipeline knows nothing about agents.
@@ -72,25 +75,55 @@ export interface Pipeline {
 interface INodeAgent {
   agent: IAgent
   config: IAgentConfig
-  // The model that picks a route: the node's planner model, the one this package uses for
-  // structured output.
-  router?: LanguageModel
+}
+
+export interface PipelineRouteOptions {
+  // The agent config of the node: its planner model picks the route (the model this package uses
+  // for structured output), with its call options, `llmTimeoutMs`, `llmMaxRetries` and
+  // `sharedLimits`; its `decisionModel` / `decision` are asked first.
+  config: IAgentConfig
+  signal?: AbortSignal
+  // A decision model's `usage` and `decision` events, a shared-limits warning (`log`). A handler
+  // that throws does not break the call.
+  onEvent?: EventHandler
+}
+
+export interface PipelineRouteResult {
+  // One of the node's labels, or undefined: no route.
+  route?: string
+  // What the call cost, a failed attempt and a decision model's question included.
+  usage: IUsage
+}
+
+// The model that picks a route, built from a config once per config object (createPipeline
+// keeps one config per node agent: one router per node).
+const routers = new WeakMap<IAgentConfig, LanguageModel>()
+
+const routerOf = async (config: IAgentConfig): Promise<LanguageModel> => {
+  let router = routers.get(config)
+  if (!router) {
+    router = await buildModelFromStage(
+      config.clientName,
+      resolveStageModel(config, config.planner, config.plannerModel, 'planner'),
+    )
+    routers.set(config, router)
+  }
+  return router
 }
 
 // Ask the node's model which of its routes the answer takes. An answer that is not one of the
 // labels - or a call that fails - is no route.
 const pickRoute = async (
-  entry: INodeAgent,
+  config: IAgentConfig,
   node: PipelineNode,
   text: string,
   signal: AbortSignal,
-): Promise<{ route?: string; usage: IUsage }> => {
-  const { config } = entry
-  entry.router ??= await buildModelFromStage(
-    config.clientName,
-    resolveStage(config, config.planner, config.plannerModel, 'planner'),
+  emit: (event: AgentEvent) => void,
+): Promise<PipelineRouteResult> => {
+  // config.sharedLimits of the node's agent: the route call is a language-model call too.
+  const model = limitedModel(await routerOf(config), 'route', config.sharedLimits, (message) =>
+    emit({ type: 'log', level: 'warn', message }),
   )
-  const model = entry.router
   const labels = (node.routes ?? []).map((r) => r.label)
   const schema = z.object({
     route: z.enum(labels as [string, ...string[]]).describe('The label of the chosen route'),
@@ -121,12 +154,12 @@ const pickRoute = async (
 // answer that is not a label). A `decision` event says what happened; what the question cost is
 // returned either way.
 const pickRouteWithDecisionModel = async (
-  { config }: INodeAgent,
+  config: IAgentConfig,
   node: PipelineNode,
   text: string,
   signal: AbortSignal,
   emit: (event: AgentEvent) => void,
-): Promise<{ route?: string; usage: IUsage } | undefined> => {
+): Promise<PipelineRouteResult | undefined> => {
   const model = config.decisionModel
   const routes = node.routes ?? []
   if (!model || config.decision?.route === false || routes.length < 2) return undefined
@@ -139,6 +172,33 @@ const pickRouteWithDecisionModel = async (
     usage,
     ...(outcome.accepted && outcome.choice !== undefined ? { route: outcome.choice } : {}),
   }
+}
+
+// The route call createPipeline makes after a node with routes answered, as a function of its own:
+// a host that runs the graph itself (runPipelineGraph) calls it wherever the node ran, with the
+// node's answer. The node's decision model first, when it is confident of a label; otherwise a
+// structured-output call to the node's planner model. An answer that is not one of the labels, or
+// a call that fails, is no route (`route` undefined); an abort rejects. A node without routes
+// costs nothing.
+export const pickPipelineRoute = async (
+  node: PipelineNode,
+  text: string,
+  options: PipelineRouteOptions,
+): Promise<PipelineRouteResult> => {
+  if (!node.routes?.length) return { usage: emptyUsage() }
+  const { config, onEvent } = options
+  const signal = options.signal ?? new AbortController().signal
+  const emit = (event: AgentEvent): void => {
+    try {
+      onEvent?.(event)
+    } catch {
+      // A handler that throws must not change the route.
+    }
+  }
+  const quick = await pickRouteWithDecisionModel(config, node, text, signal, emit)
+  if (quick?.route) return quick
+  const slow = await pickRoute(config, node, text, signal, emit)
+  return quick ? { ...slow, usage: addUsage(quick.usage, slow.usage) } : slow
 }
 
 export const createPipeline = (
@@ -175,14 +235,18 @@ export const createPipeline = (
       signal: ctx.signal,
       onEvent: ctx.emit,
     })
+    // A node's agent with persistence.journal may park its run: a pipeline cannot wait for it.
+    if (result.parked) {
+      throw new Error(
+        `node "${node.id}": its run parked (it waits for ${result.parked.items.length} answer(s) from outside), and a pipeline node cannot wait`,
+      )
+    }
     if (!node.routes?.length) return { text: result.text, usage: result.usage }
-    const quick = await pickRouteWithDecisionModel(entry, node, result.text, ctx.signal, ctx.emit)
-    const picked = quick?.route
-      ? quick
-      : await pickRoute(entry, node, result.text, ctx.signal).then((slow) => ({
-          ...slow,
-          usage: quick ? addUsage(quick.usage, slow.usage) : slow.usage,
-        }))
+    const picked = await pickPipelineRoute(node, result.text, {
+      config: entry.config,
+      signal: ctx.signal,
+      onEvent: ctx.emit,
+    })
     return {
       text: result.text,
       usage: addUsage(result.usage, picked.usage),
@@ -193,12 +257,12 @@ export const createPipeline = (
   return {
     definition: plan.definition,
     run: (run) =>
-      runPipelineGraph<AgentEvent>(
-        plan,
-        options.runNode ?? runWithAgent,
-        { input: run.input, signal: run.signal, onEvent: run.onEvent as never },
-        'reject',
-      ),
+      runPipelineGraph<AgentEvent>(plan, options.runNode ?? runWithAgent, {
+        input: run.input,
+        signal: run.signal,
+        onEvent: run.onEvent as never,
+        onAbort: 'reject',
+      }),
     close: async () => {
       const open = [...agents.values()]
       agents.clear()

@@ -209,6 +209,22 @@ test('off: escalation without tiers, an empty tiers block and a standard-only bl
   }
 })
 
+test('scale-out hooks change nothing on the wire: a lease and a sharedLimits that lets every call go give the golden requests', async () => {
+  const golden = JSON.parse(readFileSync(GOLDEN, 'utf8')) as IChatRequest[]
+  let asked = 0
+  const requests = await goldenRun({
+    runLease: { acquire: () => true, renew: () => true, release: () => {} },
+    sharedLimits: {
+      beforeModelCall: () => {
+        asked++
+      },
+      afterModelCall: () => {},
+    },
+  })
+  assert.equal(asked, golden.length, 'every call was asked about')
+  assert.deepEqual(requests, golden)
+})
+
 test('off: the events and the result carry no tier fields', async () => {
   await withRun(
     scripted([undefined], () => ({ text: 'ok' })),
@@ -216,7 +232,15 @@ test('off: the events and the result carry no tier fields', async () => {
     async (h) => {
       const result = await h.run()
       const start = of(h.events, 'step.start')[0]
-      assert.deepEqual(Object.keys(start).sort(), ['index', 'runId', 'step', 'type'])
+      // seq / attempt number every event of a run (event order across resumes), tiers or not.
+      assert.deepEqual(Object.keys(start).sort(), [
+        'attempt',
+        'index',
+        'runId',
+        'seq',
+        'step',
+        'type',
+      ])
       assert.deepEqual(Object.keys(result.trace[0]).sort(), [
         'blocked',
         'durationMs',

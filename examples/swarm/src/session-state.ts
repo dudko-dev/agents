@@ -1,0 +1,862 @@
+// The session workflow's logic as plain functions over plain data: no Temporal, no clock, no
+// randomness (the workflow passes `now`). `workflows.ts` only wires these to signals, a query, a
+// timer and the activities, so what a session does can be tested without a server.
+import type { IConversationTurn } from '@dudko.dev/agent'
+import { answerProblem } from './answers.ts'
+import {
+  childWorkflowIdOf,
+  pipelineEventsPath,
+  pipelineNodeEventsPath,
+  pipelineStreamOf,
+  pipelineWorkflowIdOf,
+  subagentStreamOf,
+  subagentWorkflowIdOf,
+} from './session-api.ts'
+import type {
+  IAnswer,
+  IChildBudget,
+  IChildParkNotice,
+  IChildWaiting,
+  IParkedRequest,
+  IPipelineInput,
+  ISessionOptions,
+  ISessionView,
+  IStopRequest,
+  IStreamMarker,
+  ISubagentInput,
+  ITurnEnd,
+  ITurnInput,
+  ITurnRecord,
+  IUserMessage,
+  PipelineOutcome,
+  SubagentOutcome,
+  TurnResult,
+} from './session-types.ts'
+
+// The turn records the state keeps (and the query shows).
+export const TURNS_KEPT = 20
+// Message ids remembered to drop a repeated POST.
+export const SEEN_KEPT = 500
+// Answers kept while nothing asks for them (a client answering a request that is not open).
+export const ANSWERS_KEPT = 100
+
+// Static subagents: the caps a session started without them gets (ISessionOptions).
+export const SUBAGENT_DEFAULTS = { maxPerRound: 4, maxPerSession: 50 } as const
+// Pipelines: the same, for a session started before pipelines existed.
+export const PIPELINE_DEFAULTS = { maxPerRound: 2, maxPerSession: 20 } as const
+
+// Where the child markers go in a turn's order: the parked attempt's slot, from this seq on - far
+// above any seq the attempt's own events reach. `subagent.started` / `pipeline.call.started` take
+// SEQ + i (the i-th child of the park, of either kind); every marker after them - `*.ended`, and
+// `*.waiting` / `*.resumed` of a child that waits for a person - SEQ + SPAN + j (the j-th, in the
+// order the workflow saw them happen: ONE counter, `IParked.ended`). Every start of a park is
+// decided at once, before any child can end or wait, and the workflow writes the markers in the
+// order they were queued, one after the other - so a reader that follows the stream never sees a
+// marker land behind its cursor.
+export const SUBAGENT_MARKER_SEQ = 1_073_741_824
+export const SUBAGENT_MARKER_SPAN = 1_048_576
+
+export interface IParked {
+  turn: number
+  runId: string
+  requests: IParkedRequest[]
+  input: string
+  messageIds: string[]
+  startedAt: number
+  // The parked attempt's slot in the turn's order (the subagent markers go there).
+  turnAttempt?: number
+  // The requests a child workflow (a subagent or a pipeline) was started for, in start order;
+  // and how many markers came after the starts (the children that ended, waited, went on - one
+  // counter, so those markers stay in order; named for the first of them).
+  children?: string[]
+  ended?: number
+  // The children that wait for a person now (a subagent child, a pipeline's node visit).
+  waiting?: IChildWaiting[]
+}
+
+export interface ISessionState {
+  sessionId: string
+  options: ISessionOptions
+  turn: number
+  inbox: IUserMessage[]
+  seen: string[]
+  dropped: number
+  history: IConversationTurn[]
+  turns: ITurnRecord[]
+  running?: { turn: number; messageIds: string[]; startedAt: number; input: string }
+  // A stop arrived while the turn ran: the turn is being cancelled.
+  stopping: boolean
+  // The session ends once nothing runs.
+  ending: boolean
+  parked?: IParked
+  answers: Record<string, IAnswer>
+  // turn.ended markers not written yet (the workflow drains them through an activity).
+  endings: ITurnEnd[]
+  // Subagent markers not written yet (drained the same way, in order).
+  markers: IStreamMarker[]
+  // Static subagent calls started in this session (subagentMaxPerSession).
+  subagentsStarted: number
+  // Pipeline calls started in this session (pipelineMaxPerSession).
+  pipelinesStarted: number
+  // Turns run by this workflow run (continue-as-new resets it).
+  turnsThisRun: number
+}
+
+// What continue-as-new carries into the next run: the whole state but the per-run counter.
+export type ISessionCarry = Omit<ISessionState, 'turnsThisRun' | 'options' | 'sessionId'>
+
+// How a turn came out, as the workflow sees it: the activity's result, or a failure Temporal gave
+// up on (or a cancellation the user asked for).
+export type TurnOutcome = TurnResult | { status: 'failed'; error: string }
+
+export const initialState = (
+  sessionId: string,
+  options: ISessionOptions,
+  carry?: ISessionCarry,
+): ISessionState => ({
+  sessionId,
+  options,
+  turn: carry?.turn ?? 0,
+  inbox: [...(carry?.inbox ?? [])],
+  seen: [...(carry?.seen ?? [])],
+  dropped: carry?.dropped ?? 0,
+  history: [...(carry?.history ?? [])],
+  turns: [...(carry?.turns ?? [])],
+  ...(carry?.running ? { running: carry.running } : {}),
+  stopping: carry?.stopping ?? false,
+  ending: carry?.ending ?? false,
+  ...(carry?.parked ? { parked: carry.parked } : {}),
+  answers: { ...(carry?.answers ?? {}) },
+  endings: [...(carry?.endings ?? [])],
+  markers: [...(carry?.markers ?? [])],
+  subagentsStarted: carry?.subagentsStarted ?? 0,
+  pipelinesStarted: carry?.pipelinesStarted ?? 0,
+  turnsThisRun: 0,
+})
+
+const maxPerRound = (o: ISessionOptions): number =>
+  o.subagentMaxPerRound ?? SUBAGENT_DEFAULTS.maxPerRound
+const maxPerSession = (o: ISessionOptions): number =>
+  o.subagentMaxPerSession ?? SUBAGENT_DEFAULTS.maxPerSession
+const pipelinesPerRound = (o: ISessionOptions): number =>
+  o.pipelineMaxPerRound ?? PIPELINE_DEFAULTS.maxPerRound
+const pipelinesPerSession = (o: ISessionOptions): number =>
+  o.pipelineMaxPerSession ?? PIPELINE_DEFAULTS.maxPerSession
+
+export type AcceptResult = 'queued' | 'duplicate' | 'full' | 'ended'
+
+// A message from the user: queued behind the running turn, or dropped as a repeat / overflow.
+export const acceptMessage = (state: ISessionState, message: IUserMessage): AcceptResult => {
+  if (state.ending) {
+    return 'ended'
+  }
+  if (state.seen.includes(message.id)) {
+    return 'duplicate'
+  }
+  if (state.inbox.length >= state.options.maxQueuedMessages) {
+    state.dropped += 1
+    return 'full'
+  }
+  state.seen.push(message.id)
+  if (state.seen.length > SEEN_KEPT) {
+    state.seen.splice(0, state.seen.length - SEEN_KEPT)
+  }
+  state.inbox.push(message)
+  return 'queued'
+}
+
+const boundStray = (state: ISessionState): void => {
+  const open = new Set(state.parked?.requests.map((r) => r.requestId) ?? [])
+  const stray = Object.keys(state.answers).filter((id) => !open.has(id))
+  for (const id of stray.slice(0, Math.max(0, stray.length - ANSWERS_KEPT))) {
+    delete state.answers[id]
+  }
+}
+
+// Why the parked turn cannot take this answer for this request (undefined: it can).
+const refusalOf = (request: IParkedRequest, answer: IAnswer): string | undefined => {
+  if (request.subagent && answer.by !== 'subagent') {
+    return 'a subagent answers this item'
+  }
+  if (request.pipeline && answer.by !== 'pipeline') {
+    return 'a pipeline answers this item'
+  }
+  return answerProblem(request.kind, answer.value)
+}
+
+export type AnswerVerdict = 'accepted' | 'early' | 'refused'
+
+// A client's answer. While a turn is parked it must name one of its requests and fit its kind
+// (the gateway checked both already; this is the authority); an item a subagent answers is
+// refused. While no turn is parked it is kept: the client may be faster than the workflow (it is
+// checked when the park arrives), and bounded, so that answers nobody asked for cannot grow the
+// state.
+export const acceptAnswer = (state: ISessionState, answer: IAnswer): AnswerVerdict => {
+  if (state.parked) {
+    const request = state.parked.requests.find((r) => r.requestId === answer.requestId)
+    if (!request || refusalOf(request, answer)) {
+      return 'refused'
+    }
+    state.answers[answer.requestId] = answer
+    return 'accepted'
+  }
+  if (answer.by === 'subagent' || answer.by === 'pipeline') {
+    return 'refused'
+  }
+  state.answers[answer.requestId] = answer
+  boundStray(state)
+  return 'early'
+}
+
+// The answer a child's outcome gives its item.
+export const childAnswerOf = (outcome: SubagentOutcome): unknown =>
+  outcome.status === 'completed'
+    ? { output: outcome.text }
+    : outcome.status === 'stopped'
+      ? { error: 'the subagent was stopped before it answered' }
+      : { error: `the subagent failed: ${outcome.error}` }
+
+// The answer a pipeline's outcome gives its item. A run a cap of the definition cut short still
+// has an answer (its last terminal node's), with a note the model reads; a failed node fails the
+// pipeline, and the item's error says which node.
+export const pipelineAnswerOf = (name: string, outcome: PipelineOutcome): unknown =>
+  outcome.status === 'completed'
+    ? {
+        output: outcome.stoppedBy
+          ? `${outcome.text}\n\n[pipeline "${name}" was cut short by its ${outcome.stoppedBy} limit after ${outcome.runs} node runs: this is the output of its last finished step]`
+          : outcome.text,
+      }
+    : outcome.status === 'stopped'
+      ? { error: `pipeline "${name}" was stopped before it answered` }
+      : { error: `pipeline "${name}" failed: ${outcome.error}` }
+
+// The children a parked turn needs: one per request a static subagent or a pipeline answers that
+// has no answer and no child yet - within the caps of its kind, per round and per session; a call
+// beyond them is answered at once with an error the model reads (it never starts a child). Marks
+// the rest started, counts them and queues their `*.started` markers. Returns what the workflow
+// starts. `kinds`: which kinds the workflow starts (each kind is behind its own patch).
+export type IChildStart =
+  | { kind: 'subagent'; requestId: string; workflowId: string; input: ISubagentInput }
+  | { kind: 'pipeline'; requestId: string; workflowId: string; input: IPipelineInput }
+
+export const startChildren = (
+  state: ISessionState,
+  now: number,
+  kinds: { subagents?: boolean; pipelines?: boolean } = { subagents: true, pipelines: true },
+): IChildStart[] => {
+  const parked = state.parked
+  if (!parked) {
+    return []
+  }
+  const children = (parked.children ??= [])
+  const o = state.options
+  const out: IChildStart[] = []
+  const options = {
+    turnTimeoutMs: o.turnTimeoutMs,
+    heartbeatTimeoutMs: o.heartbeatTimeoutMs,
+    maxTurnAttempts: o.maxTurnAttempts,
+  }
+  let subagents = 0
+  let pipelines = 0
+  const marker = (type: IStreamMarker['type'], body: Record<string, unknown>): void => {
+    if (parked.turnAttempt !== undefined) {
+      state.markers.push({
+        sessionId: state.sessionId,
+        turn: parked.turn,
+        turnAttempt: parked.turnAttempt,
+        seq: SUBAGENT_MARKER_SEQ + children.length - 1,
+        type,
+        body,
+      })
+    }
+  }
+  for (const r of parked.requests) {
+    if (state.answers[r.requestId] || children.includes(r.requestId)) {
+      continue
+    }
+    const refuse = (what: string, name: string, why: string, by: IAnswer['by']): void => {
+      state.answers[r.requestId] = {
+        requestId: r.requestId,
+        value: { error: `${what} "${name}" refused: ${why}` },
+        at: now,
+        by,
+      }
+    }
+    if (r.subagent && kinds.subagents) {
+      if (subagents >= maxPerRound(o)) {
+        refuse(
+          'subagent',
+          r.subagent.name,
+          `at most ${maxPerRound(o)} subagent calls in one round`,
+          'subagent',
+        )
+        continue
+      }
+      if (state.subagentsStarted >= maxPerSession(o)) {
+        refuse(
+          'subagent',
+          r.subagent.name,
+          `at most ${maxPerSession(o)} subagent calls in one session`,
+          'subagent',
+        )
+        continue
+      }
+      subagents += 1
+      state.subagentsStarted += 1
+      children.push(r.requestId)
+      const workflowId = subagentWorkflowIdOf(state.sessionId, parked.runId, r.requestId)
+      const stream = subagentStreamOf(state.sessionId, r.requestId)
+      out.push({
+        kind: 'subagent',
+        requestId: r.requestId,
+        workflowId,
+        input: {
+          sessionId: state.sessionId,
+          turn: parked.turn,
+          parentRunId: parked.runId,
+          itemId: r.requestId,
+          stream,
+          name: r.subagent.name,
+          task: r.subagent.task,
+          ...(r.subagent.profile ? { profile: r.subagent.profile } : {}),
+          options,
+        },
+      })
+      marker('subagent.started', {
+        itemId: r.requestId,
+        name: r.subagent.name,
+        task: r.subagent.task,
+        ...(r.subagent.profile ? { profile: r.subagent.profile } : {}),
+        workflowId,
+        events: `/sessions/${state.sessionId}/subagents/${r.requestId}/events`,
+      })
+    } else if (r.pipeline && kinds.pipelines) {
+      if (pipelines >= pipelinesPerRound(o)) {
+        refuse(
+          'pipeline',
+          r.pipeline.name,
+          `at most ${pipelinesPerRound(o)} pipeline calls in one round`,
+          'pipeline',
+        )
+        continue
+      }
+      if (state.pipelinesStarted >= pipelinesPerSession(o)) {
+        refuse(
+          'pipeline',
+          r.pipeline.name,
+          `at most ${pipelinesPerSession(o)} pipeline calls in one session`,
+          'pipeline',
+        )
+        continue
+      }
+      pipelines += 1
+      state.pipelinesStarted += 1
+      children.push(r.requestId)
+      const workflowId = pipelineWorkflowIdOf(state.sessionId, parked.runId, r.requestId)
+      out.push({
+        kind: 'pipeline',
+        requestId: r.requestId,
+        workflowId,
+        input: {
+          sessionId: state.sessionId,
+          turn: parked.turn,
+          parentRunId: parked.runId,
+          itemId: r.requestId,
+          workflowId,
+          stream: pipelineStreamOf(state.sessionId, r.requestId),
+          name: r.pipeline.name,
+          task: r.pipeline.task,
+          options,
+        },
+      })
+      marker('pipeline.call.started', {
+        itemId: r.requestId,
+        name: r.pipeline.name,
+        task: r.pipeline.task,
+        workflowId,
+        events: pipelineEventsPath(state.sessionId, r.requestId),
+      })
+    }
+  }
+  return out
+}
+
+// The next marker after the starts of the park: `*.ended`, `*.waiting`, `*.resumed`, in the order
+// the workflow saw them (one counter). None without the parked attempt's slot.
+const afterMarker = (
+  state: ISessionState,
+  parked: IParked,
+  marker: Pick<IStreamMarker, 'type' | 'body'>,
+): void => {
+  const n = parked.ended ?? 0
+  parked.ended = n + 1
+  if (parked.turnAttempt !== undefined) {
+    state.markers.push({
+      sessionId: state.sessionId,
+      turn: parked.turn,
+      turnAttempt: parked.turnAttempt,
+      seq: SUBAGENT_MARKER_SEQ + SUBAGENT_MARKER_SPAN + n,
+      ...marker,
+    })
+  }
+}
+
+// A child of the parked turn is over: the item's answer, and its `*.ended` marker queued in the
+// order the children end; it waits for nobody any more. False (nothing changes) for a child of a
+// park that is over (stopped), a request that is not that kind's child, or an item answered
+// already.
+const childEnded = (
+  state: ISessionState,
+  requestId: string,
+  kind: 'subagent' | 'pipeline',
+  answer: (request: IParkedRequest) => unknown,
+  marker: (request: IParkedRequest) => Pick<IStreamMarker, 'type' | 'body'>,
+  now: number,
+): boolean => {
+  const parked = state.parked
+  const request = parked?.requests.find((r) => r.requestId === requestId)
+  if (!parked || !request?.[kind] || !parked.children?.includes(requestId)) {
+    return false
+  }
+  if (state.answers[requestId]) {
+    return false
+  }
+  state.answers[requestId] = { requestId, value: answer(request), at: now, by: kind }
+  if (parked.waiting?.some((w) => w.itemId === requestId)) {
+    parked.waiting = parked.waiting.filter((w) => w.itemId !== requestId)
+  }
+  afterMarker(state, parked, marker(request))
+  return true
+}
+
+// A subagent child is over: its outcome answers its item, its `subagent.ended` marker is queued.
+export const childFinished = (
+  state: ISessionState,
+  requestId: string,
+  outcome: SubagentOutcome,
+  now: number,
+): boolean =>
+  childEnded(
+    state,
+    requestId,
+    'subagent',
+    () => childAnswerOf(outcome),
+    (request) => ({
+      type: 'subagent.ended',
+      body: {
+        itemId: requestId,
+        name: request.subagent!.name,
+        status: outcome.status,
+        ...(outcome.status === 'completed' ? { text: outcome.text, usage: outcome.usage } : {}),
+        ...(outcome.status === 'failed' ? { error: outcome.error } : {}),
+        ...(outcome.status !== 'failed' && outcome.runId ? { runId: outcome.runId } : {}),
+        ...(outcome.status !== 'failed' && outcome.attempt ? { attempt: outcome.attempt } : {}),
+      },
+    }),
+    now,
+  )
+
+// A pipeline child is over: its outcome answers its item, its `pipeline.call.ended` marker is
+// queued.
+export const pipelineFinished = (
+  state: ISessionState,
+  requestId: string,
+  outcome: PipelineOutcome,
+  now: number,
+): boolean =>
+  childEnded(
+    state,
+    requestId,
+    'pipeline',
+    (request) => pipelineAnswerOf(request.pipeline!.name, outcome),
+    (request) => ({
+      type: 'pipeline.call.ended',
+      body: {
+        itemId: requestId,
+        name: request.pipeline!.name,
+        status: outcome.status,
+        ...(outcome.status === 'completed' ? { text: outcome.text } : {}),
+        ...(outcome.status === 'completed' && outcome.stoppedBy
+          ? { stoppedBy: outcome.stoppedBy }
+          : {}),
+        ...(outcome.status === 'failed' ? { error: outcome.error } : {}),
+        ...(outcome.status === 'failed' && outcome.nodeId
+          ? { nodeId: outcome.nodeId, visit: outcome.visit }
+          : {}),
+        runs: outcome.runs,
+        usage: outcome.usage,
+      },
+    }),
+    now,
+  )
+
+// A child of the parked turn tells the session it waits for a person (its run parked: `waiting`,
+// with its items) or goes on with the answers (`resumed`): the state shows what it waits for, and
+// the turn's stream gets `subagent.waiting` / `.resumed` (`pipeline.call.waiting` / `.resumed`,
+// with the node visit) in the parked attempt's slot, in order with the other child markers. Only
+// from a child this park started and that has not ended: its workflow id must be the one the
+// session gave it (session + run + item, and the node and visit) - a notice about anything else
+// is ignored (false).
+export const childPark = (state: ISessionState, notice: IChildParkNotice, now: number): boolean => {
+  const parked = state.parked
+  const request = parked?.requests.find((r) => r.requestId === notice.itemId)
+  const call = notice.kind === 'subagent' ? request?.subagent : request?.pipeline
+  if (!parked || !request || !call || !parked.children?.includes(notice.itemId)) {
+    return false
+  }
+  if (state.answers[notice.itemId]) {
+    return false
+  }
+  const node =
+    notice.kind === 'pipeline'
+      ? typeof notice.nodeId === 'string' && Number.isInteger(notice.visit)
+        ? { nodeId: notice.nodeId, visit: notice.visit as number }
+        : undefined
+      : undefined
+  if (notice.kind === 'pipeline' && !node) {
+    return false
+  }
+  if (notice.kind === 'subagent' && (notice.nodeId !== undefined || notice.visit !== undefined)) {
+    return false
+  }
+  if (notice.workflowId !== childWorkflowIdOf(state.sessionId, parked.runId, notice.itemId, node)) {
+    return false
+  }
+  const waiting = (parked.waiting ??= [])
+  const at = waiting.findIndex((w) => w.workflowId === notice.workflowId)
+  const who = {
+    itemId: notice.itemId,
+    name: call.name,
+    workflowId: notice.workflowId,
+    ...(node ? node : {}),
+    runId: notice.runId,
+  }
+  const prefix = notice.kind === 'subagent' ? 'subagent' : 'pipeline.call'
+  if (notice.state === 'waiting') {
+    const requests = Array.isArray(notice.requests) ? notice.requests : []
+    if (requests.length === 0) {
+      return false
+    }
+    const entry: IChildWaiting = {
+      ...who,
+      kind: notice.kind,
+      requests,
+      since: now,
+      events: node
+        ? pipelineNodeEventsPath(state.sessionId, notice.itemId, node.nodeId, node.visit)
+        : `/sessions/${state.sessionId}/subagents/${notice.itemId}/events`,
+    }
+    if (at >= 0) {
+      waiting[at] = entry
+    } else {
+      waiting.push(entry)
+    }
+    afterMarker(state, parked, {
+      type: `${prefix}.waiting` as IStreamMarker['type'],
+      body: {
+        ...who,
+        // What to answer (POST /sessions/:id/answers/:requestId); the questions are in the state
+        // (GET /sessions/:id, parked.waiting) and in the child's own stream (its run.parked).
+        requests: requests.map((r) => ({
+          requestId: r.requestId,
+          kind: r.kind,
+          ...toolNameOf(r),
+        })),
+        events: entry.events,
+      },
+    })
+    return true
+  }
+  if (notice.state !== 'resumed' || at < 0) {
+    return false
+  }
+  waiting.splice(at, 1)
+  afterMarker(state, parked, {
+    type: `${prefix}.resumed` as IStreamMarker['type'],
+    body: { ...who, answered: Array.isArray(notice.answered) ? notice.answered : [] },
+  })
+  return true
+}
+
+// The tool an item is about (an approval's request, a deferred call), for a marker.
+const toolNameOf = (r: IParkedRequest): { toolName?: string } => {
+  const q = (r.question ?? {}) as { toolName?: unknown; request?: { toolName?: unknown } }
+  const name = typeof q.request?.toolName === 'string' ? q.request.toolName : q.toolName
+  return typeof name === 'string' ? { toolName: name } : {}
+}
+
+// Children of the parked turn still running, subagents and pipelines (continue-as-new waits for
+// them: a new run of the workflow could not await them).
+export const childrenRunning = (state: ISessionState): boolean =>
+  Boolean(state.parked?.children?.some((id) => !state.answers[id]))
+
+// Stop: the running turn is cancelled, the messages queued behind it are dropped (they were
+// written before the user said stop), a parked turn ends as stopped. `end` ends the session.
+export const acceptStop = (state: ISessionState, stop: IStopRequest, now: number): void => {
+  state.inbox = []
+  if (stop.end) {
+    state.ending = true
+  }
+  if (state.running) {
+    state.stopping = true
+  }
+  if (state.parked) {
+    const parked = state.parked
+    delete state.parked
+    recordTurn(state, {
+      turn: parked.turn,
+      status: 'stopped',
+      messageIds: parked.messageIds,
+      startedAt: parked.startedAt,
+      endedAt: now,
+      runId: parked.runId,
+    })
+    state.endings.push({
+      sessionId: state.sessionId,
+      turn: parked.turn,
+      status: 'stopped',
+      runId: parked.runId,
+    })
+  }
+}
+
+// A parked turn may go on once every request it asked has an answer.
+export const parkedReady = (state: ISessionState): boolean =>
+  Boolean(state.parked && state.parked.requests.every((r) => state.answers[r.requestId]))
+
+// Something for the loop to do: a turn to start or to go on with, or markers to write.
+export const hasWork = (state: ISessionState): boolean =>
+  !state.running &&
+  (state.endings.length > 0 ||
+    state.markers.length > 0 ||
+    (!state.parked && state.inbox.length > 0) ||
+    parkedReady(state))
+
+// What the turn's next round may start: the per-round cap and what is left of the session's.
+const subagentBudget = (state: ISessionState): IChildBudget => ({
+  maxPerRound: maxPerRound(state.options),
+  remaining: Math.max(0, maxPerSession(state.options) - state.subagentsStarted),
+})
+const pipelineBudget = (state: ISessionState): IChildBudget => ({
+  maxPerRound: pipelinesPerRound(state.options),
+  remaining: Math.max(0, pipelinesPerSession(state.options) - state.pipelinesStarted),
+})
+
+// Several messages queued behind a turn become one turn: the model reads them in order.
+export const joinMessages = (messages: IUserMessage[]): string =>
+  messages.map((m) => m.text).join('\n\n')
+
+// The next turn's input: a parked turn with its answers, else the queued messages. Marks it running.
+export const takeTurn = (state: ISessionState, now: number): ITurnInput | undefined => {
+  if (state.running) {
+    return undefined
+  }
+  if (state.parked && parkedReady(state)) {
+    const parked = state.parked
+    delete state.parked
+    const answers: Record<string, IAnswer> = {}
+    for (const r of parked.requests) {
+      answers[r.requestId] = state.answers[r.requestId] as IAnswer
+      delete state.answers[r.requestId]
+    }
+    state.running = {
+      turn: parked.turn,
+      messageIds: parked.messageIds,
+      startedAt: parked.startedAt,
+      input: parked.input,
+    }
+    state.stopping = false
+    return {
+      sessionId: state.sessionId,
+      turn: parked.turn,
+      input: parked.input,
+      history: [...state.history],
+      messageIds: parked.messageIds,
+      answers,
+      subagents: subagentBudget(state),
+      pipelines: pipelineBudget(state),
+    }
+  }
+  if (state.parked || state.inbox.length === 0) {
+    return undefined
+  }
+  const batch = state.inbox.splice(0)
+  const turn = state.turn + 1
+  state.turn = turn
+  const input = joinMessages(batch)
+  const messageIds = batch.map((m) => m.id)
+  state.running = { turn, messageIds, startedAt: now, input }
+  state.stopping = false
+  return {
+    sessionId: state.sessionId,
+    turn,
+    input,
+    history: [...state.history],
+    messageIds,
+    subagents: subagentBudget(state),
+    pipelines: pipelineBudget(state),
+  }
+}
+
+const recordTurn = (state: ISessionState, record: ITurnRecord): void => {
+  const i = state.turns.findIndex((t) => t.turn === record.turn)
+  if (i >= 0) {
+    state.turns[i] = record
+  } else {
+    state.turns.push(record)
+  }
+  if (state.turns.length > TURNS_KEPT) {
+    state.turns.splice(0, state.turns.length - TURNS_KEPT)
+  }
+}
+
+const historyChars = (history: IConversationTurn[]): number =>
+  history.reduce((n, t) => n + t.content.length, 0)
+
+// Keep the conversation under `maxChars`, dropping the oldest turns first (a user turn with the
+// answer after it, so the history never starts with an orphan answer). The last exchange always
+// stays, however long: a cap must not erase what was just said.
+export const capHistory = (history: IConversationTurn[], maxChars: number): IConversationTurn[] => {
+  const out = [...history]
+  while (out.length > 2 && historyChars(out) > maxChars) {
+    out.shift()
+    while (out.length > 2 && out[0]?.role === 'assistant') {
+      out.shift()
+    }
+  }
+  return out
+}
+
+// A turn is over (or parked): the history, the record and the marker to write.
+export const finishTurn = (
+  state: ISessionState,
+  input: ITurnInput,
+  outcome: TurnOutcome,
+  now: number,
+): void => {
+  const running = state.running
+  delete state.running
+  state.stopping = false
+  state.turnsThisRun += 1
+  const startedAt = running?.startedAt ?? now
+  if (outcome.status === 'parked') {
+    state.parked = {
+      turn: input.turn,
+      runId: outcome.runId,
+      requests: outcome.requests,
+      input: input.input,
+      messageIds: input.messageIds,
+      startedAt,
+      ...(outcome.turnAttempt !== undefined ? { turnAttempt: outcome.turnAttempt } : {}),
+      children: [],
+      ended: 0,
+    }
+    // Answers that came before the park: kept only where they fit their request.
+    for (const r of outcome.requests) {
+      const early = state.answers[r.requestId]
+      if (early && refusalOf(r, early)) {
+        delete state.answers[r.requestId]
+      }
+    }
+    recordTurn(state, {
+      turn: input.turn,
+      status: 'parked',
+      messageIds: input.messageIds,
+      startedAt,
+      runId: outcome.runId,
+      attempt: outcome.attempt,
+    })
+    return
+  }
+  if (outcome.status === 'completed') {
+    const base = outcome.compactedHistory ?? state.history
+    state.history = capHistory(
+      [
+        ...base,
+        { role: 'user', content: input.input },
+        { role: 'assistant', content: outcome.text },
+      ],
+      state.options.historyMaxChars,
+    )
+  }
+  const record: ITurnRecord = {
+    turn: input.turn,
+    status: outcome.status,
+    messageIds: input.messageIds,
+    startedAt,
+    endedAt: now,
+    ...(outcome.status !== 'failed' && outcome.runId ? { runId: outcome.runId } : {}),
+    ...(outcome.status !== 'failed' && outcome.attempt ? { attempt: outcome.attempt } : {}),
+    ...(outcome.status === 'completed' ? { text: outcome.text } : {}),
+    ...(outcome.status === 'failed' ? { error: outcome.error } : {}),
+    ...(outcome.status !== 'failed' && outcome.usage ? { usage: outcome.usage } : {}),
+  }
+  recordTurn(state, record)
+  state.endings.push({
+    sessionId: state.sessionId,
+    turn: input.turn,
+    status: record.status as ITurnEnd['status'],
+    ...(record.runId ? { runId: record.runId } : {}),
+    ...(record.attempt ? { attempt: record.attempt } : {}),
+    ...(record.text !== undefined ? { text: record.text } : {}),
+    ...(record.error ? { error: record.error } : {}),
+    ...(record.usage ? { usage: record.usage } : {}),
+  })
+}
+
+// Continue-as-new at a quiet point (nothing running, every marker written), when Temporal
+// suggests it (the history is large) or after maxTurnsPerRun turns.
+export const shouldContinueAsNew = (state: ISessionState, suggested: boolean): boolean =>
+  !state.running &&
+  state.endings.length === 0 &&
+  state.markers.length === 0 &&
+  !childrenRunning(state) &&
+  (suggested || state.turnsThisRun >= state.options.maxTurnsPerRun)
+
+export const carry = (state: ISessionState): ISessionCarry => {
+  const { turnsThisRun: _n, options: _o, sessionId: _s, ...rest } = state
+  void [_n, _o, _s]
+  return rest
+}
+
+export const view = (state: ISessionState, ended = false): ISessionView => ({
+  sessionId: state.sessionId,
+  status: ended
+    ? 'ended'
+    : state.running
+      ? state.stopping
+        ? 'stopping'
+        : 'running'
+      : state.parked
+        ? 'parked'
+        : 'idle',
+  turn: state.turn,
+  ...(state.running
+    ? {
+        running: {
+          turn: state.running.turn,
+          messageIds: state.running.messageIds,
+          startedAt: state.running.startedAt,
+        },
+      }
+    : {}),
+  queued: state.inbox.map((m) => ({ id: m.id, at: m.at })),
+  dropped: state.dropped,
+  ...(state.parked
+    ? {
+        parked: {
+          turn: state.parked.turn,
+          runId: state.parked.runId,
+          requests: state.parked.requests,
+          answered: state.parked.requests
+            .map((r) => r.requestId)
+            .filter((id) => state.answers[id] !== undefined),
+          ...(state.parked.waiting?.length ? { waiting: state.parked.waiting } : {}),
+        },
+      }
+    : {}),
+  ...(state.subagentsStarted ? { subagentsStarted: state.subagentsStarted } : {}),
+  ...(state.pipelinesStarted ? { pipelinesStarted: state.pipelinesStarted } : {}),
+  history: state.history,
+  turns: state.turns,
+})

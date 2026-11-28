@@ -1,3 +1,20 @@
+# 0.0.31 / 2026-11-27
+
+### :tada: Enhancements
+- MCP skills: the MCP hooks take `skills: { dynamic: true }` per server, and the skill card says when a skill comes with no checksums from its server (you approve the copy the agent just read) or when the server cannot list its files. Labels `skillConsentDynamic`, `skillConsentNoFileListing`. Needs `@dudko.dev/agent-web` 0.0.42 for those skills; an older core declines them
+
+# 0.0.30 / 2026-11-27
+
+### :tada: Enhancements
+- Needs `@dudko.dev/agent-web` 0.0.41 or later (peer `>=0.0.41`)
+- MCP Apps in the chat: `<AgentChat mcpApps appPanel>` draws a tool's app in a sandboxed frame with host chrome (inline, folded, a side panel or a bottom sheet); its tool calls, links and messages wait for the user. Optional: an origin of its own behind a sandbox page you host (`appSandbox`; the server half is the new entry `@dudko.dev/agent-web-react/mcp-app-sandbox`), full screen after a click in the app (`appFullscreen`), file downloads with a prompt (`appDownloads`), the app asking the model (`appSampling`). `useMcpAppHost` for a custom UI; `apps: false` per server in the MCP hooks
+- MCP servers' questions: `ElicitationPrompt` in the chat; the MCP hooks take `elicitation` and per server `protocol`
+- MCP skills: `skills: true | { consent }` per server in the MCP hooks; a skill card in `ToolApprovalPrompt` shows whose skill it is and the text the model would get (`showSkillPreview`)
+- MCP OAuth: `oauth.registration` per server and `oauthRegistration` / `servers[i].oauthRegistration` (CIMD or DCR)
+- The files a turn wrote are chips under the answer, with previews and a sandboxed HTML frame (`FileChips`, `SandboxedFrame`)
+- Files pasted with Ctrl+V are attached anywhere in the drop zone
+- `createApprovalQueue`: the consent queue behind `useAgent`'s `approve` / `deny`; a question the core stops waiting for leaves it
+
 # 0.0.29 / 2026-11-26
 
 ### :tada: Enhancements

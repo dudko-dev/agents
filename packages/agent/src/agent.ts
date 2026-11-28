@@ -3,17 +3,35 @@ import { createApprovalController, isReadOnlyTool } from './approval.ts'
 import { compactionMaxTokens } from './call-options.ts'
 import { compactHistory, resolveCompaction } from './compaction.ts'
 import type { IAgentInternalContext, IExecutorTiers } from './internal.ts'
+import { runContext } from './context.ts'
 import { connectMcpServers, filterTools } from './mcp.ts'
 import { collectMcpInstructions, renderMcpInstructions } from './mcp-shared.ts'
-import { buildModelFromStage, resolveStage } from './provider.ts'
+import { buildModelFromStage, resolveStageModel, stageModelId } from './provider.ts'
 import { runAgentLoop } from './runner.ts'
+import { resolveRunLease } from './run-lease.ts'
+import { checkSharedLimits, stageModel } from './shared-limits.ts'
+import { checkJournal } from './journal.ts'
 import { createLearning } from './learning.ts'
 import { MODEL_TIERS, resolveEscalation } from './tiers.ts'
 import { createSandboxTools, RUN_JS_TOOL } from './sandbox.ts'
 import { createDynamicSubagentTool } from './subagent-dynamic.ts'
 import { resolveDynamicSubagents, SPAWN_SUBAGENT_TOOL } from './subagent-dynamic-shared.ts'
-import { collectMcpSkillSources, type McpSkillSource } from './mcp-skills.ts'
-import { createMcpSkills, createSkillTools, isMcpSkill, validateSkills } from './skills.ts'
+import {
+  collectMcpSkillSources,
+  createMcpSkillSnapshotMemory,
+  mcpSkillConsentOf,
+  mcpSkillsSettingOf,
+  resolveMcpSkillConsent,
+  type McpSkillSource,
+} from './mcp-skills.ts'
+import {
+  createMcpSkills,
+  createSkillTools,
+  isMcpSkill,
+  mcpSkillConsentScope,
+  releaseMcpSkills,
+  validateSkills,
+} from './skills.ts'
 import { createEgressTools } from './web-fetch.ts'
 import { createSearchTools } from './web-search.ts'
 import { createMedia } from './media.ts'
@@ -100,6 +118,9 @@ export interface IAgent {
   reconnect: () => Promise<void>
   close: (options?: ICloseOptions) => Promise<void>
   activeRuns: () => number
+  // With config.runLease: who this agent is to the lease (runLease.owner, or a random id made at
+  // createAgent). Undefined without a lease.
+  readonly leaseOwner?: string
 }
 
 const LEVEL_RANK: Record<LogLevel, number> = {
@@ -141,6 +162,11 @@ export const createAgent = async (
   // Validated up front: a bad skill is a configuration error, not something
   // to discover mid-run.
   const skills = validateSkills(config.skills)
+  // The scale-out hooks, checked before anything connects: a lease or a limiter that cannot work
+  // is a configuration error.
+  const lease = resolveRunLease(config.runLease)
+  checkSharedLimits(config.sharedLimits)
+  checkJournal(config.persistence)
   // The request shows the input AFTER inputSanitizer (idempotent by
   // contract); a throwing sanitizer redacts rather than leaks.
   const sanitizeForApproval = async (name: string, input: unknown): Promise<unknown> => {
@@ -162,6 +188,7 @@ export const createAgent = async (
     approval,
     maxToolCalls: config.maxToolCalls,
     maxToolOutputChars: compaction.maxToolOutputChars,
+    sanitize: sanitizeForApproval,
   }
   // The agent's notebook: lessons it writes join `skills` (mutated in place) and are tools of its own.
   const learning = config.learning
@@ -169,11 +196,53 @@ export const createAgent = async (
         log('warn', m),
       )
     : undefined
-  // `skills: true` on an MCP server (experimental): its skills join `skills` once it is
-  // connected (and again after a refresh), so the skill tools exist from the start.
-  const mcpSkillsOn = Object.values(config.mcpServers).some((s) => s.skills === true)
+  // `skills` on an MCP server (experimental): its skills join `skills` once it is connected (and
+  // again after a refresh), so the skill tools exist from the start. The settings are checked
+  // here, before anything connects: a wrong one is a configuration error.
+  const mcpSkillServers = Object.entries(config.mcpServers)
+    .filter(([name, s]) => mcpSkillsSettingOf(s.skills, `mcpServers.${name}`).on)
+    .map(([name]) => name)
+  const mcpSkillsOn = mcpSkillServers.length > 0
+  const mcpSkillConsent = mcpSkillConsentOf(config.mcpSkills?.consent, 'mcpSkills.consent')
+  // Asked through toolApproval.onRequest: without one, nobody can say yes - said once, here.
+  if (!config.toolApproval?.onRequest) {
+    for (const name of mcpSkillServers) {
+      const own = mcpSkillsSettingOf(config.mcpServers[name].skills, `mcpServers.${name}`).consent
+      const consent = resolveMcpSkillConsent(own, mcpSkillConsent)
+      if (consent !== 'never') {
+        log(
+          'warn',
+          `[mcp] ${name}: its skills are loaded only with a person's consent (consent '${consent}'), and there is no toolApproval.onRequest - every load of one will be refused; skills: { consent: 'never' } is for a server you vetted`,
+        )
+      }
+    }
+  }
+  // The servers' skill sources, as the last connect / refresh left them.
+  let mcpSkillSources: McpSkillSource[] = []
+  // What this agent's snapshots of generated skills (`skills: { dynamic: true }`) hold in memory,
+  // together: the skill objects a refresh drops give theirs back (releaseMcpSkills).
+  const mcpSkillMemory = createMcpSkillSnapshotMemory()
   const builtinTools = wrapToolSet(
-    createSkillTools(skills, { live: Boolean(learning) || mcpSkillsOn }),
+    createSkillTools(skills, {
+      live: Boolean(learning) || mcpSkillsOn,
+      ...(mcpSkillsOn
+        ? {
+            mcp: {
+              servers: mcpSkillServers,
+              sources: () => mcpSkillSources,
+              // The run's consent record, from the run context: a person is asked through the
+              // same gate as a tool call.
+              scope: () =>
+                mcpSkillConsentScope(
+                  approval,
+                  runContext.getStore()?.state?.mcpSkillConsent,
+                  mcpSkillConsent,
+                ),
+              memory: mcpSkillMemory,
+            },
+          }
+        : {}),
+    }),
     wrapDeps,
     {
       builtIn: true,
@@ -353,9 +422,10 @@ export const createAgent = async (
   // The MCP servers' skills in `skills` (mutated in place, as the lessons are): replaced only
   // between runs - at start, after a refresh or a reconnect - never under one.
   const syncMcpSkills = (sources: McpSkillSource[]): void => {
+    mcpSkillSources = sources
     for (let i = skills.length - 1; i >= 0; i--) {
       if (isMcpSkill(skills[i])) {
-        skills.splice(i, 1)
+        releaseMcpSkills(skills.splice(i, 1))
       }
     }
     if (sources.length) {
@@ -364,6 +434,7 @@ export const createAgent = async (
           sources,
           skills.map((s) => s.name),
           (m) => log('warn', m),
+          mcpSkillMemory,
         ),
       )
     }
@@ -407,7 +478,8 @@ export const createAgent = async (
   // Executor always inherits the top-level config; planner / synthesizer can
   // override any field (provider, baseURL, apiKey, model) via the dedicated
   // override blocks. Legacy plannerModel / synthesizerModel still work as
-  // model-only shortcuts when the override block is absent.
+  // model-only shortcuts when the override block is absent. A model object (top level, a
+  // stage, a tier) is used as it is - nothing is imported or built for it.
   //
   // Provider SDKs are dynamically imported (peerDependencies, optional), so
   // model construction is async; build all three in parallel since they are
@@ -422,9 +494,9 @@ export const createAgent = async (
     // The `standard` tier IS the executor: the top-level model unless executorTiers.standard
     // overrides it. Tiers are in play only when a light or a strong model is named too.
     const tierConfig = config.executorTiers ?? {}
-    const executorStage = resolveStage(config, tierConfig.standard, undefined, 'executor')
-    const plannerStage = resolveStage(config, config.planner, config.plannerModel, 'planner')
-    const synthesizerStage = resolveStage(
+    const executorStage = resolveStageModel(config, tierConfig.standard, undefined, 'executor')
+    const plannerStage = resolveStageModel(config, config.planner, config.plannerModel, 'planner')
+    const synthesizerStage = resolveStageModel(
       config,
       config.synthesizer,
       config.synthesizerModel,
@@ -437,12 +509,17 @@ export const createAgent = async (
     ])
     if (tierConfig.light || tierConfig.strong) {
       const models: IExecutorTiers['models'] = { standard: executorModel }
-      const ids: IExecutorTiers['ids'] = { standard: executorStage.model }
+      const ids: IExecutorTiers['ids'] = { standard: stageModelId(executorStage) }
       for (const tier of ['light', 'strong'] as const) {
         if (tierConfig[tier]) {
-          const stage = resolveStage(config, tierConfig[tier], undefined, `executorTiers.${tier}`)
+          const stage = resolveStageModel(
+            config,
+            tierConfig[tier],
+            undefined,
+            `executorTiers.${tier}`,
+          )
           models[tier] = await buildModelFromStage(config.clientName, stage)
-          ids[tier] = stage.model
+          ids[tier] = stageModelId(stage)
         }
       }
       tiers = {
@@ -493,7 +570,9 @@ export const createAgent = async (
         }
       : {}),
     approval,
+    ...(mcpSkillConsent ? { mcpSkillConsent } : {}),
     ...(media ? { media } : {}),
+    ...(lease ? { lease } : {}),
   }
   // Only between runs (here, a refresh, a reconnect): a run keeps the text it started with.
   const syncMcpInstructions = (text: string): void => {
@@ -668,19 +747,23 @@ export const createAgent = async (
     listLearnedSkills: () => (learning ? learning.learned().map((s) => ({ ...s })) : []),
     forgetSkill: async (name: string) => (learning ? learning.forget(name) : false),
     compact: async (options: ICompactOptions): Promise<ICompactResult> => {
-      const r = await compactHistory(options.history, ctx.synthesizerModel, {
-        thresholdTokens: compaction.thresholdTokens,
-        keepRecentTurns: compaction.keepRecentTurns,
-        summaryMaxTokens: compactionMaxTokens(config, compaction.summaryMaxTokens),
-        maxInputTokens: Math.floor(compaction.contextWindowTokens * 0.6),
-        force: options.force,
-        signal: options.signal,
-        timeoutMs: config.llmTimeoutMs,
-        onUsage: (usage) => {
-          accumulateUsage(spent, usage)
-          emit({ type: 'usage', phase: 'compact', usage })
+      const r = await compactHistory(
+        options.history,
+        stageModel(ctx, 'compaction', ctx.synthesizerModel),
+        {
+          thresholdTokens: compaction.thresholdTokens,
+          keepRecentTurns: compaction.keepRecentTurns,
+          summaryMaxTokens: compactionMaxTokens(config, compaction.summaryMaxTokens),
+          maxInputTokens: Math.floor(compaction.contextWindowTokens * 0.6),
+          force: options.force,
+          signal: options.signal,
+          timeoutMs: config.llmTimeoutMs,
+          onUsage: (usage) => {
+            accumulateUsage(spent, usage)
+            emit({ type: 'usage', phase: 'compact', usage })
+          },
         },
-      })
+      )
       if (r.compacted) {
         emit({
           type: 'context.compacted',
@@ -810,5 +893,6 @@ export const createAgent = async (
       }
     },
     activeRuns: () => activeRuns,
+    ...(lease ? { leaseOwner: lease.owner } : {}),
   }
 }

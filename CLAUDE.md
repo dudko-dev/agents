@@ -1,7 +1,7 @@
 # agents — instructions for Claude
 
-Monorepo (pnpm workspaces + Nx) of three published packages, one private test package and four
-private apps:
+Monorepo (pnpm workspaces + Nx) of three published packages, one private test package, four
+private apps and one private example:
 
 - `packages/agent` — `@dudko.dev/agent`, the Node / server agent.
 - `packages/agent-web` — `@dudko.dev/agent-web`, the in-browser agent (the core of the next two).
@@ -37,6 +37,19 @@ private apps:
   dudko.dev; the allowed hosts in `vars`), its own Workers Builds project.
   `pnpm nx build site` never builds it (`site` / `demo` do not depend on it; its test pins that).
   Locally the demo's `vite dev` / `vite preview` serve the same page under the other loopback name.
+- `examples/swarm` — `swarm` (private, NEVER published; not in `release-plan.mjs`, and must stay
+  out of it): a reference deployment of the Node agent as a horizontally scaled swarm on
+  self-hosted Temporal + Postgres - a session workflow per conversation, one `agent.run` per turn as
+  an activity, the agent's scale-out hooks (`persistence` with the call journal, `runLease`,
+  `sharedLimits`, events) on Temporal and Postgres, turns that park on a person's answer, static
+  subagents and pipelines (the core's graph engine in a workflow) as child workflows, a stateless
+  `node:http` gateway with SSE, one image (`Dockerfile`, distroless, roles `gateway` | `worker` |
+  `migrate`), `compose.yaml` and a Helm chart
+  (`deploy/helm/agent-swarm`). TypeScript run directly by Node; `build`
+  only bundles the workflow code. `test` needs nothing external; `test:integration` needs a Postgres
+  (`DATABASE_URL`) and starts a Temporal dev server (`@temporalio/testing`, downloaded) - CI runs it
+  in `swarm.yml`, not in `ci.yml`. It uses only the agent's public API: a change it would need in
+  the core is a change to `packages/agent`, made there. Its own `CLAUDE.md` has the rules.
 
 **Each package has its own `CLAUDE.md`. Read it before changing that package** — layout, conventions
 and the reasons behind them live there. This file holds only what is shared.
@@ -54,9 +67,10 @@ pnpm nx <target> <project>   # e.g. pnpm nx test @dudko.dev/agent-web
 ```
 
 Projects: `@dudko.dev/agent`, `@dudko.dev/agent-web`, `@dudko.dev/agent-web-react`,
-`@dudko.dev/test-servers`, `demo`, `site`, `worker`, `app-sandbox`.
+`@dudko.dev/test-servers`, `demo`, `site`, `worker`, `app-sandbox`, `swarm`.
 Targets come from each package's `scripts`: `typecheck`, `format:check`, `format`, `build`, `test`
-(and `test:e2e` in the React package; `@dudko.dev/test-servers` has no `build`).
+(and `test:e2e` in the React package, `test:integration` in `swarm` - not part of `pnpm check`;
+`@dudko.dev/test-servers` has no `build`).
 
 After **any** change to `.ts` / `.tsx`, run the four checks for the packages you touched **and
 everything that depends on them** (`pnpm affected`, or `pnpm check` when in doubt) with the Bash
@@ -84,6 +98,10 @@ tool. Do not infer success from "the change looks right".
   in a test or an e2e file needs a `devDependencies` entry in that package.
 - Dependency install scripts are off except for the ones listed in `pnpm-workspace.yaml`
   (`onlyBuiltDependencies`).
+- `pnpm-workspace.yaml` keeps `@types/json-schema` out of the hidden hoist (`hoistPattern`): the
+  swarm's Temporal worker brings it (through webpack), and hoisted it would give the AI SDK's own
+  `.d.ts` a real `JSONSchema7` and change what the cores typecheck against. Drop the exclusion once
+  the cores' JSON schemas typecheck against it.
 
 ## Conventions
 
@@ -104,8 +122,14 @@ tool. Do not infer success from "the change looks right".
   every package whose version is not on npm yet — `.github/scripts/release-plan.mjs` decides — via
   npm Trusted Publishing, tags `<dir>-v<version>` and creates a GitHub release); `live-model.yml`
   (the Node agent against a real local model: gates its publish, and runs on PRs that touch its
-  dependencies). Do not edit `release.yml` unless asked: npm's Trusted Publisher setting names
-  that file and the `release` environment.
+  dependencies); `swarm.yml` (the swarm example's integration tests against a Postgres service
+  and a Temporal dev server, its Docker image built without a push, and its Helm chart's lint /
+  template / kubeconform, on changes to `examples/swarm` or `packages/agent`); `swarm-image.yml`
+  (publishes the swarm image for linux/amd64 + arm64 to `ghcr.io/dudko-dev/agent-swarm`, and to
+  `docker.io/sergdudko/agent-swarm` when the `DOCKER_USER` / `DOCKER_PAT` secrets are set: on an
+  `agent-v*` tag - after a Release run, since release.yml's tag push starts no workflow - and by
+  hand; never on PRs). Do not edit `release.yml` unless asked: npm's Trusted Publisher setting
+  names that file and the `release` environment.
 - The site and the demo are built and deployed by Cloudflare (Workers Builds: `pnpm nx build site`,
   then `wrangler.jsonc` publishes `apps/site/dist`), not by a workflow here. The site is static
   assets, served without a script; there IS a Worker script (`main`: `apps/worker/dist/index.js`,
@@ -125,7 +149,9 @@ tool. Do not infer success from "the change looks right".
   When the checks are red it dispatches `claude.yml`, which fixes the branch (up to 3 attempts).
   Events made with `GITHUB_TOKEN` start no workflows, which is why these two dispatch `ci.yml`,
   `live-model.yml` and `release.yml` explicitly — do not replace the dispatches with comment
-  mentions or rely on `pull_request` / `push` triggers there.
+  mentions or rely on `pull_request` / `push` triggers there. The same goes for the swarm image:
+  a Release run autoupdate dispatched fires no `workflow_run`, so autoupdate waits for the agent's
+  release tag at the merge commit and dispatches `swarm-image.yml` with it.
 - On an autoupdate branch (`chore/autoupdate-<run_id>`): make the checks green with compatibility
   fixes only, never change product behaviour or versions; if that is impossible, say so in a PR
   comment instead of guessing.

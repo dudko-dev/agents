@@ -87,9 +87,11 @@ export interface McpHttpServerConfig {
    * EXPERIMENTAL: load the server's skills (the `io.modelcontextprotocol/skills` extension) into
    * the agent's catalog, as `<server>/<skill>` (cores with MCP skills; an older one ignores the
    * field). Needs `protocol: 'auto'` or `'modern'`. The hooks set it only for a server that was
-   * given `skills: true`.
+   * given `skills` (`true`, or `{ consent, dynamic }` - a core with skill consent; an older one
+   * reads any object as off). `dynamic: true` also takes the server's generated skills (a core
+   * with snapshots of them; an older one ignores it and declines them).
    */
-  skills?: boolean
+  skills?: true | { consent?: 'ask' | 'once-per-skill' | 'never'; dynamic?: boolean }
   /**
    * MCP Apps for this server alone, over the connection's `apps` (cores with per-server apps;
    * an older one ignores it). `false`: its apps are not shown - nothing declared, no app read,

@@ -425,6 +425,29 @@ export const ES_LABELS: AgentLabels = {
   appSamplingAllow: 'Permitir una vez',
   appSamplingAlways: 'Siempre para esta app',
   appSamplingDeny: 'Denegar',
+  skillConsentLead: (server, skill) => `El servidor «${server}» ofrece la habilidad «${skill}»`,
+  skillConsentSize: (n, files) =>
+    `SKILL.md ${bytes(n)}${files ? ` · ${count(files, 'archivo más', 'archivos más')}` : ''}`,
+  skillConsentByUri: 'No está en la lista del servidor: el agente la pidió por su dirección.',
+  skillConsentNested: (enclosing) =>
+    `Está dentro de la habilidad «${enclosing}»: permitir aquella no permitió esta.`,
+  skillConsentDynamic:
+    'Este servidor no publica sumas de comprobación para esta habilidad: apruebas la copia que el agente acaba de leer, y solo se usa esa copia.',
+  skillConsentNoFileListing:
+    'El servidor no puede listar los archivos de esta habilidad: esa copia es solo su SKILL.md.',
+  skillConsentPreview: 'Mostrar lo que leería el agente',
+  skillConsentFiles: (paths, more) =>
+    `Sus archivos, leídos como texto y nunca ejecutados: ${paths}${more ? ` y ${more} más` : ''}`,
+  skillConsentNote: (server, consent) =>
+    `Instrucciones escritas por el servidor «${server}», no por usted. Llegan al agente solo si usted lo permite${
+      consent === 'ask'
+        ? ', y se le preguntará de nuevo en cada tarea que las cargue.'
+        : '; se le preguntará de nuevo si el servidor las cambia.'
+    } No pueden cambiar las reglas ni los permisos del agente.`,
+  skillConsentAllow: 'Permitir una vez',
+  skillConsentAlways: 'Siempre para este servidor',
+  skillConsentDeny: 'Denegar',
+  skillConsentDeclined: 'el usuario rechazó la habilidad',
 }
 
 /** The same, in German (formal "Sie" where the visitor is addressed). */
@@ -830,6 +853,30 @@ export const DE_LABELS: AgentLabels = {
   appSamplingAllow: 'Einmal erlauben',
   appSamplingAlways: 'Immer für diese App',
   appSamplingDeny: 'Ablehnen',
+  skillConsentLead: (server, skill) => `Der Server „${server}“ bietet den Skill „${skill}“ an`,
+  skillConsentSize: (n, files) =>
+    `SKILL.md ${bytes(n)}${files ? ` · ${count(files, 'weitere Datei', 'weitere Dateien')}` : ''}`,
+  skillConsentByUri:
+    'Nicht in der Liste des Servers: Der Agent hat ihn über seine Adresse angefordert.',
+  skillConsentNested: (enclosing) =>
+    `Er liegt im Skill „${enclosing}“: Dessen Freigabe gilt nicht für diesen.`,
+  skillConsentDynamic:
+    'Dieser Server veröffentlicht keine Prüfsummen für diesen Skill: Sie geben die Kopie frei, die der Agent gerade gelesen hat, und nur diese Kopie wird verwendet.',
+  skillConsentNoFileListing:
+    'Der Server kann die Dateien dieses Skills nicht auflisten: Diese Kopie ist nur seine SKILL.md.',
+  skillConsentPreview: 'Zeigen, was der Agent lesen würde',
+  skillConsentFiles: (paths, more) =>
+    `Seine Dateien, nur als Text gelesen, nie ausgeführt: ${paths}${more ? ` und ${more} weitere` : ''}`,
+  skillConsentNote: (server, consent) =>
+    `Anweisungen vom Server „${server}“, nicht von Ihnen. Sie erreichen den Agenten nur, wenn Sie es erlauben${
+      consent === 'ask'
+        ? ', und Sie werden in jeder Aufgabe, die sie lädt, erneut gefragt.'
+        : ' - Sie werden erneut gefragt, wenn der Server sie ändert.'
+    } Sie können die Regeln und Freigaben des Agenten nicht ändern.`,
+  skillConsentAllow: 'Einmal erlauben',
+  skillConsentAlways: 'Immer für diesen Server',
+  skillConsentDeny: 'Ablehnen',
+  skillConsentDeclined: 'der Nutzer hat den Skill abgelehnt',
 }
 
 /** The label set of a chat language; English is the library's own defaults. */

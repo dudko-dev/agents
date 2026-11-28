@@ -4,6 +4,7 @@ import test from 'node:test'
 import {
   startLocalMcpServer,
   SKILL_MARKERS,
+  SKILL_URIS,
   type ILocalMcpServer,
   type McpProtocol,
 } from '@dudko.dev/test-servers'
@@ -104,19 +105,29 @@ interface Rig {
 }
 
 const withRig = async (
-  opts: { protocol?: McpProtocol; server?: Partial<McpHttpServerConfig> },
+  opts: {
+    protocol?: McpProtocol
+    server?: Partial<McpHttpServerConfig>
+    directoryRead?: boolean | { pageSize?: number }
+  },
   body: (rig: Rig) => Promise<void>,
 ): Promise<void> => {
-  const server = await startLocalMcpServer({ protocol: opts.protocol ?? 'modern', skills: true })
+  const server = await startLocalMcpServer({
+    protocol: opts.protocol ?? 'modern',
+    skills: true,
+    ...(opts.directoryRead ? { skillDirectoryRead: opts.directoryRead } : {}),
+  })
   const wire = recorder()
   const logs: string[] = []
   const changed: string[] = []
   const mcp = await connectMcpHttp(
     {
+      // The host vetted this server (`consent: 'never'`): these tests are about loading. The
+      // consent has its own tests below, with `skills: true` (the default consent).
       docs: {
         url: server.url,
         protocol: 'modern',
-        skills: true,
+        skills: { consent: 'never' },
         fetch: wire.fetch,
         ...opts.server,
       },
@@ -184,6 +195,7 @@ test('mcp skills (browser): OFF by default - nothing declared, nothing asked, no
     assert.equal(declaresSkills(rig.wire), false)
     assert.ok(!methodsOf(rig.wire).some((m) => m.startsWith('skills/')))
     assert.ok(!rig.server.requests.some((r) => r.method.startsWith('skills/')))
+    assert.ok(!methodsOf(rig.wire).includes('resources/directory/read'))
   })
 })
 
@@ -206,7 +218,7 @@ test('mcp skills (browser): a 2025 connection declares and asks nothing (the ext
 })
 
 test('mcp skills (browser): ON - the catalog comes with the tools, <server>/<skill>, nothing read', async () => {
-  await withRig({}, async (rig) => {
+  await withRig({ server: { skills: true } }, async (rig) => {
     assert.equal(declaresSkills(rig.wire), true)
     const agent = await rig.agent()
     assert.deepEqual(
@@ -504,4 +516,887 @@ test('mcp skills (browser): run_js is asked while the run acts on an MCP skill, 
       [['run_js', ['docs/git-workflow']]],
     )
   })
+})
+
+// ── consent: a person sees a server's skill before its text enters the model's context ─────
+
+const seenByModel = (rig: Rig): string => JSON.stringify(rig.calls.map((c) => c.options.prompt))
+const skillAsks = (asked: ToolApprovalRequest[]) => asked.filter((r) => r.skill)
+
+/** Both servers on one connection: `docs` (the rig's) and `other`, each with `skills`. */
+const withTwo = async (
+  rig: Rig,
+  other: ILocalMcpServer,
+  skills: McpHttpServerConfig['skills'],
+  body: (mcp: ConnectedMcp) => Promise<void>,
+): Promise<void> => {
+  const mcp = await connectMcpHttp({
+    docs: { url: rig.server.url, protocol: 'modern', skills },
+    other: { url: other.url, protocol: 'modern', skills },
+  })
+  try {
+    await body(mcp)
+  } finally {
+    await mcp.close()
+  }
+}
+
+test('mcp skills consent (browser): asked BEFORE the body enters; Allow lets it in, once per skill', async () => {
+  await withRig({ server: { skills: true } }, async (rig) => {
+    const asked: ToolApprovalRequest[] = []
+    const before: boolean[] = []
+    const agent = await rig.agent({
+      toolApproval: {
+        onRequest: (req) => {
+          asked.push(req)
+          before.push(seenByModel(rig).includes(SKILL_MARKERS.pdfProcessing))
+          return true
+        },
+      },
+    })
+    rig.scenario = { calls: [{ name: 'load_skill', args: { name: 'docs/pdf-processing' } }] }
+    const result = await run(rig, agent)
+    assert.deepEqual(before, [false], 'not a byte of it before the yes')
+    const [req] = asked
+    assert.equal(req.toolName, 'load_skill')
+    assert.deepEqual(req.input, { name: 'docs/pdf-processing' })
+    assert.deepEqual(
+      [req.skill?.server, req.skill?.name, req.skill?.skill, req.skill?.consent],
+      ['docs', 'docs/pdf-processing', 'pdf-processing', 'once-per-skill'],
+    )
+    assert.equal(req.skill?.description, 'Extract, fill and assemble PDF documents')
+    assert.ok(req.skill?.body.includes(SKILL_MARKERS.pdfProcessing))
+    const requested = rig.events.find((e) => e.type === 'tool.approval-requested')
+    assert.equal(
+      requested?.type === 'tool.approval-requested' && requested.skill?.name,
+      'docs/pdf-processing',
+    )
+    assert.equal(callsOf(result)[0].ok, true)
+    assert.ok(seenByModel(rig).includes(SKILL_MARKERS.pdfProcessing))
+    await run(rig, agent)
+    assert.equal(skillAsks(asked).length, 1, 'once-per-skill: not asked again')
+  })
+})
+
+test('mcp skills consent (browser): Deny keeps all of it out - the body, a file; the run does not ask again', async () => {
+  await withRig({ server: { skills: true } }, async (rig) => {
+    const asked: ToolApprovalRequest[] = []
+    const agent = await rig.agent({
+      toolApproval: {
+        onRequest: (req) => {
+          asked.push(req)
+          return { approved: false, reason: 'no' }
+        },
+      },
+    })
+    rig.scenario = {
+      planned: ['docs/git-workflow'],
+      calls: [
+        { name: 'load_skill', args: { name: 'docs/git-workflow' } },
+        {
+          name: 'read_skill_file',
+          args: { name: 'docs/pdf-processing', path: 'references/FORMS.md' },
+        },
+      ],
+    }
+    const result = await run(rig, agent)
+    const [load, file] = callsOf(result)
+    assert.equal(load.ok, false)
+    assert.match(errorOf(load.output), /already refused the skill "docs\/git-workflow"/)
+    assert.equal(file.ok, false)
+    assert.match(errorOf(file.output), /The user did not allow the skill "docs\/pdf-processing"/)
+    assert.deepEqual(
+      skillAsks(asked).map((r) => r.skill?.name),
+      ['docs/git-workflow', 'docs/pdf-processing'],
+      "the planner's pick was asked about once; load_skill of it then refused at once",
+    )
+    assert.deepEqual(result.skills, [])
+    assert.ok(!seenByModel(rig).includes(SKILL_MARKERS.gitWorkflow))
+    assert.ok(!seenByModel(rig).includes(SKILL_MARKERS.forms))
+    assert.ok(!rig.server.skillReads.includes('skill://pdf-processing/references/FORMS.md'))
+  })
+})
+
+test('mcp skills consent (browser): "Always for this server" - that server only; a nested skill asks again', async () => {
+  const other = await startLocalMcpServer({ protocol: 'modern', skills: true })
+  try {
+    await withRig({}, async (rig) => {
+      rig.server.skillFaults.nested = true
+      await withTwo(rig, other, true, async (mcp) => {
+        const asked: ToolApprovalRequest[] = []
+        const agent = await rig.agent({
+          tools: mcp.tools,
+          toolApproval: {
+            onRequest: (req) => {
+              asked.push(req)
+              return { approved: true, remember: true }
+            },
+          },
+        })
+        rig.scenario = {
+          calls: [
+            { name: 'load_skill', args: { name: 'docs/handbook' } },
+            { name: 'load_skill', args: { name: 'docs/git-workflow' } },
+            { name: 'load_skill', args: { name: 'docs/onboarding' } },
+            { name: 'load_skill', args: { name: 'other/git-workflow' } },
+          ],
+        }
+        const result = await run(rig, agent)
+        assert.ok(callsOf(result).every((c) => c.ok))
+        assert.deepEqual(
+          skillAsks(asked).map((r) => [r.skill?.name, r.skill?.nestedIn]),
+          [
+            ['docs/handbook', undefined],
+            ['docs/onboarding', 'docs/handbook'],
+            ['other/git-workflow', undefined],
+          ],
+        )
+      })
+    })
+  } finally {
+    await other.close()
+  }
+})
+
+test("mcp skills consent (browser): 'never' skips it, a server's own setting wins, autopilot still asks", async () => {
+  await withRig({ server: { skills: true } }, async (rig) => {
+    const asked: ToolApprovalRequest[] = []
+    const onRequest = (req: ToolApprovalRequest) => {
+      asked.push(req)
+      return true
+    }
+    rig.scenario = { calls: [{ name: 'load_skill', args: { name: 'docs/git-workflow' } }] }
+    await run(
+      rig,
+      await rig.agent({ mcpSkills: { consent: 'never' }, toolApproval: { onRequest } }),
+    )
+    assert.equal(skillAsks(asked).length, 0)
+    await run(
+      rig,
+      await rig.agent({
+        toolApproval: { mode: 'autopilot', rules: { '*': 'allow' }, onRequest },
+      }),
+    )
+    assert.equal(skillAsks(asked).length, 1, 'autopilot and a rule do not skip it')
+    await assert.rejects(
+      rig.agent({ mcpSkills: { consent: 'sometimes' as never } }),
+      /mcpSkills.consent must be/,
+    )
+  })
+  await withRig({ server: { skills: { consent: 'ask' } } }, async (rig) => {
+    const asked: ToolApprovalRequest[] = []
+    const agent = await rig.agent({
+      mcpSkills: { consent: 'never' },
+      toolApproval: {
+        onRequest: (req) => {
+          asked.push(req)
+          return true
+        },
+      },
+    })
+    rig.scenario = { calls: [{ name: 'load_skill', args: { name: 'docs/git-workflow' } }] }
+    await run(rig, agent)
+    await run(rig, agent)
+    assert.deepEqual(
+      skillAsks(asked).map((r) => r.skill?.consent),
+      ['ask', 'ask'],
+    )
+  })
+  // Nobody to ask: not loaded, and said at createAgent.
+  await withRig({ server: { skills: true } }, async (rig) => {
+    const agent = await rig.agent()
+    assert.ok(
+      rig.logs.some((l) => /docs: its skills are loaded only with a person's consent/.test(l)),
+    )
+    rig.scenario = { calls: [{ name: 'load_skill', args: { name: 'docs/git-workflow' } }] }
+    const [load] = callsOf(await run(rig, agent))
+    assert.match(errorOf(load.output), /no approval handler is configured/)
+    assert.ok(!seenByModel(rig).includes(SKILL_MARKERS.gitWorkflow))
+  })
+})
+
+// ── by URI ──────────────────────────────────────────────────────────────────
+
+test('mcp skills by URI (browser): from the named server only, under the same rules; it joins the catalog', async () => {
+  const other = await startLocalMcpServer({ protocol: 'modern', skills: true })
+  const vendor = 'skill://elsewhere/vendor-guide/SKILL.md'
+  try {
+    await other.addSkill('elsewhere/vendor-guide', 'The vendor guide', '# V\n\nVENDOR-BODY\n', {
+      listed: false,
+    })
+    await withRig({}, async (rig) => {
+      await withTwo(rig, other, true, async (mcp) => {
+        const asked: ToolApprovalRequest[] = []
+        const agent = await rig.agent({
+          tools: mcp.tools,
+          toolApproval: {
+            onRequest: (req) => {
+              asked.push(req)
+              return true
+            },
+          },
+        })
+        rig.scenario = {
+          calls: [
+            { name: 'load_skill', args: { server: 'docs', uri: SKILL_URIS.unlisted } },
+            { name: 'load_skill', args: { server: 'other', uri: vendor } },
+          ],
+        }
+        const result = await run(rig, agent)
+        const out = callsOf(result)[0].output as { name: string; content: string }
+        const second = callsOf(result)[1].output as { name: string; content: string }
+        assert.equal(second.name, 'other/vendor-guide')
+        assert.ok(second.content.includes('VENDOR-BODY'))
+        assert.equal(out.name, 'docs/release-checklist')
+        assert.match(out.content, /^\[A skill from the MCP server "docs"/)
+        assert.ok(out.content.includes(SKILL_MARKERS.unlisted))
+        // Each URI went to the server named with it, and to no other.
+        assert.deepEqual(rig.server.skillGets, [SKILL_URIS.unlisted])
+        assert.deepEqual(other.skillGets, [vendor])
+        assert.deepEqual(
+          skillAsks(asked).map((r) => [r.skill?.byUri, r.input]),
+          [
+            [true, { server: 'docs', uri: SKILL_URIS.unlisted }],
+            [true, { server: 'other', uri: vendor }],
+          ],
+        )
+        assert.ok(
+          agent.skills.some((s) => s.name === 'docs/release-checklist' && s.server === 'docs'),
+        )
+        assert.deepEqual(result.skills, ['docs/release-checklist', 'other/vendor-guide'])
+        // Its description says how, and to whom.
+        const executor = rig.calls.find((c) => stageOf(c) === 'executor')!
+        const tool = (executor.options.tools as { name: string; description?: string }[]).find(
+          (t) => t.name === 'load_skill',
+        )
+        assert.match(String(tool?.description), /Servers whose skills can be loaded: docs, other\./)
+      })
+    })
+  } finally {
+    await other.close()
+  }
+})
+
+test('mcp skills by URI (browser): refused before any request; -32602 surfaced; rules, verification, cap', async () => {
+  const other = await startLocalMcpServer({ protocol: 'modern', skills: true })
+  try {
+    await other.addSkill('elsewhere/vendor-guide', 'Vendor', '# V\n\nVENDOR-BODY\n', {
+      listed: false,
+    })
+    await withRig({}, async (rig) => {
+      // `other` is connected WITHOUT skills: its server serves them, its config did not ask.
+      const mcp = await connectMcpHttp({
+        docs: { url: rig.server.url, protocol: 'modern', skills: { consent: 'never' } },
+        other: { url: other.url, protocol: 'modern' },
+      })
+      try {
+        Object.assign(rig.server.skillFaults, { emptyListing: true, digest: true, dynamic: true })
+        const agent = await rig.agent({ tools: mcp.tools, maxStepsPerTask: 8 })
+        const vendor = 'skill://elsewhere/vendor-guide/SKILL.md'
+        rig.scenario = {
+          calls: [
+            { name: 'load_skill', args: { server: 'other', uri: vendor } },
+            {
+              name: 'load_skill',
+              args: { server: 'docs', uri: 'https://evil.example/a/SKILL.md' },
+            },
+            { name: 'load_skill', args: { server: 'docs', uri: vendor } },
+            { name: 'load_skill', args: { server: 'docs', uri: 'skill://tampered/SKILL.md' } },
+            { name: 'load_skill', args: { server: 'docs', uri: 'skill://generated/SKILL.md' } },
+          ],
+        }
+        const [notOn, notSkill, unknown, tampered, generated] = callsOf(await run(rig, agent))
+        assert.match(errorOf(notOn.output), /"other" is not a server whose skills can be loaded/)
+        assert.match(errorOf(notSkill.output), /is not a skill:\/\/ URI/)
+        assert.match(errorOf(unknown.output), /the server serves no skill at that URI \(-32602/)
+        assert.match(errorOf(tampered.output), /\(digest\)/)
+        assert.match(errorOf(generated.output), /its content is generated/)
+        assert.deepEqual(rig.server.skillGets, [
+          vendor,
+          'skill://tampered/SKILL.md',
+          'skill://generated/SKILL.md',
+        ])
+        assert.deepEqual(other.skillGets, [], 'nothing was sent to a server not opted in')
+        assert.ok(
+          !seenByModel(rig).includes('VENDOR-BODY') && !seenByModel(rig).includes('TAMPERED-BODY'),
+        )
+      } finally {
+        await mcp.close()
+      }
+    })
+  } finally {
+    await other.close()
+  }
+  await withRig({}, async (rig) => {
+    rig.server.skillFaults.extra = 40
+    await rig.mcp.refreshServer('docs')
+    const agent = await rig.agent()
+    rig.scenario = {
+      calls: [{ name: 'load_skill', args: { server: 'docs', uri: SKILL_URIS.unlisted } }],
+    }
+    const [full] = callsOf(await run(rig, agent))
+    assert.match(errorOf(full.output), /already has 32 skills in the catalog/)
+    assert.deepEqual(rig.server.skillGets, [])
+  })
+})
+
+test('mcp skills by URI (browser): never shadows a name in use', async () => {
+  await withRig({}, async (rig) => {
+    await rig.server.addSkill('internal/git-workflow', 'Another', '# O\n\nOTHER-GIT\n', {
+      listed: false,
+    })
+    const agent = await rig.agent({
+      skills: [{ name: 'git-workflow', description: 'Ours', content: 'HOST-GIT-WORKFLOW' }],
+    })
+    rig.scenario = {
+      calls: [
+        {
+          name: 'load_skill',
+          args: { server: 'docs', uri: 'skill://internal/git-workflow/SKILL.md' },
+        },
+        { name: 'load_skill', args: { name: 'git-workflow' } },
+      ],
+    }
+    const [byUri, host] = callsOf(await run(rig, agent))
+    assert.equal((byUri.output as { name: string }).name, 'docs/internal/git-workflow')
+    assert.equal((host.output as { content: string }).content, 'HOST-GIT-WORKFLOW')
+    assert.deepEqual(
+      agent.skills.map((s) => s.name).filter((n) => n.includes('git-workflow')),
+      ['git-workflow', 'docs/git-workflow', 'docs/internal/git-workflow'],
+    )
+  })
+})
+
+test("mcp skills consent (browser): 'ask' - let in by an earlier run, not active in a run whose person said no", async () => {
+  await withRig({ server: { skills: { consent: 'ask' } } }, async (rig) => {
+    const answers = [true, false]
+    const asked: ToolApprovalRequest[] = []
+    const agent = await rig.agent({
+      toolApproval: {
+        onRequest: (req) => {
+          asked.push(req)
+          return answers.shift() ?? false
+        },
+      },
+    })
+    rig.scenario = { calls: [{ name: 'load_skill', args: { name: 'docs/git-workflow' } }] }
+    await run(rig, agent)
+    const before = rig.calls.length
+    rig.events.length = 0
+    rig.scenario = { planned: ['docs/git-workflow'] }
+    const result = await run(rig, agent)
+    assert.equal(skillAsks(asked).length, 2)
+    assert.deepEqual(result.skills, [])
+    assert.deepEqual(
+      rig.events.filter((e) => e.type === 'skill.activated'),
+      [],
+    )
+    const executor = rig.calls.slice(before).filter((c) => stageOf(c) === 'executor')
+    assert.ok(executor.length > 0)
+    assert.ok(executor.every((c) => !c.system.includes(SKILL_MARKERS.gitWorkflow)))
+  })
+})
+
+// ── a directory of a skill: read_skill_file on a directory; resources/directory/read ─────────
+
+const directoryReadsOn = (wire: Wire) =>
+  wire.bodies.filter((b) => b.method === 'resources/directory/read')
+const readDir = (name: string, path: string) => ({ name: 'read_skill_file', args: { name, path } })
+
+// The skills a server's tools carry (the mark of `markMcpSkills`), with a spy on `readDirectory`.
+const SKILLS_MARK = Symbol.for('@dudko.dev/agent:mcp-skills')
+type MarkedSource = {
+  server: string
+  readDirectory?: (l: unknown, d: string, o?: { signal?: AbortSignal }) => Promise<unknown>
+}
+const spyOnDirectoryReads = (
+  tools: Record<string, unknown>,
+  server: string,
+  seen: (signal: AbortSignal | undefined) => void,
+): Record<string, unknown> => {
+  const out: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(tools)) {
+    const tool = { ...(value as object) } as Record<symbol, unknown>
+    const source = tool[SKILLS_MARK] as MarkedSource | undefined
+    if (source?.server === server && source.readDirectory) {
+      const read = source.readDirectory
+      const spy = Object.create(source) as MarkedSource
+      spy.readDirectory = (l, d, o) => {
+        seen(o?.signal)
+        return read(l, d, o)
+      }
+      Object.defineProperty(tool, SKILLS_MARK, { value: spy, enumerable: true })
+    }
+    out[key] = tool
+  }
+  return out
+}
+
+test('mcp skills directories (browser): listed from the held entry; no directoryRead - never on the wire', async () => {
+  await withRig({}, async (rig) => {
+    const agent = await rig.agent({ maxStepsPerTask: 8 })
+    rig.scenario = {
+      calls: [
+        { name: 'load_skill', args: { name: 'docs/pdf-processing' } },
+        readDir('docs/pdf-processing', ''),
+        readDir('docs/pdf-processing', './references/'),
+        readDir('docs/pdf-processing', 'nope'),
+        readDir('docs/pdf-processing', 'skill://pdf-processing/references'),
+      ],
+    }
+    const result = await run(rig, agent)
+    const [, root, references, nope, uri] = callsOf(result)
+    assert.deepEqual(root.output, {
+      name: 'docs/pdf-processing',
+      directory: '.',
+      files: [],
+      directories: ['references', 'scripts'],
+    })
+    assert.deepEqual(references.output, {
+      name: 'docs/pdf-processing',
+      directory: 'references',
+      files: ['references/FORMS.md'],
+      directories: [],
+    })
+    assert.equal(nope.ok, false)
+    assert.match(errorOf(nope.output), /has no file "nope"; its files: references\/FORMS.md/)
+    assert.equal(uri.ok, false)
+    assert.match(errorOf(uri.output), /not a path inside the skill/)
+    // Never called - not even tried (the SDK would refuse it too).
+    assert.deepEqual(directoryReadsOn(rig.wire), [])
+    assert.deepEqual(rig.server.skillDirectoryReads, [])
+    assert.ok(!rig.logs.some((l) => l.includes('resources/directory/read')), rig.logs.join('\n'))
+    assert.deepEqual(rig.server.skillReads, ['skill://pdf-processing/SKILL.md'])
+  })
+})
+
+test("mcp skills directories (browser): with directoryRead the skill's own server is asked, by its URI, page by page", async () => {
+  const other = await startLocalMcpServer({
+    protocol: 'modern',
+    skills: true,
+    skillDirectoryRead: true,
+  })
+  try {
+    await withRig({ directoryRead: { pageSize: 2 } }, async (rig) => {
+      await withTwo(rig, other, { consent: 'never' }, async (mcp) => {
+        // The tools carry docs' skills with a spy on its directory reads: the signal they get.
+        const signals: unknown[] = []
+        const tools = spyOnDirectoryReads(mcp.tools, 'docs', (signal) => signals.push(signal))
+        const agent = await rig.agent({ tools })
+        rig.scenario = {
+          calls: [readDir('docs/pdf-processing', '.'), readDir('docs/pdf-processing', 'scripts/')],
+        }
+        const result = await run(rig, agent)
+        const [root, scripts] = callsOf(result)
+        assert.deepEqual((root.output as { directories: string[] }).directories, [
+          'references',
+          'scripts',
+        ])
+        assert.deepEqual((scripts.output as { files: string[] }).files, ['scripts/extract.py'])
+        assert.equal((scripts.output as { note?: string }).note, undefined, 'the views agree')
+        // Three children of the root, two a page: two requests; then the subdirectory.
+        assert.deepEqual(rig.server.skillDirectoryReads, [
+          'skill://pdf-processing',
+          'skill://pdf-processing',
+          'skill://pdf-processing/scripts',
+        ])
+        assert.equal(signals.length, 2)
+        assert.ok(
+          signals.every((signal) => signal instanceof AbortSignal),
+          "the tool call's signal",
+        )
+        assert.deepEqual(other.skillDirectoryReads, [], "never the other server's")
+        assert.ok(!other.requests.some((r) => r.method === 'resources/directory/read'))
+      })
+    })
+  } finally {
+    await other.close()
+  }
+})
+
+test('mcp skills directories (browser): an extra file never reaches the model - a note, a warning, onToolsChanged', async () => {
+  await withRig({ directoryRead: true }, async (rig) => {
+    rig.server.skillFaults.directoryExtra = true
+    const agent = await rig.agent()
+    rig.scenario = {
+      calls: [
+        { name: 'load_skill', args: { name: 'docs/pdf-processing' } },
+        readDir('docs/pdf-processing', 'references'),
+        readDir('docs/pdf-processing', 'references'),
+      ],
+    }
+    const result = await run(rig, agent)
+    const [, listing, again] = callsOf(result)
+    const out = listing.output as Record<string, unknown>
+    assert.deepEqual(out.files, ['references/FORMS.md'])
+    assert.equal(out.notServed, undefined)
+    assert.match(
+      String(out.note),
+      /^The server now lists 1 more item\(s\) here than the approved entry of this skill/,
+    )
+    assert.ok(!JSON.stringify(out).includes('NEW'))
+    assert.ok(!seenByModel(rig).includes('NEW.md'), 'nothing of it in what the model was sent')
+    assert.ok(!seenByModel(rig).includes(SKILL_MARKERS.newFile))
+    assert.ok(!rig.server.skillReads.includes(SKILL_URIS.newFile), 'never read')
+    assert.ok(
+      rig.logs.some((l) =>
+        /^warn \[mcp\] docs: the skill "pdf-processing" \(skill:\/\/pdf-processing\/SKILL.md\) changed on the server - its directory "references" lists 1 item\(s\) its entry does not/.test(
+          l,
+        ),
+      ),
+    )
+    assert.ok(!rig.logs.some((l) => l.includes('NEW.md')))
+    // The host hears of it the way it hears of a list change - once for this loaded skill.
+    assert.deepEqual(rig.changed, ['docs'])
+    assert.equal((again.output as { note?: string }).note, out.note)
+  })
+})
+
+test('mcp skills directories (browser): notServed marked and kept; an error falls back to the entry', async () => {
+  await withRig({ directoryRead: true }, async (rig) => {
+    rig.server.skillFaults.directoryOmit = true
+    const agent = await rig.agent()
+    rig.scenario = { calls: [readDir('docs/pdf-processing', 'scripts')] }
+    const omitted = callsOf(await run(rig, agent))[0].output as Record<string, unknown>
+    assert.deepEqual(omitted.files, ['scripts/extract.py'])
+    assert.deepEqual(omitted.notServed, ['scripts/extract.py'])
+    assert.match(String(omitted.note), /\(notServed\) are no longer listed by the server/)
+    rig.server.skillFaults.directoryOmit = false
+    rig.server.skillFaults.directoryError = true
+    rig.scenario = { calls: [readDir('docs/pdf-processing', 'scripts')] }
+    const [failed] = callsOf(await run(rig, agent))
+    assert.equal(failed.ok, true)
+    assert.deepEqual(failed.output, {
+      name: 'docs/pdf-processing',
+      directory: 'scripts',
+      files: ['scripts/extract.py'],
+      directories: [],
+    })
+    assert.ok(
+      rig.logs.some((l) =>
+        /^warn \[mcp\] docs: resources\/directory\/read of skill:\/\/pdf-processing\/scripts failed - .*\(-32603\); the directory is listed from the skill's entry alone/.test(
+          l,
+        ),
+      ),
+    )
+  })
+})
+
+test('mcp skills directories (browser): before consent a directory is refused like a file - nothing asked', async () => {
+  await withRig({ directoryRead: true, server: { skills: true } }, async (rig) => {
+    const asked: ToolApprovalRequest[] = []
+    const agent = await rig.agent({
+      toolApproval: {
+        onRequest: (req) => {
+          asked.push(req)
+          return { approved: false, reason: 'no' }
+        },
+      },
+    })
+    rig.scenario = {
+      calls: [
+        readDir('docs/pdf-processing', 'references'),
+        readDir('docs/pdf-processing', 'references/FORMS.md'),
+      ],
+    }
+    const [directory, file] = callsOf(await run(rig, agent))
+    assert.equal(directory.ok, false)
+    assert.match(
+      errorOf(directory.output),
+      /The user did not allow the skill "docs\/pdf-processing"/,
+    )
+    assert.equal(file.ok, false)
+    assert.match(errorOf(file.output), /already refused the skill "docs\/pdf-processing"/)
+    assert.equal(skillAsks(asked).length, 1)
+    assert.deepEqual(rig.server.skillDirectoryReads, [], 'no directory read before a yes')
+    assert.deepEqual(rig.server.skillReads, ['skill://pdf-processing/SKILL.md'])
+  })
+})
+
+test("mcp skills directories (browser): the host's skills list their directories too", async () => {
+  await withRig({ directoryRead: true }, async (rig) => {
+    const agent = await rig.agent({
+      skills: [
+        {
+          name: 'invoices',
+          description: 'Invoice rules',
+          content: 'Pick a template from templates/.',
+          files: [
+            { path: 'notes', content: 'NOTES-FILE' },
+            { path: 'notes/a.md', content: 'A' },
+            { path: 'rates.json', content: '{}' },
+            { path: 'templates/eu.md', content: 'EU' },
+            { path: 'templates/regional/nordics.md', content: 'N' },
+          ],
+        },
+      ],
+      maxStepsPerTask: 8,
+    })
+    rig.scenario = {
+      calls: [
+        readDir('invoices', '/'),
+        readDir('invoices', 'templates'),
+        readDir('invoices', 'templates/eu.md'),
+        readDir('invoices', 'templates/../rates.json'),
+        readDir('invoices', 'notes'),
+        readDir('invoices', 'notes/'),
+      ],
+    }
+    const [root, templates, file, up, notesFile, notes] = callsOf(await run(rig, agent))
+    assert.deepEqual(root.output, {
+      name: 'invoices',
+      directory: '.',
+      files: ['notes', 'rates.json'],
+      directories: ['notes', 'templates'],
+    })
+    assert.equal(notesFile.output, 'NOTES-FILE', 'a file of that name wins')
+    assert.deepEqual((notes.output as { files: string[] }).files, ['notes/a.md'])
+    assert.deepEqual(templates.output, {
+      name: 'invoices',
+      directory: 'templates',
+      files: ['templates/eu.md'],
+      directories: ['templates/regional'],
+    })
+    assert.equal(file.output, 'EU')
+    assert.equal(up.ok, false)
+    assert.match(errorOf(up.output), /has no file "templates\/..\/rates.json"/)
+    assert.deepEqual(rig.server.skillDirectoryReads, [], 'a host skill asks no server')
+  })
+})
+
+// ── generated skills (`skills: { dynamic: true }`): a snapshot before consent ─────
+
+const GEN = SKILL_URIS.generated
+const GEN_FILES = ['skill://generated/references/notes.md', 'skill://generated/templates/a.md']
+const readsOf = (server: ILocalMcpServer, uri: string) => server.skillReads.filter((u) => u === uri)
+const MARK = Symbol.for('@dudko.dev/agent:mcp-skills')
+/** The skill source the connection's tools carry (the shared catalog's), for what binds a consent. */
+const sourceOf = (mcp: ConnectedMcp) =>
+  (mcp.tools.docs__echo as unknown as Record<symbol, McpSkillSourceLike>)[MARK]
+interface McpSkillSourceLike {
+  load: (
+    uri: string,
+  ) => Promise<{ entry: { resources: { uri: string; digest: string; size: number }[] } }>
+}
+
+test('mcp skills dynamic (browser): OFF by default - declined as always, the same wire', async () => {
+  const wires: string[][] = []
+  for (const server of [{}, { skills: { consent: 'never' as const, dynamic: false } }]) {
+    await withRig({ directoryRead: true, server }, async (rig) => {
+      rig.server.skillFaults.dynamic = true
+      await rig.mcp.refreshServer('docs')
+      const agent = await rig.agent()
+      assert.ok(!agent.skills.some((k) => k.name.includes('generated')))
+      assert.ok(
+        rig.logs.includes(
+          'warn [mcp] docs: skill skill://generated/SKILL.md refused - its content is generated ("resources": "dynamic"): there are no digests to verify it against',
+        ),
+        rig.logs.join('\n'),
+      )
+      wires.push(methodsOf(rig.wire))
+      assert.deepEqual([rig.server.skillReads, rig.server.skillDirectoryReads], [[], []])
+    })
+  }
+  await withRig(
+    { directoryRead: true, server: { skills: { consent: 'never', dynamic: true } } },
+    async (rig) => {
+      rig.server.skillFaults.dynamic = true
+      await rig.mcp.refreshServer('docs')
+      const agent = await rig.agent()
+      assert.ok(agent.skills.some((k) => k.name === 'docs/generated'))
+      wires.push(methodsOf(rig.wire))
+      assert.deepEqual([rig.server.skillReads, rig.server.skillDirectoryReads], [[], []])
+    },
+  )
+  assert.deepEqual(wires[1], wires[0])
+  assert.deepEqual(wires[2], wires[0], 'on: the same requests until a load')
+})
+
+test('mcp skills dynamic (browser): on - listed with its marker; the snapshot is read before the person is asked', async () => {
+  await withRig({ directoryRead: true, server: { skills: { dynamic: true } } }, async (rig) => {
+    rig.server.skillFaults.dynamic = true
+    await rig.mcp.refreshServer('docs')
+    const asked: ToolApprovalRequest[] = []
+    const atAsk: string[][] = []
+    const agent = await rig.agent({
+      toolApproval: {
+        onRequest: (req) => {
+          asked.push(req)
+          atAsk.push([...rig.server.skillReads])
+          assert.ok(!seenByModel(rig).includes(SKILL_MARKERS.generated), 'nothing before the yes')
+          return true
+        },
+      },
+    })
+    assert.equal(
+      agent.skills.find((k) => k.name === 'docs/generated')?.description,
+      'A skill generated on every read [from the MCP server "docs" - third-party, no checksums]',
+    )
+    rig.scenario = { calls: [{ name: 'load_skill', args: { name: 'docs/generated' } }] }
+    const [load] = callsOf(await run(rig, agent))
+    assert.deepEqual(atAsk, [[GEN, ...GEN_FILES]])
+    const view = skillAsks(asked)[0].skill
+    assert.deepEqual(
+      [view?.dynamic, view?.noFileListing, view?.files, view?.fileCount],
+      [true, undefined, ['references/notes.md', 'templates/a.md'], 2],
+    )
+    assert.ok((view?.totalSize ?? 0) > (view?.size ?? 0))
+    assert.ok(view?.body.includes(SKILL_MARKERS.generated))
+    assert.ok(
+      String((load.output as { content: string }).content).includes(SKILL_MARKERS.generated),
+    )
+    // Once per skill: the copy it holds, not asked again, not read again.
+    await run(rig, agent)
+    assert.equal(skillAsks(asked).length, 1)
+    assert.equal(readsOf(rig.server, GEN).length, 1)
+  })
+})
+
+test('mcp skills dynamic (browser): the model gets the SNAPSHOT; no second read; a file outside it is refused', async () => {
+  await withRig(
+    { directoryRead: true, server: { skills: { consent: 'never', dynamic: true } } },
+    async (rig) => {
+      rig.server.skillFaults.dynamicChanging = true
+      await rig.mcp.refreshServer('docs')
+      const agent = await rig.agent({ maxStepsPerTask: 8 })
+      const live = 'skill://changing/references/live.md'
+      rig.scenario = {
+        calls: [
+          { name: 'load_skill', args: { name: 'docs/changing' } },
+          readDir('docs/changing', 'references/live.md'),
+          readDir('docs/changing', 'references/live.md'),
+          readDir('docs/changing', 'references/other.md'),
+          readDir('docs/changing', 'references'),
+        ],
+      }
+      const [load, first, second, other, dir] = callsOf(await run(rig, agent))
+      assert.match((load.output as { content: string }).content, /CHANGING-BODY read 1\n/)
+      assert.match(String(first.output), /CHANGING-FILE-BODY read 1\n/)
+      assert.match(String(second.output), /CHANGING-FILE-BODY read 1\n/)
+      assert.equal(other.ok, false)
+      assert.match(errorOf(other.output), /has no file "references\/other.md"/)
+      assert.deepEqual((dir.output as { files: string[] }).files, ['references/live.md'])
+      assert.deepEqual(readsOf(rig.server, live), [live], 'read once, by the snapshot')
+      assert.deepEqual(readsOf(rig.server, SKILL_URIS.changing), [SKILL_URIS.changing])
+      assert.ok(!seenByModel(rig).includes('read 2'))
+    },
+  )
+})
+
+test('mcp skills dynamic (browser): over the limit - declined before anyone is asked; no directoryRead - SKILL.md alone', async () => {
+  await withRig({ directoryRead: true, server: { skills: { dynamic: true } } }, async (rig) => {
+    rig.server.skillFaults.dynamicOversize = true
+    await rig.mcp.refreshServer('docs')
+    const asked: ToolApprovalRequest[] = []
+    const agent = await rig.agent({
+      toolApproval: { onRequest: (req) => (asked.push(req), true) },
+    })
+    rig.scenario = { calls: [{ name: 'load_skill', args: { name: 'docs/sprawl' } }] }
+    const [load] = callsOf(await run(rig, agent))
+    assert.deepEqual(skillAsks(asked), [])
+    assert.equal(load.ok, false)
+    assert.match(errorOf(load.output), /was not loaded: it holds more than 512 files/)
+    assert.ok(
+      rig.logs.includes(
+        'warn [mcp] docs: the generated skill skill://sprawl/SKILL.md is declined - it holds more than 512 files (SKILL.md included; the limit); no one is asked, nothing of it is used',
+      ),
+    )
+    assert.deepEqual(rig.server.skillReads, [SKILL_URIS.sprawl])
+  })
+  await withRig({ server: { skills: { dynamic: true } } }, async (rig) => {
+    rig.server.skillFaults.dynamic = true
+    await rig.mcp.refreshServer('docs')
+    const asked: ToolApprovalRequest[] = []
+    const agent = await rig.agent({
+      toolApproval: { onRequest: (req) => (asked.push(req), true) },
+    })
+    rig.scenario = {
+      calls: [
+        { name: 'load_skill', args: { name: 'docs/generated' } },
+        readDir('docs/generated', 'references/notes.md'),
+      ],
+    }
+    const [, notes] = callsOf(await run(rig, agent))
+    const view = skillAsks(asked)[0].skill
+    assert.deepEqual([view?.dynamic, view?.noFileListing, view?.fileCount], [true, true, 0])
+    assert.equal(notes.ok, false)
+    assert.match(errorOf(notes.output), /has no file "references\/notes.md"; its files: none/)
+    assert.deepEqual(rig.server.skillReads, [GEN])
+    assert.deepEqual(directoryReadsOn(rig.wire), [])
+  })
+})
+
+test('mcp skills dynamic (browser): the consent binds to the copy - the same bytes, the same digests; a change, others', async () => {
+  await withRig({ directoryRead: true, server: { skills: { dynamic: true } } }, async (rig) => {
+    Object.assign(rig.server.skillFaults, { dynamic: true, dynamicChanging: true })
+    await rig.mcp.refreshServer('docs')
+    const source = sourceOf(rig.mcp)
+    const digests = async (uri: string) =>
+      (await source.load(uri)).entry.resources.map((r) => `${r.uri} ${r.size} ${r.digest}`)
+    const a = await digests(GEN)
+    assert.equal(a.length, 3)
+    for (const line of a) assert.match(line, / \d+ sha256:[0-9a-f]{64}$/)
+    assert.deepEqual(await digests(GEN), a, 'a second snapshot of the same bytes: the same')
+    const one = await digests(SKILL_URIS.changing)
+    const two = await digests(SKILL_URIS.changing)
+    assert.notDeepEqual(two, one, 'the server changed it: other digests, another consent')
+    // A new agent takes its own snapshot: asked about it.
+    const asked: ToolApprovalRequest[] = []
+    const agent = await rig.agent({
+      toolApproval: { onRequest: (req) => (asked.push(req), true) },
+    })
+    rig.scenario = { calls: [{ name: 'load_skill', args: { name: 'docs/changing' } }] }
+    await run(rig, agent)
+    assert.match(skillAsks(asked)[0].skill?.body ?? '', /CHANGING-BODY read 3/)
+  })
+})
+
+test('mcp skills dynamic (browser): nothing of the snapshot in an event or a checkpoint', async () => {
+  await withRig(
+    { directoryRead: true, server: { skills: { consent: 'never', dynamic: true } } },
+    async (rig) => {
+      rig.server.skillFaults.dynamic = true
+      await rig.mcp.refreshServer('docs')
+      const saved: unknown[] = []
+      const keep = (x: unknown) => void saved.push(structuredClone(x))
+      const agent = await rig.agent({
+        persistence: { onRunStart: keep, onStepComplete: keep, onRunComplete: keep },
+      })
+      rig.scenario = { planned: ['docs/generated'] }
+      await run(rig, agent)
+      assert.deepEqual(rig.server.skillReads, [GEN, ...GEN_FILES], 'read whole')
+      assert.ok(seenByModel(rig).includes(SKILL_MARKERS.generated), 'its body is in the context')
+      assert.ok(saved.length > 0)
+      const written = JSON.stringify([rig.events, saved])
+      for (const marker of [SKILL_MARKERS.generatedNotes, SKILL_MARKERS.generatedTemplate]) {
+        assert.ok(!written.includes(marker), marker)
+        assert.ok(!seenByModel(rig).includes(marker), `${marker} never sent to the model`)
+      }
+      assert.doesNotMatch(written, /sha256:[0-9a-f]{64}/, 'no digest of the copy')
+    },
+  )
+})
+
+test("mcp skills dynamic (browser): one agent's copies share its memory cap - counted together", async () => {
+  await withRig(
+    { directoryRead: true, server: { skills: { consent: 'never', dynamic: true } } },
+    async (rig) => {
+      Object.assign(rig.server.skillFaults, { dynamic: true, dynamicChanging: true })
+      await rig.mcp.refreshServer('docs')
+      const agent = await rig.agent()
+      rig.scenario = {
+        calls: [
+          { name: 'load_skill', args: { name: 'docs/generated' } },
+          { name: 'load_skill', args: { name: 'docs/changing' } },
+        ],
+      }
+      await run(rig, agent)
+      const held = rig.logs
+        .map((l) => /the agent's copies of generated skills now hold (\d+) bytes/.exec(l)?.[1])
+        .filter((n): n is string => n !== undefined)
+        .map(Number)
+      assert.equal(held.length, 2)
+      assert.ok(held[1] > held[0], `the second copy adds to the first: ${held.join(', ')}`)
+    },
+  )
 })

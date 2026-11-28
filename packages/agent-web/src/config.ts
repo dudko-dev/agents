@@ -16,6 +16,7 @@ import type { LearningConfig } from './learning.js'
 import type { SandboxConfig } from './sandbox/index.js'
 import type { ISubagentsConfig } from './subagent/dynamic-shared.js'
 import type { Skill } from './skills.js'
+import type { McpSkillConsent } from './mcp/skills.js'
 import type { IEgressPolicy } from './tools/egress.js'
 import type { ISearchConfig } from './tools/web-search.js'
 import type { IMediaConfig } from './tools/media.js'
@@ -201,6 +202,17 @@ export interface BrowserAgentConfig {
    * for servers you do not trust to write into a system prompt (see docs/security.md).
    */
   mcpInstructions?: boolean
+
+  /**
+   * The MCP servers' skills (`skills` on a server of `./mcp`, experimental). `consent`: when a
+   * person is asked before a skill's text enters the model's context, for every server whose own
+   * `skills: { consent }` does not say - `'once-per-skill'` (default: the first time per skill in
+   * the agent's life, again when its entry changes), `'ask'` (in every run that loads it) or
+   * `'never'` (no question: servers you vetted). Asked through `toolApproval.onRequest`, the
+   * request carrying `skill`; without a handler such a skill is not loaded. Autopilot does not
+   * skip it. See the README, "MCP skills".
+   */
+  mcpSkills?: { consent?: McpSkillConsent }
 
   /** Prepended to every phase's system prompt. */
   systemPrompt?: string

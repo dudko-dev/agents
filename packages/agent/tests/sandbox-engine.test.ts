@@ -140,6 +140,222 @@ test('guard timeout: waiting is bounded too (a timer past the deadline, a regex 
   assert.match(never.error?.message ?? '', /never settle/)
 })
 
+// The engine's clock is Date.now(); Node's timers run on the event loop's own (monotonic) time.
+// These tests move the first by hand and restore it afterwards.
+const realNow = Date.now
+
+test('guard timeout: a timer not due yet never runs its callback - not even when the clock reads the deadline exactly', async () => {
+  // The edge CI hit: the host timers fire at the deadline, but Date.now() - programAt reads
+  // exactly timeoutMs (two clocks, millisecond granularity), which is not over the limit. Here the
+  // clock stalls at that value for 100 ms of real time and then goes on, so it happens every run.
+  const timeoutMs = 400
+  let last = 0
+  let deadline = 0
+  let stallEnds = 0
+  Date.now = () => {
+    const now = realNow()
+    if (deadline && now >= deadline) {
+      stallEnds ||= now + 100
+      if (now < stallEnds) {
+        return (last = deadline)
+      }
+    }
+    return (last = now)
+  }
+  try {
+    for (const code of [
+      'await new Promise((r) => setTimeout(() => { console.log("woke"); r() }, 60000)); "slept"',
+      'setTimeout(() => console.log("woke"), 60000); "ended"',
+    ]) {
+      deadline = 0
+      stallEnds = 0
+      const r = await runGuest(
+        lib,
+        { code, limits: resolveSandboxLimits({ timeoutMs }) },
+        // Called right after the engine read the program's start from the clock.
+        { onStart: () => (deadline = last + timeoutMs) },
+      )
+      assert.ok(stallEnds > 0, 'the clock did stall at the deadline')
+      assert.equal(r.error?.name, 'TimeoutError', code)
+      assert.equal(r.stdout, '', `the 60 s timer's callback never ran: ${code}`)
+      assert.ok(!Object.hasOwn(r, 'result'), code)
+    }
+  } finally {
+    Date.now = realNow
+  }
+})
+
+test('guard timeout: while a file call waits, a timer runs its callback at its time - never before it', async () => {
+  // No watchdog runs and the budget is paused while the host serves a call; a timer clamped to
+  // the deadline used to run its callback at 400 ms, whatever it asked for.
+  const slow: SandboxHostCall = () => new Promise((r) => setTimeout(() => r('read'), 700))
+  const due = await run(
+    'const t0 = Date.now(); const timer = new Promise((r) => setTimeout(() => r(Date.now() - t0), 900)); const text = await fs.readFile("/a"); ({ text, waited: await timer })',
+    {},
+    { hostOps: ['readFile'] },
+    slow,
+  )
+  assert.equal(due.ok, true, JSON.stringify(due.error))
+  const { text, waited } = due.result as { text: string; waited: number }
+  assert.equal(text, 'read')
+  // 900 ms of which 700 were the wait: 200 ms of the 400 ms budget.
+  assert.ok(waited >= 900, `the 900 ms timer ran after ${waited} ms`)
+
+  const past = await run(
+    'setTimeout(() => console.log("early"), 30000); await fs.readFile("/a"); "read"',
+    {},
+    { hostOps: ['readFile'] },
+    slow,
+  )
+  assert.equal(past.error?.name, 'TimeoutError')
+  assert.equal(past.stdout, '', 'a timer past the deadline never runs, during a wait included')
+})
+
+test('guard timeout: a run whose time is spent ends at the deadline while a file call waits', async () => {
+  // The guest spends its time in one long native call (no interrupt check inside one), then
+  // waits on a file call: no watchdog runs while a call waits, so it is the guest's own timer,
+  // not due yet, that finds the time is up. The clock jumps a second to stand for that call.
+  let skew = 0
+  Date.now = () => realNow() + skew
+  let answer: ((value: unknown) => void) | undefined
+  const fallback = setTimeout(() => answer?.('read'), 3000)
+  try {
+    const began = realNow()
+    const r = await run(
+      'setTimeout(() => console.log("woke"), 60000); await fs.readFile("/a"); "read"',
+      {},
+      { hostOps: ['readFile'] },
+      () => {
+        skew += 1000
+        return new Promise((resolve) => (answer = resolve))
+      },
+    )
+    const took = realNow() - began
+    assert.equal(r.error?.name, 'TimeoutError')
+    assert.equal(r.stdout, '')
+    assert.ok(took < 2000, `stopped at the deadline, not when the call was answered: ${took} ms`)
+  } finally {
+    Date.now = realNow
+    clearTimeout(fallback)
+    answer?.('read')
+  }
+})
+
+test('guard timeout: a guest whose time is spent is not entered again - not for an answer, not for a due timer', async () => {
+  // As above, the clock jumps a second inside the guest (one long native call) before a file call.
+  let skew = 0
+  Date.now = () => realNow() + skew
+  const answers: (() => void)[] = []
+  try {
+    const answered = await run(
+      'await fs.readFile("/a"); console.log("after"); "read"',
+      {},
+      { hostOps: ['readFile'] },
+      () => {
+        skew += 1000
+        return new Promise((resolve) => setTimeout(() => resolve('read'), 20))
+      },
+    )
+    assert.equal(answered.error?.name, 'TimeoutError')
+    assert.equal(answered.stdout, '', 'nothing ran after the answer came')
+
+    skew = 0
+    const fallback = setTimeout(() => answers.forEach((a) => a()), 3000)
+    const timer = await run(
+      'setTimeout(() => console.log("timer"), 10); await fs.readFile("/a"); "read"',
+      {},
+      { hostOps: ['readFile'] },
+      () => {
+        skew += 1000
+        return new Promise((resolve) => answers.push(() => resolve('read')))
+      },
+    )
+    clearTimeout(fallback)
+    assert.equal(timer.error?.name, 'TimeoutError')
+    assert.equal(timer.stdout, '', 'the due timer found the time spent and did not run')
+  } finally {
+    Date.now = realNow
+    answers.forEach((a) => a())
+  }
+})
+
+test('guard timers: once a run is over none of its host timers is left - one cleared after it slept again included', async () => {
+  const realSetTimeout = globalThis.setTimeout
+  const realClearTimeout = globalThis.clearTimeout
+  const live = new Set<unknown>()
+  let waiting = false
+  let armedWhileWaiting = 0
+  globalThis.setTimeout = ((fn: (...a: unknown[]) => void, ms?: number, ...args: unknown[]) => {
+    const handle = realSetTimeout(() => {
+      live.delete(handle)
+      fn(...args)
+    }, ms)
+    live.add(handle)
+    armedWhileWaiting += waiting ? 1 : 0
+    return handle
+  }) as unknown as typeof setTimeout
+  globalThis.clearTimeout = ((handle: ReturnType<typeof setTimeout>) => {
+    live.delete(handle)
+    realClearTimeout(handle)
+  }) as typeof clearTimeout
+  const slow: SandboxHostCall = () => {
+    waiting = true
+    return new Promise((r) =>
+      realSetTimeout(() => {
+        waiting = false
+        r('read')
+      }, 500),
+    )
+  }
+  try {
+    // timeoutMs 200: the 60 s timer wakes at the deadline during the 500 ms wait and sleeps
+    // again (a new host timer), then the guest clears it.
+    const cleared = await run(
+      'const id = setTimeout(() => console.log("cleared"), 60000); await fs.readFile("/a"); clearTimeout(id); "done"',
+      { timeoutMs: 200 },
+      { hostOps: ['readFile'] },
+      slow,
+    )
+    assert.equal(cleared.ok, true, JSON.stringify(cleared.error))
+    assert.equal(cleared.result, 'done')
+    assert.equal(cleared.stdout, '')
+    assert.ok(armedWhileWaiting >= 1, 'the timer slept again while the file call waited')
+    assert.equal(live.size, 0, 'the clear reached the host timer that was armed')
+
+    const timedOut = await run('await new Promise((r) => setTimeout(r, 60000))')
+    assert.equal(timedOut.error?.name, 'TimeoutError')
+    assert.equal(live.size, 0, 'a run that timed out leaves no host timer either')
+  } finally {
+    globalThis.setTimeout = realSetTimeout
+    globalThis.clearTimeout = realClearTimeout
+  }
+})
+
+test('guard timers: at most 1000 at once - counted by the guest and again by the host, and sleeping again is not a new one', async () => {
+  const guest = await run(
+    'const ids = []; for (let i = 0; i < 1000; i++) ids.push(setTimeout(() => {}, 60000)); let e; try { setTimeout(() => {}, 1) } catch (x) { e = x.name + ": " + x.message } ids.forEach(clearTimeout); e',
+  )
+  assert.equal(guest.result, 'RangeError: too many timers')
+  // The guest shares its realm with its runtime: it can blind the runtime's own count.
+  const blind = 'Object.defineProperty(Map.prototype, "size", { get() { return 0 } });'
+  const host = await run(
+    `${blind} const ids = []; let e; try { for (let i = 0; i < 2000; i++) ids.push(setTimeout(() => {}, 60000)) } catch (x) { e = x.name + ": " + x.message } ids.forEach(clearTimeout); [e, ids.length]`,
+  )
+  assert.deepEqual(host.result, ['RangeError: too many timers', 1000])
+  // 1000 timers wake at the deadline during a 500 ms wait and sleep again: still 1000, not more.
+  const slow: SandboxHostCall = () => new Promise((r) => setTimeout(() => r('read'), 500))
+  const slept = await run(
+    `${blind} const ids = []; for (let i = 0; i < 1000; i++) ids.push(setTimeout(() => {}, 60000));
+    await fs.readFile("/a"); clearTimeout(ids.pop()); const out = [];
+    for (let i = 0; i < 2; i++) { try { ids.push(setTimeout(() => {}, 60000)); out.push("ok") } catch (x) { out.push(x.message) } }
+    ids.forEach(clearTimeout); out`,
+    { timeoutMs: 200 },
+    { hostOps: ['readFile'] },
+    slow,
+  )
+  assert.deepEqual(slept.result, ['ok', 'too many timers'])
+})
+
 test('guard memory: allocating past the limit fails inside the guest, not the host', async () => {
   const r = await run(
     'const a = []; for (;;) a.push(new Array(1000).fill("x".repeat(64) + a.length))',

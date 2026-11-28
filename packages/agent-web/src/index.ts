@@ -53,34 +53,45 @@ export { synthesizeAnswer } from './agent/synthesizer.js'
 export type { AgentContext, EffectiveToolStrategy } from './agent/internal.js'
 
 // ── Pipelines: a graph of agents with conditions and loops, in plain JSON ────
-export { createPipeline, nodeResolver } from './pipeline/index.js'
+export { createPipeline, nodeResolver, pickPipelineRoute } from './pipeline/index.js'
 export type {
   NodeResolverOptions,
   Pipeline,
   PipelineOptions,
+  PipelineRouteOptions,
+  PipelineRouteResult,
   PipelineRunOptions,
 } from './pipeline/index.js'
 export {
+  matchPipelineRoute,
   normalizePipeline,
   PIPELINE_LIMITS,
+  PIPELINE_ROUTER_SYSTEM,
   PipelineNodeError,
   PipelineValidationError,
+  preparePipeline,
   renderPipelineNodeInput,
+  renderPipelineRoutePrompt,
+  runPipelineGraph,
   testPipelineCondition,
   validatePipeline,
 } from './pipeline/engine.js'
 export type {
+  PipelineAbortBehaviour,
   PipelineCondition,
   PipelineDefinition,
   PipelineEdge,
   PipelineEvent,
+  PipelineGraphRunOptions,
   PipelineIssue,
   PipelineNode,
   PipelineNodeContext,
+  PipelineNodeEvent,
   PipelineNodeInput,
   PipelineNodeOutput,
   PipelineNodeRunner,
   PipelineNodeSource,
+  PipelinePlan,
   PipelineResult,
   PipelineRoute,
   PipelineStop,
@@ -194,8 +205,21 @@ export {
   MCP_SKILL_MAX_TOTAL_BYTES,
   MCP_SKILLS_MAX_PER_SERVER,
   MCP_SKILLS_MAX_TOTAL,
+  MCP_SKILL_CONSENTS,
+  MCP_SKILL_CONSENT_DEFAULT,
+  MCP_SKILL_URI_MAX_CHARS,
+  MCP_SKILL_DIRECTORY_ENTRIES_MAX,
+  MCP_SKILL_SNAPSHOT_MAX_DIRECTORIES,
+  MCP_SKILL_SNAPSHOT_MAX_DEPTH,
+  MCP_SKILL_SNAPSHOTS_MAX_BYTES,
   mcpSkillEntryRefusal,
   mcpSkillPreamble,
+  mcpSkillUriRefusal,
+  type McpSkillConsent,
+  type McpSkillConsentView,
+  type McpSkillsOptions,
+  type McpSkillsSetting,
+  type SkillDirectoryListing,
 } from './mcp/skills.js'
 
 // ── Learning: the agent's notebook of lessons (skills it wrote itself) ───────

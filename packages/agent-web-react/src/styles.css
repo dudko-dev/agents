@@ -2636,6 +2636,57 @@
   border-left: 3px solid color-mix(in srgb, var(--awr-fg) 25%, var(--awr-border));
   white-space: pre-wrap;
 }
+/* An MCP server's skill about to enter the agent's context: the server's text, captioned. */
+.awr-approval--skill .awr-approval__head {
+  align-items: flex-start;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.awr-approval--skill .awr-approval__icon {
+  margin-top: 3px;
+}
+.awr-approval__skillmeta {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  font-size: 12px;
+  color: var(--awr-muted);
+}
+.awr-approval__skillmeta code {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.awr-approval__nested,
+.awr-approval__dynamic {
+  color: var(--awr-fg);
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--awr-warn) 14%, transparent);
+}
+.awr-approval__preview {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.awr-approval__preview > summary {
+  cursor: pointer;
+  font-size: 12.5px;
+  color: var(--awr-accent);
+  width: fit-content;
+}
+.awr-approval__preview[open] > summary {
+  margin-bottom: 6px;
+}
+.awr-approval__body {
+  max-height: 260px;
+  overflow: auto;
+  font-family: var(--awr-mono);
+  font-size: 12px;
+}
+
 /* The app in a panel beside the chat (wide), or a sheet from the bottom (narrow). */
 .awr-frame--panel {
   flex: 1 1 auto;

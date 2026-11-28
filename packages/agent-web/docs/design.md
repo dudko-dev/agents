@@ -180,6 +180,54 @@ again). A hook that throws is logged and the run carries on: persistence is
 observability, not a correctness boundary. The hook names match the Node
 sibling, where the contract originated.
 
+### Event order across crashes: `(attempt, seq)`
+
+A client that shows a run - or a server that relays it from many workers - must put its
+events in order, and a run's events do not come from one uninterrupted process: a reload
+or a crash cuts the run, a resume continues it, perhaps elsewhere. Arrival order, wall
+clocks and a counter alone all fail there: arrival order is the transport's, clocks of two
+machines disagree, and a counter restarted by the resume collides with the one before it.
+So every event of a run carries `seq` (1, 2, ... within one attempt) and `attempt` (1 for
+the run as first started, one more per resume), and `(attempt, seq)` is a TOTAL order with
+no ties: within an attempt the counter is monotonic, and two attempts never share a number.
+
+That last part is why the attempt is persisted, and when. The attempt a resume runs as is
+one more than the snapshot's; if it were only written at the resumed run's first
+checkpoint, a crash before that checkpoint would hand the NEXT resume the same number, and
+two attempts' events would interleave ambiguously. So a resume records its attempt
+(`onRunResume`, else `onStepComplete`) before it emits anything - and, unlike every other
+write, a failure there refuses the resume: carrying on would produce events under a number
+the store does not know about. A snapshot whose attempt is not a positive integer is
+refused for the same reason.
+
+Delivery stays at-least-once, and the numbering says so instead of hiding it: the step a
+crash interrupted runs again under the next attempt, so its events (and its tool calls)
+come again with the new attempt's numbers - a consumer that deduplicates keeps the later
+attempt's copy. A subagent's envelope is numbered in the parent run and the child event
+inside keeps the child run's own numbers: each run's events are one order, and a tree of
+runs is a tree of orders. The fields are optional on the type because events outside a run
+(a pipeline's own events) carry none; the Node sibling has the same names and rules, and
+on the server they are what its scale-out hooks (a run lease, shared limits) build on.
+
+### The call journal and parking: names reserved, server-only
+
+The Node sibling has a **call journal** (`persistence.journal`: every model response and tool
+result recorded as the run goes, so a resume replays the interrupted step instead of running
+it again) and **parking** (a run that waits for a person's answer, or for a tool's result from
+outside, stops without failing and is resumed later with `answers`, by any worker). Its names
+are reserved here and mean the same if they ever come: `persistence.journal` (`append` /
+`load`), `IJournalEntry`, `deferResult()`, `{ park: true }` from `onRequest`, the run status
+`'waiting'`, `result.parked`, `run({ answers })`, the events `run.parked` and
+`journal.diverged`. This package has none of them, and does not accept them.
+
+Why server-only: both exist so that a run can outlive the process that started it - a worker
+that crashed, a worker freed while a run waits hours or days - and be picked up by another
+one. A page's run lives and dies with its tab: there is no other worker to hand it to, a park
+that frees nothing has nothing to free, and the guarantee rests on a store that is written
+before every side effect and is fail-closed, which IndexedDB in a tab that may be closed at any
+moment does not give. A browser host that needs a long wait keeps the run going (the wait clock
+already stops the limits while a person decides), or hands the work to a server agent.
+
 ## Steering a run (`RunControl`)
 
 `run()` returns when the run is over, so a host with something to say mid-run
@@ -668,13 +716,24 @@ the same in both. Only the adapter that runs a node with `createAgent` differs.
   fire, and it has no meaning inside a loop. Instead a `join: 'all'` node waits
   while something still activated can reach it through the graph: a fan-in waits
   for the slower branch however long it is, and stops waiting the moment that
-  branch dies out. When everything activated waits for something else (a cycle),
-  nothing would ever start, so all of it starts. Reachability ignores conditions
-  on purpose: it can only make a node wait a wave longer, never deadlock it.
-  The known limit is a fan-in inside a loop: the join and a slower branch that
-  leads to it reach each other through the cycle, so they wait for each other,
-  both run, and the join fires without that branch. `join: 'any'`, or a loop
-  drawn around the whole fan-out / fan-in, is the way out.
+  branch dies out. Reachability ignores conditions on purpose: it can only make
+  a node wait a wave longer, never deadlock it.
+- **Inside a loop, a wait is for this pass or for the next.** When everything
+  activated waits for something else, the nodes reach each other through a loop:
+  typically a join inside it and its slower branch, where the branch reaches the
+  join directly and the join reaches the branch only by going round. So then only
+  the waits within one pass count: a wait that holds only by going round - back
+  along an edge to the loop's head, a node that dominates the edge's source
+  (every path from the entry to the source passes it) - is for the next pass
+  and is dropped; the branch runs, the join goes on waiting for it. Dominators are a property of the graph,
+  not of the order of its edges, so the rule is too (a depth-first search would
+  pick its back edges by that order). The rule is asked only when everybody
+  waits, which is exactly when the scheduler used to start everybody and the
+  join ran without its branch; a node fed from inside a loop still waits for
+  the loop to end, as it always did. A cycle with more than one way in (a loop
+  back into one branch) has no head: all of it starts, since nothing would
+  ever start otherwise, and the join fires without that branch - a loop back to
+  a node before the fan-out, or `join: 'any'`, is the way out there.
 - **Every edge has an id.** A UI lights edges up from events, so an edge must be
   nameable even when the author gave it no id: it gets `e<position>`, the
   normalised definition is what `pipeline.definition` returns, and
@@ -704,6 +763,25 @@ the same in both. Only the adapter that runs a node with `createAgent` differs.
 - **Abort follows the package's agent**: here `run` resolves with
   `stoppedBy: 'aborted'` (as `agent.run` resolves with `stopped`); on the server
   it rejects with an `AbortError`. A failed node rejects in both.
+- **The engine is a deterministic scheduler, by contract.** `runPipelineGraph`
+  is public so that a host can run the graph with its own node runner, and the
+  host that needs it most is a durable-execution orchestrator: one that records
+  each node's answer and, after a crash, replays the scheduling code against that
+  log instead of running the nodes again. That works only if the scheduler's
+  output is a function of the definition, the input and the answers in the order
+  they arrived - so the engine reads no clock, no randomness and no timer, does no
+  I/O and imports nothing. Such orchestrators run that code in a sandbox with the
+  language and little else, so the engine does not assume the web platform
+  either: `DOMException` and `AbortController` are used where they exist (the same
+  error and signal as before) and replaced by an `Error` named `AbortError` and a
+  small signal of its own where they do not. The arrival order is part of the
+  input on purpose: a visit's answer is applied when it settles, and the
+  orchestrator replays that order exactly. A rule like this decays unless a test
+  holds it: `tests/pipeline-determinism.test.ts` parses the engine for clocks,
+  randomness, timers, host globals and imports, and runs it in a `node:vm`
+  context with only the language's globals - with and without `DOMException` and
+  `AbortController` - against a normal run. The route call (`pickPipelineRoute`)
+  is a model call and stays out of the engine, where the node runs.
 
 ## MCP: server instructions and structured results
 
@@ -846,6 +924,106 @@ source of the agent's skills, beside the host's and the lessons. The choices:
   `run_js` (and whatever the host marks): while the run, or the run that started a helper, has an
   MCP skill active, a call of one is asked whatever the mode. This only tightens: a deny stays a
   deny, and nothing else about consent changes.
+- **A person sees a skill before the model does - through the gate the host already has.** The
+  extension says a host SHOULD let users inspect a skill before it is loaded and MAY gate loading
+  per skill or per server; for a third party's instructions both are cheap and worth it. The
+  question goes to `toolApproval.onRequest` - the same handler, events, timeout and clock as a
+  tool call, with `skill` on the request - rather than a callback of its own: every UI that
+  answers tool calls (the React card, the Node REPL's prompt) answers it already, and one that
+  does not know `skill` still shows a request for `load_skill` instead of loading silently. The
+  approval MODE does not lower it: a mode is about tool calls, and autopilot is exactly the
+  setting where nobody would see the text otherwise (the same reasoning as an MCP App's writes).
+- **The default: once per skill, bound to its entry.** Every run would make a person click through
+  the same text over and over, and a click that is routine stops meaning anything. Never would
+  mean nobody ever sees a third party's instructions. Once per skill per agent - per session -
+  shows every text a person has not seen, and binds the yes to what was shown: the server, the URI
+  and every file's digest (the extension's content-bound approval), so a server that changes the
+  skill is asked about again. `'ask'` (every run) is there for hosts that want it, `'never'` for a
+  server the host vetted (the behaviour before the question existed). Per server, with an
+  agent-wide default: the decision is about a server, and a host trusts its own servers and not a
+  URL a user typed in. Nothing is persisted: a grant on disk would have to be bound and revoked
+  across restarts, and a person re-seeing a skill once per session is cheap.
+- **Fetched to be shown, not to be used.** To be inspected, the text must be read before the yes.
+  It is read when the model asks for the skill (the point of need, which the lazy-retrieval rule
+  allows), verified, held off any context, and shown; only a yes puts it in. The preview is the
+  model's text exactly (`mcpSkillBodyPreview`: the same cleaning and cap), so what is approved is
+  what is sent. A decided request keeps no copy of it (the React state drops `body`).
+- **Nested skills, and "Always for this server".** A nested skill needs "fresh, explicit user
+  consent", and approving the enclosing skill does not substitute for it. Per-skill grants are
+  keyed by URI, so the enclosing skill's yes never covers it; a server-wide yes, given before the
+  nested skill was ever shown, is not "fresh" either, so it does not cover nested skills. Nesting
+  is read from the URIs the agent knows (listed and given by URI): a `SKILL.md` inside another
+  one's directory.
+- **A no is final for the run.** A model that is refused tends to try again; the run remembers the
+  refusal and answers the next load of that skill itself, so a person is not asked the same
+  question twice in one task. Nobody to ask, or no answer in time, is not a person's no: it is not
+  remembered, and the skill is asked about next time.
+- **By URI: the server the model names, nothing else.** The listing may be partial, and a host
+  "MUST support loading a skill given only its URI"; a URI is scoped to the server that serves it.
+  The agent cannot tell which server's text the model read a URI in (instructions, a skill, a tool
+  result all end up in one context), so it does not guess: `load_skill({ server, uri })` names the
+  server, the URI goes to that one server only, and only to a server whose skills the host turned
+  on. Searching every server for a URI would let one server's text make the agent ask another one
+  - the cross-server confused deputy the extension warns about. Only `skill://` is taken from the
+  model: other schemes are allowed in a listing, but a URI the model hands over came from
+  third-party text, and `skill://` is what the extension's servers use. What comes back is an
+  entry like a listed one - the same rules, cap, verification, preamble and consent - and it stays
+  in the catalog (on the connection's source) so the next run, and the planner, see it.
+- **A directory is listed from the entry; the server is asked only for staleness.** A skill's
+  instructions name directories ("pick a template from `templates/`"), and the model needs to see
+  what is in one. The entry the skill was loaded with already lists every file (it MUST be
+  complete), and it is what the person approved - so the listing comes from it, and a host "MAY
+  answer from the entry alone". `read_skill_file` takes the directory rather than a new tool: one
+  tool that reads what a skill holds, a path the model already has, no new name in every prompt,
+  and the same consent path as a file (a directory of a skill nobody allowed lists nothing). The
+  server's own view (`resources/directory/read`, only where it declared `directoryRead`) is ahead
+  of or behind the entry, and nothing ties the two to one snapshot - so it can never extend what
+  may be read under the approval ("MUST NOT treat the directory result as extending the
+  manifest"), and a child it adds must not reach the model as a file of the skill. What it can
+  tell is that the skill changed: the listing says so with a count in a sentence of ours (nothing
+  of the server's text), the log says so, and the server's skills are listed again between runs -
+  through the same `onToolsChanged` path a resource list change takes, never behind a running
+  agent, because re-reading a held entry mid-run would swap what a person approved for what the
+  server says now. A changed entry is a new consent key, so the person is asked again: the spec's
+  "a skill that has changed and needs re-approval". A child of the entry the server no longer
+  lists is the entry's own path, so it is named (`notServed`). A failed directory read costs
+  nothing but a log line: the entry is enough. The work is bounded - the SDK walks at most
+  `listMaxPages` pages, and at most 640 entries of the answer are looked at.
+- **`"dynamic"` skills: declined by default, a snapshot when a server is trusted with them.** The
+  extension lets a host decline them, and by default this one does: a directory read is the only
+  way to find their files, and it verifies nothing - no digest, no size, nothing a consent could
+  bind to, so a yes would cover whatever the server serves next. Some servers can only generate
+  their skills, though, so `skills: { dynamic: true }` takes them on terms that keep the one
+  property the consent stands for - what the model reads is what the person approved:
+  - **Why a snapshot.** With no published digests there is nothing to bind a yes to except bytes
+    the agent itself holds. So the agent reads the whole skill BEFORE asking (`SKILL.md`, then -
+    where the server lists directories - every file in its tree), computes the digests itself
+    and makes that manifest the held entry. The consent is then content-bound after all, to the
+    copy: the same machinery as a listed skill (`mcpSkillGrantKey`, `'once-per-skill'`, nested
+    rules, the card), nothing special-cased downstream. Reading up front breaks the extension's
+    lazy-retrieval rule for these skills; a copy must be complete to be what a person approves,
+    and the bounds (the extension's 512 files / 16 MiB counted on what is read, 64 directories,
+    8 levels, 64 MiB per agent) cap what that costs. A copy over a bound is declined before
+    anyone is asked: a person should not be asked about something the agent would not use.
+  - **Why served from memory.** A generated skill may differ on every read - the test server's
+    `changing` fault does exactly that. Reading a file again at `read_skill_file` time would give
+    the model bytes nobody saw, and there would be nothing to check them against. So every file
+    is served from the copy, and a path the copy does not hold is refused like an unlisted file
+    of any held entry. Memory, not IndexedDB or a checkpoint: a stored copy would be a second
+    copy to keep honest (the extension's cache rules) and would outlive the approval it was
+    taken for; a resumed run in a new agent simply reads - and, if it differs, asks - again.
+  - **Why opt-in per server, with no agent-wide switch.** The snapshot protects the approval, not
+    the content: the server still chooses what to send at that moment, and nothing protects
+    against it or an intermediary. Whether that is acceptable is a judgement about one server,
+    like `consent: 'never'` - so it is set where the server is configured, never for every server
+    at once (`mcpSkills` stays consent-only), and a new server never brings generated skills by
+    default.
+  - **Why the walk is pure and shared.** What is read (direct children, `inode/directory` only
+    inside the root, nothing twice, the bounds) is security-relevant and identical in both
+    packages, so it lives in the shared file (`startMcpSkillWalk`, `takeMcpSkillWalkListing`,
+    `mcpSkillSnapshotBytesRefusal`, `mcpSkillSnapshotEntry`), tested once rule by rule; the
+    digest is WebCrypto's (`globalThis.crypto.subtle`, browsers and Node >= 20), so the shared
+    file still imports nothing.
 
 ## MCP elicitation: the host answers, the model never sees the question
 

@@ -4,6 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import {
+  createMcpSkills,
   createSkillTools,
   defineSkill,
   loadSkillsFromDir,
@@ -14,6 +15,7 @@ import {
 import { runContext } from '../src/context.ts'
 import type { IRunState } from '../src/internal.ts'
 import type { AgentEvent } from '../src/types.ts'
+import type { McpSkillLoaded, McpSkillSource } from '../src/mcp-skills.ts'
 
 test('parseSkillMarkdown: plain frontmatter + body', () => {
   const s = parseSkillMarkdown(
@@ -182,4 +184,105 @@ test('load_skill activates the skill in the run and lists its files; read_skill_
     ['invoices:tool'],
   )
   assert.deepEqual(createSkillTools([]), {})
+})
+
+type Exec = Record<string, { execute: (input: unknown, opts: unknown) => Promise<unknown> }>
+
+test('read_skill_file on a directory of a host skill: its listing; a file of that name wins', async () => {
+  const skills = [
+    defineSkill({
+      name: 'invoices',
+      description: 'Invoice rules',
+      content: 'Pick a template from templates/.',
+      files: [
+        { path: 'notes', content: 'NOTES-FILE' },
+        { path: 'notes/a.md', content: 'A' },
+        { path: 'templates/eu.md', content: 'EU' },
+      ],
+    }),
+  ]
+  const tools = createSkillTools(skills) as Exec
+  const read = (path: string) => tools.read_skill_file.execute({ name: 'invoices', path }, {})
+  assert.equal(await read('notes'), 'NOTES-FILE', 'the file wins')
+  assert.deepEqual(await read('notes/'), {
+    name: 'invoices',
+    directory: 'notes',
+    files: ['notes/a.md'],
+    directories: [],
+  })
+  for (const root of ['.', '', '/', './']) {
+    assert.deepEqual(
+      await read(root),
+      { name: 'invoices', directory: '.', files: ['notes'], directories: ['notes', 'templates'] },
+      JSON.stringify(root),
+    )
+  }
+  await assert.rejects(() => read('nope'), /has no file "nope". Files: notes, notes\/a.md/)
+  await assert.rejects(() => read('../x'), /must be relative and stay inside the skill/)
+})
+
+test("read_skill_file on a directory of an MCP skill: the held entry's listing; the server's view with the call's signal", async () => {
+  const entry = {
+    uri: 'skill://pdf-processing/SKILL.md',
+    frontmatter: { name: 'pdf-processing', description: 'PDFs' },
+    resources: [],
+  }
+  const loaded: McpSkillLoaded = {
+    uri: entry.uri,
+    body: 'BODY',
+    files: ['references/FORMS.md', 'scripts/extract.py'],
+    entry,
+  }
+  const asked: { loaded: McpSkillLoaded; dir: string; signal?: AbortSignal }[] = []
+  const reads: string[] = []
+  const source: McpSkillSource = {
+    server: 'docs',
+    consent: 'never',
+    skills: [
+      {
+        uri: entry.uri,
+        name: 'pdf-processing',
+        description: 'PDFs',
+        path: ['pdf-processing'],
+        files: loaded.files as string[],
+      },
+    ],
+    load: async () => loaded,
+    readFile: async (_l, path) => {
+      reads.push(path)
+      return 'FILE'
+    },
+    readDirectory: async (l, dir, o) => {
+      asked.push({ loaded: l, dir, ...(o?.signal ? { signal: o.signal } : {}) })
+      return { extra: 1, notServed: [], truncated: false }
+    },
+  }
+  const skills = createMcpSkills([source], [], () => {})
+  const tools = createSkillTools(skills, {
+    mcp: { servers: ['docs'], sources: () => [source], scope: () => undefined },
+  }) as Exec
+  const signal = new AbortController().signal
+  const listing = (await tools.read_skill_file.execute(
+    { name: 'docs/pdf-processing', path: 'references/' },
+    { abortSignal: signal },
+  )) as Record<string, unknown>
+  assert.deepEqual(listing.files, ['references/FORMS.md'])
+  assert.match(String(listing.note), /1 more item\(s\)/)
+  assert.deepEqual(asked, [{ loaded, dir: 'references', signal }])
+  assert.deepEqual(reads, [], 'a listing reads no file')
+  // A server without directory reads: the entry alone, nothing asked.
+  const plain = createMcpSkills([{ ...source, readDirectory: undefined }], [], () => {})
+  const plainTools = createSkillTools(plain, {
+    mcp: { servers: ['docs'], sources: () => [], scope: () => undefined },
+  }) as Exec
+  assert.deepEqual(
+    await plainTools.read_skill_file.execute({ name: 'docs/pdf-processing', path: '.' }, {}),
+    {
+      name: 'docs/pdf-processing',
+      directory: '.',
+      files: [],
+      directories: ['references', 'scripts'],
+    },
+  )
+  assert.equal(asked.length, 1)
 })

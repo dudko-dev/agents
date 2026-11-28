@@ -6,7 +6,9 @@ import {
   PIPELINE_LIMITS,
   PipelineNodeError,
   PipelineValidationError,
+  preparePipeline,
   renderPipelineNodeInput,
+  runPipelineGraph,
   testPipelineCondition,
   validatePipeline,
   type PipelineCondition,
@@ -15,6 +17,8 @@ import {
   type PipelineNode,
   type PipelineNodeInput,
   type PipelineNodeOutput,
+  type PipelineNodeRunner,
+  type PipelineResult,
 } from '../dist/index.js'
 
 // The graph engine, through `runNode` stubs: no agent, no model. Everything below this line is
@@ -157,6 +161,124 @@ test('pipeline: a cycle of mutual waiting resolves - every waiting node runs', a
   assert.deepEqual(p.order().sort(), ['a', 'b', 'c'])
   assert.equal(result.runs, 3)
   assert.equal(result.stoppedBy, 'maxNodeVisits')
+})
+
+// Each wave of a run, as `<node>#<visit>[<the nodes it got outputs from>]`, read off the trace.
+const wavesOf = (result: PipelineResult): string[][] => {
+  const waves: string[][] = []
+  for (const t of result.trace) {
+    if (t.type === 'node') (waves[t.wave] ??= []).push(`${t.nodeId}#${t.visit}[${t.from}]`)
+  }
+  return waves
+}
+
+// a → b → join, a → c → d → join, and back: join → a. The join and d reach each other through the
+// loop (join → a → c → d), so each waits for the other.
+const loopAround = (): PipelineDefinition =>
+  graph(
+    'a',
+    [...nodes('a', 'b', 'c', 'd'), { id: 'join', name: 'Join' }],
+    [
+      edge('a', 'b'),
+      edge('a', 'c'),
+      edge('c', 'd'),
+      edge('b', 'join'),
+      edge('d', 'join'),
+      edge('join', 'a'),
+    ],
+    { maxNodeVisits: 2 },
+  )
+
+test("pipeline: in a loop around the fan-out and the fan-in, join 'all' waits for the slower branch on every pass", async () => {
+  const p = stubbed(loopAround())
+  const result = await p.run()
+  // The wait of d for the join goes back through the loop's head (a): it is for the next pass,
+  // so d runs and the join goes on waiting for it.
+  assert.deepEqual(wavesOf(result), [
+    ['a#1[]'],
+    ['b#1[a]', 'c#1[a]'],
+    ['d#1[c]'],
+    ['join#1[b,d]'],
+    ['a#2[join]'],
+    ['b#2[a]', 'c#2[a]'],
+    ['d#2[c]'],
+    ['join#2[b,d]'],
+  ])
+  assert.deepEqual(
+    [result.runs, result.stoppedBy, result.text],
+    [10, 'maxNodeVisits', 'join output'],
+  )
+})
+
+test('pipeline: the loop may go back to any node before the fan-out, in any order of the edges', async () => {
+  // s → p → a, the fan-out and the fan-in, then join → r → p: back to p, not to the entry.
+  const edges = [
+    edge('s', 'p'),
+    edge('p', 'a'),
+    edge('a', 'b'),
+    edge('a', 'c'),
+    edge('c', 'd'),
+    edge('b', 'join'),
+    edge('d', 'join'),
+    edge('join', 'r'),
+    edge('r', 'p'),
+  ]
+  for (const order of [edges, [...edges].reverse()]) {
+    const p = stubbed(
+      graph('s', nodes('s', 'p', 'a', 'b', 'c', 'd', 'join', 'r'), order, { maxNodeVisits: 2 }),
+    )
+    const result = await p.run()
+    assert.deepEqual(
+      p.calls.filter((c) => c.nodeId === 'join').map((c) => c.input.from.map((f) => f.nodeId)),
+      [
+        ['b', 'd'],
+        ['b', 'd'],
+      ],
+    )
+    assert.deepEqual([result.runs, result.stoppedBy], [15, 'maxNodeVisits'])
+  }
+})
+
+test('pipeline: only a wait of everybody is decided by the pass - a node after a loop still waits for it to end', async () => {
+  // e → a, a ↔ b (the loop), a → x: x waits while b can still reach it (through a), however
+  // long the loop goes - b is never stuck waiting, so nothing changes here.
+  const p = stubbed(
+    graph('e', nodes('e', 'a', 'b', 'x'), [
+      edge('e', 'a'),
+      edge('a', 'b'),
+      edge('b', 'a'),
+      edge('a', 'x'),
+    ]),
+  )
+  const result = await p.run()
+  assert.deepEqual(
+    p.calls.filter((c) => c.nodeId === 'x').map((c) => c.input.from.map((f) => f.nodeId)),
+    [['a', 'a', 'a']],
+  )
+  assert.deepEqual(p.order(), ['e', 'a', 'b', 'a', 'b', 'a', 'b', 'x'])
+  assert.equal(result.stoppedBy, 'maxNodeVisits')
+})
+
+test('pipeline: a loop back INTO a branch has no head - the join and that branch run together (the known limit)', async () => {
+  // a → b → join, a → c → d → join, join → c: the cycle c → d → join → c is entered at c (from a)
+  // and at the join (from b), so no wait in it is "the next pass" and everybody runs.
+  const p = stubbed(
+    graph(
+      'a',
+      nodes('a', 'b', 'c', 'd', 'join'),
+      [
+        edge('a', 'b'),
+        edge('a', 'c'),
+        edge('c', 'd'),
+        edge('b', 'join'),
+        edge('d', 'join'),
+        edge('join', 'c'),
+      ],
+      { maxNodeVisits: 2 },
+    ),
+  )
+  const result = await p.run()
+  assert.deepEqual(wavesOf(result).slice(0, 3), [['a#1[]'], ['b#1[a]'], ['c#1[a]', 'join#1[b]']])
 })
 
 test('pipeline: several terminal nodes of the last wave are joined under their names', async () => {
@@ -551,6 +673,266 @@ test('pipeline: the node input reads as plain text', () => {
       '(This is visit 2 of this step.)',
     ].join('\n\n'),
   )
+})
+
+// ── the scheduler, with a runner of your own ─────────────────────────────────
+
+// plan → a, b; b → b2; a, b2 → join (all); join → review; review routes: approve → done,
+// revise → fix → review (the loop, under maxNodeVisits: 2).
+const hostGraph = (): PipelineDefinition =>
+  graph(
+    'plan',
+    [
+      ...nodes('plan', 'a', 'b', 'b2', 'join'),
+      { id: 'review', routes: [{ label: 'approve' }, { label: 'revise' }] },
+      ...nodes('fix', 'done'),
+    ],
+    [
+      edge('plan', 'a'),
+      edge('plan', 'b'),
+      edge('a', 'join'),
+      edge('b', 'b2'),
+      edge('b2', 'join'),
+      edge('join', 'review'),
+      edge('review', 'done', { kind: 'route', label: 'approve' }),
+      edge('review', 'fix', { kind: 'route', label: 'revise' }),
+      edge('fix', 'review'),
+    ],
+    { maxNodeVisits: 2 },
+  )
+
+// A host's runner: it answers by node and visit (the route is ITS answer, not a model's) and
+// logs when each visit starts and ends. No timer: a visit ends after one microtask turn.
+const hostRunner = (route: (visit: number) => string | undefined) => {
+  const log: string[] = []
+  const runNode: PipelineNodeRunner = async (node, input) => {
+    log.push(`start ${node.id}#${input.visit}`)
+    await null
+    log.push(`end ${node.id}#${input.visit}`)
+    const picked = node.id === 'review' ? route(input.visit) : undefined
+    return { text: `${node.id} ${input.visit}`, ...(picked ? { route: picked } : {}) }
+  }
+  return { runNode, log, calls: () => log.filter((l) => l.startsWith('start ')) }
+}
+
+test('runPipelineGraph: a runner of your own drives waves, a join, routes and a loop under its caps', async () => {
+  const host = hostRunner(() => 'revise')
+  const events: Record<string, unknown>[] = []
+  const result = await runPipelineGraph(preparePipeline(hostGraph()), host.runNode, {
+    input: 'the request',
+    onEvent: (e) => events.push(e as Record<string, unknown>),
+  })
+
+  assert.deepEqual(host.calls(), [
+    'start plan#1',
+    'start a#1',
+    'start b#1',
+    'start b2#1',
+    'start join#1',
+    'start review#1',
+    'start fix#1',
+    'start review#2',
+    'start fix#2',
+  ])
+  // A wave's visits all start before any is awaited.
+  assert.deepEqual(host.log.slice(2, 6), ['start a#1', 'start b#1', 'end a#1', 'end b#1'])
+  const waves = Object.fromEntries(
+    result.trace.flatMap((t) => (t.type === 'node' ? [[`${t.nodeId}#${t.visit}`, t.wave]] : [])),
+  )
+  assert.deepEqual(waves, {
+    'plan#1': 0,
+    'a#1': 1,
+    'b#1': 1,
+    'b2#1': 2,
+    'join#1': 3,
+    'review#1': 4,
+    'fix#1': 5,
+    'review#2': 6,
+    'fix#2': 7,
+  })
+  // The join waited for the longer branch and got both outputs in one visit.
+  const join = result.trace.find((t) => t.type === 'node' && t.nodeId === 'join')
+  assert.deepEqual(join?.type === 'node' && join.from, ['a', 'b2'])
+  // The route the runner gave is the route: 'revise' every time, so the loop hit its cap.
+  assert.deepEqual(result.outputs.review, [
+    { visit: 1, text: 'review 1', route: 'revise' },
+    { visit: 2, text: 'review 2', route: 'revise' },
+  ])
+  assert.deepEqual(events.at(-2), {
+    type: 'pipeline.node.skipped',
+    nodeId: 'review',
+    from: ['fix'],
+    reason: 'maxNodeVisits',
+  })
+  assert.equal(result.stoppedBy, 'maxNodeVisits')
+  assert.equal(result.runs, 9)
+  assert.equal(result.text, 'fix 2')
+
+  // Another answer, another run: approved on the second visit.
+  const approving = hostRunner((visit) => (visit === 2 ? 'approve' : 'revise'))
+  const approved = await runPipelineGraph(preparePipeline(hostGraph()), approving.runNode, {
+    input: 'the request',
+  })
+  assert.equal(approved.stoppedBy, undefined)
+  assert.equal(approved.text, 'done 1')
+  assert.deepEqual(approving.calls().slice(-2), ['start review#2', 'start done#1'])
+
+  // A label the node does not have is no route: the review is where the run ends.
+  const unknown = hostRunner(() => 'ship-it')
+  const unrouted = await runPipelineGraph(preparePipeline(hostGraph()), unknown.runNode, {
+    input: 'the request',
+  })
+  assert.deepEqual(unrouted.outputs.review, [{ visit: 1, text: 'review 1' }])
+  assert.equal(unrouted.text, 'review 1')
+})
+
+test('runPipelineGraph: maxRuns bounds what the runner is asked, and the runner is never called past it', async () => {
+  const host = hostRunner(() => 'revise')
+  const definition = { ...hostGraph(), limits: { maxNodeVisits: 50, maxRuns: 4 } }
+  const result = await runPipelineGraph(preparePipeline(definition), host.runNode, {
+    input: 'x',
+  })
+  assert.equal(host.calls().length, 4)
+  assert.equal(result.runs, 4)
+  assert.equal(result.stoppedBy, 'maxRuns')
+})
+
+test('runPipelineGraph: createPipeline is built on it - the same runner gives the same run', async () => {
+  const viaScheduler: unknown[] = []
+  const viaPipeline: unknown[] = []
+  const a = await runPipelineGraph(
+    preparePipeline(hostGraph()),
+    hostRunner(() => 'revise').runNode,
+    {
+      input: 'the request',
+      onEvent: (e) => viaScheduler.push(e),
+    },
+  )
+  const b = await createPipeline(hostGraph(), { runNode: hostRunner(() => 'revise').runNode }).run({
+    input: 'the request',
+    onEvent: (e) => viaPipeline.push(e),
+  })
+  assert.deepEqual(b, a)
+  assert.deepEqual(viaPipeline, viaScheduler)
+})
+
+test('preparePipeline: validates, copies and fills in the defaults', () => {
+  const definition = graph('a', nodes('a', 'b'), [edge('a', 'b')])
+  const plan = preparePipeline(definition)
+  assert.deepEqual(
+    plan.definition.edges.map((e) => e.id),
+    ['e0'],
+  )
+  assert.equal(definition.edges[0].id, undefined, 'the original is not touched')
+  assert.equal(plan.maxNodeVisits, PIPELINE_LIMITS.maxNodeVisits)
+  assert.equal(plan.maxRuns, PIPELINE_LIMITS.maxRuns)
+  assert.deepEqual(
+    preparePipeline(definition).definition,
+    plan.definition,
+    'the same definition, the same plan',
+  )
+  assert.throws(
+    () => preparePipeline({ ...definition, entry: 'nowhere' }),
+    (err: unknown) => err instanceof PipelineValidationError && err.errors[0].code === 'entry',
+  )
+})
+
+test('runPipelineGraph: an abort settles the run at once - rejects by default, resolves with onAbort "resolve"', async () => {
+  const definition = graph('a', nodes('a', 'b', 'c', 'after'), [
+    edge('a', 'b'),
+    edge('a', 'c'),
+    edge('c', 'after'),
+  ])
+  const started = (onAbort?: 'reject' | 'resolve') => {
+    const controller = new AbortController()
+    const seen: string[] = []
+    const events: Record<string, unknown>[] = []
+    const run = runPipelineGraph(
+      preparePipeline(definition),
+      async (node, _input, ctx) => {
+        if (node.id === 'a') return { text: 'a output' }
+        ctx.signal.addEventListener('abort', () => seen.push(`${node.id} saw the abort`))
+        if (node.id === 'b') {
+          // Once every visit of the wave has started.
+          await null
+          controller.abort()
+          // Never settles: the run must not wait for it.
+          return new Promise<PipelineNodeOutput>(() => {})
+        }
+        return { text: `${node.id} output` }
+      },
+      {
+        input: 'x',
+        signal: controller.signal,
+        onEvent: (e) => events.push(e as Record<string, unknown>),
+        ...(onAbort ? { onAbort } : {}),
+      },
+    )
+    return { run, seen, events }
+  }
+
+  const rejecting = started()
+  await assert.rejects(rejecting.run, { name: 'AbortError', message: 'Aborted' })
+  assert.deepEqual(rejecting.seen, ['b saw the abort', 'c saw the abort'])
+  assert.deepEqual(rejecting.events.at(-1), {
+    type: 'pipeline.finished',
+    stoppedBy: 'aborted',
+    runs: 3,
+  })
+  assert.ok(!rejecting.events.some((e) => e.nodeId === 'after'), 'nothing started after it')
+
+  const resolving = started('resolve')
+  const result = await resolving.run
+  assert.equal(result.stoppedBy, 'aborted')
+  assert.equal(result.runs, 3)
+  assert.deepEqual(Object.keys(result.outputs), ['a'], 'what finished before the abort')
+
+  // Aborted before it starts: the runner is never called.
+  let called = false
+  const never = await runPipelineGraph(
+    preparePipeline(definition),
+    async () => {
+      called = true
+      return { text: '' }
+    },
+    { input: 'x', signal: AbortSignal.abort(), onAbort: 'resolve' },
+  )
+  assert.equal(called, false)
+  assert.equal(never.runs, 0)
+  assert.equal(never.stoppedBy, 'aborted')
+})
+
+test('runPipelineGraph: a runner that rejects fails the run with a PipelineNodeError, whatever onAbort says', async () => {
+  const events: Record<string, unknown>[] = []
+  let siblingAborted = false
+  await assert.rejects(
+    runPipelineGraph(
+      preparePipeline(
+        graph('a', nodes('a', 'bad', 'slow', 'after'), [
+          edge('a', 'bad'),
+          edge('a', 'slow'),
+          edge('slow', 'after'),
+        ]),
+      ),
+      async (node, _input, ctx) => {
+        if (node.id === 'bad') throw new Error('the worker is gone')
+        if (node.id === 'slow') {
+          await null
+          siblingAborted = ctx.signal.aborted
+        }
+        return { text: node.id }
+      },
+      { input: 'x', onAbort: 'resolve', onEvent: (e) => events.push(e as Record<string, unknown>) },
+    ),
+    (err: unknown) =>
+      err instanceof PipelineNodeError &&
+      err.nodeId === 'bad' &&
+      err.visit === 1 &&
+      (err.cause as Error).message === 'the worker is gone',
+  )
+  assert.equal(siblingAborted, true, "the sibling's signal was aborted")
+  assert.equal(events.at(-1)?.type, 'pipeline.node.failed')
+  assert.ok(!events.some((e) => e.nodeId === 'after'), 'the sibling did not go on')
 })
 
 // ── validation ───────────────────────────────────────────────────────────────

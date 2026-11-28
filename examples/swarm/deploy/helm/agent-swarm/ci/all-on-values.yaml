@@ -1,0 +1,182 @@
+# CI: every flag of the chart on at once (helm template + kubeconform). Not a deployment.
+image:
+  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+imagePullSecrets:
+  - name: registry
+secrets:
+  migrateDatabaseUrl:
+    name: agent-swarm-owner
+    key: url
+  temporalApiKey:
+    name: temporal-cloud
+    key: api-key
+  temporalTls:
+    name: temporal-client-tls
+    clientCertificate: true
+temporal:
+  tls:
+    enabled: true
+    serverName: frontend.temporal.internal
+  # The bundled Temporal chart, with its own persistence (an external Postgres).
+  enabled: true
+  server:
+    replicaCount: 1
+    config:
+      persistence:
+        defaultStore: default
+        visibilityStore: visibility
+        numHistoryShards: 512
+        datastores:
+          default:
+            sql:
+              pluginName: postgres12
+              databaseName: temporal
+              connectAddr: postgres.db.svc.cluster.local:5432
+              connectProtocol: tcp
+              user: temporal
+              existingSecret: temporal-postgres
+          visibility:
+            sql:
+              pluginName: postgres12
+              databaseName: temporal_visibility
+              connectAddr: postgres.db.svc.cluster.local:5432
+              connectProtocol: tcp
+              user: temporal
+              existingSecret: temporal-postgres
+      namespaces:
+        create: true
+        namespace:
+          - name: default
+            retention: 3d
+gateway:
+  corsOrigins: https://app.example.com
+  service:
+    annotations:
+      example.com/team: agents
+  podAnnotations:
+    example.com/scrape: 'false'
+  podLabels:
+    example.com/tier: edge
+  nodeSelector:
+    kubernetes.io/os: linux
+  tolerations:
+    - key: dedicated
+      operator: Equal
+      value: agents
+      effect: NoSchedule
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/component: gateway
+  extraEnv:
+    - name: SSE_KEEPALIVE_MS
+      value: '10000'
+worker:
+  limiter:
+    refillPerSecond: 2
+    capacity: 10
+    scope: model
+  autoscaling:
+    keda:
+      enabled: true
+      minReplicaCount: 0
+  extraEnvFrom:
+    - secretRef:
+        name: mcp-headers
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/component: worker
+agent:
+  providerType: openai-compatible
+  baseUrl: https://llm.internal/v1
+  plannerModel: small
+  synthesizerModel: small
+  systemPrompt: Be brief.
+  toolApproval: ask-writes
+  childAsk: deny
+  toolRules:
+    github__delete_*: deny
+  mcpServers:
+    docs:
+      url: https://mcp.example.com/mcp
+  subagents:
+    researcher:
+      description: Research one question with the docs
+      tools: [docs__search]
+      readOnly: true
+  pipelines:
+    review:
+      description: Draft an answer, check it against the docs, publish it
+      readOnly: true
+      definition:
+        version: 1
+        name: review
+        entry: draft
+        nodes:
+          - id: draft
+            instructions: Write a first draft.
+          - id: check
+            instructions: Check the draft against the docs.
+            tools: [docs__search]
+            routes:
+              - label: approve
+              - label: revise
+          - id: publish
+            instructions: Format it for publication.
+            model: small
+        edges:
+          - from: draft
+            to: check
+          - from: check
+            to: publish
+            when: { kind: route, label: approve }
+          - from: check
+            to: draft
+            when: { kind: otherwise }
+        limits: { maxNodeVisits: 2, maxRuns: 8 }
+  extra:
+    AGENT_COMPACTION: 'on'
+serviceAccount:
+  annotations:
+    example.com/role: agents
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffering: 'off'
+    nginx.ingress.kubernetes.io/proxy-read-timeout: '3600'
+  hosts:
+    - host: swarm.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: swarm-tls
+      hosts: [swarm.example.com]
+networkPolicy:
+  enabled: true
+  gatewayFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx
+  postgres:
+    to:
+      - ipBlock:
+          cidr: 10.20.0.0/16
+  provider:
+    to:
+      - ipBlock:
+          cidr: 0.0.0.0/0
+          except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16]
+  extraWorkerEgress:
+    - ports:
+        - { port: 8443, protocol: TCP }

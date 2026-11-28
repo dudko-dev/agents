@@ -337,7 +337,13 @@ Progressive disclosure:
 2. The planner lists the skills that apply (`plan.skills`); their full
    instructions enter the executor, replanner and synthesizer prompts.
 3. The executor can pull one in later with the built-in `load_skill` tool and
-   read bundled files with `read_skill_file` (both read-only, never gated).
+   read bundled files with `read_skill_file` (both read-only, never gated). Given a directory of
+   the skill instead of a file (`templates/`, `./templates`, `.` / `''` / `/` for the root),
+   `read_skill_file` returns its listing: `{ name, directory, files, directories, more? }`
+   (`SkillDirectoryListing`) - the direct children, by their paths inside the skill, sorted,
+   subdirectories first, at most 64 together (`more` counts the rest). A file of that name wins;
+   a path that is neither keeps the "no file" error; `..`, a URI or scheme, a query, a fragment or
+   a backslash is never a directory.
 
 `skill.activated { name, by: 'plan' | 'tool' }` is emitted; `RunResult.skills`
 lists the skills used; `agent.skills` lists the configured ones (and, with
@@ -352,16 +358,27 @@ with the same progressive disclosure - and with the guards a third party's text 
 
 ```ts
 const mcp = await connectMcpHttp(
-  { docs: { url, protocol: 'auto', skills: true } },
+  {
+    docs: { url, protocol: 'auto', skills: true },
+    // A server you vetted: its skills load without a question.
+    ours: { url: ourUrl, protocol: 'auto', skills: { consent: 'never' } },
+    // A server you trust with its generated skills (no checksums): step 8 below.
+    gen: { url: genUrl, protocol: 'auto', skills: { dynamic: true } },
+  },
   { onToolsChanged: (name) => void mcp.refreshServer(name) },
 )
-const agent = await createAgent({ model, tools: { ...mcp.tools } })
+const agent = await createAgent({
+  model,
+  tools: { ...mcp.tools },
+  // A person sees each skill before the model does (step 4 below).
+  toolApproval: { onRequest: (req) => (req.skill ? showSkillCard(req) : showToolCard(req)) },
+})
 agent.skills.filter((s) => s.server) // [{ name: 'docs/pdf-processing', description, server: 'docs' }, …]
 ```
 
 What happens, in order:
 
-1. **Negotiation.** With `skills: true` and a `protocol` that may speak 2026-07-28 (`'auto'`,
+1. **Negotiation.** With `skills` (`true`, or `{ consent, dynamic }`) and a `protocol` that may speak 2026-07-28 (`'auto'`,
    `'modern'`), the client declares `io.modelcontextprotocol/skills: {}` among its
    `extensions`. Without the flag - the default - nothing is declared and the wire is what it
    always was. On `'legacy'` (or no `protocol`) nothing is declared either and a `warn` line says
@@ -372,7 +389,9 @@ What happens, in order:
    follows the Agent Skills rules, there is a description, `resources` is the complete list of its
    files - each inside the skill's directory, listed once, with a `sha256:` digest and a size -
    within the extension's limits (512 files, 16 MiB). A `"dynamic"` entry (no digests) is
-   declined. A refused entry is a `warn` line naming why. Nothing is read: lazy retrieval.
+   declined - deliberately, also where the server serves directory reads (step 5a) - unless the
+   server has `skills: { dynamic: true }` (step 8): then it is taken when it meets every other
+   rule. A refused entry is a `warn` line naming why. Nothing is read: lazy retrieval.
 3. **The catalog.** The skills join `skills` as `<server>/<skill>`, the server by its key in the
    connection (the host's label). Host skills and lessons cannot hold a `/`, so no name is ever
    shared: a server cannot shadow one of yours or another server's skill, and a clash of bare
@@ -386,16 +405,70 @@ What happens, in order:
    against the entry: byte size, SHA-256 digest, and the frontmatter field by field (the SDK's
    `SkillsClient`). A mismatch - the server changed it, or lies - refuses the load: the tool call
    fails with the reason, a planner's pick is not activated (a `warn` line), nothing of the text
-   reaches the model. The body (cleaned, cut at `MCP_SKILL_BODY_MAX_CHARS`, 16 000, with a notice)
-   goes to the model under `mcpSkillPreamble`, which names the server and the URI and says the text
-   is third-party knowledge that cannot grant permissions, approve a call, change the approval
-   mode, widen egress or the sandbox, or make the agent run anything. The skill is active for the
-   rest of the run (`skill.activated` with `server`), under the same preamble.
+   reaches the model. Then the person is asked (step 4a); only on a yes does the body (cleaned,
+   cut at `MCP_SKILL_BODY_MAX_CHARS`, 16 000, with a notice) go to the model, under
+   `mcpSkillPreamble`, which names the server and the URI and says the text is third-party
+   knowledge that cannot grant permissions, approve a call, change the approval mode, widen egress
+   or the sandbox, or make the agent run anything. The skill is active for the rest of the run
+   (`skill.activated` with `server`), under the same preamble.
+   4a. **Consent.** Before a server's skill enters the model's context - by `load_skill`, the
+   planner's pick, a resumed run, or `read_skill_file` of one of its files - the agent asks
+   through `toolApproval.onRequest`: a request with `toolName: 'load_skill'`, `input` (what it was
+   called with: `{ name }` or `{ server, uri }`), `readOnly: true` and `skill`
+   (`McpSkillConsentView`): `server`, `name` (`<server>/<skill>`), `skill` (its frontmatter
+   name), `uri`, `description` (one line, ≤ 300 characters), `size` / `totalSize` (bytes of its
+   `SKILL.md` / of all its files), `files` / `fileCount`, `body` (the very text the model would
+   read: `mcpSkillBodyPreview`, the same cleaning and cap - what a person approves is what the
+   model gets), `byUri` (asked for by URI, step 7), `nestedIn` (it sits inside that skill of the
+   same server) and `consent`. The same `tool.approval-requested` / `-resolved` events (with
+   `skill`), the same `timeoutMs`, and the run's clock stops while the person reads. A yes
+   (`true`) lets it in; `{ approved: true, remember: true }` - "Always for this server" - lets in
+   that server's other skills for the agent's life too, nested ones excepted; a no keeps all of it
+   out: the call fails with `McpSkillDeniedError` ("The user did not allow the skill … nothing of
+   it is in your context. Do not load it again in this task …"), a planner's pick is not activated
+   (a `warn` line), and a second load of it in the same run is refused at once, without a second
+   question. No answer within `timeoutMs`, or a handler that throws, is a refusal nobody gave:
+   asked again next time. Without `onRequest` the skill is not loaded (a `warn` at `createAgent`
+   says so). The approval MODE plays no part - autopilot asks too - and neither do `rules`.
+   **When** is the consent's choice: the server's `skills: { consent }`, else the agent's
+   `mcpSkills: { consent }`, else `'once-per-skill'` (`MCP_SKILL_CONSENT_DEFAULT`):
+   - `'once-per-skill'` - asked the first time the skill would enter a context in the agent's
+     life; a yes holds while its entry is the same (bound to the server, the URI and every file's
+     digest - `mcpSkillGrantKey` - so a skill the server changed is asked about again);
+   - `'ask'` - asked in every run that loads it ("Always for this server" still holds);
+   - `'never'` - never asked: what the extension did before, for a server the host vetted.
+   A **nested** skill (its `SKILL.md` inside another listed or known skill's directory) is asked
+   about on its own: its enclosing skill's yes does not cover it, nor does "Always for this
+   server". Nothing is kept on disk: grants last as long as the agent (helpers share them).
 5. **Files.** `read_skill_file({ name, path })` reads one file of a loaded skill: only a path the
    entry it was LOADED with lists (never a URI, an absolute path or `..` - a skill cannot point a
    read at another skill or another server), from its own server, verified the same way, text only,
    cut at `MCP_SKILL_FILE_MAX_CHARS` (32 000), under a header that says it is text to read, never a
    program to run. A script a skill bundles is shown as text; nothing runs it.
+   5a. **Directories.** `read_skill_file` with a directory of a loaded skill (step 3) lists it
+   from the entry it was LOADED with - the held entry is authoritative for what may be read - after
+   the same consent as a file (a refused skill lists nothing). When the server declared
+   `directoryRead` (the SDK's `SkillsClient.directoryRead`, on the 2026-07-28 connection), the
+   agent also sends `resources/directory/read` for that directory - the skill's root URI, or
+   `<root>/<dir>`, without a trailing slash, every page walked (bounded by the client's
+   `listMaxPages`), with the tool call's abort signal - to THAT server only, and only to see
+   whether the skill changed there (`compareMcpSkillDirectory`: a live entry counts only as a
+   direct child of that directory, its name compared with its percent escapes decoded, at most
+   `MCP_SKILL_DIRECTORY_ENTRIES_MAX` (640) looked at):
+   - a child the server lists and the entry does not is NEVER shown - not its name, URI,
+     description or MIME type - and cannot be read; the listing gets `note`, a fixed sentence
+     with the count ("The server now lists 1 more item(s) here than the approved entry of this
+     skill: the skill changed on the server. They are not shown and cannot be read under the
+     current approval. The skill is read again, and asked about again, when the server's skills
+     are refreshed."), a `warn` names the server, the skill and the counts, and `onToolsChanged`
+     fires once for that loaded skill, so the host lists the server's skills again between runs
+     (`refreshServer`): never behind a run;
+   - a child of the entry the server no longer lists stays in `files` / `directories` and is also
+     named in `notServed` (a read of it will fail), with a `note`;
+   - a directory read that fails (`-32602`, the SDK's capability error, a bad result) leaves the
+     listing to the entry alone: no note, a `warn` line; a stop of the run still stops it.
+   Without `directoryRead` the method is never called; without `skills` nothing of it exists.
+   A generated skill (step 8) is listed from its snapshot, and compared the same way.
 6. **Changes.** The extension has no notice of its own: a server announces a change of its skills
    as a resource list change. With `onToolsChanged`, the connection listens for
    `notifications/resources/list_changed` too (on 2026-07-28, `resourcesListChanged` on the same
@@ -403,6 +476,66 @@ What happens, in order:
    this package an agent built after the refresh has the new list (the Node sibling refreshes its
    own between runs). A skill loaded before keeps reading against the entry it was loaded with; a
    file that changed since fails its check.
+7. **By URI.** A server MAY list only some of its skills, and point at others by URI - in its
+   instructions, in one of its skills, in a tool result. `load_skill` then takes
+   `{ server, uri }` instead of `{ name }`, and its description says so and names the servers
+   (`mcpSkillLoadByUriNote`; it is fixed when the agent is built, so the prompt stays run-stable;
+   without a server whose skills are on, the tool is what it always was). Before any request, the
+   URI must be a `skill://` URI of a `SKILL.md` in a named directory (`mcpSkillUriRefusal`: no
+   other scheme - a URI the model hands over came from third-party text - no space, nothing
+   invisible, ≤ `MCP_SKILL_URI_MAX_CHARS`, 512), `server` must be one whose `skills` are on (by its
+   key or its label; `resolveMcpSkillServer`), and the catalog must have room for one more of that
+   server (`mcpSkillRoomRefusal`: it counts against the same 32 / 64). Then `skills/get` goes to
+   THAT server and no other - the URI is scoped to the server the model names, never looked up
+   across servers. Its error reaches the model (`-32602`: "the server serves no skill at that
+   URI"); its entry passes the rules of step 2, then everything of steps 4 - 5 (verification,
+   consent with `byUri`, the preamble). It joins the catalog for the connection's life
+   (`source.added`; a refresh keeps it, a listing that now holds it makes it a listed one), named
+   so that it takes no name in use (`assignAddedMcpSkillName`: `docs/release-checklist`, or by its
+   path, `docs/internal/git-workflow`, when `docs/git-workflow` is taken). A URI already in the
+   catalog for that server is that skill: nothing is asked of the server.
+8. **Generated skills (opt-in).** A server that generates a skill publishes `"resources":
+   "dynamic"` instead of the list of its files: there are no digests, so nothing could be verified
+   and no consent could bind to the content. Such an entry is declined (step 2) unless that
+   server's config says `skills: { dynamic: true }` - per server, on purpose: there is no
+   agent-wide switch (`mcpSkills` stays consent only). Then:
+   - **Listing.** It joins the catalog like any other skill, its line ending
+     `[from the MCP server "docs" - third-party, no checksums]` (still within 300 characters).
+     Nothing of it is read.
+   - **A snapshot, before anyone is asked.** When it would enter the context (step 4 / 4a - the
+     same paths), the agent reads all of it once: `SKILL.md` through the SDK (`read(skill)`: the
+     frontmatter is still compared with the entry's), then - only if the server declared
+     `directoryRead` - its directory tree: `resources/directory/read` of the skill's root, then of
+     every `inode/directory` child inside the root (direct children only, two spellings of one
+     name are one, nothing visited twice; anything outside the root, with a query or no plain name
+     is ignored), and `resources/read` of every file found (nested `SKILL.md` files are files like
+     any other). Bounds: at most `MCP_SKILL_MAX_RESOURCES` (512) files including `SKILL.md`, at most
+     `MCP_SKILL_MAX_TOTAL_BYTES` (16 MiB) actually read, at most
+     `MCP_SKILL_SNAPSHOT_MAX_DIRECTORIES` (64) directories read, none deeper than
+     `MCP_SKILL_SNAPSHOT_MAX_DEPTH` (8), and all the snapshots one agent holds together at most
+     `MCP_SKILL_SNAPSHOTS_MAX_BYTES` (64 MiB). Over any of them - or a directory or a file that
+     cannot be read - the skill is declined: nobody is asked, the model is told why (the tool
+     call fails, a planner's pick is not activated), and a `warn` line names the reason. The
+     file count is checked as the directories are listed, before any file is read.
+   - **Its own entry.** The agent computes each file's byte size and SHA-256 itself (WebCrypto)
+     and makes a manifest of the copy (`resources: [{ uri, size, digest }]`). That manifest is the
+     skill's held entry from then on: the consent request carries `dynamic: true` and the copy's
+     `size`, `totalSize`, `files` and `body`; a yes binds to the copy's digests
+     (`mcpSkillGrantKey`), so under `'once-per-skill'` a later snapshot that differs - after a
+     refresh (the Node sibling) or in a new agent - is asked about again, and an identical one is
+     not. `'never'` works as for any skill (a vetted server).
+   - **Served from memory.** The model gets exactly what was approved: the body of the copy's
+     `SKILL.md`, and `read_skill_file` answers every file from the copy's bytes, never with a new
+     read (a generated skill may change on every read: the approved copy is what counts). A path
+     the copy does not hold is refused before any request. A directory is listed from the copy;
+     with `directoryRead`, the staleness check of step 5a works as for any skill (counts only).
+   - **No directory reads.** On a server that did not declare `directoryRead` the copy is
+     `SKILL.md` alone: the request says `noFileListing: true`, and no other file of the skill can
+     be read (none is in the held entry).
+   - **Nothing written.** The copy lives in memory, with the skill object (for the agent's life;
+     the Node sibling's refresh drops the old objects and gives their bytes back): never in
+     IndexedDB, a checkpoint, an event or a log - only what the model was given, as for any skill.
+     A resumed run in a new agent reads a new copy.
 
 While a run acts on an MCP skill - one of its own active skills, or one of the run that started
 it, for a helper - a call of a tool that **runs code** (`isCodeExecutionTool`: the sandbox's
@@ -411,12 +544,7 @@ rule or an earlier "always allow" say; the request carries `mcpSkills` (the skil
 with no `onRequest` the call is refused. The extension requires it: a server's skill must not lead
 to code running here without a person's approval. Nothing else about consent changes.
 
-Not done (yet): a skill the listing leaves out cannot be loaded by its URI alone (`skills/get`,
-which the extension asks a host to support for partial listings - a URI the model read in one
-server's instructions must reach that server and no other, and the agent cannot yet tell which
-server's text the model read it in), and `resources/directory/read` is never called (a skill's
-files are known from its entry, which the extension allows a host to answer from). A skill whose
-listing changed is re-read on the next refresh, not with `skills/get`.
+A skill whose listing changed is re-read on the next refresh, not with `skills/get`.
 
 A server's skills come with its tools, like its instructions (each mounted tool carries them): a
 server none of whose tools is mounted offers none. `RunResult.skills`, `agent.skills` (with
@@ -823,9 +951,18 @@ section on MCP Apps (`ui/open-link`) and to put the plan in the message box (`ui
 reports its height as days open and close. Everything is computed from the inputs: the same trip,
 the same plan and the same code.
 
+On 2026-07-28 it also serves two [skills](#mcp-skills-experimental) (it declares
+`io.modelcontextprotocol/skills`; on the 2025 revisions it does not). `skill://demo/trip-planning/SKILL.md`
+says how to plan a trip with its tools (ask for what is missing, `plan_trip` for a form,
+`trip_board` for the days) and bundles `references/checklist.md`, a list of papers and things to
+pack; `skill://demo/dice-games/SKILL.md` has the rules of Pig and Yacht-lite, played with
+`roll_dice`. Static entries (no `"dynamic"`), each skill a few KiB, the sizes and digests computed
+from the bytes it serves. With `skills: true` they are `demo/trip-planning` and `demo/dice-games`
+in the agent's catalog (in the demo: "Try it with its skills").
+
 ```ts
 const mcp = await connectMcpHttp(
-  { demo: { url: 'https://agent.dudko.dev/mcp/demo', protocol: 'auto' } },
+  { demo: { url: 'https://agent.dudko.dev/mcp/demo', protocol: 'auto', skills: true } },
   { onElicitation: askTheUser, elicitation: { url: true }, apps: true },
 )
 ```
@@ -1673,11 +1810,35 @@ if (unfinished) await agent.run('', { resumeFromRunId: unfinished.runId })
 - A stopped run (`cancelled`) and a failed one can be resumed; a `complete` one cannot.
   `IndexedDBRunStore` drops a completed run's snapshot (`keepCompleted: true` keeps it
   as an audit trail); `MemoryRunStore` does the same but does not survive a reload.
-- The hooks are `onRunStart`, `onStepComplete`, `onRunComplete` and `loadRun` — the
-  names the Node package uses — so a store of your own is four methods. A hook that
-  throws is logged and the run carries on: persistence is observability, not a
-  correctness boundary. The snapshot's field names follow this package's `run(goal)`
-  (`goal`, not Node's `input`).
+- **Your own run id.** `run(goal, { runId })` starts a fresh run under an id you choose
+  instead of a random one - a host that keys runs by ids of its own (a conversation and a
+  turn) gives one, so that a retry finds the same run. The rule of every run id: 1-128
+  letters, digits, `_` or `-`. `run()` rejects before anything of the run (no model call,
+  no event, no write) for an id that breaks it, for `runId` together with `resumeFromRunId`
+  (a resume keeps the id of the run it resumes), and when `loadRun` has a snapshot for the
+  id: `Run "<id>" already exists (status "…"); resume it with resumeFromRunId` - a run on
+  record is never written over, and a `loadRun` that throws refuses the run too. A check,
+  not a lock: two runs started at the same moment under one id both pass it, and a
+  completed run whose snapshot the store dropped (above: without `keepCompleted`) leaves its
+  id free again.
+- The hooks are `onRunStart`, `onStepComplete`, `onRunComplete`, `onRunResume` and
+  `loadRun` — the names the Node package uses — so a store of your own is a handful of
+  methods. A write hook that throws is logged and the run carries on: persistence is
+  observability, not a correctness boundary. The one exception is `onRunResume` (below).
+  The snapshot's field names follow this package's `run(goal)` (`goal`, not Node's
+  `input`).
+- **Attempts and the order of events.** Every event of a run carries `seq` and `attempt`:
+  `attempt` is 1 for the run as first started and one more for every resume, `seq` counts
+  the events of one attempt from 1. Ordered by `(attempt, seq)`, a run's events are one
+  total order across reloads and crashes. Every snapshot carries the `attempt` that wrote
+  it (absent on an older snapshot: read as 1). A resume writes `onRunResume` — the loaded
+  snapshot with the NEW attempt, status `executing` — **before** it emits anything (a store
+  without that hook gets the same write as `onStepComplete`), so a crash even before the
+  resumed run's first checkpoint never lets two attempts share a number. That write is not
+  best-effort: if it throws, the resume is refused (`run()` rejects, nothing ran). A
+  snapshot whose `attempt` is not a positive integer is not resumed. Delivery is
+  at-least-once: the step a crash interrupted runs again under the next attempt, so its
+  events come again with the new attempt's numbers.
 - The database gains a `runs` object store (schema v3); an existing database upgrades in
   place and keeps its data.
 
@@ -2368,17 +2529,24 @@ validation. It answers the same as `RegExp.test` on what it accepts.
 - **Join.** A node activated by several edges gets all their outputs in one visit. With
   `join: 'all'` an activated node is *deferred* while any other activated node can still reach it
   through the graph (conditions aside) - so a fan-in waits for its slower branch even when the
-  branches have different lengths. If every activated node is deferred (they wait for each other in
-  a cycle), all of them run. `join: 'any'` never defers: the node runs once per wave it is
-  activated in.
+  branches have different lengths. If every activated node is deferred (they reach each other
+  through a loop), only the waits within one pass of the loop count: a wait that holds only by
+  going round, back to the loop's *head* (the node every path from the entry into the loop
+  passes), is for the next pass and is dropped. If that still leaves every node deferred, all of
+  them run. `join: 'any'` never defers: the node runs once per wave it is activated in.
 - **Loops** are allowed. When starting a node would exceed `maxNodeVisits` for it, or `maxRuns` for
   the pipeline, that activation is dropped (`pipeline.node.skipped`); the run goes on with what is
   left, ends normally, and the result carries `stoppedBy: 'maxNodeVisits'` or `'maxRuns'`
   (`maxRuns` wins when both happened).
-- **A fan-in inside a loop** has a limit: when a `join: 'all'` node and a slower branch that leads
-  to it can also reach each other through the loop, they wait for each other, so both run and the
-  join fires without that branch. Use `join: 'any'` there, or keep the fan-in out of the cycle (a
-  loop around the whole fan-out and fan-in works).
+- **A fan-in inside a loop.** A loop that goes back to the fan-out or to any node before it
+  (`a → b → join`, `a → c → d → join`, `join → a`) works: on every pass the join waits for its
+  slower branch and runs once with both outputs, whatever the order of the edges. A loop that goes
+  back *into* a branch (`join → c` instead) has no head - it is entered at `c` and at the join -,
+  so the join and that branch wait for each other, both run, and the join fires without that
+  branch: loop back to a node before the fan-out, or use `join: 'any'` there. The pass rule is
+  asked only when every activated node waits: a node outside a loop that the loop feeds
+  (`a ↔ b`, `a → x`) still waits while the loop goes on, and runs once, with the output of every
+  pass.
 - **The end.** The run ends when nothing is activated. A *terminal* visit is one that activated
   nothing (no edge fired, or a cap dropped what it fired). `result.text` is the output of the last
   terminal node to finish; several of the same wave are joined under `## <name>` headings.
@@ -2431,6 +2599,28 @@ schedules - which is also how to test a graph without a model.
 failed node. A route is picked with `generateStructured`; a model that cannot do structured output
 is asked again in plain text.
 
+**Running the graph yourself.** The scheduler and the route call are public: `preparePipeline(definition)`
+validates and compiles, `runPipelineGraph(plan, runNode, { input, signal?, onEvent?, onAbort? })` runs
+the graph with a node runner of your own (`onAbort`: `'reject'` by default, `'resolve'` as
+`createPipeline` here), and `pickPipelineRoute(node, text, { agent, config, signal?, onEvent? })` is
+the route call `createPipeline` makes after a node, for wherever the node ran. The pure parts of the
+route call are exported too: `PIPELINE_ROUTER_SYSTEM`, `renderPipelineRoutePrompt`,
+`matchPipelineRoute`. The engine is deterministic by contract (no clock, randomness, timers or I/O;
+`AbortController` and `DOMException` only where the runtime has them). The runner's contract and an
+example: [README](../README.md#running-the-graph-yourself).
+
+**The engine alone: `@dudko.dev/agent-web/pipeline-engine`.** An entry point of its own (ESM and
+CommonJS, with types) with the engine and nothing else: `preparePipeline`, `runPipelineGraph`,
+`validatePipeline`, `normalizePipeline`, `testPipelineCondition`, `renderPipelineNodeInput`,
+`renderPipelineRoutePrompt`, `matchPipelineRoute`, `PIPELINE_ROUTER_SYSTEM`, `PIPELINE_LIMITS`,
+`PipelineValidationError`, `PipelineNodeError` and every pipeline type. Its file imports nothing -
+not `ai`, `zod` or `idb`, no chunk of the package - so it loads where the main entry cannot: a
+bundled orchestrator, a workflow sandbox, anything with the language and nothing else
+(`tests/pipeline-determinism.test.ts` runs the built ESM and CommonJS files in such a sandbox).
+`pickPipelineRoute` and `createPipeline` call models and stay in the main entry. It is a copy of
+the engine the main entry carries, not the same objects: an error thrown by one is not
+`instanceof` the other's class - compare `error.name`.
+
 ## Autonomy
 
 The default prompts make the agent act on its own:
@@ -2452,6 +2642,14 @@ Soften it per app with `systemPrompt`, or replace any phase via `prompts`.
 
 Everything the agent does is a typed `AgentEvent` (the union is in [`src/events.ts`](../src/events.ts)).
 Subscribe with `onEvent` (per run) or the handler you pass to `createAgent`; render them however you like.
+
+Every event of a run also carries **`seq`** and **`attempt`**, its place in the run: `attempt` is 1 for
+a fresh run and one more for every [resume](#resuming-an-interrupted-run), `seq` counts the events of
+one attempt from 1, so `(attempt, seq)` is a total order of the run's events across reloads and
+crashes. A `subagent.event` envelope is numbered in the parent run; the event inside keeps the child
+run's own numbers. Delivery is at-least-once: a step a crash interrupted runs again under the next
+attempt, and its events come again with that attempt's numbers. Events outside a run (a pipeline's
+own `pipeline.*` events, `approveAppToolCall`, `sampleForApp`) carry neither.
 
 **The loop**
 
@@ -2491,7 +2689,7 @@ Subscribe with `onEvent` (per run) or the handler you pass to `createAgent`; ren
 | --- | --- |
 | `skill.activated` | `name, by: 'plan' \| 'tool', server?` (`server`: the MCP server of a skill served with `skills: true`) |
 | `tools.discovered` | `step?, query, names` — `find_tools` activated more tools |
-| `tool.approval-requested` | `id, name, input, readOnly, step?, subagent?, app?, mcpSkills?` (`subagent: { id, depth }` when a helper the model started is asking; `app: { server, tool, resourceUri }` when an [MCP App](#mcp-apps-a-servers-interface-for-a-tool) asks - `agent.approveAppToolCall`; `mcpSkills`: the call runs code while the run acts on these [MCP skills](#mcp-skills-experimental), so it is asked whatever the mode says) |
+| `tool.approval-requested` | `id, name, input, readOnly, step?, subagent?, app?, mcpSkills?, skill?` (`subagent: { id, depth }` when a helper the model started is asking; `app: { server, tool, resourceUri }` when an [MCP App](#mcp-apps-a-servers-interface-for-a-tool) asks - `agent.approveAppToolCall`; `mcpSkills`: the call runs code while the run acts on these [MCP skills](#mcp-skills-experimental), so it is asked whatever the mode says; `skill` (`McpSkillConsentView`, with `name: 'load_skill'`): not a tool call but an [MCP server's skill](#mcp-skills-experimental) about to enter the model's context - its server, name, description, size, files and the text the model would read; `dynamic` / `noFileListing` for a [generated one](#mcp-skills-experimental): the copy the agent just read) |
 | `tool.approval-resolved` | `id, name, approved, reason?, automatic` |
 | `mcp.elicitation-requested` | `id, server, tool, mode: 'form' \| 'url', message, requestedSchema?, url?, step?, subagent?` — an MCP server asked the user for input during a tool call and the connection's `onElicitation` is being called. The server's text, cleaned and capped ([elicitation](#mcp-elicitation-a-server-asks-the-user)) |
 | `mcp.elicitation-answered` | `id, server, tool, action: 'accept' \| 'decline' \| 'cancel', automatic, reason?, fields?` — the question was settled. `fields`: the NAMES of the fields an accepted form was answered with, never a value. `automatic`: nobody decided, the tool call fails, `reason` says why |
@@ -2508,7 +2706,7 @@ Subscribe with `onEvent` (per run) or the handler you pass to `createAgent`; ren
 
 | Event | Payload |
 | --- | --- |
-| `subagent.start` / `subagent.event` / `subagent.complete` / `subagent.error` | `id, name` + `task, parentId, depth, profile?, dynamic?, role?, tools?` / `event` / `text, usage` / `error, stopped?, usage?` — a static subagent or a helper the model started; see [the subagent tree](#the-subagent-tree-from-the-events) |
+| `subagent.start` / `subagent.event` / `subagent.complete` / `subagent.error` | `id, name` + `task, parentId, depth, profile?, dynamic?, role?, tools?` / `event` / `text, usage` / `error, stopped?, usage?` — a static subagent or a helper the model started; see [the subagent tree](#the-subagent-tree-from-the-events). The envelope's `seq` is the parent run's; the `event` inside keeps the child's `seq` / `attempt` |
 | `message.queued` | `id, text` — a `RunControl.send()` is waiting for a boundary |
 | `message.delivered` | `id, text, at: 'round' \| 'step' \| 'final'` — the model has seen it |
 

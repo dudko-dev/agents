@@ -46,8 +46,10 @@ import {
   createMcpSkillCatalog,
   markMcpSkills,
   MCP_SKILLS_EXTENSION,
+  mcpSkillsSettingOf,
   type McpSkillSource,
   type McpSkillsClientLike,
+  type McpSkillsSetting,
 } from './skills.js'
 import { assertSecureOAuthUrl } from './oauth.js'
 import {
@@ -131,8 +133,14 @@ export interface McpHttpServerConfig {
    * it. The skills come with the server's tools (each mounted tool carries them, like the
    * server's instructions), so merging `tools` into the agent's config is all a host does. Their
    * text is third-party - knowledge only, never policy; see the README, "MCP skills".
+   * `true`, or `{ consent, dynamic }`: `consent` is when a person is asked before one of its
+   * skills enters the model's context - `'once-per-skill'` (default, or the agent's
+   * `mcpSkills.consent`), `'ask'` (every run) or `'never'` (a server you vetted); `dynamic: true`
+   * also takes its GENERATED skills (`"resources": "dynamic"`, no checksums - declined by
+   * default), each read whole into a snapshot in memory before anyone is asked, approved and used
+   * as that copy only (README, "MCP skills").
    */
-  skills?: boolean
+  skills?: McpSkillsSetting
   /**
    * MCP Apps for THIS server, over the connection's `apps`: `false` keeps its apps off while
    * other servers' are shown - nothing is declared to it, no app of it is read, no `mcp.app`
@@ -277,7 +285,10 @@ export interface ConnectMcpOptions {
    * callback fires as for a notice, since a change in the gap was not announced.
    * On a server with `skills: true` it also fires for a resource list change
    * (`notifications/resources/list_changed`): that is how a change of its
-   * skills is announced, and `refreshServer` lists them again.
+   * skills is announced, and `refreshServer` lists them again. It fires too,
+   * once per loaded skill, when a directory read (`resources/directory/read`,
+   * a server that declared `directoryRead`) shows that a skill changed on the
+   * server since it was loaded.
    */
   onToolsChanged?: (server: string) => void
   /**
@@ -994,8 +1005,9 @@ const connectAndList = async (
   const apps = mcpAppsModeOf(cfg.apps, opts.apps) === 'on'
   // `skills: true` (experimental): the Skills extension is written against 2026-07-28, so it is
   // declared only where that revision may be spoken; never on a 'legacy' connection.
-  const skillsWanted = cfg.skills === true && mode !== 'legacy'
-  if (cfg.skills === true && mode === 'legacy') {
+  const skillsSetting = mcpSkillsSettingOf(cfg.skills, name)
+  const skillsWanted = skillsSetting.on && mode !== 'legacy'
+  if (skillsSetting.on && mode === 'legacy') {
     log(
       'warn',
       `[mcp] ${name}: skills: true needs protocol 'auto' or 'modern' (the Skills extension is written against 2026-07-28); no skills are requested`,
@@ -1091,10 +1103,18 @@ const connectAndList = async (
       log('info', `[mcp] ${name}: the server does not offer skills (${MCP_SKILLS_EXTENSION})`)
     } else {
       const { SkillsClient } = await import('@modelcontextprotocol/client/ext/skills')
+      // A directory read that shows a skill changed on the server (`directoryRead`) is announced
+      // the way a resource list change is: `onToolsChanged`, for a refresh between runs.
+      const notify = opts.onToolsChanged
       skills = createMcpSkillCatalog(
         name,
         new SkillsClient(client, { skipInvalid: true }) as unknown as McpSkillsClientLike,
         (level, message) => log(level, message),
+        {
+          ...(skillsSetting.consent ? { consent: skillsSetting.consent } : {}),
+          ...(skillsSetting.dynamic ? { dynamic: true } : {}),
+          ...(notify ? { onChanged: () => notify(name) } : {}),
+        },
       )
       await skills.refresh()
     }

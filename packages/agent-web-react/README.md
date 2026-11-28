@@ -472,7 +472,7 @@ Options:
 | `connect({ url, name, headers })` | the endpoint, the tool prefix (`"<name>__<tool>"`, default `mcp`), static headers |
 | `connect({ oauth })` | `true`, or `{ redirectUrl, scope, clientName, clientMetadataUrl, registration }` (`McpOAuthOptions`) - each overrides the hook-level value for this server; `registration` is below |
 | `connect({ protocol })` | the MCP protocol revisions this connection may use: `'legacy'` (the 2025 revisions), `'auto'` (2026-07-28 when the server offers it, the 2025 ones otherwise) or `'modern'` (2026-07-28 only). Left out, nothing is passed and the core speaks the 2025 revisions, exactly as before. Kept across the OAuth redirect. See [the protocol revision](#the-protocol-revision) |
-| `connect({ skills })` | **experimental**: load the skills the server serves (the MCP Skills extension) into the agent's skills catalog, as `<server>/<skill>`. They come with `tools` - nothing else to wire. Needs `protocol: 'auto'` or `'modern'`. Off (left out) by default. Kept across the OAuth redirect. See [MCP skills](#mcp-skills-experimental) |
+| `connect({ skills })` | **experimental**: load the skills the server serves (the MCP Skills extension) into the agent's skills catalog, as `<server>/<skill>`. They come with `tools` - nothing else to wire. Needs `protocol: 'auto'` or `'modern'`. `true`, or `{ consent: 'once-per-skill' \| 'ask' \| 'never', dynamic?: boolean }` (`consent`: when a person is asked before one of its skills enters the agent's context; `dynamic: true`: its generated skills too, no checksums - see [MCP skills](#mcp-skills-experimental); `McpSkillsSetting`, `mcpSkillsSettingOf`). Off (left out) by default. Kept across the OAuth redirect. See [MCP skills](#mcp-skills-experimental) |
 
 **`clientMetadataUrl` (CIMD).** Instead of registering itself with every authorization server, an
 app can publish one JSON document that describes it and use that document's URL as its
@@ -532,11 +532,13 @@ Two notes:
   hooks is what puts it in your build.
 - `oauthSupported` is `false` on cores older than `@dudko.dev/agent-web@0.0.9`,
   which introduced `BrowserOAuthProvider`; header auth still works there. The
-  peer floor is `>=0.0.39` — the first core with model tiers, dynamic subagents,
-  media and decision models, whose helpers and constants this package imports
-  (`isReplayedToolOutput`, the media type lists), on top of pipelines, the learning
+  peer floor is `>=0.0.41` — the first core with MCP Apps (`approveAppToolCall`,
+  `sampleForApp`), MCP skills with consent, `file.written`, elicitation and the
+  OAuth `registration` choice this package's chat and hooks use, on top of model
+  tiers, dynamic subagents, media and decision models, pipelines, the learning
   notebook, the virtual file system, attachments, consent, tool search, subagents,
-  steering and context editing this package's chat builds on.
+  steering and context editing. `skills: { dynamic: true }` needs a core 0.0.42 or
+  later: an older one declines those skills.
 
 ## Several MCP servers — `useMcpServers`
 
@@ -553,7 +555,7 @@ const config = { model, tools: { ...myTools, ...mcp.tools } } // "<name>__<tool>
 `elicitation`) plus `persist`, `storageKey`, `autoConnect` and `connectTimeoutMs`, and returns
 `{ servers, tools, catalog, protocols, connectedCount, pendingElicitations, answerElicitation, … }`.
 A server may be added with its own `protocol` (`add({ name, url, protocol: 'auto' })`),
-`skills: true` ([MCP skills](#mcp-skills-experimental); `servers[i].skills`) and `apps: false`
+`skills: true` or `{ consent, dynamic }` ([MCP skills](#mcp-skills-experimental); `servers[i].skills`) and `apps: false`
 (that server's [MCP Apps](#mcp-apps--a-servers-interface-in-the-chat) off while the others' are
 shown; `servers[i].apps`), all remembered with the list; `servers[i].protocolMode` is what it was added with and
 `servers[i].protocol` (`{ version, era }`) what was negotiated while it is connected - `protocols`
@@ -580,6 +582,11 @@ core's [capabilities doc](https://github.com/dudko-dev/agents/blob/main/packages
 ```tsx
 await mcp.add({ name: 'docs', url, protocol: 'auto', skills: true })
 // the agent's catalog now has docs/<skill> entries; mcp.servers[0].skills === true
+// a server you vetted: its skills load without asking
+await mcp.add({ name: 'ours', url: ourUrl, protocol: 'auto', skills: { consent: 'never' } })
+// a server you trust with its GENERATED skills (no checksums): each is read whole, and the
+// person approves that copy
+await mcp.add({ name: 'gen', url: genUrl, protocol: 'auto', skills: { dynamic: true } })
 ```
 
 A server may serve **skills** (the `io.modelcontextprotocol/skills` extension, Beta): instruction
@@ -595,6 +602,33 @@ approve a call, change the approval mode, open the web or run code (while the ag
 tool that runs code is always asked). Needs the 2026-07-28 revision. The core's
 [README](https://github.com/dudko-dev/agents/blob/main/packages/agent-web/README.md) ("MCP
 skills") has the rules.
+
+**A person sees a server's skill before the agent does.** The first time a skill would enter the
+agent's context, the core asks through the same consent gate as a tool call - `useAgent()`'s
+`pendingApprovals` gets a request whose `skill` (`SkillConsentView`) holds the server, the skill,
+its description, size and files, and the very text the model would read (`skill.body`, while the
+request is open: the reducer drops it once it is decided, so a saved chat does not keep it).
+`<AgentChat>` / `<ToolApprovalPrompt>` render it as its own card - "The server “docs” offers the
+skill “pdf-processing”", the description, a collapsed preview of the text (plain text) and **Allow
+once** / **Always for this server** / **Deny**; `approve(id)` / `approve(id, { remember: true })`
+/ `deny(id)` answer it. Asked whatever the approval mode - autopilot too. `skills: { consent }`
+(per server, remembered) or the agent's `mcpSkills: { consent }` (core config) choose when:
+`'once-per-skill'` (default: once per skill in the agent's life, again when the server changes
+it), `'ask'` (every task that loads it) or `'never'` (a server you vetted: today's behaviour). A
+skill inside another one (nested) is asked about on its own. The agent may also load a skill a
+server names by its address (`skill://…/SKILL.md`, in its instructions or a skill), from that
+server only - the card says so (`skill.byUri`).
+
+**Generated skills** (`"resources": "dynamic"`: the server publishes no checksums) are declined
+unless the server was added with `skills: { dynamic: true }` (remembered with the list; there is
+no switch for every server). Then, before the person is asked, the core reads the whole skill -
+its `SKILL.md` and, if the server can list directories, every file in them, within the
+specification's limits (512 files, 16 MiB) - computes the digests itself and keeps that copy in
+memory: the card shows its size and files, says so in one line (`skill.dynamic`;
+`skillConsentDynamic`: "This server publishes no checksums for this skill: you approve the copy
+the agent just read, and only that copy is used."), and the agent is given that copy only, never
+a later read. A server that cannot list its files gives `SKILL.md` alone (`skill.noFileListing`,
+`skillConsentNoFileListing`). Nothing of the copy is stored.
 
 ### The protocol revision
 
@@ -766,7 +800,7 @@ use them standalone. The full guide: [docs/chat.md](docs/chat.md).
 | `<GeneratedMedia>` / `<TranscriptBlock>` | A file a media tool wrote, read from the workspace: an image inline or a native audio player (only the types the core generates; never SVG) / a folded "Transcript of …" block. `<MessageList files showMedia renderMedia>` places them in the answer. |
 | `<FileChips>` / `<FileChip>` | The files an answer wrote to the workspace (the core's `file.written` / `file.deleted`), as chips: name, kind, size, open, download; an inline preview (text with line numbers, a picture, your own rendering through `renderFileContent`), and an `.html` file in a sandboxed frame with Preview / Source. `<MessageList files showFileChips htmlPreview renderFile renderFileContent>` places them under the answer. |
 | `<SandboxedFrame>` / `<SourceView>` | Untrusted HTML inside chrome the host draws: `<iframe sandbox>` without `allow-same-origin`, by `srcdoc`, no network, fixed height (`html`, `scripts`, `title`, `label`, `actions`, `footer`, `height`) / a file's text with line numbers, never markup. See [the boundary](#the-html-preview-is-a-security-boundary). |
-| `<ToolApprovalPrompt>` | Consent cards (Allow once / Always / Deny); a helper's request says which helper asks (`showHelper`); an MCP App's says the APP asks, with the server's own tool name. |
+| `<ToolApprovalPrompt>` | Consent cards (Allow once / Always / Deny); a helper's request says which helper asks (`showHelper`); an MCP App's says the APP asks, with the server's own tool name; an MCP server's skill gets its own card (the server, the skill, a collapsed preview of its text - `showSkillPreview` - and Allow once / Always for this server / Deny). |
 | `<ElicitationPrompt>` | A question an MCP server puts to the user during a tool call: a form (Submit / Decline / Cancel, checked by the core's rules) or a link opened only by a click, one at a time with a count, the time left, and the questions nobody answered (`elicitations`, `onAnswer`, `outcomes`, `showOutcomes`, `showExpiry`, `showHelper`, `renderElicitation`). See [MCP elicitation](#mcp-elicitation--a-server-asks-the-user). |
 | `<McpAppFrame>` / `<McpAppLine>` | An MCP App in host-drawn chrome ("App from server “travel” · sandboxed", panel, menu: reload / open in panel / hide): an opaque-origin frame - or, with `host.sandbox` (`useMcpAppHost({ sandbox })`, `<AgentChat appSandbox>`), an origin of its own behind your sandbox page ("· sandboxed on its own origin") - network only to the origins its resource declared, a bridge with an allow-list; inline, folded, in a panel or - with `allowFullscreen`, asked for by the app after a click in it - full screen over the chat with Exit / Esc (`app`, `host`, `variant`, `theme`, `defaultCollapsed`, `onOpenPanel`, `onClosePanel`, `showCalls`, `allowFullscreen`). `<AgentChat mcpApps>` places them under the answer. See [the boundary](#an-mcp-app-is-a-security-boundary). |
 | `<AppRequestPrompt>` | What an MCP App asks for besides a tool call: a link (its host highlighted, opened only on the user's click), a message (put in the message box as a draft, never sent for the user), a file (its sanitized name, type and size; saved by the page on Save file) or an answer of the agent's model (the app's text as text, the token cap; Allow once / Always for this app / Deny). |

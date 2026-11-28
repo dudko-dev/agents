@@ -11,6 +11,7 @@ import type { IDecisionEvent } from './decision.js'
 import type { LimitKind } from './limits.js'
 import type { McpAppToolResult } from './mcp/apps.js'
 import type { McpElicitationReason, McpElicitationSchema } from './mcp/elicitation.js'
+import type { McpSkillConsentView } from './mcp/skills.js'
 import type { PipelineEvent } from './pipeline/engine.js'
 import type { ToolApprovalApp } from './tools/approval.js'
 
@@ -188,6 +189,11 @@ type AgentEventBody =
       app?: ToolApprovalApp
       /** See `ToolApprovalRequest.mcpSkills`. */
       mcpSkills?: string[]
+      /**
+       * Set when the request is about an MCP server's skill about to enter the model's context,
+       * not a tool call (see `ToolApprovalRequest.skill`): the server's words, as plain text.
+       */
+      skill?: McpSkillConsentView
     }
   /** A consent decision: from the user, or `automatic` (policy denial). */
   | {
@@ -307,9 +313,22 @@ type AgentEventBody =
   | PipelineEvent
 
 /**
+ * `seq` / `attempt` order a run's events, across crashes and resumes: `attempt` is 1 for a fresh
+ * run and one more for every resume, `seq` counts the events of one attempt from 1. Ordered by
+ * (attempt, seq) the events of a run are a total order. Delivery is at-least-once: the step a
+ * crash interrupted runs again under the next attempt, so its events come again with that
+ * attempt's numbers. A `subagent.event` envelope is numbered in the parent run; the child event
+ * inside keeps its own numbers. Events outside a run (a pipeline's own `pipeline.*` events,
+ * `approveAppToolCall`, `sampleForApp`) carry none.
+ *
  * `nodeId` / `visit` are set on the events a pipeline forwards from a node's agent (and on the
  * `pipeline.node.*` events themselves).
  */
-export type AgentEvent = AgentEventBody & { nodeId?: string; visit?: number }
+export type AgentEvent = AgentEventBody & {
+  seq?: number
+  attempt?: number
+  nodeId?: string
+  visit?: number
+}
 
 export type AgentEventHandler = (event: AgentEvent) => void

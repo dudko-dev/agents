@@ -4,8 +4,12 @@ import { test } from 'node:test'
 import {
   createPipeline,
   nodeResolver,
+  pickPipelineRoute,
+  preparePipeline,
+  runPipelineGraph,
   type AgentEvent,
   type IAgentConfig,
+  type IDecisionModel,
   type PipelineDefinition,
 } from '../src/index.ts'
 import {
@@ -35,6 +39,19 @@ test('pipeline: the engine is the same file in both packages, and so are its tes
     body(readFileSync(here('./pipeline.test.ts'), 'utf8')),
     body(readFileSync(here('../../agent-web/tests/pipeline.test.ts'), 'utf8')),
     'tests/pipeline.test.ts is the same in both packages below its imports',
+  )
+})
+
+test('pipeline: the determinism test is the same in both packages', (t) => {
+  const sibling = here('../../agent-web/tests/pipeline-determinism.test.ts')
+  if (!existsSync(sibling)) return t.skip('the browser sibling is not in this checkout')
+  // They differ only in where they import the package from and where the engine is.
+  const body = (source: string): string =>
+    source.slice(source.indexOf('// The determinism contract'))
+  assert.equal(
+    body(readFileSync(here('./pipeline-determinism.test.ts'), 'utf8')),
+    body(readFileSync(sibling, 'utf8')),
+    'tests/pipeline-determinism.test.ts is the same in both packages below its engine path',
   )
 })
 
@@ -297,4 +314,113 @@ test('pipeline: a node whose name is not registered fails the run', async () => 
     { resolveNode: nodeResolver({ base: baseConfig('http://127.0.0.1:1/v1') }) },
   )
   await assert.rejects(pipeline.run({ input: 'x' }), /node "a" failed.*unknown model/)
+})
+
+// ── the route call on its own (a host that runs the graph itself) ────────────
+
+const reviewer = definition.nodes[0]
+
+test('pickPipelineRoute: picks a label with the node planner model, as createPipeline does', async () => {
+  const llm = await startLocalOpenAI(script('revise'))
+  try {
+    const picked = await pickPipelineRoute(reviewer, 'The draft needs a second pass.', {
+      config: baseConfig(llm.baseURL),
+    })
+    assert.equal(picked.route, 'revise')
+    assert.equal(picked.usage.totalTokens, 15, 'one call, 10 in / 5 out')
+    assert.equal(llm.requests.length, 1)
+    assert.match(systemOf(llm.requests[0]), /You are the Router/)
+    assert.match(userOf(llm.requests[0]), /- approve: good to publish/)
+    assert.match(userOf(llm.requests[0]), /The draft needs a second pass/)
+  } finally {
+    await llm.close()
+  }
+})
+
+test('pickPipelineRoute: an answer that is not a label is no route; no routes, no call', async () => {
+  const llm = await startLocalOpenAI(script('ship-it'))
+  try {
+    const config = { ...baseConfig(llm.baseURL), llmMaxRetries: 0 }
+    const none = await pickPipelineRoute(reviewer, 'x', { config })
+    assert.equal(none.route, undefined)
+    assert.equal(none.usage.totalTokens, 15, 'the failed attempt still counts')
+
+    const free = await pickPipelineRoute({ id: 'plain' }, 'x', { config })
+    assert.equal(free.route, undefined)
+    assert.equal(free.usage.totalTokens, 0)
+    assert.equal(llm.requests.length, 1, 'a node without routes made no call')
+
+    await assert.rejects(
+      pickPipelineRoute(reviewer, 'x', { config, signal: AbortSignal.abort() }),
+      {
+        name: 'AbortError',
+      },
+    )
+  } finally {
+    await llm.close()
+  }
+})
+
+test('pickPipelineRoute: a confident decision model answers first; an unsure one hands over', async () => {
+  const llm = await startLocalOpenAI(script('revise'))
+  try {
+    const events: AgentEvent[] = []
+    const sure: IDecisionModel = { decide: async () => ({ choice: 'approve', confidence: 0.95 }) }
+    const quick = await pickPipelineRoute(reviewer, 'Ready.', {
+      config: { ...baseConfig(llm.baseURL), decisionModel: sure },
+      onEvent: (e) => events.push(e),
+    })
+    assert.equal(quick.route, 'approve')
+    assert.equal(llm.requests.length, 0, 'no route call')
+    assert.deepEqual(
+      events.map((e) => e.type),
+      ['usage', 'decision'],
+    )
+
+    const unsure: IDecisionModel = { decide: async () => ({ choice: 'approve', confidence: 0.3 }) }
+    const slow = await pickPipelineRoute(reviewer, 'Ready?', {
+      config: { ...baseConfig(llm.baseURL), decisionModel: unsure },
+      onEvent: () => {
+        throw new Error('a handler that throws changes nothing')
+      },
+    })
+    assert.equal(slow.route, 'revise', "the route call's answer")
+    assert.equal(llm.requests.length, 1)
+    assert.equal(slow.usage.decisionCalls, 1, 'both are counted')
+    assert.equal(slow.usage.totalTokens, 15)
+  } finally {
+    await llm.close()
+  }
+})
+
+test('runPipelineGraph + pickPipelineRoute: a host runs the nodes itself and routes like createPipeline', async () => {
+  const llm = await startLocalOpenAI(script('approve'))
+  try {
+    const config = baseConfig(llm.baseURL)
+    const ran: string[] = []
+    const result = await runPipelineGraph<AgentEvent>(
+      preparePipeline(definition),
+      async (node, input, ctx) => {
+        // The node "runs elsewhere" (a job, a worker): here, a fixed answer.
+        ran.push(`${node.id}#${input.visit}`)
+        const text = `${node.id} answered`
+        if (!node.routes?.length) return { text }
+        const { route, usage } = await pickPipelineRoute(node, text, {
+          config,
+          signal: ctx.signal,
+          onEvent: ctx.emit,
+        })
+        return { text, usage, ...(route ? { route } : {}) }
+      },
+      { input: 'Check my text' },
+    )
+    assert.deepEqual(ran, ['reviewer#1', 'publisher#1'])
+    assert.deepEqual(result.outputs.reviewer, [
+      { visit: 1, text: 'reviewer answered', route: 'approve' },
+    ])
+    assert.equal(result.text, 'publisher answered')
+    assert.equal(result.usage.totalTokens, 15, 'the route call is the only model call')
+  } finally {
+    await llm.close()
+  }
 })

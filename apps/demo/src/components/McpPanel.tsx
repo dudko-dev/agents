@@ -157,7 +157,23 @@ export const McpPanel = ({
             No server of your own? This site runs a small one: tools that answer at once, two that
             ask you something in the middle of the call — a form (<code>plan_trip</code>) and a link
             (<code>open_docs</code>) — and one that comes with an app (<code>trip_board</code>): a
-            trip board drawn in the chat, whose pretend booking waits for your OK.
+            trip board drawn in the chat, whose pretend booking waits for your OK. It also serves
+            two skills, trip planning and dice games, which the button leaves off (experimental):{' '}
+            <button
+              type="button"
+              className="mcp__btn-ghost mcp__try-skills"
+              onClick={() =>
+                void mcp.add({
+                  name: 'demo',
+                  url: demoUrl,
+                  auth: 'none',
+                  protocol: 'auto',
+                  skills: true,
+                })
+              }
+            >
+              Try it with its skills
+            </button>
           </span>
         </div>
       )}
@@ -240,7 +256,7 @@ export const McpPanel = ({
                 {s.skills && (
                   <span
                     className="mcp__badge mcp__badge--muted"
-                    title="Its skills (if it serves any) are in the agent's skills catalog, as <server>/<skill>: third-party text, knowledge only"
+                    title="Its skills (if it serves any) are in the agent's skills catalog, as <server>/<skill>: third-party text, knowledge only, each asked about before it first reaches the agent"
                   >
                     skills · experimental
                   </span>
@@ -394,7 +410,8 @@ export const McpPanel = ({
           <p className="settings__note">
             Its skills join the agent’s as <code>server/skill</code> and are read only when needed,
             checked against the server’s digests - third-party knowledge that cannot approve a call,
-            reach the web or execute anything. Needs the 2026-07-28 revision (Auto or 2026-07-28).
+            reach the web or execute anything. You see each one, and allow or deny it, before it
+            first reaches the agent. Needs the 2026-07-28 revision (Auto or 2026-07-28).
           </p>
         )}
 

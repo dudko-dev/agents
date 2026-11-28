@@ -1,0 +1,68 @@
+{
+  "name": "swarm",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Reference deployment of @dudko.dev/agent as a horizontally scaled swarm: Temporal sessions, Postgres state, a stateless HTTP gateway. An example, never published.",
+  "license": "MIT",
+  "files": [
+    "src",
+    "sql",
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "start": "node --experimental-strip-types --disable-warning=ExperimentalWarning src/main.ts",
+    "build": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/bundle-workflows.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --experimental-strip-types --disable-warning=ExperimentalWarning tests/*.test.ts",
+    "test:integration": "node --test --test-concurrency=1 --experimental-strip-types --disable-warning=ExperimentalWarning tests/integration/*.test.ts",
+    "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\" \"scripts/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\" \"scripts/**/*.ts\""
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^4.0.111",
+    "@ai-sdk/google": "^4.0.128",
+    "@ai-sdk/openai": "^4.0.125",
+    "@ai-sdk/openai-compatible": "^3.0.96",
+    "@dudko.dev/agent": "workspace:*",
+    "@temporalio/activity": "^1.27.0",
+    "@temporalio/client": "^1.27.0",
+    "@temporalio/common": "^1.27.0",
+    "@temporalio/worker": "^1.27.0",
+    "@temporalio/workflow": "^1.27.0",
+    "pg": "^8.23.1"
+  },
+  "devDependencies": {
+    "@temporalio/testing": "^1.27.0",
+    "@types/node": "^22.9.0",
+    "@types/pg": "^8.23.1",
+    "ai": "^7.0.184",
+    "ajv": "^8.20.0",
+    "prettier": "^3.10.1",
+    "typescript": "^6.0.3",
+    "yaml": "^2.9.1",
+    "zod": "^4.6.7"
+  },
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "nx": {
+    "targets": {
+      "typecheck": {
+        "inputs": [
+          "default",
+          "^production",
+          "{workspaceRoot}/packages/agent/tests/helpers/openai-server.ts"
+        ]
+      },
+      "test:integration": {
+        "dependsOn": [
+          "build",
+          "^build"
+        ],
+        "cache": false
+      }
+    }
+  }
+}

@@ -789,6 +789,10 @@ a:hover {
 .mcp__try span {
   flex: 1 1 220px;
 }
+.mcp__try .mcp__try-skills {
+  padding: 2px 8px;
+  font-size: 12px;
+}
 
 /* ── Agent settings ───────────────────────────────────────────────────────── */
 .agentset {

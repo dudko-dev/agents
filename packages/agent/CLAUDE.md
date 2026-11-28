@@ -46,7 +46,8 @@
     emitted as a `usage` event by the stage (`usageOfError` in `utils.ts`).
   - A replanner failure does not end the run (`runner.ts`): the decision becomes `continue`, the
     `replan.decision` event carries `failed: true` after an `error` event of phase 'replan'. A stop
-    and refused credentials (`isAuthError`: 401 / 403) still throw. `tests/replan-failure.test.ts`.
+    and refused credentials (`isAuthError`: 401 / 403; exported from the main entry for hosts) still
+    throw. `tests/replan-failure.test.ts`.
     The browser sibling uses the same names.
   - `call-options.ts` also owns the per-call output caps (`stageOutputCap`): `limits.perCall` wins (0 = no
     cap), otherwise a share of the context window between a floor and a ceiling (`OUTPUT_CAP_SHARES`), and
@@ -99,7 +100,96 @@
   - `control.ts` (`createRunControl`: send a message into a running loop, stop one
     subagent). The runner drains it at round / step / final boundaries; messages are
     recorded in `IRunState.userUpdates` and in run snapshots.
-  - `provider.ts` (`resolveStage` / model factory per provider), `mcp.ts` (stdio + streamable-HTTP
+  - Scale-out HOOKS (README, "Running on many workers"): small optional hooks, the host brings the
+    broker / store - NO broker code, no runtime dependency here. Without them nothing changes: no
+    timer, the models not even wrapped, the golden fixtures untouched (`tests/model-tiers.test.ts`
+    also runs the golden requests WITH both hooks on and gets the same wire).
+    - Event order (`runner.ts`, both cores, same names): every event of a run is tagged in ONE
+      place (`dispatch` in `runAgentLoop`: the run's fixed `runId`, `seq` from 1 per attempt,
+      `attempt`), so a subagent envelope emitted from inside the child's run context still
+      carries the PARENT's id. `IRunSnapshot.attempt`; a resume runs as `resumeAttemptOf` (+1) and
+      records it BEFORE any event (`recordResume`: `onRunResume`, else `onStepComplete`) - NOT
+      fail-open, a throw refuses the resume; `resolveResume` refuses an attempt that is not a
+      positive integer. `tests/event-order.test.ts` (both packages).
+    - A caller's id for a fresh run (`run({ runId })`, both cores, same name): `runIdOf` decides the
+      id before anything (the runId rule, a non-string refused; refused with `resumeFromRunId`),
+      `assertRunIdFree` refuses an id `loadRun` has a snapshot for, or `journal.load` has entries
+      for, under the lease when there is one (read errors propagate). `IAgentRunResult.runId`
+      (optional in the type: hand-made results stay valid). Every guard has a test in
+      `tests/run-id.test.ts` and a mutation check.
+    - `run-lease.ts` (`config.runLease`, Node only: `resolveRunLease` - ttl 1000..2^31-1, owner,
+      methods - `holdRunLease` - acquire, renew every ttl/3, lost on false / throw / no answer
+      within ttl, `release`, `RunLeaseError`). STRICT: acquired before anything of a run (a resume
+      even before `loadRun`); a lost lease aborts the run's signal (combined into the run's own)
+      and `callPersistence` writes NOTHING more; one `lease.lost` event; the run rejects with the
+      `RunLeaseError`; a lost lease is not released. Helpers and subagents never take one (the
+      helper's ctx drops `lease` and its config `runLease`, `subagent.ts` drops `runLease`). Its
+      timers have a test seam of their OWN (`Symbol.for('@dudko.dev/agent:run-lease-test-time')`,
+      `tests/helpers/lease-time.ts`), never the wait clock's; real timers are unref'd; a child
+      process (`tests/fixtures/run-lease-exit.ts`) proves no way out leaves one. Every guard has a
+      test in `tests/run-lease.test.ts` and a mutation check.
+    - `shared-limits.ts` (`config.sharedLimits`, Node only): one AI SDK middleware
+      (`wrapLanguageModel`) around the stage's model, applied AT THE CALL SITE (`stageModel(ctx,
+      stage, model)`, `limitedModel` for the pipeline's route call): the planner model serves the
+      planner, the replanner and the route call, the synthesizer model the answer and the summaries,
+      so the stage is named where the call is made. A new language-model call MUST go through it
+      (`tests/shared-limits.test.ts` counts the hook's calls per stage against the endpoint's log).
+      The hook in force is the run's (`IRunContext.sharedLimits`: the agent's own, else the run
+      above it - an in-process subagent), `call.runId` the ROOT run (`IRunContext.rootRunId`); a
+      worker child asks the parent over the worker protocol (`model-call` / `model-call-result` /
+      `model-call-end`). A refusal is `ModelCallRefusedError`, never retried (`withRetry` checks
+      `isModelCallRefused` in `utils.ts` before anything else) nor escalated (`tiers.ts`); a wait
+      counts against the call's own timeout (not the wait clock); a slot given after the call was
+      given up gets `afterModelCall(ok: false)`. Media, search grounding and decision models are
+      NOT wrapped, deliberately.
+    - Remote subagents (`subagent.ts`, `isolation: 'remote'`, `dispatch(task, { signal, emit })`):
+      no config crosses (`config` / `tools` / a profile's `config` refused); what comes back is
+      untrusted (`remoteSubagentEventOf`: plain object, `type` pattern, size, `REMOTE_SUBAGENT_LIMITS`
+      count, nothing after settle; `remoteSubagentUsageOf`: non-negative counts); usage charged
+      ONCE from the result (forwarded `usage` events are not charged); a stop aborts `signal` and
+      does not wait for the dispatch. Every guard has a test in `tests/subagent-remote.test.ts`.
+    - `journal.ts` (`persistence.journal`, Node only; the browser sibling only reserves the names, its
+      `docs/design.md` says why): the CALL JOURNAL and PARKING. Every language-model response is
+      appended before any tool call it contains runs (`journalMiddleware`, applied by `limitedModel`
+      OUTSIDE the sharedLimits middleware, only while a run with a journal is in force: the stream's
+      `tool-call` parts are held until the response is on record), every tool result right after the
+      tool returns, before the model sees it (`runJournaledToolCall`, from `tool-wrap.ts`). Appends
+      are fail-closed (`JournalError`: the run's journal stop aborts it, the runner fails it), and so
+      is a journaled ROOT run's `onRunStart` (a run with no snapshot can never be resumed and its id,
+      with journal entries, never reused: a throw fails it before its first step, phase 'plan';
+      without a journal it stays fail-open). Positions
+      are attempt-independent (`<segment>.<n>` - `0` before the loop, the iteration, `f` the answer;
+      n counts RECORDED calls only, so a retry shares its failed call's position -, `.t<i>`, `.q<j>`,
+      `.m<k>`, `/c<k>/` a run inside a tool call); a tool entry names its response (`parent`), so a
+      call is never answered from another branch. On resume the run REPLAYS: a matching model call
+      gets the recorded response (no request, no sharedLimits, zero usage - its recorded usage goes to
+      the run's total only, drained at the stage's next `usage` event in `runner.ts`), a matching tool
+      call the recorded result (counted against maxToolCalls); a mismatch emits ONE
+      `journal.diverged` (positions only) and the scope goes live. Built-ins are not recorded (they
+      run again); a tool that runs a run inside it (`markJournalRerun`: `spawn_subagent`, in-process
+      subagents) runs again and THAT run replays under its own prefix. Parking: `{ park: true }` from
+      `onRequest` (the gate in `approval.ts`, `askSkill` too; only from a tool call of the run,
+      `journalQuestion`) or `deferResult()` from a tool (also a remote `dispatch`) makes the call
+      PENDING (a `pending` entry; the call hands the SDK `PENDING`, which the executor skips); at the
+      end of the ROUND (the next model call in that scope, or `journalRoundEnd` when the step's loop
+      ends) the scope parks - a nested one marks its call (`childParked`) and its caller's round, the
+      root stops (`stopped: park`) and the runner writes the BOUNDARY snapshot (the run at the step's
+      start) as `'waiting'` (`onRunPark`, else `onStepComplete`; fail-closed), emits `run.parked`
+      and resolves with `result.parked`. `answers` are checked in `openJournal` before the attempt
+      goes on record (an id not pending is refused; one already answered is ignored); approvals are
+      recorded as `answer` entries, tool answers (untrusted: shape, invisible characters,
+      `outputSanitizer`, the tool's output cap) as `tool` entries. Item ids hash run, position,
+      parent and request: stable across attempts. No timers or retries for pending items. OFF
+      without the hook: the models are not even wrapped; with it a fresh run's wire is the same
+      (`tests/journal.test.ts` compares). Every guard has a test in `tests/journal.test.ts` and a
+      mutation check.
+    - `examples/scale-out-memory.ts`: in-memory reference implementations (lease map with TTL,
+      token bucket + per-run budget), typechecked with the package and exercised by
+      `tests/scale-out-example.test.ts`.
+  - `provider.ts` (`resolveStage` / model factory per provider; `resolveStageModel` lets a stage run on
+    a ready AI SDK model object, `AgentModel` - top level, `planner` / `synthesizer`, a tier - used as it
+    is, no provider package imported: a model id still needs a `providerType`, and a model object is
+    refused for a worker subagent by `assertWorkerSafeConfig`; `tests/model-object.test.ts`), `mcp.ts` (stdio + streamable-HTTP
     MCP connections, reconnect, paginated `tools/list`) + `mcp-oauth.ts` (OAuth 2.1 provider,
     file-backed tokens; `registration: 'auto' | 'cimd' | 'dcr'`, the browser sibling's names and
     rules - change both; every rule a test in `tests/mcp-oauth-registration.test.ts`, the same tests
@@ -202,22 +292,56 @@
   - `mcp-skills.ts` (pure, no imports; `skills: true` on a server, EXPERIMENTAL - the MCP Skills
     extension `io.modelcontextprotocol/skills`, Beta, written against 2026-07-28): the rules on a
     server's entries (`mcpSkillEntryRefusal`: URI last segment = frontmatter name, the naming
-    rules, `"dynamic"` declined, complete file list inside the skill, sha256 digests, the 512-file /
-    16 MiB limits), the catalog names (`assignMcpSkillNames`: `<server>/<skill>` by the HOST's
+    rules, `"dynamic"` declined unless `{ dynamic: true }`, complete file list inside the skill,
+    sha256 digests, the 512-file / 16 MiB limits), the catalog names (`assignMcpSkillNames`: `<server>/<skill>` by the HOST's
     label - no host skill or lesson name can hold a "/", so nothing shadows anything), the caps
     (`selectMcpSkills`, 32 per server / 64 in all; body / file / description caps), the preamble
     (`mcpSkillPreamble`: knowledge, never policy), the file rule (`resolveMcpSkillFile`: only what
     the LOADED entry lists, never a URI / absolute / `..`), the mark that carries a server's
     skills on its tools (`markMcpSkills` / `collectMcpSkillSources`, like the instructions: a
     server with no mounted tool offers none) and one server's catalog over the SDK's
-    `SkillsClient` (`createMcpSkillCatalog`: list, load SKILL.md, read a file against the held
-    entry - the SDK verifies size, digest and frontmatter). A COPY of the browser sibling's
+    `SkillsClient` (`createMcpSkillCatalog`: list, `get` one by URI (`skills/get`, kept in
+    `source.added`), load SKILL.md, read a file against the held entry - the SDK verifies size,
+    digest and frontmatter), a skill by URI (`mcpSkillUriRefusal`: `skill://` only;
+    `resolveMcpSkillServer`: the server the model names, never a search; `mcpSkillRoomRefusal`;
+    `assignAddedMcpSkillName`) and the person's consent before a skill's text enters the context
+    (`McpSkillConsent` `'once-per-skill'` default / `'ask'` / `'never'`, per server `skills:
+    { consent }` over `config.mcpSkills.consent`; `decideMcpSkillConsent` / `recordMcpSkillConsent`,
+    the grant bound to `mcpSkillGrantKey` - server, URI, every digest; nested skills
+    (`mcpSkillEnclosingUri`) never covered by another yes; `mcpSkillConsentView` - the body is
+    the model's text exactly), and a directory of a skill (`read_skill_file` on a directory, for
+    every kind of skill: `skillDirectoryRef` - root `''` / `.` / `./` / `/`, never a URI, `..`,
+    `?`, `#` or `\` -, `skillDirectoryChildren` / `skillDirectoryOf`, `resolveMcpSkillPath` - a
+    listed file wins -, `skillDirectoryListing` - `{ name, directory, files, directories, more?,
+    notServed?, note? }`, 64 at most). The listing comes from the HELD entry; with `directoryRead`
+    declared, the catalog's `readDirectory` (present only then) sends `resources/directory/read` to
+    that server for `<root>[/<dir>]` and `compareMcpSkillDirectory` only counts what it lists
+    beyond the entry (never named: `mcpSkillDirectoryNote` is counts only) and marks `notServed`;
+    a change logs a `warn` and calls `onChanged` (wired to `onToolsChanged`: the deferred
+    refresh) once per held entry; a failed read = the entry alone. GENERATED skills
+    (`"resources": "dynamic"`) are declined unless the server's `skills: { dynamic: true }`
+    (`mcpSkillsSettingOf` returns `dynamic`, refuses a non-boolean by name; NO agent-wide switch):
+    then the catalog's `load` reads one into a SNAPSHOT before anyone is asked - SKILL.md through
+    the SDK, then with `directoryRead` the tree (`startMcpSkillWalk` / `nextMcpSkillWalkDirectory`
+    / `takeMcpSkillWalkListing`: direct children, `inode/directory` inside the root, never twice;
+    512 files, 64 directories (`MCP_SKILL_SNAPSHOT_MAX_DIRECTORIES`), depth 8
+    (`MCP_SKILL_SNAPSHOT_MAX_DEPTH`)) and every file, bytes counted as read
+    (`mcpSkillSnapshotBytesRefusal`: 16 MiB per skill, `MCP_SKILL_SNAPSHOTS_MAX_BYTES` 64 MiB per
+    agent, `McpSkillSnapshotMemory`), digests computed here (`mcpSkillSha256`, WebCrypto, or
+    `options.digest`), the manifest (`mcpSkillSnapshotEntry`) = the held entry (`loaded.snapshot`);
+    `readFile` serves its files from memory, never re-read; past a bound: declined, `warn`, nobody
+    asked. The record's `dynamic` marks the catalog line (`mcpSkillTag(server, true)`: "no
+    checksums"), the view's `dynamic` / `noFileListing` the request. A COPY of the browser sibling's
     `src/mcp/skills.ts`, byte for byte: change both (`tests/mcp-skills-shared.test.ts` compares
     them and tests every rule). `mcp.ts` wires it (the extension declared only with `skills: true`
     and a mode that may speak 2026-07-28; listed only on a 2026-07-28 connection; a change comes
     as `notifications/resources/list_changed`, on the same listen stream, and goes the
     `onToolsChanged` -> `refreshServer` path); `skills.ts` keeps an MCP skill's state per skill
-    object (`createMcpSkills`, `loadMcpSkill`, `prepareMcpSkills`; `skillPreamble`); `agent.ts`
+    object (`createMcpSkills`, `acquireMcpSkill` - read, verify, ASK, then let in -,
+    `addMcpSkillByUri`, `prepareMcpSkills`; `isMcpSkillAllowed` per run, `IRunState.mcpSkillConsent`;
+    `skillPreamble`; the agent's snapshot memory in each skill's state, given back by
+    `releaseMcpSkills` when `syncMcpSkills` drops the objects); the question is `approval.ts`'s `askSkill` (`onRequest`, the request's
+    `skill`; the mode and the rules play no part; grants in `mcpSkillGrants`); `agent.ts`
     syncs them into `skills` between runs; the runner reads a planner's pick before activating
     it. While a run (or a run above it) acts on an MCP skill, a tool that runs code
     (`markCodeExecution`: `run_js`) is ALWAYS asked (`decideToolPermission`, source
@@ -232,7 +356,30 @@
     `pipeline.ts` is this package's adapter: a node run by `createAgent`, the route call
     (`generateStructured` on the planner model), `nodeResolver`. A definition is untrusted input: the
     caps, the `otherwise` rule, the condition input bound and the join deferral each need a test
-    and a mutation check.
+    and a mutation check, and so does the loop's pass rule: when EVERY waiting node waits for another,
+    `passReach` (dominators from the entry; an edge to a node that dominates its source is a loop's
+    way back and is left out) decides who starts, before the old "all of them start" - asked only
+    then, so a schedule where someone was ready is unchanged. The scheduler is PUBLIC, the same
+    names in both cores: `preparePipeline` +
+    `runPipelineGraph(plan, runNode, { input, signal?, onEvent?, onAbort? })` (`onAbort` default
+    'reject'; createPipeline passes this package's), so a host runs the graph with its own node
+    runner; `pickPipelineRoute(node, text, { config, signal?, onEvent? })` is the route call on its
+    own (decision model, then the planner model; the router built once per config object), and
+    createPipeline is built on exactly these. The engine is a DETERMINISTIC scheduler by contract
+    (its header): no clock (`Date`, `performance`), no randomness (`Math.random`, `crypto`), no
+    timers, no I/O, no imports, no global the language does not define - `DOMException` /
+    `AbortController` only where the runtime has them (`abortError`, `createStopper`: an `Error`
+    named AbortError, a stand-in signal). A run depends only on the definition, the input and the
+    runner's answers in order. `tests/pipeline-determinism.test.ts` (the same in both packages,
+    compared by `pipeline-agent.test.ts`) scans the source and runs the engine in a `node:vm`
+    context with only the language's globals, with and without `DOMException` / `AbortController`;
+    a new global the engine needs goes into its `LANGUAGE_GLOBALS` only if the language defines it.
+    The engine is also the package's `./pipeline-engine` entry (ESM + CJS + d.ts): its JS from a
+    tsup block of its own (`splitting: false`: no chunk shared with the main entry), its d.ts from
+    the MAIN block's dts build (`dts.entry`) - the dts build of a block with `clean` deletes every
+    d.ts in dist when it starts, so a d.ts from another block can vanish. The same determinism test
+    resolves the subpath through `exports`, checks the built files import / require nothing (a
+    chunk counts) and runs them in the sandbox. Docs: README ("Running the graph yourself").
   - `tiers.ts` (`config.executorTiers` / `config.escalation`, the pure rules: `pickTier` - the
     planner's `complexity`, else `standard`; a missing tier falls back to the nearest configured one,
     the stronger of two; `escalationReasonOf` / `isEscalatableError` - what is a failure a stronger
@@ -304,7 +451,8 @@
     into tools). Neither is public API.
   - `cli/` — the `dd-agent` REPL (`start.ts` entry, `args.ts` flags + `--help`, `config.ts` env →
     `IAgentConfig`, `run.ts` the REPL and its slash commands, `live.ts` what a line typed *while* a
-    run goes means, `questions.ts` the approval / elicitation questions at the prompt: one at a
+    run goes means, `questions.ts` the approval / elicitation / skill questions at the prompt -
+    `skillApprovalPrompt` says a generated skill's "no checksums" and "SKILL.md alone": one at a
     time, and one the agent stops waiting for - its `signal` aborted - closed with one line, the
     event's own line skipped via `closedAtPrompt`; `tests/cli-questions.test.ts` drives it over a
     real `readline/promises` interface and the real REPL). A new env var / flag / command goes in `args.ts` (help), `config.ts` /

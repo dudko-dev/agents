@@ -1,6 +1,6 @@
 {
   "name": "@dudko.dev/agent-web",
-  "version": "0.0.40",
+  "version": "0.0.43",
   "description": "Headless, configurable in-browser LLM agent on the Vercel AI SDK: multi-provider bring-your-own-key (OpenAI, Anthropic, Google, xAI, DeepSeek, gateway, openai-compatible) AND local WebGPU/WebLLM, native + prompted tool-calling, structured output, an encrypted IndexedDB token vault, and a plan → execute → replan → synthesize loop. UI-agnostic.",
   "type": "module",
   "sideEffects": [
@@ -51,6 +51,16 @@
       "require": {
         "types": "./dist/sandbox-worker.d.cts",
         "default": "./dist/sandbox-worker.cjs"
+      }
+    },
+    "./pipeline-engine": {
+      "import": {
+        "types": "./dist/pipeline-engine.d.ts",
+        "default": "./dist/pipeline-engine.js"
+      },
+      "require": {
+        "types": "./dist/pipeline-engine.d.cts",
+        "default": "./dist/pipeline-engine.cjs"
       }
     },
     "./bundle": {
@@ -147,7 +157,7 @@
     "node": ">=20"
   },
   "dependencies": {
-    "ai": "^7.0.183",
+    "ai": "^7.0.184",
     "idb": "^8.0.4",
     "zod": "^4.6.7"
   },
@@ -200,7 +210,7 @@
     }
   },
   "devDependencies": {
-    "@ai-sdk/anthropic": "^4.0.110",
+    "@ai-sdk/anthropic": "^4.0.111",
     "@ai-sdk/deepseek": "^3.0.91",
     "@ai-sdk/google": "^4.0.128",
     "@ai-sdk/openai": "^4.0.125",

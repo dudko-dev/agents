@@ -16,6 +16,7 @@ import { randomUUID } from 'node:crypto'
 import { isReadOnlyTool, markReadOnly } from './approval.ts'
 import { runContext, type IRunContext } from './context.ts'
 import type { IAgentInternalContext, IRunState, ISpawnScope } from './internal.ts'
+import { markJournalRerun } from './journal.ts'
 import { FORGET_SKILL_TOOL, SAVE_SKILL_TOOL } from './learning.ts'
 import { resolveLimits } from './limits.ts'
 import { collectMcpInstructions, renderMcpInstructions } from './mcp-shared.ts'
@@ -153,8 +154,15 @@ export const createDynamicSubagentTool = (deps: IDynamicSubagentDeps): Tool => {
           scope.running,
           settings,
         )
-        const { maxTotalTokens: _legacy, persistence: _none, ...inherited } = parentConfig
-        void [_legacy, _none]
+        // No persistence and no lease of its own: a helper runs under its parent's lease, and its
+        // state is in the parent's snapshots. sharedLimits is kept - its calls go through it.
+        const {
+          maxTotalTokens: _legacy,
+          persistence: _none,
+          runLease: _noLease,
+          ...inherited
+        } = parentConfig
+        void [_legacy, _none, _noLease]
         const config: IAgentConfig = {
           ...inherited,
           maxIterations: budget.maxIterations,
@@ -183,9 +191,10 @@ export const createDynamicSubagentTool = (deps: IDynamicSubagentDeps): Tool => {
           onUsage: _onUsage,
           run: _run,
           takeRoundUpdates: _take,
+          lease: _lease,
           ...shared
         } = agent
-        void [_learning, _sandbox, _subagents, _findTools, _mcp, _onUsage, _run, _take]
+        void [_learning, _sandbox, _subagents, _findTools, _mcp, _onUsage, _run, _take, _lease]
         const mcpInstructions =
           agent.config.mcpInstructions === false
             ? ''
@@ -320,5 +329,7 @@ export const createDynamicSubagentTool = (deps: IDynamicSubagentDeps): Tool => {
   // Starting a helper changes nothing by itself: every call the helper makes passes the same
   // gate as the parent's would. So 'ask-writes' and 'read-only' let the spawn through (and still
   // ask about / refuse the helper's writes); 'ask-all' and a rule on spawn_subagent apply to it.
-  return markReadOnly(spawn)
+  // persistence.journal: the helper's run is a run inside this call - on a replay the call runs
+  // again and the helper's calls replay from the journal (journal.ts).
+  return markJournalRerun(markReadOnly(spawn))
 }

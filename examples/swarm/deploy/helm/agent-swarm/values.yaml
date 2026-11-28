@@ -1,0 +1,300 @@
+# The agent swarm on Kubernetes. Every key is checked by values.schema.json.
+#
+# What you bring: a Postgres (a URL in a Secret), a Temporal cluster (temporal.address) and the
+# Secret(s) named under `secrets` - the chart reads Secrets, it never creates one. The variables
+# behind each key are in the swarm's README ("Configuration").
+
+image:
+  repository: ghcr.io/dudko-dev/agent-swarm
+  # Empty: the chart's appVersion (the agent version). Or pin by digest with `digest`.
+  tag: ''
+  digest: ''
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+nameOverride: ''
+fullnameOverride: ''
+
+# Shared by every role (LOG_LEVEL, PG_POOL_MAX).
+logLevel: info
+pgPoolMax: 10
+
+# The Secrets the chart mounts. Each value becomes a file under /run/secrets/agent-swarm and the
+# app reads it as <NAME>_FILE - never as an environment variable a process listing would show.
+# Create them before installing, e.g.:
+#   kubectl create secret generic agent-swarm \
+#     --from-literal=database-url='postgres://swarm:...@postgres:5432/swarm?sslmode=require' \
+#     --from-literal=gateway-tokens="$(openssl rand -base64 32)" \
+#     --from-literal=agent-api-key='sk-...'
+secrets:
+  # DATABASE_URL (every role). Postgres is external: point it at your own (a managed one, or an
+  # operator's cluster); the chart runs no database.
+  databaseUrl:
+    name: agent-swarm
+    key: database-url
+  # MIGRATE_DATABASE_URL (the migrate Job only): a role that may change the schema. Empty name:
+  # the Job uses databaseUrl.
+  migrateDatabaseUrl:
+    name: ''
+    key: migrate-database-url
+  # GATEWAY_TOKENS (the gateway): bearer tokens, comma separated, 16+ characters each.
+  gatewayTokens:
+    name: agent-swarm
+    key: gateway-tokens
+  # AGENT_API_KEY (the workers only - the gateway never sees a provider key).
+  agentApiKey:
+    name: agent-swarm
+    key: agent-api-key
+  # TEMPORAL_API_KEY (gateway, workers, KEDA): Temporal Cloud or an API-key frontend. Empty: none.
+  temporalApiKey:
+    name: ''
+    key: temporal-api-key
+  # TEMPORAL_TLS_*_PATH: a Secret with `ca.crt` and, for mTLS (clientCertificate), `tls.crt` +
+  # `tls.key` (the shape cert-manager writes). Empty: plain TCP unless temporal.tls.enabled.
+  temporalTls:
+    name: ''
+    clientCertificate: false
+
+temporal:
+  # The frontend, host:port: your Temporal cluster (the default is the service the official chart
+  # makes for a release `temporal` in the namespace `temporal`). Ignored with temporal.enabled:
+  # the bundled chart's frontend.
+  address: temporal-frontend.temporal.svc.cluster.local:7233
+  namespace: default
+  taskQueue: swarm
+  tls:
+    # On with a CA / client certificate (secrets.temporalTls) or an API key; on its own for a
+    # server whose certificate the system trusts.
+    enabled: false
+    serverName: ''
+  # The official Temporal chart as a dependency (https://github.com/temporalio/helm-charts,
+  # version pinned in Chart.yaml). OFF: production runs Temporal on its own. On, it needs its own
+  # persistence below (temporal.server.config.persistence...: two databases, `temporal` and
+  # `temporal_visibility`) - see the chart's README and ci/all-on-values.yaml. Every other key
+  # under `temporal:` is passed to that chart as is.
+  enabled: false
+
+# Session options: read by the GATEWAY and fixed when a session starts (they are the workflow's
+# input), so a running session never depends on a worker's settings.
+session:
+  idleTimeoutMs: 86400000
+  turnTimeoutMs: 1800000
+  heartbeatTimeoutMs: 20000
+  maxTurnAttempts: 5
+  maxTurnsPerRun: 100
+  historyMaxChars: 200000
+  maxQueuedMessages: 50
+  # Static subagents (child workflows): calls per round of a turn, and per session.
+  subagentMaxPerRound: 4
+  subagentMaxPerSession: 50
+  # Pipelines (a child workflow per call, one per node visit under it): the same two caps.
+  pipelineMaxPerRound: 2
+  pipelineMaxPerSession: 20
+
+gateway:
+  replicaCount: 2
+  # bearer (GATEWAY_TOKENS from secrets.gatewayTokens) or none (a local try only).
+  auth: bearer
+  corsOrigins: ''
+  maxBodyBytes: 65536
+  messageMaxChars: 32000
+  sse:
+    maxConnections: 1000
+    keepAliveMs: 15000
+    batch: 500
+  service:
+    type: ClusterIP
+    port: 8080
+    annotations: {}
+  # Seconds the pod keeps serving after it is taken out of the endpoints (a kubelet `sleep`
+  # preStop action: the image has no shell). 0: none.
+  preStopSleepSeconds: 5
+  # SIGTERM closes the server and ends the open streams (clients reconnect elsewhere with
+  # Last-Event-ID): quick.
+  terminationGracePeriodSeconds: 30
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { memory: 512Mi }
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+  # More environment (name/value or valueFrom) and envFrom sources.
+  extraEnv: []
+  extraEnvFrom: []
+
+worker:
+  replicaCount: 2
+  maxConcurrentTurns: 10
+  # SIGTERM gives the running turns this long, then they move to another worker; the pod gets
+  # this + terminationExtraSeconds before Kubernetes kills it.
+  shutdownGraceSeconds: 30
+  terminationExtraSeconds: 15
+  heartbeatThrottleMs: 1000
+  leaseTtlMs: 15000
+  eventMaxBytes: 262144
+  healthPort: 8081
+  # A token bucket in Postgres shared by every worker (model calls per second). Empty: off.
+  limiter:
+    refillPerSecond: ''
+    capacity: ''
+    maxWaitMs: 60000
+    scope: global
+  autoscaling:
+    enabled: true
+    # The fallback: an HPA on CPU. A worker mostly waits on the model, so CPU is a weak signal of
+    # its load - prefer KEDA's Temporal scaler where KEDA runs.
+    minReplicas: 2
+    maxReplicas: 20
+    targetCPUUtilizationPercentage: 70
+    # KEDA (https://keda.sh) >= v2.17.0, its `temporal` scaler: scale on the task queue's backlog
+    # (workflow + activity tasks). Replaces the HPA. minReplicaCount 0 scales to zero: a message
+    # or an answer still lands (Temporal takes signals without a worker) and the backlog brings a
+    # worker up - at the price of a cold start on the first turn.
+    keda:
+      enabled: false
+      minReplicaCount: 1
+      maxReplicaCount: 20
+      pollingInterval: 15
+      cooldownPeriod: 300
+      targetQueueSize: 5
+      activationTargetQueueSize: 0
+      queueTypes: workflow,activity
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits: { memory: 2Gi }
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+  extraEnv: []
+  extraEnvFrom: []
+
+# The agent the workers run (non-secret settings; the key is secrets.agentApiKey).
+agent:
+  providerType: openai
+  model: gpt-4.1-mini
+  baseUrl: ''
+  plannerModel: ''
+  synthesizerModel: ''
+  systemPrompt: ''
+  # autopilot | read-only | ask-writes | ask-all. An "ask" parks the turn until a person answers
+  # it through the gateway (POST /sessions/:id/answers/:requestId).
+  toolApproval: autopilot
+  # CHILD_ASK: what an "ask" of a CHILD's approval (a static subagent, a pipeline node visit)
+  # does. park: the child's own run parks and waits for a person's answer through the same route
+  # (no slot held; the parent turn waits for its child). deny: an ask is a denial (nobody to ask).
+  childAsk: park
+  # JSON objects, as strings or as YAML maps (rendered as JSON).
+  toolRules: {}
+  # MCP servers: {"name": {"url": "...", "headers": {...}}}. Headers with secrets belong in a
+  # Secret: set MCP_SERVERS through worker.extraEnv / extraEnvFrom instead.
+  mcpServers: {}
+  # Static subagents: {"researcher": {"description": "...", "model"?, "systemPrompt"?,
+  # "tools"?: ["docs__search"], "maxIterations"?, "readOnly"?}}.
+  subagents: {}
+  # Pipelines: {"review": {"description": "...", "definition": <the core's PipelineDefinition>,
+  # "readOnly"?}}. A node's tools and mcpServers must be the workers' own; no skills, no settings.
+  pipelines: {}
+  maxIterations: 10
+  maxStepsPerTask: 8
+  logLevel: warn
+  # Any other AGENT_* variable of the README, as name: value.
+  extra: {}
+
+# The schema migration: a Job run before every install and upgrade (a Helm hook), under the
+# namespace's default ServiceAccount (the chart's own does not exist yet at pre-install), with no
+# token mounted.
+migrate:
+  enabled: true
+  backoffLimit: 3
+  activeDeadlineSeconds: 600
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 256Mi }
+
+serviceAccount:
+  create: true
+  name: ''
+  annotations: {}
+  # The app talks to Postgres and Temporal, never to the Kubernetes API.
+  automountServiceAccountToken: false
+
+podDisruptionBudget:
+  enabled: true
+  gateway:
+    maxUnavailable: 1
+  worker:
+    maxUnavailable: 1
+
+ingress:
+  enabled: false
+  className: ''
+  # SSE needs an unbuffered proxy with a long read timeout, e.g. for ingress-nginx:
+  #   nginx.ingress.kubernetes.io/proxy-buffering: "off"
+  #   nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+  annotations: {}
+  hosts:
+    - host: swarm.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+networkPolicy:
+  enabled: false
+  # Who may reach the gateway on its port (NetworkPolicyPeer list). Empty: anyone.
+  gatewayFrom: []
+  # Name resolution (egress to the cluster DNS).
+  dns:
+    enabled: true
+    to:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: kube-system
+        podSelector:
+          matchLabels:
+            k8s-app: kube-dns
+  # Postgres (every role). `to`: NetworkPolicyPeer list; empty: any destination on the port.
+  postgres:
+    port: 5432
+    to: []
+  # The Temporal frontend (gateway, workers). Empty `to` with temporal.enabled: its pods.
+  temporal:
+    port: 7233
+    to: []
+  # The model provider and MCP servers (workers only).
+  provider:
+    ports: [443]
+    to:
+      - ipBlock:
+          cidr: 0.0.0.0/0
+  # More egress rules for the workers (NetworkPolicyEgressRule list).
+  extraWorkerEgress: []
+
+# Pod and container security (both roles and the Job): non-root, no privilege, read-only root;
+# /tmp is an emptyDir (the agent's per-run sandbox directory).
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  privileged: false
+  capabilities:
+    drop: [ALL]
+tmp:
+  sizeLimit: 1Gi

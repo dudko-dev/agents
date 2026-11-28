@@ -1,0 +1,23 @@
+# The build context is the monorepo root; BuildKit reads this file (named after the Dockerfile)
+# instead of a root .dockerignore. An allowlist: only what the image is built from is sent - never
+# node_modules, a dist, an .env or anything else lying in the tree.
+**
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!packages/agent/package.json
+!packages/agent/README.md
+!packages/agent/tsconfig.json
+!packages/agent/tsup.config.ts
+!packages/agent/src/**
+!packages/test-servers/package.json
+!examples/swarm/package.json
+!examples/swarm/README.md
+!examples/swarm/tsconfig.json
+!examples/swarm/scripts/**
+!examples/swarm/sql/**
+!examples/swarm/src/**
+**/node_modules
+**/dist
+**/.env
+**/.env.*

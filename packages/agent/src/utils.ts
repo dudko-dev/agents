@@ -11,6 +11,25 @@ export interface IRetryOptions {
   onRetry?: (attempt: number, err: unknown) => void
 }
 
+// Is `err` - or anything down its `cause` / `lastError` / `errors` chain - a call that
+// config.sharedLimits refused (ModelCallRefusedError, shared-limits.ts)? Read by name, so that
+// this file needs nothing from there.
+export const isModelCallRefused = (err: unknown, seen: Set<unknown> = new Set()): boolean => {
+  if (!err || typeof err !== 'object' || seen.has(err)) {
+    return false
+  }
+  seen.add(err)
+  if ((err as { name?: unknown }).name === 'ModelCallRefusedError') {
+    return true
+  }
+  const e = err as { cause?: unknown; lastError?: unknown; errors?: unknown }
+  return (
+    isModelCallRefused(e.cause, seen) ||
+    isModelCallRefused(e.lastError, seen) ||
+    (Array.isArray(e.errors) && e.errors.some((x) => isModelCallRefused(x, seen)))
+  )
+}
+
 const isRetriable = (err: unknown, seen: Set<unknown> = new Set()): boolean => {
   if (!err || typeof err !== 'object') {
     return false
@@ -23,7 +42,8 @@ const isRetriable = (err: unknown, seen: Set<unknown> = new Set()): boolean => {
   seen.add(err)
 
   const e = err as { statusCode?: number; status?: number; name?: string; cause?: unknown }
-  if (e.name === 'AbortError') {
+  // A stop, a park and a failed journal append are never tried again (journal.ts).
+  if (e.name === 'AbortError' || e.name === 'RunParkedSignal' || e.name === 'JournalError') {
     return false
   }
   const status = e.statusCode ?? e.status
@@ -51,7 +71,9 @@ export const withRetry = async <T>(fn: () => Promise<T>, opts: IRetryOptions): P
       return await fn()
     } catch (err) {
       lastErr = err
-      if (attempt === opts.maxRetries || !isRetriable(err)) {
+      // A call config.sharedLimits refused is never repeated here, whatever its cause says (a
+      // host's refusal may well carry a 429): the host decided.
+      if (attempt === opts.maxRetries || isModelCallRefused(err) || !isRetriable(err)) {
         throw err
       }
       opts.onRetry?.(attempt + 1, err)

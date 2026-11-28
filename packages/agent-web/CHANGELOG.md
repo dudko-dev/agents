@@ -1,3 +1,33 @@
+# 0.0.43 / 2026-11-28
+
+### :tada: Enhancements
+- Updated dependencies: ai
+- Every event carries `seq` and `attempt`, a total order across crashes, and a resume records its attempt before it emits anything (`IRunSnapshot.attempt`)
+- Pipelines: the graph scheduler and the route call are public (`preparePipeline`, `runPipelineGraph`, `pickPipelineRoute`), so a host can run every node its own way; the engine is deterministic by contract, and is its own entry, `@dudko.dev/agent-web/pipeline-engine`, which imports nothing
+- `run(goal, { runId })`: a fresh run under the caller's id (refused when the store already has the id); the names of the Node package's call journal and parking are reserved
+
+### :bug: Fixes
+- Pipelines: a `join: 'all'` inside a loop around a fan-out started only one branch; edges back to a loop's head are now left out before the start-everyone fallback
+
+# 0.0.42 / 2026-11-27
+
+### :tada: Enhancements
+- MCP skills: `read_skill_file` on a directory path (`.`, `templates/`) lists its direct children, for every kind of skill. An MCP skill is listed from the entry it was approved with; where the server declared `directoryRead`, `resources/directory/read` is asked only to see whether the skill changed there - what it lists beyond the entry is counted, never named, a file it no longer lists is marked `notServed`, and `onToolsChanged` asks the host to refresh that server
+- MCP skills: `"dynamic"` skills (no checksums from the server), opt-in per server with `skills: { dynamic: true }`. Before the user is asked, the agent reads a copy of the skill (its `SKILL.md`, and every file where the server can list them) within bounds (512 files, 16 MiB, 64 directories, depth 8; 64 MiB per agent), computes the checksums itself and binds the consent to them; the model reads only that copy, from memory. The consent request says so (`skill.dynamic`, `skill.noFileListing`). Off by default: such skills are declined as before
+
+# 0.0.41 / 2026-11-27
+
+### :tada: Enhancements
+- **Breaking for `config.search`:** the Brave, Tavily and SearXNG adapters are gone from the library. `search` takes your own `engine` function (a few lines for any provider), or `provider: 'google'` - Google Search through Gemini grounding, with its tokens reported under the usage phase `'search'`
+- MCP Apps (the `io.modelcontextprotocol/ui` extension): a tool's interactive view, read through the connection (`apps: true` on connect; per server `apps: false`), the event `mcp.app`, and `agent.approveAppToolCall` - an app's tool calls go through the agent's consent gate (writes ask even on autopilot). `agent.sampleForApp` answers an app's `sampling/createMessage` with the synthesizer's model (no tools, no context, consent per request, caps and a rate per app, usage phase `'app'`; `config.appSampling`); a model seen reasoning gets `reasoningTokens` of room on top of the app's `maxTokens`. `apps.readResource` reads a file an app offers for download from its own server
+- Files a run writes are reported: events `file.written` / `file.deleted`
+- MCP 2026-07-28 per server: `protocol: 'legacy' | 'auto' | 'modern'`; when the `subscriptions/listen` stream ends it is opened again with backoff and the tools are re-listed
+- MCP elicitation: `onElicitation(request, { signal })` (form or URL) with limits per call and run; events `mcp.elicitation-requested` / `mcp.elicitation-answered`. Off by default
+- MCP skills (experimental): `skills: true | { consent }` per server, `mcpSkills` agent-wide - namespaced `<server>/<skill>`, verified against the server's digests, loaded as third-party knowledge, `load_skill({ server, uri })` for unlisted ones, and the user asked before a skill's text reaches the model (once per skill by default)
+- MCP OAuth: `registration: 'auto' | 'cimd' | 'dcr'` on `BrowserOAuthProvider`, and `registrationKind()`
+- Approval: a 5-minute default wait (`toolApproval.timeoutMs`; `0` / `Infinity` = until stopped); `onRequest` gets `{ signal }`. Time waiting for a person does not count against the step's or a subagent's limit
+- Sandbox: `timeoutMs` counts from the program's first instruction
+
 # 0.0.40 / 2026-11-26
 
 ### :tada: Enhancements

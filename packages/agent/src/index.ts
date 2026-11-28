@@ -1,7 +1,7 @@
 export { createAgent } from './agent.ts'
 export type { IAgent, ICloseOptions, ICompactOptions, ICompactResult } from './agent.ts'
 export { getCurrentRunId, getCurrentRunSandbox } from './context.ts'
-export { addUsage, normalizeUsage, redactHeaders } from './utils.ts'
+export { addUsage, isAuthError, normalizeUsage, redactHeaders } from './utils.ts'
 export {
   beginMcpOAuth,
   checkAuthorizationResponseIssuer,
@@ -30,8 +30,21 @@ export {
   MCP_SKILL_MAX_TOTAL_BYTES,
   MCP_SKILLS_MAX_PER_SERVER,
   MCP_SKILLS_MAX_TOTAL,
+  MCP_SKILL_CONSENTS,
+  MCP_SKILL_CONSENT_DEFAULT,
+  MCP_SKILL_URI_MAX_CHARS,
+  MCP_SKILL_DIRECTORY_ENTRIES_MAX,
+  MCP_SKILL_SNAPSHOT_MAX_DIRECTORIES,
+  MCP_SKILL_SNAPSHOT_MAX_DEPTH,
+  MCP_SKILL_SNAPSHOTS_MAX_BYTES,
   mcpSkillEntryRefusal,
   mcpSkillPreamble,
+  mcpSkillUriRefusal,
+  type McpSkillConsent,
+  type McpSkillConsentView,
+  type McpSkillsOptions,
+  type McpSkillsSetting,
+  type SkillDirectoryListing,
 } from './mcp-skills.ts'
 export {
   MCP_ELICITATION_MAX_PER_RUN,
@@ -242,35 +255,46 @@ export type { ISandboxConfig, ISandboxError, ISandboxLimits, ISandboxResult } fr
 export { createRunControl } from './control.ts'
 export type { RunControl, SubagentInfo } from './control.ts'
 // Pipelines: a graph of agents with conditions and loops, described in plain JSON.
-export { createPipeline, nodeResolver } from './pipeline.ts'
+export { createPipeline, nodeResolver, pickPipelineRoute } from './pipeline.ts'
 export type {
   NodeResolverOptions,
   Pipeline,
   PipelineModelConfig,
   PipelineOptions,
+  PipelineRouteOptions,
+  PipelineRouteResult,
   PipelineRunOptions,
 } from './pipeline.ts'
 export {
+  matchPipelineRoute,
   normalizePipeline,
   PIPELINE_LIMITS,
+  PIPELINE_ROUTER_SYSTEM,
   PipelineNodeError,
   PipelineValidationError,
+  preparePipeline,
   renderPipelineNodeInput,
+  renderPipelineRoutePrompt,
+  runPipelineGraph,
   testPipelineCondition,
   validatePipeline,
 } from './pipeline-engine.ts'
 export type {
+  PipelineAbortBehaviour,
   PipelineCondition,
   PipelineDefinition,
   PipelineEdge,
   PipelineEvent,
+  PipelineGraphRunOptions,
   PipelineIssue,
   PipelineNode,
   PipelineNodeContext,
+  PipelineNodeEvent,
   PipelineNodeInput,
   PipelineNodeOutput,
   PipelineNodeRunner,
   PipelineNodeSource,
+  PipelinePlan,
   PipelineResult,
   PipelineRoute,
   PipelineStop,
@@ -278,8 +302,25 @@ export type {
   PipelineUsage,
   PipelineValidation,
 } from './pipeline-engine.ts'
-export { createSubagentTool } from './subagent.ts'
-export type { ISubagentProfile, ISubagentToolOptions, SubagentIsolation } from './subagent.ts'
+export { createSubagentTool, REMOTE_SUBAGENT_LIMITS } from './subagent.ts'
+export type {
+  ILocalSubagentToolOptions,
+  IRemoteSubagentContext,
+  IRemoteSubagentResult,
+  IRemoteSubagentTask,
+  IRemoteSubagentToolOptions,
+  ISubagentProfile,
+  ISubagentToolOptions,
+  RemoteSubagentDispatch,
+  SubagentIsolation,
+} from './subagent.ts'
+export { RunLeaseError, RUN_LEASE_DEFAULT_TTL_MS } from './run-lease.ts'
+export type { IRunLease, IRunLeaseOptions, RunLeaseLostReason } from './run-lease.ts'
+export { isModelCallRefused, ModelCallRefusedError } from './shared-limits.ts'
+export type { IModelCall, ISharedLimits, ModelCallStage } from './shared-limits.ts'
+// The call journal (persistence.journal) and parking a run on what it waits for.
+export { deferResult, isDeferredResult, JournalError, JOURNAL_LIMITS } from './journal.ts'
+export type { IDeferredResult } from './journal.ts'
 // Dynamic subagents: helpers the model starts itself (config.subagents.dynamic).
 export {
   adoptSubagentEvent,
@@ -299,6 +340,7 @@ export type {
 
 export type {
   AgentEvent,
+  AgentModel,
   AgentStage,
   BudgetKind,
   EventHandler,
@@ -315,6 +357,17 @@ export type {
   IMcpStdioServerConfig,
   IPersistence,
   IRunSnapshot,
+  IRunJournal,
+  IJournalEntry,
+  IJournalModelEntry,
+  IJournalToolEntry,
+  IJournalPendingEntry,
+  IJournalAnswerEntry,
+  IParkedRun,
+  ParkedItem,
+  ParkAnswer,
+  ToolApprovalAnswer,
+  ToolResultAnswer,
   ISkill,
   ISkillOrigin,
   ISkillStore,

@@ -1,0 +1,20 @@
+The agent swarm is installed: {{ include "swarm.fullname" . }} ({{ include "swarm.image" . }}).
+
+  Temporal:  {{ include "swarm.temporalAddress" . }} (namespace {{ .Values.temporal.namespace }}, task queue {{ .Values.temporal.taskQueue }})
+  Gateway:   service {{ include "swarm.component" (list . "gateway") }}:{{ .Values.gateway.service.port }}{{ if .Values.ingress.enabled }}, ingress {{ (first .Values.ingress.hosts).host }}{{ end }}
+  Workers:   {{ if and .Values.worker.autoscaling.enabled .Values.worker.autoscaling.keda.enabled }}KEDA on the task queue ({{ .Values.worker.autoscaling.keda.minReplicaCount }}-{{ .Values.worker.autoscaling.keda.maxReplicaCount }}){{ else if .Values.worker.autoscaling.enabled }}HPA on CPU ({{ .Values.worker.autoscaling.minReplicas }}-{{ .Values.worker.autoscaling.maxReplicas }}){{ else }}{{ .Values.worker.replicaCount }} replicas{{ end }}
+
+The pods read these Secrets (create them first - the chart never does):
+{{- range $name, $s := .Values.secrets }}
+{{- if $s.name }}
+  {{ $s.name }}{{ if $s.key }} / {{ $s.key }}{{ end }}  ({{ $name }})
+{{- end }}
+{{- end }}
+
+Try it (GATEWAY_TOKENS is in the Secret above):
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "swarm.component" (list . "gateway") }} 8080:{{ .Values.gateway.service.port }}
+  curl -s -X POST localhost:8080/sessions -H "authorization: Bearer $TOKEN" \
+    -H 'content-type: application/json' -d '{"message":"What is 2+2?"}'
+
+The HTTP API, parking, subagents and pipelines: https://github.com/dudko-dev/agents/tree/main/examples/swarm

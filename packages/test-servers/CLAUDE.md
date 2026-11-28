@@ -67,9 +67,21 @@ published**, never a runtime dependency of anything.
   from inside) and its tools' data. `appTools` mounts the
   `flights.*` tools and the `ui://` resources in both eras; `appFaults` breaks the resource.
 - `src/mcp-skills.ts` — the skills (`skills`, the `io.modelcontextprotocol/skills` extension, 2026-07-28
-  only): the honest ones, the misbehaving ones `skillFaults` adds, `addSkill`, and a `SkillSource`
+  only): the honest ones, one never listed but served by `skills/get` (`SKILL_URIS.unlisted`), the
+  misbehaving ones `skillFaults` adds (and `nested`, `emptyListing`), `addSkill` (`listed: false`:
+  by `skills/get` only), the `skills/get` log (`skillGets`), and a `SkillSource`
   for the 2.x SDK's `SkillsExtension` (attached to every modern server the handler builds). The
   `nameMismatch` listing is answered by hand in `mcp-server.ts`: the SDK drops such an entry.
+  With `skillDirectoryRead` the source also has `readDirectory` (written here: the direct
+  children of a directory of the served files, `inode/directory` for subdirectories, `undefined` =
+  the SDK's -32602, `pageSize` paging), which is what makes the SDK declare `directoryRead: true`
+  and route `resources/directory/read`; its log is `skillDirectoryReads`, its faults
+  `directoryExtra` / `directoryOmit` / `directoryError`. Without the option the source has no
+  `readDirectory`: the capability and the wire stay what they were. The generated skills
+  (`"resources": "dynamic"`) are served as files so a client can walk and read them whole:
+  `dynamic` (`generated`, a small tree), `dynamicChanging` (`changing`: its text is made anew on
+  every read, `read <n>`), `dynamicOversize` (`sprawl`, 513 files); without `skillDirectoryRead`
+  a client finds their SKILL.md alone (the no-`directoryRead` case is that, not a fault).
 - `src/mcp-elicitation.ts` — the `elicit_*` tools as step functions (ask or finish), the signed
   `requestState`, the URL-mode pages and `elicitationFaults`. It knows no transport: the modern
   driver (an `input_required` result) and the legacy one (real `elicitation/create` requests on the

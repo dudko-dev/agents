@@ -2,6 +2,7 @@ import { streamText } from 'ai'
 import { outputCapNotice, stageCallOptions } from './call-options.ts'
 import type { IAgentInternalContext } from './internal.ts'
 import { buildSynthesizerUserPrompt, composeSynthesizerSystem } from './prompts.ts'
+import { stageModel } from './shared-limits.ts'
 import { stageEmitsThoughts } from './thinking.ts'
 import { ATTR, withSpan } from './tracing.ts'
 import type { IConversationTurn, IPlan, IStepResult, IUsage } from './types.ts'
@@ -53,7 +54,7 @@ const streamOnce = async (
     : undefined
   const emitThoughts = stageEmitsThoughts(ctx.config, 'synthesizer')
   const result = streamText({
-    model: ctx.synthesizerModel,
+    model: stageModel(ctx, 'synthesizer', ctx.synthesizerModel),
     ...call,
     prompt: buildSynthesizerUserPrompt(
       input,

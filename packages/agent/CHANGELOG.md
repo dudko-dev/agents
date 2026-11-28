@@ -1,3 +1,41 @@
+# 0.0.52 / 2026-11-28
+
+### :bug: Fixes
+- With `persistence.journal`, `persistence.onRunStart` is no longer fail-open: a run whose start cannot be written ends as failed before its first step (an `error` event of phase `'plan'`, the snapshot `failed`). Such a run could never be resumed (no snapshot) nor started again under its id (it has journal entries), so a run replacing it would have repeated its tools' writes. Without a journal nothing changes: the write stays a warning
+
+# 0.0.51 / 2026-11-28
+
+### :tada: Enhancements
+- Updated dependencies: ai
+- Scale-out hooks, all optional (without them nothing changes): every event carries `seq` and `attempt`, a total order across crashes, and a resume records its attempt before it emits anything; `runLease` (acquire, renew, a lost lease aborts the run and writes nothing more, `lease.lost`); `sharedLimits` (`beforeModelCall` may delay or refuse every language-model call, `ModelCallRefusedError`; `afterModelCall` gets the usage); `createSubagentTool({ isolation: 'remote', dispatch })` runs a subagent elsewhere; `examples/scale-out-memory.ts`
+- A call journal, `persistence.journal` (`append`, `load`; needs `loadRun`): every model response and tool result is on record before it is acted on, and a resume replays them instead of calling the model or the tool again (`journal.diverged` on the first mismatch)
+- Parking: `onRequest` may answer `{ park: true }` and a tool may return `deferResult()`; the run parks at the end of the tool round with its pending items (`run.parked`, `result.parked`, status `'waiting'`) and `agent.run({ resumeFromRunId, answers })` goes on with the answers
+- Pipelines: the graph scheduler and the route call are public (`preparePipeline`, `runPipelineGraph`, `pickPipelineRoute`), so a host can run every node its own way; the engine is deterministic by contract, and is its own entry, `@dudko.dev/agent/pipeline-engine`, which imports nothing
+- `agent.run({ runId })`: a fresh run under the caller's id (refused when the id has a snapshot or journal entries); `isAuthError` exported
+
+### :bug: Fixes
+- Pipelines: a `join: 'all'` inside a loop around a fan-out started only one branch; edges back to a loop's head are now left out before the start-everyone fallback
+
+# 0.0.50 / 2026-11-27
+
+### :tada: Enhancements
+- MCP skills: `read_skill_file` on a directory path (`.`, `templates/`) lists its direct children, for every kind of skill. An MCP skill is listed from the entry it was approved with; where the server declared `directoryRead`, `resources/directory/read` is asked only to see whether the skill changed there - what it lists beyond the entry is counted, never named, a file it no longer lists is marked `notServed`, and the server's skills are re-read before the next run
+- MCP skills: `"dynamic"` skills (no checksums from the server), opt-in per server with `skills: { dynamic: true }`. Before the user is asked, the agent reads a copy of the skill (its `SKILL.md`, and every file where the server can list them) within bounds (512 files, 16 MiB, 64 directories, depth 8; 64 MiB per agent), computes the checksums itself and binds the consent to them; the model reads only that copy, from memory. Off by default: such skills are declined as before
+- CLI: `MCP_SERVERS` takes `skills` (`true` or `{ "consent", "dynamic" }`, with `"protocol": "auto"` or `"modern"`) and `connectTimeoutMs` per server; before a server's skill reaches the model the REPL shows it - whose it is, its size, the first lines of what the model would read - and asks `[y]es / [n]o / [a]lways for this server`
+
+# 0.0.49 / 2026-11-27
+
+### :tada: Enhancements
+- **Breaking for `config.search`:** the Brave, Tavily and SearXNG adapters are gone from the library. `search` takes your own `engine` function (a few lines for any provider), or `provider: 'google'` - Google Search through Gemini grounding, with its tokens reported under the usage phase `'search'`
+- MCP 2026-07-28 per server: `protocol: 'legacy' | 'auto' | 'modern'` (`'legacy'` keeps the 2025 revisions, the default)
+- MCP elicitation: a server may ask the user something during a tool call - `onElicitation(request, { signal })` (form or URL), with limits per call and run; events `mcp.elicitation-requested` / `mcp.elicitation-answered`. Off by default
+- MCP 2026-07-28: when the `subscriptions/listen` stream ends it is opened again with backoff (10 failures in a row give up), and the tools are re-listed after a re-subscribe
+- MCP skills (the `io.modelcontextprotocol/skills` extension, experimental): `skills: true | { consent }` per server, `mcpSkills` agent-wide. A server's skills join the catalog as `<server>/<skill>`, are read when needed, verified against the server's digests and loaded as third-party knowledge; `load_skill({ server, uri })` loads one the listing left out. The user is asked before a skill's text reaches the model (through `toolApproval.onRequest`; once per skill by default; autopilot does not skip it), and while one is active every tool that runs code is asked
+- MCP OAuth: `registration: 'auto' | 'cimd' | 'dcr'` - a client ID metadata document where the server supports it (default), the document only, or dynamic registration only; `registrationKind()` says which one a stored client is
+- Approval: a question waits 5 minutes by default (`toolApproval.timeoutMs`; `0` or `Infinity` = until the run is stopped); `onRequest` gets `{ signal }`. The CLI closes a question that ended without an answer
+- Time spent waiting for a person (a consent prompt, a server's question) does not count against the step's or a subagent's time limit
+- Sandbox: `timeoutMs` counts from the program's first instruction, not from the engine's start (a busy machine no longer fails short limits)
+
 # 0.0.48 / 2026-11-26
 
 ### :tada: Enhancements

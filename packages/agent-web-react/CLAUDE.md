@@ -127,7 +127,7 @@ against its production build.
   servers' `appSandbox` plugin).
 - `apps/demo/src/components/McpPanel.tsx` (monorepo root) — the demo's "bring your own MCP" panel,
   and its "Try the demo server" (adds `${location.origin}/mcp/demo`, protocol `auto`: the site's
-  own MCP server, `apps/worker`).
+  own MCP server, `apps/worker`) and "Try it with its skills" (the same, with `skills: true`).
 - `src/html-preview.ts` — the sandboxed frame's security core as pure strings: `sandboxTokens`
   (never `allow-same-origin`), `sandboxedCsp` (no network source), `withCspFirst`,
   `buildSandboxedDocument` (the SHELL: the untrusted document is framed by a document of ours
@@ -212,6 +212,20 @@ appFullscreen appDownloads appSampling>`, `useMcpAppHost({ downloads, sampling, 
 - `src/index.ts` — public surface (+ curated re-exports from the core).
 - `tests/files.test.ts` — files of a turn: the reducer, the chips, and every guard of the sandboxed
   frame as a string check.
+- An MCP server's skill about to enter the agent's context (the core's `tool.approval-requested`
+  with `skill`): `ApprovalView.skill` (`SkillConsentView`; its `body` - the server's text - is
+  dropped by the reducer once the request is decided or the run stops, so a saved chat never holds
+  it), its own card in `ToolApprovalPrompt` (`SkillConsentCard`: lead, description, size, a
+  collapsed `<details>` preview in a `<pre>` - text nodes only - Allow once / Always for this
+  server / Deny; `showSkillPreview`, also on `<AgentChat>`; a generated skill's one-line notice,
+  `skill.dynamic` -> `skillConsentDynamic`, and `skill.noFileListing` ->
+  `skillConsentNoFileListing`), labels `skillConsent*`, and the MCP hooks'
+  `skills: true | { consent, dynamic }` (`mcpSkillsSettingOf`, `./mcp`: `dynamic` kept only when
+  `true`, a non-boolean is off). Tests: `tests/skills.test.ts` (reducer, card markup, the
+  setting), `tests/mcp.test.ts` (the setting reaches the core) and the `MCP skills` block of
+  `e2e/mcp.spec.ts` (the demo, the test server's skills: nothing reaches the model before Allow,
+  nothing after Deny, no sideways scroll at 390; a generated skill - remembered with
+  `skills: { dynamic: true }` - shows the notice, the copy's files, and nothing before Allow).
 - `tests/state.test.ts`, `tests/chat.test.ts` — `node --test` over the reducer,
   composer helpers, labels and the history store (imports from `dist`). `tests/elicitation.test.ts`:
   the queue, the form helpers against the core's validator, the prompt as markup, and the queue as
@@ -234,6 +248,11 @@ appFullscreen appDownloads appSampling>`, `useMcpAppHost({ downloads, sampling, 
   demo - the model is never offered its two app-only tools, the board renders and grows, its
   read-only app tool runs without a prompt, its `book_trip` waits for consent (Deny sends nothing,
   Allow once sends one call), its link and message prompts, the phone sheet without sideways scroll.
+  `demo-server-skills.spec.ts`: the same server's two skills (the MCP Skills extension) - "Try it
+  with its skills" adds it with `skills: true`, the planner's catalog names `demo/trip-planning`
+  and `demo/dice-games` with their origin, the planner's pick reaches the executor under the
+  third-party preamble, `read_skill_file` reads `references/checklist.md` from the server and the
+  skill's tool is called (only the picked skill's files are read); "Try the demo server" lists none.
   `agent.spec.ts`, `steering.spec.ts`, `learning.spec.ts`: the agent end to end
   (a run, typing to it while it works, the notebook and the fetched pages) against a scripted Gemini
   endpoint (`gemini.ts`, routed by the stage markers; it can script tool calls and the notebook's

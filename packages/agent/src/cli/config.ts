@@ -16,6 +16,7 @@ import type {
 } from '../index.ts'
 import { DirSkillStore } from '../learning.ts'
 import { mcpProtocolMode } from '../mcp-shared.ts'
+import { mcpSkillsSettingOf, type McpSkillsSetting } from '../mcp-skills.ts'
 import { parseElicitationMode } from './elicit.ts'
 import type { ISandboxConfig } from '../sandbox.ts'
 import type { ISubagentsConfig } from '../subagent-dynamic-shared.ts'
@@ -59,7 +60,15 @@ const APPROVAL_MODES: readonly ToolApprovalMode[] = [
 ]
 type ToolStrategy = (typeof TOOL_STRATEGIES)[number]
 
-export const loadConfig = (): IAgentConfig => {
+// The REPL's config comes from the environment: its models are ids, never model objects.
+export type ICliAgentConfig = IAgentConfig & {
+  providerType: ProviderType
+  model: string
+  planner?: IAgentStageOverride
+  synthesizer?: IAgentStageOverride
+}
+
+export const loadConfig = (): ICliAgentConfig => {
   const providerType = (process.env.AGENT_PROVIDER_TYPE ?? 'openai') as ProviderType
   if (!PROVIDERS.includes(providerType)) {
     throw new Error(`AGENT_PROVIDER_TYPE must be ${PROVIDERS.join(' | ')}, got: ${providerType}`)
@@ -724,7 +733,7 @@ const parseMcpServers = (raw: string | undefined): Record<string, IMcpServerConf
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new Error(
-      'MCP_SERVERS must be a JSON object: Record<name, { url, headers?, protocol? } | { command, args?, env?, cwd?, protocol? }>',
+      'MCP_SERVERS must be a JSON object: Record<name, { url, headers?, protocol?, skills?, connectTimeoutMs? } | { command, args?, env?, cwd?, protocol?, skills?, connectTimeoutMs? }>',
     )
   }
   const result: Record<string, IMcpServerConfig> = {}
@@ -740,11 +749,37 @@ const parseMcpServers = (raw: string | undefined): Record<string, IMcpServerConf
       env?: unknown
       cwd?: unknown
       protocol?: unknown
+      skills?: unknown
+      connectTimeoutMs?: unknown
     }
     // 'legacy' (default) | 'auto' | 'modern': anything else is refused here,
     // by name, instead of at connect.
     const protocol =
       v.protocol === undefined ? undefined : mcpProtocolMode(v.protocol, `MCP_SERVERS.${name}`)
+    // The Skills extension (experimental): true, false or { consent, dynamic }, checked by the core's own
+    // rule. It is written against 2026-07-28, so it needs a protocol that may speak it: the core
+    // would only warn and request nothing, which in an env var reads as "on" and is silently off.
+    const skillsOn = mcpSkillsSettingOf(v.skills, `MCP_SERVERS.${name}`).on
+    if (skillsOn && protocol !== 'auto' && protocol !== 'modern') {
+      throw new Error(
+        `MCP_SERVERS.${name}: "skills" needs "protocol": "auto" or "modern" (the Skills extension is written against 2026-07-28)`,
+      )
+    }
+    if (
+      v.connectTimeoutMs !== undefined &&
+      (typeof v.connectTimeoutMs !== 'number' ||
+        !Number.isInteger(v.connectTimeoutMs) ||
+        v.connectTimeoutMs < 0)
+    ) {
+      throw new Error(
+        `MCP_SERVERS.${name}.connectTimeoutMs must be a non-negative integer (ms; 0 = no bound)`,
+      )
+    }
+    const shared = {
+      ...(protocol ? { protocol } : {}),
+      ...(v.skills !== undefined ? { skills: v.skills as McpSkillsSetting } : {}),
+      ...(v.connectTimeoutMs !== undefined ? { connectTimeoutMs: v.connectTimeoutMs } : {}),
+    }
     const hasUrl = typeof v.url === 'string' && v.url.length > 0
     const hasCommand = typeof v.command === 'string' && v.command.length > 0
     if (hasUrl && hasCommand) {
@@ -760,7 +795,7 @@ const parseMcpServers = (raw: string | undefined): Record<string, IMcpServerConf
         v.headers && typeof v.headers === 'object' && !Array.isArray(v.headers)
           ? (v.headers as Record<string, string>)
           : undefined
-      result[name] = { url: v.url as string, headers, ...(protocol ? { protocol } : {}) }
+      result[name] = { url: v.url as string, headers, ...shared }
       continue
     }
     // stdio path
@@ -778,7 +813,7 @@ const parseMcpServers = (raw: string | undefined): Record<string, IMcpServerConf
       args: v.args as string[] | undefined,
       env: v.env as Record<string, string> | undefined,
       cwd: v.cwd as string | undefined,
-      ...(protocol ? { protocol } : {}),
+      ...shared,
     }
   }
   return result

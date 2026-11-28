@@ -7,6 +7,7 @@ import {
   composePlannerSystem,
   type PromptCatalogMode,
 } from './prompts.ts'
+import { stageModel } from './shared-limits.ts'
 import { streamStructured } from './structured.ts'
 import { STEP_COMPLEXITIES, isStepComplexity } from './tiers.ts'
 import { resolveToolStrategy } from './tool-search.ts'
@@ -195,7 +196,7 @@ const streamPlanOnce = async (
     }),
   )
   const result = streamStructured({
-    model: ctx.plannerModel,
+    model: stageModel(ctx, 'planner', ctx.plannerModel),
     schema: planSchemaFor(ctx),
     ...call,
     prompt: buildPlannerUserPrompt(input, history),

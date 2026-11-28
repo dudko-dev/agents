@@ -26,14 +26,16 @@ import {
   createSkillTools,
   defineSkill,
   isMcpSkill,
-  isMcpSkillLoaded,
+  isMcpSkillAllowed,
   prepareMcpSkills,
   renderActiveSkills,
   renderSkillIndex,
   SKILL_TOOL_NAMES,
+  type McpSkillConsentScope,
   type Skill,
 } from '../skills.js'
 import {
+  askMcpSkillConsent,
   createApprovalState,
   gateToolCall,
   type ToolApprovalMode,
@@ -85,7 +87,14 @@ import {
   type IUsage,
   type ModelTier,
 } from './loop-types.js'
-import { resolveResume, type RunSnapshot, type RunStatus } from './persistence.js'
+import {
+  recordResume,
+  resolveResume,
+  resolveRunId,
+  resumeAttemptOf,
+  type RunSnapshot,
+  type RunStatus,
+} from './persistence.js'
 import { createPlan, type PlanOutcome } from './planner.js'
 import type { IDecisionModel } from '../decision.js'
 import { resolveDecisionModel } from '../decision-provider.js'
@@ -106,7 +115,14 @@ import {
   type IStepWrites,
 } from '../tiers.js'
 import { collectMcpInstructions, renderMcpInstructions } from '../mcp/shared.js'
-import { collectMcpSkillSources, isMcpSkillName } from '../mcp/skills.js'
+import {
+  collectMcpSkillSources,
+  createMcpSkillRunConsent,
+  createMcpSkillSnapshotMemory,
+  isMcpSkillName,
+  mcpSkillConsentOf,
+  resolveMcpSkillConsent,
+} from '../mcp/skills.js'
 import {
   AttachmentsNotSupportedError,
   attachmentKind,
@@ -131,6 +147,14 @@ export interface RunOptions {
    * planning again. Attachments are not stored: pass them again if the run needs them.
    */
   resumeFromRunId?: string
+  /**
+   * A fresh run's id, in place of a random one: a host that keys runs by ids of its own (a
+   * session and a turn) gives one, so that a retry finds the same run. 1-128 letters, digits,
+   * `_` or `-`, as every run id. Refused - thrown before anything of the run - together with
+   * `resumeFromRunId`, and when `persistence.loadRun` has a snapshot for it (resume that run
+   * instead): a run on record is never written over.
+   */
+  runId?: string
   /**
    * Steer the run while it goes: `control.send(text)` puts a message in front of the model
    * at the next boundary, `control.stopSubagent(id)` stops one subagent. Make it with
@@ -566,14 +590,33 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
   // The skills of the MCP servers with `skills: true` (experimental), read from the mounted tools
   // the same way and at the same time: named `<server>/<skill>`, capped, loaded on demand. A
   // helper has its caller's (above), not a second copy.
+  const mcpSkillSources = collectMcpSkillSources(baseTools)
+  // What this agent's snapshots of generated skills (`skills: { dynamic: true }`) hold in memory,
+  // together (a helper's count against its caller's: they are the caller's skills).
+  const mcpSkillMemory = createMcpSkillSnapshotMemory()
   if (!seed) {
     skills.push(
       ...createMcpSkills(
-        collectMcpSkillSources(baseTools),
+        mcpSkillSources,
         skills.map((s) => s.name),
         (m) => log.warn(m),
+        mcpSkillMemory,
       ),
     )
+  }
+  // When a person is asked before an MCP skill's text enters the context, for the servers whose
+  // own `skills: { consent }` does not say (checked here: a wrong value is a configuration error).
+  const mcpSkillConsent = mcpSkillConsentOf(config.mcpSkills?.consent, 'mcpSkills.consent')
+  // Asked through toolApproval.onRequest: without one, nobody can say yes - said once, here.
+  if (!seed && !config.toolApproval?.onRequest) {
+    for (const source of mcpSkillSources) {
+      const consent = resolveMcpSkillConsent(source.consent, mcpSkillConsent)
+      if (consent !== 'never') {
+        log.warn(
+          `[mcp] ${source.server}: its skills are loaded only with a person's consent (consent '${consent}'), and there is no toolApproval.onRequest - every load of one will be refused; skills: { consent: 'never' } is for a server you vetted`,
+        )
+      }
+    }
   }
 
   const catalog = toolCatalogOf(baseTools)
@@ -681,18 +724,28 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
     port: RunControlPort | undefined,
   ): Promise<RunResult> => {
     // Validated BEFORE anything is emitted or spent: a bad id throws to the caller.
+    const ownRunId = await resolveRunId(config.persistence, opts.runId, opts.resumeFromRunId)
     const resumed = await resolveResume(config.persistence, opts.resumeFromRunId)
+    // Every event of the run, numbered: `attempt` is 1 for a fresh run and one more for every
+    // resume, `seq` counts the events of one attempt from 1 - (attempt, seq) is their total order
+    // across crashes and reloads.
+    const attempt = resumed ? resumeAttemptOf(resumed) : 1
+    let seq = 0
     const emit = (event: AgentEvent): void => {
       try {
-        opts.onEvent?.(event)
+        opts.onEvent?.({ ...event, seq: ++seq, attempt })
       } catch {
         /* a bad handler must not break the run */
       }
     }
+    // The resumed attempt goes on record before it says anything: a crash before its first
+    // checkpoint must not let the next resume reuse the number. A store that cannot record it
+    // refuses the resume (it throws to the caller, nothing ran).
+    if (resumed) await recordResume(config.persistence, resumed, attempt, (m) => log.warn(m))
     // A resumed run is the SAME run: its goal, session and id come from the checkpoint.
     let text = (resumed?.goal ?? goal).trim()
     const sessionId = resumed?.sessionId ?? opts.sessionId ?? cfg.sessionId
-    const runId = resumed?.runId ?? newRunId()
+    const runId = resumed?.runId ?? ownRunId ?? newRunId()
     const startedAt = resumed?.startedAt ?? Date.now()
     let usage = resumed ? { ...resumed.usage } : emptyUsage()
     const result: RunResult = {
@@ -730,23 +783,17 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
     // ── per-run tool state: skills, discovered tools, call budget, current step
     // Restored silently: `skill.activated` already fired in the run that activated them.
     const activeSkillNames = new Set<string>((resumed?.skills ?? []).filter(hasSkill))
-    // A resumed run's MCP skills are read again (and verified) before they are active again; one
-    // that cannot be is left out.
-    if ([...activeSkillNames].some(isMcpSkillName)) {
-      await prepareMcpSkills(skills, activeSkillNames, (m) => log.warn(m), opts.signal)
-      for (const name of [...activeSkillNames]) {
-        const skill = skills.find((s) => s.name === name)
-        if (skill && isMcpSkill(skill) && !isMcpSkillLoaded(skill)) activeSkillNames.delete(name)
-      }
-    }
+    // The MCP skills this run let into its context, and refused (the person's consent).
+    const skillRun = createMcpSkillRunConsent()
     result.skills = [...activeSkillNames]
     // Pages web_fetch reads in this run: provenance for any lesson the run writes.
     const fetched: string[] = []
     const activateSkill = (name: string, by: 'plan' | 'tool'): void => {
       if (activeSkillNames.has(name) || !hasSkill(name)) return
       const skill = skills.find((s) => s.name === name) as Skill
-      // An MCP skill is active only once its instructions were read and verified.
-      if (isMcpSkill(skill) && !isMcpSkillLoaded(skill)) return
+      // An MCP skill is active only once its instructions were read, verified and let into THIS
+      // run's context (the person's consent).
+      if (isMcpSkill(skill) && !isMcpSkillAllowed(skill, skillRun)) return
       activeSkillNames.add(name)
       result.skills = [...activeSkillNames]
       emit({
@@ -774,6 +821,52 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
     // The run's clock: its step limit and the time limits of its subagents are deadlines of it,
     // and it stops while a tool call of the run (or of a subagent below it) waits for a person.
     const clock = createWaitClock()
+    // How an MCP skill's text gets in: the agent's consent, the session's grants (a helper shares
+    // its caller's approval state, and so the grants), this run's record, and the question - the
+    // same gate as a tool call's, the run's clock stopped while a person decides.
+    const skillScope: McpSkillConsentScope = {
+      ...(mcpSkillConsent ? { agentConsent: mcpSkillConsent } : {}),
+      grants: approval.mcpSkillGrants,
+      run: skillRun,
+      ask: (input, skill, signal) =>
+        askMcpSkillConsent(
+          approval,
+          {
+            input,
+            skill,
+            ...(currentStep ? { step: currentStep } : {}),
+            ...(seed ? { subagent: seed.subagent } : {}),
+          },
+          {
+            requested: (req) =>
+              emit({
+                type: 'tool.approval-requested',
+                id: req.id,
+                name: req.toolName,
+                input: req.input,
+                readOnly: req.readOnly,
+                step: req.step,
+                ...(req.subagent ? { subagent: req.subagent } : {}),
+                ...(req.skill ? { skill: req.skill } : {}),
+              }),
+            resolved: (r) => emit({ type: 'tool.approval-resolved', ...r }),
+            wait: clock.pause,
+          },
+          signal ?? opts.signal,
+        ),
+    }
+    // A resumed run's MCP skills are read again (and verified, and let in) before they are active
+    // again; one that cannot be is left out.
+    if ([...activeSkillNames].some(isMcpSkillName)) {
+      await prepareMcpSkills(skills, activeSkillNames, (m) => log.warn(m), skillScope, opts.signal)
+      for (const name of [...activeSkillNames]) {
+        const skill = skills.find((s) => s.name === name)
+        if (skill && isMcpSkill(skill) && !isMcpSkillAllowed(skill, skillRun)) {
+          activeSkillNames.delete(name)
+        }
+      }
+      result.skills = [...activeSkillNames]
+    }
     const counter = createCallCounter(cfg.maxToolCalls, resumed?.toolCalls)
     // A helper's call also counts on the run that started it, all the way up: it cannot make a
     // call its parent has no budget left for.
@@ -798,7 +891,13 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
     if (skills.length || learning) {
       Object.assign(
         builtins,
-        createSkillTools(skills, (s) => activateSkill(s.name, 'tool')),
+        createSkillTools(
+          skills,
+          (s) => activateSkill(s.name, 'tool'),
+          mcpSkillSources.length
+            ? { sources: mcpSkillSources, scope: skillScope, memory: mcpSkillMemory }
+            : undefined,
+        ),
       )
     }
     if (strategy === 'search') {
@@ -1072,7 +1171,7 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
       emit({ type: 'plan.created', plan: announced })
       announced.steps.forEach((step, index) => emit({ type: 'plan.step-added', step, index }))
       // An MCP server's skill is read (and verified) before it is activated.
-      await prepareMcpSkills(skills, planned.skills, (m) => log.warn(m), opts.signal)
+      await prepareMcpSkills(skills, planned.skills, (m) => log.warn(m), skillScope, opts.signal)
       for (const name of planned.skills) activateSkill(name, 'plan')
 
       // 2) EXECUTE → REPLAN
@@ -1108,6 +1207,7 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
         ...(spawnRun && !seed && spawnRun.root.spawned
           ? { subagentsSpawned: spawnRun.root.spawned }
           : {}),
+        attempt,
         ...extra,
       })
       const persist = async (
@@ -1612,6 +1712,7 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
           config: approval.config,
           timeoutMs: approval.timeoutMs,
           remembered: appRemembered,
+          mcpSkillGrants: approval.mcpSkillGrants,
         },
         {
           toolName: call.tool,

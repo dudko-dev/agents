@@ -37,6 +37,7 @@ On top of the loop:
 - **[Subagents](#subagents-worker_threads)** — a whole agent exposed as one tool, isolated in a `worker_thread`.
 - **[Images, speech, transcription](#media-images-speech-and-transcription)** — three optional tools, each mounted only when its model is configured; files on disk, never bytes in the context.
 - **[Dynamic subagents](#dynamic-subagents-helpers-the-model-starts-itself)** — opt-in: the model starts a helper for a sub-task itself, with a subset of its own tools and a share of its budgets; a helper can only have less than its parent.
+- **[Call journal](#the-call-journal-exact-resume) and [parking](#parking-a-run-a-persons-answer-or-a-result-from-outside)** — opt-in: a resume replays the interrupted step instead of running it again (no write twice), and a run that waits for a person's answer or a result from outside parks without failing and is resumed later, by any worker.
 - **[Autonomy](#autonomy)** — the agent looks things up and decides on its own instead of asking.
 
 ## Install
@@ -64,7 +65,7 @@ npm install workers-ai-provider          # cloudflare
 # gateway: no extra install — ships inside `ai`
 ```
 
-Setting `providerType` to a value whose SDK isn't installed throws a clear `"Provider package "@ai-sdk/X" is not installed"` error at `createAgent` time.
+Setting `providerType` to a value whose SDK isn't installed throws a clear `"Provider package "@ai-sdk/X" is not installed"` error at `createAgent` time. Or build the model yourself and pass the object as `model`: the agent then imports no provider package at all (see [Your own model object](#your-own-model-object)).
 
 ## Quick start
 
@@ -96,7 +97,7 @@ await agent.close()
 
 ### Streaming events
 
-Pass an event handler as the second argument to `createAgent`, or per run via `onEvent`. Every event carries the `runId` of its run, so a handler shared by concurrent runs can tell them apart. The full union is [`AgentEvent`](./src/types.ts); this is the whole list, by stage.
+Pass an event handler as the second argument to `createAgent`, or per run via `onEvent`. Every event carries the `runId` of its run, so a handler shared by concurrent runs can tell them apart, and `seq` / `attempt`, its place in the run: `attempt` is 1 for a fresh run and one more for every [resume](#resume-after-crash), `seq` counts the events of one attempt from 1. Ordered by `(attempt, seq)`, the events of a run are a total order, across crashes and resumes (see [Running on many workers](#running-on-many-workers-scale-out-hooks)). The full union is [`AgentEvent`](./src/types.ts); this is the whole list, by stage.
 
 **The loop**
 
@@ -135,7 +136,7 @@ Pass an event handler as the second argument to `createAgent`, or per run via `o
 | --- | --- |
 | `skill.activated` | A skill became active (`by: 'plan' \| 'tool'`; `server` for a skill an MCP server serves). |
 | `tools.discovered` | `find_tools` activated tools (`query`, `names`). |
-| `tool.approval-requested` / `tool.approval-resolved` | The approval gate asked / decided (`automatic` for rule, mode and timeout denials). `mcpSkills` on a request: the call runs code while the run acts on those MCP skills (always asked). |
+| `tool.approval-requested` / `tool.approval-resolved` | The approval gate asked / decided (`automatic` for rule, mode and timeout denials). `mcpSkills` on a request: the call runs code while the run acts on those MCP skills (always asked). `skill` on a request (`name: 'load_skill'`): an MCP server's skill about to enter the model's context - see [MCP skills](#mcp-skills-experimental). `parked: true` on a resolution: nobody answered yet - the run [parks](#parking-a-run-a-persons-answer-or-a-result-from-outside) with the question. |
 | `mcp.elicitation-requested` / `mcp.elicitation-answered` | An MCP server asked the user for input during a tool call and `onElicitation` is being called (`id`, `server`, `tool`, `mode`, `message`, `requestedSchema?`, `url?`, `step?`, `subagent?` - the server's text, cleaned and capped) / the question was settled (`action`, `automatic`, `reason?`, `fields?` - field names, never a value). See [MCP elicitation](#mcp-elicitation-a-server-asks-the-user). |
 | `egress.request` | A `web_fetch` request (or `web_search`'s call to its [search API](#search-finding-the-page-to-fetch)), allowed or refused by the [egress policy](#egress-what-the-model-may-fetch) (`url` is origin and path only, `allowed`, `status?`, `reason?`). |
 | `media.generated` | A [media tool](#media-images-speech-and-transcription) wrote a file: `kind: 'image' \| 'speech'`, `path` (absolute), `mediaType`, `bytes`, `model`, `step?`. The bytes are in the file, never in an event. |
@@ -146,8 +147,11 @@ Pass an event handler as the second argument to `createAgent`, or per run via `o
 
 | Event | When |
 | --- | --- |
-| `subagent.start` / `subagent.event` / `subagent.complete` / `subagent.error` | A subagent's lifecycle and its forwarded child events - a static one (`createSubagentTool`) or a helper the model started (`subagents.dynamic`, `dynamic: true`). `start` carries `parentId` and `depth`, `error` carries `stopped` when the user stopped it. See [the subagent tree](#the-subagent-tree-from-the-events). |
+| `subagent.start` / `subagent.event` / `subagent.complete` / `subagent.error` | A subagent's lifecycle and its forwarded child events - a static one (`createSubagentTool`, local or [remote](#remote-subagents-isolation-remote)) or a helper the model started (`subagents.dynamic`, `dynamic: true`). `start` carries `parentId` and `depth`, `error` carries `stopped` when the user stopped it. A `subagent.event` envelope is numbered (`seq`) in the parent run; the child event inside keeps its own `runId` / `seq` / `attempt`. See [the subagent tree](#the-subagent-tree-from-the-events). |
 | `message.queued` / `message.delivered` | A `RunControl.send()` message is waiting for a boundary / the model has seen it (`at: 'round' \| 'step' \| 'final'`). See [Steering a run](#steering-a-run-that-is-already-going). |
+| `lease.lost` | With [`runLease`](#running-on-many-workers-scale-out-hooks): a renew answered false (`reason: 'refused'`), threw (`'error'`, the message in `error`) or did not answer before the lease ran out (`'expired'`); `owner`. The run is aborted at once and persists nothing more; it rejects with `RunLeaseError` (`lost: true`). |
+| `run.parked` | The run [parked](#parking-a-run-a-persons-answer-or-a-result-from-outside): `items` (what it waits for, each with its stable `id` and `kind: 'approval' \| 'tool'`), `at`. `run()` resolves with `result.parked`; the snapshot is `'waiting'`. |
+| `journal.diverged` | A resumed run's request at `position` is not the one [recorded there](#the-call-journal-exact-resume) (`kind: 'model' \| 'tool'`, `stage?`): from here the run is live. Positions only, never content; once per run (and per run inside one of its calls). |
 
 **Pipelines**
 
@@ -227,14 +231,168 @@ await agent.run({ input: '', resumeFromRunId: '<saved-run-id>' })
 
 Caveats:
 
-- **Idempotency.** Resume re-enters the loop at the saved checkpoint (the iteration boundary after the last successful step). A crash mid-step means the in-flight step's tool calls are lost; on resume, the runner re-executes that step from scratch. If your tools have side effects (writes, payments, emails), the same call may fire twice. Design tools to be idempotent or guard against replay.
+- **Idempotency.** Resume re-enters the loop at the saved checkpoint (the iteration boundary after the last successful step). Without a [call journal](#the-call-journal-exact-resume), a crash mid-step means the in-flight step's tool calls are lost; on resume, the runner re-executes that step from scratch. If your tools have side effects (writes, payments, emails), the same call may fire twice. Design tools to be idempotent or guard against replay - or give the agent `persistence.journal`, which replays the step instead of running it again (below).
 - **Sandbox.** The per-run sandbox directory is auto-cleaned on completion. To resume, set `keepSandbox: true` so files written by earlier steps survive the crash. Without it, the trace's file references will point to a directory that no longer exists.
 - **Plan changes.** The saved `currentPlan` (post any revise) is what gets used on resume — the planner is not re-invoked.
 - **Caps inherit.** `iterations`, `revisions`, usage, the tool-call count (`toolCallCount`) and the escalation count (`escalations`) carry over, so per-run caps still apply across the boundary; so do the active skills (`activeSkills`) and the trace summary (`traceSummary` / `traceSummaryUpTo`).
 - **Terminal status.** Resuming a run with `status: 'complete'` throws — re-read the saved `text` directly instead.
-- **Event semantics.** On resume the runner re-emits a `plan.created` event so consumers attaching mid-resume see the canonical plan; consumers that store every event will observe `plan.created` twice for the same `runId`. `onRunStart` is **not** re-fired (the original run already emitted it) — code that counts run starts must use `runId` for de-duplication. `onStepComplete` only fires for steps the resumed run actually executes; pre-resume steps are already in the loaded `trace`.
+- **Event semantics.** On resume the runner re-emits a `plan.created` event so consumers attaching mid-resume see the canonical plan; consumers that store every event will observe `plan.created` twice for the same `runId`. `onRunStart` is **not** re-fired (the original run already emitted it) — code that counts run starts must use `runId` for de-duplication. Instead, a resume writes `onRunResume` (the loaded snapshot with the new `attempt`, status `'executing'`) **before** it emits anything - or, without that hook, the same write to `onStepComplete`. Unlike the other write hooks a failure there refuses the resume (see [Running on many workers](#running-on-many-workers-scale-out-hooks)). Otherwise `onStepComplete` only fires for steps the resumed run actually executes; pre-resume steps are already in the loaded `trace`.
+- **Attempts.** Every snapshot carries the `attempt` that wrote it (1 for the run as first started; a snapshot written before the field existed reads as 1); a resume runs as the next one, and its events say so. A snapshot whose `attempt` is not a positive integer is not resumed.
 - **Inputs are locked to the snapshot.** Both `options.input` and `options.history` passed to `agent.run({ resumeFromRunId })` are **silently ignored** in favor of the values stored at the original run start. This keeps the resumed prompt deterministic against the saved trace; pass an empty input (`input: ''`) to make the override explicit.
 - **runId hygiene.** Persisted `runId`s end up in filesystem paths (`<sandboxRoot>/<runId>/`) and are validated against `^[a-zA-Z0-9_-]{1,128}$`. A persistence adapter that returns a snapshot whose `runId` differs from the requested one, or that contains path-unsafe characters, is rejected.
+- **Your own run id.** `agent.run({ input, runId })` starts a fresh run under an id you choose instead of a random UUID - a host that keys runs by ids of its own (a session and a turn) gives one, so that a retry finds the same run: start it with `runId`, and if that is refused because the run exists, resume it with `resumeFromRunId`. The id follows the rule above (anything else is refused, a non-string too). `run()` rejects before anything of the run - no lease kept, no model call, no event, no write - for `runId` together with `resumeFromRunId` (a resume keeps the id of the run it resumes), when `persistence.loadRun` has a snapshot for the id (`Run "<id>" already exists (status "…"); resume it with resumeFromRunId…`: a run on record is never written over, whatever its status), and when `persistence.journal` has entries for an id `loadRun` does not know (a run under it stopped before its first snapshot: it cannot be resumed, and the two runs would share one journal - clear it, or use another id). A `loadRun` or `journal.load` that throws refuses the run as well. With `runLease` the lookup happens while the run's lease is held, so two workers cannot both find the id free; without one it is a check, not a lock. The run's sandbox directory is named by the id, so a fresh run under an id finds what a crashed run under it left there.
+
+#### The call journal: exact resume
+
+`persistence.journal` records, as the run goes, every language-model response and every tool result, and a resume **replays** the step a crash interrupted instead of running it again:
+
+```ts
+const persistence: IPersistence = {
+  ...snapshots, // onRunStart / onStepComplete / onRunResume / onRunPark / loadRun (needed)
+  journal: {
+    // Append-only, per run, read back whole and in order. Entries are plain JSON.
+    append: (runId, entry) => db.insert('journal', { runId, entry: JSON.stringify(entry) }),
+    load: async (runId) => (await db.select('journal', { runId })).map((r) => JSON.parse(r.entry)),
+  },
+}
+```
+
+- **What is recorded.** For a model call: the parts the SDK needs to continue (text, reasoning and its provider metadata, tool calls, the finish reason) and what the call cost (`usage`). For a tool call: the result **as the model saw it** (after the output cap), the result itself when it is small, or the error the model read. Built-in tools (`load_skill`, `read_skill_file`, `find_tools`) are not recorded: their effects are on the run's own state, so they run again on a replay. A call that runs a run inside it - a [helper the model started](#dynamic-subagents-helpers-the-model-starts-itself), an in-process [subagent](#subagents-worker_threads) - runs again too, and **its** calls replay from the same journal. A worker's or a remote child's calls are not recorded one by one: their tool call's result is.
+- **Where.** Every entry has a `position` that is the same on every attempt: `<segment>.<n>` is the n-th recorded model call of a segment (`0` before the loop, `1`, `2`, ... the loop's iterations, `f` the answer; a failed call and its retry share one), `.t<i>` the i-th tool call of that response, `.q<j>` a question asked inside that tool call, `/c<k>/` a run started inside it. A model entry carries a sha256 `hash` of its request (prompt, tools, tool choice, response format - a stable serialization), a tool entry the hash of its name and arguments and the id of the response that asked for it (`parent`), so a call is never answered from another branch of the run.
+- **Order.** A model response is appended **before** any tool call it contains runs (its tool calls are held until it is on record; text streams live); a tool result is appended right after the tool returns, before the model sees it.
+- **Fail-closed.** An append that throws ends the run as failed (`JournalError`, an `error` event, the snapshot `failed`): a side effect the journal does not know about would break the guarantee. A failed `load` refuses the resume. With [`runLease`](#running-on-many-workers-scale-out-hooks), nothing is appended once the lease is lost.
+- **The start is on record, or the run does not go on.** With a journal, `onRunStart` is not fail-open: a run whose start cannot be written could never be resumed (no snapshot) nor started again under its id (it has journal entries), so what its tools wrote, the run that replaces it would write again. A throw ends the run as failed before its first step (an `error` event of phase `'plan'`, the snapshot `failed`); only the planner's call has been made, and it is on record. Without a journal, `onRunStart` stays a warning, as before.
+- **The replay.** On `resumeFromRunId` the run loads the journal and goes through the interrupted step in order: a model call whose request matches the one recorded at its position gets the recorded response - no request goes out, [`sharedLimits`](#running-on-many-workers-scale-out-hooks) is not asked; a tool call whose name and arguments match gets the recorded result - the tool does not run (it still counts against `maxToolCalls`). At the first call that does not match, the run **diverged**: one `journal.diverged` event (positions, never content), and from there it is live. At the end of the journal it goes on live without a word.
+- **Events and usage.** Replayed calls emit their events again under the new attempt, as a re-run step did. A replayed model call is **not charged again**: its usage events carry nothing for it, `agent.usage` and `sharedLimits.afterModelCall` never hear of it. The run's own total (`result.usage`, the snapshots, the run's limits) counts it once, from the journal, at the moment the stage that made it reports.
+- **The one window that cannot be closed.** A tool that ran, but whose result was not appended before the process died, runs again on the resume. Everything before it replays; everything after it never happened. A tool that must never run twice still needs its own guard (an idempotency key) for that window.
+- Without `persistence.journal` nothing changes: no wrapper around the models, the same requests on the wire. With it, a fresh run sends exactly what it sends without it (a test compares the two).
+
+### Running on many workers (scale-out hooks)
+
+One agent process is one worker. To run many - a queue of runs, workers that crash, a run that one worker started and another finishes - the package gives three small **optional** hooks (and the [call journal](#the-call-journal-exact-resume) for exact resume and [parking](#parking-a-run-a-persons-answer-or-a-result-from-outside)); the broker, the store and the deployment are yours. Without them nothing changes: no timer, no wrapper around the models, the same requests on the wire (the golden fixtures pin it).
+
+**Event order.** Every event of a run carries `seq` and `attempt` (see [Streaming events](#streaming-events)). A client that orders by `(attempt, seq)` gets one total order of the run's events, however often its workers died. A resume puts its attempt on record **before** its first event (`persistence.onRunResume`, else `onStepComplete`), so a crash at any point - even before the resumed run's first checkpoint - never lets two attempts share a number. Delivery is **at-least-once**: the step a crash interrupted runs again under the next attempt, so its events (and its tool calls: see "Idempotency" above) come again, with the new attempt's numbers. A consumer that deduplicates keeps the last attempt's copy of a step.
+
+**`runLease`: one worker at a time owns a run.** The host's lease, anything with an atomic "take it if nobody holds it" (Redis `SET NX PX`, a database row, etcd):
+
+```ts
+import { createAgent, RunLeaseError } from '@dudko.dev/agent'
+
+const agent = await createAgent({
+  ...config,
+  persistence,
+  runLease: {
+    acquire: (runId, { owner, ttlMs }) => store.takeIfFree(runId, owner, ttlMs), // true = held
+    renew: (runId, { owner, ttlMs }) => store.extendIfMine(runId, owner, ttlMs), // false = lost
+    release: (runId, { owner }) => store.dropIfMine(runId, owner),
+    ttlMs: 30_000, // default; renewed every ttlMs / 3
+    // owner: 'worker-7', // default: a random id per agent - agent.leaseOwner
+  },
+})
+```
+
+- **Acquire.** Before a run - fresh or resumed - does anything (a resume even before it reads its snapshot). `false` or a throw ends the run there: it rejects with `RunLeaseError` (`lost: false`), no model was called, no event was emitted, nothing was persisted.
+- **Renew.** Every `ttlMs / 3` while the run goes. `false`, a throw, or no answer before the lease would run out (`ttlMs` after the last answer that kept it) means the lease is **lost**, and the reading is strict: the run is aborted at once (its tools' signals too), **no further snapshot is written**, terminal or not - another worker may own the run by now, and a late write would corrupt its state - one `lease.lost` event says so, and the run rejects with `RunLeaseError` (`lost: true`, `reason: 'refused' | 'error' | 'expired'`). A lost lease is not released: it is not this worker's any more.
+- **Release.** When the run ends, every way (success, failure, stop, a resume that could not load); a failed release is only logged.
+- The timers never keep a process alive and stop on every way out. Subagents and the helpers the model starts run under their parent's lease: never one of their own (a `runLease` in a subagent's config is dropped). With a lease every snapshot carries `leaseOwner`, so a store can refuse a write from anyone but the owner (fencing) - the TTL alone cannot rule out a paused worker writing late.
+- `ttlMs` must be 1000 ms to 2^31 - 1 ms, the owner 1-256 characters, all three methods functions - `createAgent` throws otherwise.
+
+**`sharedLimits`: limits shared by every worker.** A provider's rate limit or a tenant's budget lives in the host's store; the agent asks before every language-model call and says what each used:
+
+```ts
+const agent = await createAgent({
+  ...config,
+  sharedLimits: {
+    // Wait (a rate limit) or throw (a refusal: a budget). `signal`: the call was given up.
+    beforeModelCall: async (call, { signal }) => {
+      await bucket.take(call.stage, { signal })
+      if (await budget.spent(call.runId)) throw new Error('budget spent')
+    },
+    // Not awaited; a throw is only logged.
+    afterModelCall: (call, usage, { ok }) => budget.add(call.runId, usage.totalTokens),
+  },
+})
+```
+
+- `call` is `{ runId?, stage, provider?, modelId, estimatedInputTokens?, maxOutputTokens? }`. `stage` is `'planner' | 'executor' | 'replanner' | 'synthesizer' | 'compaction' | 'route'`; `runId` is the run the **host** started (a helper's, a subagent's calls carry it: they are spent for it) and is absent for a call outside a run (`agent.compact()`, a pipeline's route call); `estimatedInputTokens` is the prompt and the tool definitions, estimated like compaction does (errs high).
+- **Every** language-model call goes through it: the four stages, the compaction summaries (and `agent.compact()`), a pipeline's route call, escalated tiers, the helpers the model starts, and subagents - an in-process one under its own config's `sharedLimits` or else the calling run's, a worker one through the calling run's (asked over the worker protocol: functions cannot cross). A remote subagent's calls are the host's business. A test counts the calls per stage against the requests the model endpoint saw.
+- **Not** through it: the [media models](#media-images-speech-and-transcription), the [Google search grounding call](#the-google-provider-google-search-through-gemini-grounding) and [decision models](#decision-models) - none is a language-model call of a stage, and each has its own `usage` phase. When the decision model is not confident, the ordinary replanner / route call that follows is a language-model call and is asked about.
+- **A wait** counts against the call's own timeout (`llmTimeoutMs`, the step's limit) like a slow answer: it is not a person waiting, so the run's clock is not stopped. A call given up while `beforeModelCall` still decides is not sent; if the hook lets it through later, `afterModelCall` is told it ended (`ok: false`, zero usage), so a host counting slots gets every one back.
+- **A refusal** fails that call with `ModelCallRefusedError` (exported; `isModelCallRefused(err)` reads it anywhere down a `cause` chain), which is **never retried** - not by the package's retry, not by the AI SDK's, not on a stronger tier - even when its cause looks retryable (a 429). The stage then fails as it fails on any error: a refused **planner** call falls back to the one-step "answer directly" plan; a refused **executor** call fails the step and with it the run (`error` of phase `'execute'`, the snapshot `failed`), without escalation; a refused **replanner** call degrades to `continue` (`replan.decision.failed`, see [When the replanner fails](#when-the-replanner-fails)); a refused **synthesizer** call fails the run; a refused **compaction** call leaves the history / trace as it was (the next call carries the full context); a refused **route** call is no route. Inside a helper or a subagent the same rules apply to its run, and its failure is the tool call's.
+- `afterModelCall(call, usage, { ok })`: once per call `beforeModelCall` let through, when it ends - finished, failed or cancelled.
+
+**Remote subagents** (`createSubagentTool({ isolation: 'remote', dispatch })`) send a child to another worker: see [Remote subagents](#remote-subagents-isolation-remote).
+
+[`examples/scale-out-memory.ts`](./examples/scale-out-memory.ts) has in-memory reference implementations of both hooks - a lease map with a TTL and a token bucket with a per-run budget - to show the wiring and the contract without a broker (single process only; the same logic in a shared store is the multi-worker version).
+
+A whole deployment built on these hooks - sessions as Temporal workflows, each turn one `agent.run` in an activity whose heartbeat is the `runLease`, snapshots, events (`LISTEN/NOTIFY`) and a shared token bucket in Postgres, a stateless gateway with SSE, one Docker image and a Compose file - is in the monorepo: [`examples/swarm`](https://github.com/dudko-dev/agents/tree/main/examples/swarm).
+
+### Parking a run: a person's answer or a result from outside
+
+A run that needs something it cannot have now - a person's yes, the result of a long job, a webhook, a review in another system - can **park**: it stops without failing, frees its worker, and is resumed later with the answer, by any worker, hours or days later. Parking needs the [call journal](#the-call-journal-exact-resume): the resume replays the run up to where it parked, so the model cannot ask for something else on the way back.
+
+**Two things park.**
+
+- A question of the [approval gate](#tool-approval-and-autopilot) that `onRequest` answers with **`{ park: true }`**: a tool call to allow, or an [MCP server's skill](#mcp-skills-experimental) to let in (asked from `load_skill`).
+- A tool whose `execute` returns **`deferResult({ note? })`**: "the result will come from outside, later". Any tool may: a job queue, a webhook, a review. A [remote subagent](#remote-subagents-isolation-remote)'s `dispatch` may return it too, instead of awaiting the child.
+
+```ts
+import { createAgent, deferResult } from '@dudko.dev/agent'
+
+const agent = await createAgent({
+  ...config,
+  persistence, // with journal, loadRun and (best) onRunPark
+  toolApproval: { mode: 'ask-writes', onRequest: () => ({ park: true }) }, // ask a person later
+  tools: {
+    render_video: tool({
+      inputSchema: z.object({ script: z.string() }),
+      execute: async ({ script }) => {
+        await jobs.submit({ script }) // the result arrives by webhook
+        return deferResult({ note: 'queued on the render farm' })
+      },
+    }),
+  },
+})
+
+const result = await agent.run({ input: 'Make the video and send it to the client' })
+if (result.parked) {
+  const { runId, items } = result.parked // items: [{ id, kind: 'approval' | 'tool', ... }]
+  await store.saveWaiting(runId, items)
+}
+
+// Later, anywhere - one way to resume:
+await agent.run({
+  input: '',
+  resumeFromRunId: runId,
+  answers: {
+    [approvalId]: true, // or { approved: false, reason }, or { approved: true, remember: true }
+    [renderId]: { output: { url: 'https://cdn.example/video.mp4' } }, // or { error: 'render failed' }
+  },
+})
+```
+
+**At the end of the round.** When a call of a tool round parks, the round's other parallel calls settle first: a call that completes is recorded as usual, another park or deferral joins the list. Then, before the next model call (or when the step's tool loop ends), the run parks with **every** pending item of that round:
+
+- its snapshot has status **`'waiting'`** and `parked: { runId, items, at }` - the rest of it is the run as it stood when the step started, which is where a resume replays from; it is written to `persistence.onRunPark` (else `onStepComplete`), and **not** fail-open: a park that cannot be put on record fails the run;
+- one **`run.parked`** event carries the items; the question's `tool.approval-resolved` says `parked: true`;
+- nothing more is sent: no model call, no deadline left behind; the lease is released;
+- `agent.run()` **resolves** - not an error - with `text: ''` and `result.parked: { runId, items, at }`.
+
+**The items.** Each has a stable `id` - derived from its journal position, so the same item has the same id however often the run is resumed (with the journal, an approval request's `id` is that id too) - and a `kind`:
+
+- `'approval'`: `request` - the approval request as `onRequest` saw it (`toolName`, `input` after `inputSanitizer`, `step`, `subagent?`, and `skill` for an MCP skill's consent). Answer with a decision: `true` / `false`, `{ approved, reason?, remember? }` (`remember` as for any approval: for that agent instance's life);
+- `'tool'`: `toolName`, `input` (after `inputSanitizer`), `note?`, `step?`, `subagent?`. Answer with the tool's result: `{ output: <JSON value> }`, or `{ error: string }` for a failure. The answer is **untrusted** external data: its shape is checked (plain JSON, nested at most 64 levels, at most 1 000 000 characters - `JOURNAL_LIMITS`), invisible characters are removed, `outputSanitizer` runs on it, and the model sees it through the tool's output cap - what any tool result goes through.
+
+**Resuming.** `agent.run({ resumeFromRunId, answers })`: the run replays up to the round that parked - its completed calls are answered from the journal, the pending ones from `answers` - and goes on live. Answers go on record as they are used: a crash after the resume does not need them again (a retried resume that still sends one is not an error). An item left unanswered parks the run again at once, with the rest - nobody is asked again, the answered ones stay answered. An answer for an id that is not pending, or of the wrong shape for its item, is **refused** before the resume starts (nothing runs, no attempt goes on record). A resume that diverges before it reaches an item does not use its answer (a warning says so).
+
+**Guards.**
+
+- Without `persistence.journal`, `{ park: true }` is a denial (`cannot park: parking a run needs config.persistence.journal`) and `deferResult()` fails its tool call with a clear error. A `'waiting'` run cannot be resumed without the journal.
+- Only a question asked **from a tool call** can park. The consent asked outside one - an MCP skill the planner picked, a resumed run's active skills - is a denial on `{ park: true }`: the model can still `load_skill` it.
+- Inside a [helper the model started](#dynamic-subagents-helpers-the-model-starts-itself) or an in-process [subagent](#subagents-worker_threads), a park or a deferral **parks the whole run**, with the item (its `subagent` says which helper). On the resume the helper's call runs again and its own calls replay from the journal, up to the item. A subagent whose own agent has a journal while the calling agent has none cannot wait: its tool call fails. A pipeline node whose run parks fails the node.
+- [MCP elicitation](#mcp-elicitation-a-server-asks-the-user) does not park. A 2025-revision question is a request bound to the open connection and to the tool call in flight, which cannot outlive the worker; the 2026-07-28 `input_required` answer could be parked later (the call is sent again with the answer), but is not in this release.
+- **The core keeps no timers and no retries for pending items**: how long an item may wait, reminders, escalation to another person, a job's own retries - those are the host's. A parked run's wait counts against no limit (it is not running); the resumed attempt runs on a new clock, and the step that parked gets its full `llmTimeoutMs` again, as a retried step does.
+- A round parks when **all** its calls have settled: a question of the round that is still open with a person (not answered `{ park: true }`) holds the park until it is answered or its `toolApproval.timeoutMs` runs out.
 
 ### OpenTelemetry
 
@@ -292,7 +450,7 @@ What is different on 2026-07-28:
 - **OAuth** is unchanged: the probe is simply the first request to get the 401.
 - **stdio.** `'auto'` and `'modern'` ask on a **second, short-lived process** started from the same `command` (a 2025 server may exit on a request it does not know; that must not cost the session its process): the command runs twice per connect. A server that does not answer the probe at all is taken for a 2025 one after 5 s (half the connect timeout, if that is less).
 
-`MCP_SERVERS` (the CLI) takes the field as it is: `{"crm":{"url":"https://…","protocol":"auto"}}`.
+`MCP_SERVERS` (the CLI) takes the field as it is: `{"crm":{"url":"https://…","protocol":"auto"}}` - and `skills` and `connectTimeoutMs` the same way (see [CLI](#cli)).
 
 ### MCP over OAuth 2.1
 
@@ -315,7 +473,7 @@ await finishMcpOAuth(auth, { code, state, iss }) // iss: pass it when the redire
 await agent.reconnect()
 ```
 
-Nothing is printed or opened on your behalf; `onAuthorizationUrl` and the loopback listener are yours to wire. `agent.listTools()` stays empty until the flow completes — a server that needs authorization reports `needsAuthorization: true` in its connect result rather than a generic failure. `MCP_SERVERS` (the CLI's env config) is JSON, so it can only express `headers`; OAuth is a library-level feature.
+Nothing is printed or opened on your behalf; `onAuthorizationUrl` and the loopback listener are yours to wire. `agent.listTools()` stays empty until the flow completes — a server that needs authorization reports `needsAuthorization: true` in its connect result rather than a generic failure. `MCP_SERVERS` (the CLI's env config) is JSON, so it can only express static `headers` (plus `protocol`, `skills` and `connectTimeoutMs`); OAuth is a library-level feature.
 
 - **`iss` (RFC 9207).** `finishMcpOAuth` checks the `iss` query parameter of the redirect against the authorization server the flow was started with, after `state` and before the code is exchanged. A different issuer is refused (a mix-up attack: a code meant for one server sent to another), and so is a missing `iss` when the server's metadata says `authorization_response_iss_parameter_supported: true`. The comparison is exact, character for character. Read `iss` off the callback URL together with `code` and `state`; `checkAuthorizationResponseIssuer` is the rule on its own.
 - **`clientMetadataUrl` (CIMD).** Host a client ID metadata document and pass its URL: an authorization server that advertises `client_id_metadata_document_supported` takes the URL as the `client_id`, and no registration request is made. Other servers get dynamic registration as before, and a registration already in the store wins over both. The URL must be https with a path (anything else throws when the provider is built), and the document must list the same `redirect_uris` as `redirectUrl`.
@@ -554,7 +712,7 @@ Progressive disclosure keeps them cheap:
 
 1. The planner and executor system prompts carry only an index: `- name: description`.
 2. The planner's plan has an optional `skills` field naming the skills that apply (unknown names are dropped with a warning). Their instructions are injected into the executor, replanner and synthesizer system prompts for the rest of the run (24k chars in total, clipped beyond that).
-3. The executor gets two read-only built-in tools: `load_skill({ name })` returns `{ name, content, files }` and activates the skill for later steps; `read_skill_file({ name, path })` returns a bundled file. Both always run without approval.
+3. The executor gets two read-only built-in tools: `load_skill({ name })` returns `{ name, content, files }` and activates the skill for later steps; `read_skill_file({ name, path })` returns a bundled file - or, when `path` names a directory of the skill (`templates/`, `.` for the root), its listing: `{ name, directory, files, directories, more? }`, the direct children by their paths inside the skill, sorted, at most 64 (`more` counts the rest; a file of that name wins). Both always run without approval (an MCP server's skill is the one exception: a person sees it first - [MCP skills](#mcp-skills-experimental)).
 
 Every activation emits `skill.activated` (`by: 'plan' | 'tool'`). A host or MCP tool named `load_skill` / `read_skill_file` is a configuration error. `parseSkillMarkdown(markdown, files?)` and `defineSkill(skill)` validate skills you build yourself (names match `[a-z0-9-]{1,64}`). `loadSkillsFromDir` bundles text files (`.md .txt .json .yaml .yml .csv .ts .js .py .sh .html .css .xml .toml`, up to 256 KB each).
 
@@ -566,14 +724,22 @@ An MCP server may serve skills too (the [Skills extension](https://github.com/mo
 ```ts
 const agent = await createAgent({
   ...config,
-  mcpServers: { docs: { url: 'https://docs.example.com/mcp', protocol: 'auto', skills: true } },
+  mcpServers: {
+    docs: { url: 'https://docs.example.com/mcp', protocol: 'auto', skills: true },
+    // A server you vetted: its skills load without asking anyone.
+    ours: { url: 'https://mcp.internal.example/mcp', protocol: 'auto', skills: { consent: 'never' } },
+    // A server you trust with its GENERATED skills (no checksums): see "Generated skills" below.
+    gen: { url: 'https://gen.example.com/mcp', protocol: 'auto', skills: { dynamic: true } },
+  },
+  // A person sees each skill before the model does (see "Consent" below).
+  toolApproval: { onRequest: askThePerson },
 })
 agent.listSkills()
 // [{ name: 'docs/pdf-processing', description: 'Extract, fill and assemble PDF documents [from the MCP server "docs" - third-party]', server: 'docs' }, ...]
 ```
 
-- **Off by default.** Without `skills: true` the extension is not declared and nothing of it is
-  sent. With it, the extension is declared only where 2026-07-28 may be spoken (`protocol:
+- **Off by default.** Without `skills` (`true`, or `{ consent, dynamic }`) the extension is not declared
+  and nothing of it is sent. With it, the extension is declared only where 2026-07-28 may be spoken (`protocol:
   'auto'` or `'modern'`): on `protocol: 'legacy'` (or none) a warning says so and nothing is
   asked, and an `'auto'` connection that ends on a 2025 revision lists no skills. There is no
   agent-wide switch: a server is trusted with this one by one.
@@ -598,17 +764,77 @@ agent.listSkills()
   whatever the mode, a rule or an earlier "always allow" say; with no `onRequest`, it is refused.
 - **Caps.** At most 32 skills per server and 64 in all in the catalog, 16 000 characters of a
   skill's instructions and 32 000 of one file - each cut said, never silent. Entries over the
-  extension's own limits (512 files, 16 MiB), `"dynamic"` ones (no digests to check), and ones
-  whose URI and frontmatter name disagree are refused, with a warning.
+  extension's own limits (512 files, 16 MiB), `"dynamic"` ones (no digests to check; unless the
+  server has `skills: { dynamic: true }`, below), and ones whose URI and frontmatter name disagree
+  are refused, with a warning.
 - **Changes.** A change of a server's skills is announced as a resource list change: the agent
   re-lists them the way it re-lists tools after a `tools/list_changed` (between runs).
+- **Directories.** `read_skill_file` with a directory of an MCP skill (`templates/`, `.`) lists
+  it from the entry the skill was loaded and approved with - the held entry is authoritative, and
+  the same consent comes first as for a file. When the server declared `directoryRead`, the agent
+  also sends `resources/directory/read` for that directory (`skill://<path>/<dir>`, no trailing
+  slash) to THAT server, only to see whether the skill changed there: a child the server lists and
+  the entry does not is never shown - not its name, URI or type; the listing gets a fixed `note`
+  ("The server now lists 1 more item(s) here than the approved entry of this skill: the skill
+  changed on the server ..."), a warning is logged (counts only) and the server's skills are
+  listed again between runs (as after a resource list change; a changed entry is asked about
+  again). A child of the entry the server no longer lists stays in the listing and is also named
+  in `notServed` (a read of it will fail). If the directory read fails, the listing comes from the
+  entry alone (a log line); a stop of the run still stops it. Without `directoryRead` the method
+  is never called. A generated skill's directories are listed from its snapshot, the same way.
+- **Generated skills (opt-in, per server).** A `"dynamic"` entry - the server generates the skill
+  and publishes no checksums - is declined unless THAT server has `skills: { dynamic: true }`
+  (no agent-wide switch). It then joins the catalog like any other, its line ending
+  `[from the MCP server "gen" - third-party, no checksums]`. When it would enter the context -
+  BEFORE anyone is asked - the agent reads all of it once: `SKILL.md` (its frontmatter compared
+  with the entry's) and, if the server declared `directoryRead`, its directory tree (direct
+  children each time, only `inode/directory` children inside the skill, never twice) and every
+  file found. Bounds: 512 files and 16 MiB read (the extension's limits, counted on what is
+  read), 64 directories, 8 levels deep, and 64 MiB held by all of the agent's copies
+  (`MCP_SKILL_SNAPSHOTS_MAX_BYTES`); past any of them it is declined - nobody is asked, the model
+  is told why, a warning says it. The agent computes each file's size and SHA-256 itself, and that
+  copy (a "snapshot") is the skill's entry from then on: the request carries `skill.dynamic` and
+  the copy's size, files and text; a yes binds to the copy's digests (after a refresh the agent
+  takes a new copy - one that differs is asked about again under `'once-per-skill'`, the same
+  bytes are not); and the model gets that copy only - its body, and every file from memory, never
+  read from the server again. Without `directoryRead` the copy is `SKILL.md` alone
+  (`skill.noFileListing`; no other file can be read). Nothing of a copy is written anywhere -
+  not to a checkpoint, an event or a log. `'never'` works too, for a vetted server.
+- **Consent: a person sees a skill before the model does.** The first time a server's skill would
+  enter the model's context - `load_skill`, the planner picking it, a resumed run, or
+  `read_skill_file` of one of its files - its `SKILL.md` is read and verified, then put to
+  `toolApproval.onRequest` as a request with `skill` (`McpSkillConsentView`: `server`, `name`,
+  `skill`, `uri`, `description`, `size` / `totalSize`, `files` / `fileCount`, `byUri`, `nestedIn`,
+  `dynamic` / `noFileListing` (a generated skill: the copy just read), `consent`, and `body` - the very text the model would read, cleaned and capped as the model gets
+  it); `toolName` is `load_skill`, `input` what it was called with. A yes lets it in; `remember:
+  true` ("Always for this server") lets in that server's other skills for the agent's life; a no
+  keeps all of it out - the model is told so ("The user did not allow the skill ... nothing of it
+  is in your context") and is not asked again in that run. Asked whatever the approval mode says -
+  autopilot and an allow-everything rule included. With no `onRequest` such a skill is not loaded
+  (a warning at `createAgent` says so). When: `skills: { consent }` per server, else
+  `mcpSkills: { consent }` for the agent, else `'once-per-skill'` - once per skill in the agent's
+  life, bound to its entry (the server, the URI and every file's digest: a changed skill is asked
+  about again); `'ask'` - in every run that loads it; `'never'` - no question, for a server you
+  vetted. A skill nested inside another one of the server is asked about on its own: neither its
+  enclosing skill's yes nor "Always for this server" covers it. A no-answer (`timeoutMs`) is a
+  refusal nobody gave: asked again next time.
+- **By URI.** The listing may be partial: a skill a server names by its URI - in its instructions,
+  in one of its skills, in a tool result - loads with `load_skill({ server, uri })` (its
+  description says so, and names the servers). The URI must be a `skill://.../<name>/SKILL.md`
+  and `server` one whose `skills` are on - both checked before any request; the catalog must have
+  room for one more of that server (it counts like a listed one); then `skills/get` goes to THAT
+  server only (a `-32602` "no such skill" reaches the model as the call's error), and the entry
+  passes every rule a listed one does, then the same verification, preamble and consent
+  (`skill.byUri`). It joins the catalog for the agent's life under a name no other skill has
+  (`docs/release-checklist`, or `docs/internal/git-workflow` when `docs/git-workflow` is taken).
 
 `skill.activated` carries `server` for these. The browser package's
 [security notes](https://github.com/dudko-dev/agents/blob/main/packages/agent-web/docs/security.md#mcp-skills-third-party-instructions)
 say what a server's skill can and cannot do; its
 [design notes](https://github.com/dudko-dev/agents/blob/main/packages/agent-web/docs/design.md#mcp-skills-one-catalog-namespaced-under-a-preamble-opt-in)
-why it is namespaced, loaded under a preamble and opt-in. Not done (yet): loading a skill the
-listing leaves out by its URI alone (`skills/get`), and `resources/directory/read`.
+why it is namespaced, loaded under a preamble and opt-in, why the consent is what it is, why
+a directory is listed from the entry with the server asked only for staleness, and why a
+generated skill is a snapshot served from memory, opt-in per server.
 
 ## Tool approval and autopilot
 
@@ -631,6 +857,8 @@ const agent = await createAgent({
 agent.setToolApprovalMode('autopilot') // the toggle; applies to the next call, in-flight runs included
 agent.getToolApprovalMode()
 ```
+
+`onRequest` may also answer **`{ park: true }`**: "the answer will come later, from outside the run" - the run parks at the end of the tool round and is resumed with the answer (needs `persistence.journal`; see [Parking a run](#parking-a-run-a-persons-answer-or-a-result-from-outside)). Without the journal it is a denial.
 
 Each call is decided in this order: (1) a tool approved earlier with `remember: true` runs; (2) the most specific matching rule — exact name over the longest `*` glob — says `allow`, `ask` or `deny`; (3) the mode: `autopilot` allows, `read-only` allows read-only tools and denies the rest, `ask-writes` allows read-only tools and asks for the rest, `ask-all` asks. Built-in tools are always allowed. An `ask` without `onRequest` is a denial.
 
@@ -697,6 +925,8 @@ const agent = await createAgent({
   elicitation: { timeoutMs: 300_000, maxPerToolCall: 5, maxPerRun: 20 }, // the defaults
 })
 ```
+
+**It does not park.** A question here is answered while the tool call waits; it cannot [park the run](#parking-a-run-a-persons-answer-or-a-result-from-outside) (see why there).
 
 **The host decides, never the model.** The question is not shown to the model and the model cannot answer it. The callback returns `{ action: 'accept', content }`, `{ action: 'decline' }` (a no) or `{ action: 'cancel' }` (dismissed). An `accept` or a user's own `decline` / `cancel` goes to the server and the tool call ends with whatever the server then answers.
 
@@ -791,7 +1021,7 @@ const researcher = createSubagentTool({
   name: 'researcher',
   description: 'Research a self-contained question and report the findings',
   config: { ...childConfig }, // a full IAgentConfig for the child
-  isolation: 'worker', // default; or 'in-process'
+  isolation: 'worker', // default; or 'in-process' / 'remote' (below)
   tools: { lookup }, // host tools for the child
   maxConcurrent: 4, // parallel calls beyond this queue
   timeoutMs: 120_000,
@@ -802,12 +1032,41 @@ const researcher = createSubagentTool({
 const agent = await createAgent({ ...config, tools: { researcher } })
 ```
 
-- **`'worker'`** runs each call in its own `worker_thread` (terminated afterwards), so the child's CPU work and crashes stay off the parent's event loop. Its config must be structured-cloneable — a function anywhere (`getHeaders`, `authProvider`, `fetch`, sanitizers, `persistence`, `onRequest`, native `tools`) throws, naming the field. Host tools passed as `tools` are **proxied**: the child sees their schemas, every call runs on the parent thread.
+- **`'worker'`** runs each call in its own `worker_thread` (terminated afterwards), so the child's CPU work and crashes stay off the parent's event loop. Its config must be structured-cloneable — a function anywhere (`getHeaders`, `authProvider`, `fetch`, sanitizers, `persistence`, `onRequest`, native `tools`) or a [model object](#your-own-model-object) (`model`, a stage, a tier, a media model) throws when the tool is created, naming the field. Host tools passed as `tools` are **proxied**: the child sees their schemas, every call runs on the parent thread.
 - **`'in-process'`** builds the child on this thread; `tools` are merged into its config.
 
 Several calls in one model step run in parallel (bounded by `maxConcurrent`). The parent's abort aborts the child. `timeoutMs` does not count the time a person takes to answer the child's questions (an approval, an MCP elicitation) or the calling run's: while one waits, the subagent's limit and the calling step's `llmTimeoutMs` are stopped, and a worker child whose proxied host tool call is in flight stops its own step limit too. The child's usage is emitted on the parent as `usage` with `phase: 'subagent'` as it happens, so it counts against the parent's limits. Parent events: `subagent.start`, `subagent.event` (each child event, long strings clipped), `subagent.complete` (`text`, `usage`), `subagent.error`.
 
 The worker entry ships as `dist/subagent-worker.js` and is resolved next to the bundle, from the ESM and the CJS build alike.
+
+A subagent runs under its parent's [lease](#running-on-many-workers-scale-out-hooks) (a `runLease` in its config is dropped) and its model calls go through the parent run's [`sharedLimits`](#running-on-many-workers-scale-out-hooks) unless its own config has one (a worker child's are asked over the worker protocol).
+
+### Remote subagents (`isolation: 'remote'`)
+
+The child runs wherever your `dispatch` sends it - another worker, another machine, a queue. No config crosses: you decide the child's config over there.
+
+```ts
+const researcher = createSubagentTool({
+  name: 'researcher',
+  description: 'Research a self-contained question',
+  isolation: 'remote',
+  dispatch: async (task, { signal, emit }) => {
+    // task: { id, name, profile?, input, parentRunId?, rootRunId?, depth }
+    const job = await queue.submit({ input: task.input, profile: task.profile, signal })
+    for await (const event of job.events()) emit(event) // forwarded as subagent.event
+    return { text: job.answer, usage: job.usage } // usage: charged once, here
+  },
+  profiles: { deep: { description: 'A thorough look' } }, // names only: dispatch decides
+  timeoutMs: 120_000,
+})
+```
+
+- `task` is the child's input (what the parent model wrote) and who it is for: the subagent's `id` (the one its `subagent.*` events carry), the tool's `name`, the `profile` the parent model chose, the calling run (`parentRunId`), the run the host started (`rootRunId`) and the `depth`.
+- `emit` forwards the remote child's events into the parent's stream as the same `subagent.event` envelopes a local child produces. They are **untrusted**: each must be a plain object with a well-formed `type`, at most 64 000 characters as JSON, at most 10 000 per call (`REMOTE_SUBAGENT_LIMITS`); long strings are clipped like a local child's; anything else is dropped, with one warning; an `emit` after `dispatch` settled is ignored. Forwarded `…-requested` / `…-resolved` waits stop the caller's clock as a local child's do.
+- **Usage is charged once**, from what `dispatch` resolves with (a `usage` event of phase `'subagent'`; a forwarded `usage` event is shown, never charged). Every count is clamped to a non-negative number (a remote child cannot hand budget back). A `dispatch` that throws an error with a `usage` field is charged that.
+- The answer must be `{ text: string }` (clipped to `outputMaxChars`); anything else fails the tool call. Or `dispatch` resolves with **`deferResult({ note? })`** when the answer will come later: the run [parks](#parking-a-run-a-persons-answer-or-a-result-from-outside) with the call pending (needs `persistence.journal`), and the host resumes it with the child's answer as `{ output }` - no `subagent.complete` is emitted for it.
+- A stop of the parent (the run, the step, `stopSubagent`, `timeoutMs`) aborts `signal`, and the tool call does not wait for a `dispatch` that ignores it.
+- `config`, `tools` and a profile's `config` make no sense here and are refused when the tool is made, as is `dispatch` on a local isolation. A remote child's tool approvals and questions are the host's business: they are not bridged to the parent's gate.
 
 ### Profiles: other models, params and context per call
 
@@ -1286,7 +1545,7 @@ const pipeline = createPipeline(definition, {
   // What the names in the definition stand for. A name that is not here fails its node.
   resolveNode: nodeResolver({
     base: config, // an IAgentConfig: every node starts from it
-    models: { smart: { model: 'gpt-4.1-mini' } },
+    models: { smart: { model: 'gpt-4.1-mini' } }, // or a model object: { model: openai('gpt-5') }
     tools: { files: fileTools },
     // skills: { ... }, mcpServers: { ... },
     // configure: (config, node) => config  // the place to read node.settings
@@ -1345,17 +1604,24 @@ validation. It answers the same as `RegExp.test` on what it accepts.
 - **Join.** A node activated by several edges gets all their outputs in one visit. With
   `join: 'all'` an activated node is *deferred* while any other activated node can still reach it
   through the graph (conditions aside) - so a fan-in waits for its slower branch even when the
-  branches have different lengths. If every activated node is deferred (they wait for each other in
-  a cycle), all of them run. `join: 'any'` never defers: the node runs once per wave it is
-  activated in.
+  branches have different lengths. If every activated node is deferred (they reach each other
+  through a loop), only the waits within one pass of the loop count: a wait that holds only by
+  going round, back to the loop's *head* (the node every path from the entry into the loop
+  passes), is for the next pass and is dropped. If that still leaves every node deferred, all of
+  them run. `join: 'any'` never defers: the node runs once per wave it is activated in.
 - **Loops** are allowed. When starting a node would exceed `maxNodeVisits` for it, or `maxRuns` for
   the pipeline, that activation is dropped (`pipeline.node.skipped`); the run goes on with what is
   left, ends normally, and the result carries `stoppedBy: 'maxNodeVisits'` or `'maxRuns'`
   (`maxRuns` wins when both happened).
-- **A fan-in inside a loop** has a limit: when a `join: 'all'` node and a slower branch that leads
-  to it can also reach each other through the loop, they wait for each other, so both run and the
-  join fires without that branch. Use `join: 'any'` there, or keep the fan-in out of the cycle (a
-  loop around the whole fan-out and fan-in works).
+- **A fan-in inside a loop.** A loop that goes back to the fan-out or to any node before it
+  (`a → b → join`, `a → c → d → join`, `join → a`) works: on every pass the join waits for its
+  slower branch and runs once with both outputs, whatever the order of the edges. A loop that goes
+  back *into* a branch (`join → c` instead) has no head - it is entered at `c` and at the join -,
+  so the join and that branch wait for each other, both run, and the join fires without that
+  branch: loop back to a node before the fan-out, or use `join: 'any'` there. The pass rule is
+  asked only when every activated node waits: a node outside a loop that the loop feeds
+  (`a ↔ b`, `a → x`) still waits while the loop goes on, and runs once, with the output of every
+  pass.
 - **The end.** The run ends when nothing is activated. A *terminal* visit is one that activated
   nothing (no edge fired, or a cap dropped what it fired). `result.text` is the output of the last
   terminal node to finish; several of the same wave are joined under `## <name>` headings.
@@ -1406,6 +1672,93 @@ process, the caps bound its loops, and it can only name what `nodeResolver` regi
 `node.settings` reaches your `configure` and nothing else. The graph engine is the same file as in
 the browser sibling, so a definition runs the same in both.
 
+### Running the graph yourself
+
+`createPipeline` is a scheduler with `createAgent` as its node runner. Both halves are public, so a
+host can keep the scheduler and run every node its own way - a queue job, a remote worker, a child
+workflow - and make the route call where the node ran:
+
+```ts
+import { pickPipelineRoute, preparePipeline, runPipelineGraph } from '@dudko.dev/agent'
+
+const plan = preparePipeline(definition) // validates (PipelineValidationError) and compiles
+const result = await runPipelineGraph(
+  plan,
+  async (node, input, ctx) => {
+    // input: { request, from: [{ nodeId, name?, text }], visit } - renderPipelineNodeInput(input)
+    // is the text a createPipeline node is given.
+    const text = await jobs.run(node.id, input, { signal: ctx.signal }) // your runner
+    if (!node.routes?.length) return { text }
+    // The route call createPipeline makes: the node's decision model, then its planner model.
+    const { route, usage } = await pickPipelineRoute(node, text, {
+      config: configOf(node), // the node's IAgentConfig
+      signal: ctx.signal,
+      onEvent: ctx.emit,
+    })
+    return { text, usage, route }
+  },
+  { input: 'A release note for v2', signal, onEvent, onAbort: 'reject' },
+)
+```
+
+The runner's contract:
+
+- **When it is called.** Once per visit, never for an activation a cap refused (`plan.maxNodeVisits`
+  / `plan.maxRuns`: the definition's `limits` or the defaults). All visits of a wave are started, in
+  the order their nodes were first activated, before any is awaited; the next wave starts when all
+  of them have settled. A visit's answer is applied (events, trace, edges) when it settles.
+- **What it returns.** `{ text, usage?, route? }`. `text` is what the edges test (not a string
+  counts as `''`); `usage` is added to `result.usage`, every numeric field; `route` must be one of
+  `node.routes`' labels exactly as written - anything else, or none, is no route. To pick one with a
+  model of your own: `PIPELINE_ROUTER_SYSTEM` and `renderPipelineRoutePrompt(node, text)` are the
+  prompt, `matchPipelineRoute(node, answer)` turns the answer into a label.
+- **When it fails.** A runner that rejects fails the run with a `PipelineNodeError` (`nodeId`,
+  `visit`, `cause`), whatever `onAbort` says: the other visits' `ctx.signal` aborts, and what they
+  return afterwards is ignored.
+- **Abort.** `signal` aborts the visits in flight (their `ctx.signal`) and settles the run at once,
+  without waiting for them: it rejects with an `AbortError` (`onAbort: 'reject'`, the default, as
+  `createPipeline` does here) or resolves with what it has and `stoppedBy: 'aborted'` (`'resolve'`,
+  as the browser sibling's does). Aborted before it starts: no visit at all.
+- **Events.** `onEvent` gets the `pipeline.*` events `createPipeline` sends; `ctx.emit(event)`
+  forwards one of the node's own, with `nodeId` and `visit`, until the run is over.
+
+`pickPipelineRoute(node, text, { config, signal?, onEvent? })` resolves with `{ route?, usage }`:
+the decision model of `config` first (`decisionModel`, when it is confident of a label), else a
+structured-output call to its planner model with its call options, `llmTimeoutMs`, `llmMaxRetries`
+and `sharedLimits`. No label, or a failed call, is no route; an abort rejects. The model is built
+once per config object.
+
+**Deterministic by contract.** The engine - `preparePipeline`, `runPipelineGraph`, the conditions -
+reads no clock, no randomness and no timer, and does no I/O: the same definition, input and runner
+answers, arriving in the same order (and an abort at the same point), give the same calls, events,
+trace and result. So it can be a deterministic scheduler, replayed from a log of the runner's
+answers. It needs nothing but the JavaScript language: where there is no `AbortController`,
+`ctx.signal` is a stand-in (`aborted`, `reason`, `onabort`, `throwIfAborted()`, `addEventListener` /
+`removeEventListener`), where there is no `DOMException` the abort error is an `Error` named
+`AbortError`, and of your `signal` only `aborted` and `addEventListener` / `removeEventListener`
+for `'abort'` are read. `pickPipelineRoute` calls a model, so it is not part of that: it belongs
+where the node runs.
+
+**The engine alone: `@dudko.dev/agent/pipeline-engine`.** The main entry loads the whole agent -
+`ai`, `zod`, the MCP client, `node:*` -, which a bundled orchestrator cannot import (a workflow
+sandbox has the language and little else). The engine has an entry point of its own, ESM and
+CommonJS with types, whose file imports nothing:
+
+```ts
+// In the workflow: the scheduler only; every node runs outside it (an activity, a job).
+import { preparePipeline, runPipelineGraph } from '@dudko.dev/agent/pipeline-engine'
+```
+
+It exports `preparePipeline`, `runPipelineGraph`, `validatePipeline`, `normalizePipeline`,
+`testPipelineCondition`, `renderPipelineNodeInput`, `renderPipelineRoutePrompt`,
+`matchPipelineRoute`, `PIPELINE_ROUTER_SYSTEM`, `PIPELINE_LIMITS`, `PipelineValidationError`,
+`PipelineNodeError` and every pipeline type - the same names as the main entry.
+`tests/pipeline-determinism.test.ts` holds the built ESM and CommonJS files to the contract: no
+import and no `require` (a shared chunk would be one), and the same runs inside a `node:vm`
+context with only the language's globals. It is a copy of the engine the main entry carries, not
+the same objects: an error thrown by one is not `instanceof` the other's class - compare
+`error.name`.
+
 ## Autonomy
 
 The stage prompts are written for an agent that acts on its own:
@@ -1423,20 +1776,20 @@ Consent is the host's job ([tool approval](#tool-approval-and-autopilot)) — th
 
 | Field | Notes |
 | --- | --- |
-| `providerType` | `'openai' \| 'anthropic' \| 'google' \| 'openai-compatible' \| 'xai' \| 'azure' \| 'amazon-bedrock' \| 'google-vertex' \| 'deepseek' \| 'gateway' \| 'cloudflare'`. Each provider's SDK is an **optional peerDependency** — install only the package(s) you intend to use; setting `providerType` to a missing one throws at `createAgent` time. |
+| `providerType` | `'openai' \| 'anthropic' \| 'google' \| 'openai-compatible' \| 'xai' \| 'azure' \| 'amazon-bedrock' \| 'google-vertex' \| 'deepseek' \| 'gateway' \| 'cloudflare'`. Each provider's SDK is an **optional peerDependency** — install only the package(s) you intend to use; setting `providerType` to a missing one throws at `createAgent` time. The provider of every model given as an id; optional when every stage runs on a [model object](#your-own-model-object), and a model id with no `providerType` (its block's or the top level's) throws at `createAgent`, naming the block. |
 | `baseURL` | Required for `openai-compatible` (point at your self-hosted server) and `azure` (point at your deployment URL). Optional for the rest. |
-| `apiKey` | Required by the type, but **ignored** for `google-vertex` (which authenticates via Google ADC). |
+| `apiKey` | Optional: unset, the provider's SDK reads its own environment variable (`OPENAI_API_KEY`, ...). **Ignored** for `google-vertex` (which authenticates via Google ADC) and by a model object. |
 | `providerOptions` | Escape hatch for provider-specific factory options. Spread into the SDK's `create*()` call after `baseURL` / `apiKey`, so anything documented for the underlying SDK works: e.g. `{ apiVersion, resourceName }` for Azure, `{ region, accessKeyId, secretAccessKey }` for Bedrock, `{ project, location, googleAuthOptions }` for Vertex, `{ accountId }` (or `{ binding }` inside a Worker) for Cloudflare. Per-stage override blocks have their own `providerOptions`; if absent, the top-level value is used. |
 | `subagents` | Off by default. `{ dynamic: true }` or `{ dynamic: { maxDepth, maxChildren, maxConcurrent, budgetShare, minTokens, timeoutMs, defaultTools } }` gives the model `spawn_subagent`: it starts a helper agent for a sub-task, with a subset of its own tools and a share of what is left of its budgets. A helper can only have less than the run that starts it. See [Dynamic subagents](#dynamic-subagents-helpers-the-model-starts-itself). |
 | `sandbox` | Off by default. `true` or `{ timeoutMs, memoryLimitBytes, maxOutputChars, maxCodeChars }` gives the model `run_js`: JavaScript it wrote runs in QuickJS/WebAssembly inside a worker thread that is killed at the deadline. Needs the optional peer `quickjs-emscripten`. See [Running code](#running-code-the-sandbox). |
-| `model` | Default model for every stage (executor / planner / synthesizer) when no per-stage override is set. |
-| `planner` / `synthesizer` | Optional per-stage override blocks: `{ providerType?, baseURL?, apiKey?, model? }`. Use these to mix providers (e.g. Gemini planner, Anthropic synthesizer). Cross-provider overrides MUST set their own `apiKey`. |
-| `executorTiers` | Off by default. `{ light?, standard?, strong? }`, each a stage override like `planner`: the planner rates every step `low` / `medium` / `high` and the executor runs it on that tier's model; a tier that is not configured falls back to the nearest one. See [Model tiers and escalation](#model-tiers-and-escalation). |
+| `model` | Default model for every stage (executor / planner / synthesizer) when no per-stage override is set: a model id of `providerType`, or a ready AI SDK model object (`AgentModel`), used as it is. See [Your own model object](#your-own-model-object). |
+| `planner` / `synthesizer` | Optional per-stage override blocks: `{ providerType?, baseURL?, apiKey?, model? }`, or a model object for the stage. Use these to mix providers (e.g. Gemini planner, Anthropic synthesizer). Cross-provider overrides MUST set their own `apiKey`. |
+| `executorTiers` | Off by default. `{ light?, standard?, strong? }`, each a stage override like `planner` (a block or a model object): the planner rates every step `low` / `medium` / `high` and the executor runs it on that tier's model; a tier that is not configured falls back to the nearest one. See [Model tiers and escalation](#model-tiers-and-escalation). |
 | `escalation` | `true` (default once `executorTiers` is on) \| `false` \| `{ maxPerStep?, maxPerRun? }` (defaults 1 / 3). A step that fails in a way a stronger model could fix is retried on the next stronger tier before the replanner is consulted. Nothing without tiers. |
 | `decisionModel` | Off by default. A [decision model](#decision-models): an object with `decide(question, { abortSignal })` that answers a closed question with `{ choice, confidence }` (`decisionModelFromAiSdk(...)` adapts Gemini Decision 1, TypeSafe's Jev or any AI SDK decision model). Where it is confident it replaces the replanner's continue / finish call and a pipeline node's route call. Never consulted for tool approval or egress. |
 | `decision` | `{ confidenceThreshold?, timeoutMs?, replan?, route? }` (defaults `0.8`, `5000`, `true`, `true`). Below the threshold, on an error, a timeout or an answer that is not an option, the ordinary model call runs unchanged. |
 | `plannerModel` / `synthesizerModel` | **Deprecated** model-only shortcuts. Equivalent to `planner: { model }` / `synthesizer: { model }`. The override block, if present, wins. |
-| `mcpServers` | `Record<name, { url, headers?, getHeaders?, authProvider?, fetch?, connectTimeoutMs?, protocol? } \| { command, args?, env?, cwd?, connectTimeoutMs?, protocol? }>` — StreamableHTTP for remote (legacy HTTP+SSE servers are **not** supported), stdio for locally-spawned servers. `protocol`: `'legacy'` (default) \| `'auto'` \| `'modern'` - the 2025 revisions, 2026-07-28 when the server offers it, or 2026-07-28 only; see [MCP protocol revision](#mcp-protocol-revision). `skills: true` (**experimental**, needs `'auto'` / `'modern'`): load the server's skills into the catalog as `<server>/<skill>`; off by default - see [MCP skills](#mcp-skills-experimental). |
+| `mcpServers` | `Record<name, { url, headers?, getHeaders?, authProvider?, fetch?, connectTimeoutMs?, protocol? } \| { command, args?, env?, cwd?, connectTimeoutMs?, protocol? }>` — StreamableHTTP for remote (legacy HTTP+SSE servers are **not** supported), stdio for locally-spawned servers. `protocol`: `'legacy'` (default) \| `'auto'` \| `'modern'` - the 2025 revisions, 2026-07-28 when the server offers it, or 2026-07-28 only; see [MCP protocol revision](#mcp-protocol-revision). `skills: true` or `{ consent: 'once-per-skill' \| 'ask' \| 'never', dynamic?: boolean }` (**experimental**, needs `'auto'` / `'modern'`): load the server's skills into the catalog as `<server>/<skill>`, each let into the model's context only once a person allowed it (`consent`); `dynamic: true` also takes its generated skills (no checksums: each read whole into a snapshot before anyone is asked, and only that copy used); off by default - see [MCP skills](#mcp-skills-experimental). |
 | `tools` | Optional `ToolSet` of native AI-SDK tools registered alongside MCP-discovered ones. Names must not collide with MCP-prefixed names or the built-in tools (`createAgent` throws on conflict). Mark read-only tools with `markReadOnly(tool)`, and tools that run code with `markCodeExecution(tool)` (always asked while a run acts on an MCP server's skill). |
 | `availableTools` / `excludedTools` | Whitelist / blacklist applied to **all** tools (MCP and native). |
 | `maxIterations` | Cap on **executed steps** across the run (every step counts, including those run after a `revise`). |
@@ -1457,6 +1810,7 @@ Consent is the host's job ([tool approval](#tool-approval-and-autopilot)) — th
 | `mcpConnectTimeoutMs` | Connect + `tools/list` budget per MCP server (each server's `connectTimeoutMs` wins). Default `30000`; `0` disables. |
 | `onElicitation` | `(request, { signal }) => { action: 'accept', content? } \| { action: 'decline' } \| { action: 'cancel' }`. Answers an MCP server that asks the user for input during a tool call. Unset (default): no capability is declared, a server cannot ask, the wire is unchanged. See [MCP elicitation](#mcp-elicitation-a-server-asks-the-user). |
 | `elicitation` | `{ timeoutMs?, maxPerToolCall?, maxPerRun?, url?, subagents? }` — defaults `300000` / `5` / `20` / `false` / `false`. Only read with `onElicitation`. |
+| `mcpSkills` | `{ consent?: 'once-per-skill' \| 'ask' \| 'never' }` (**experimental**) — when a person is asked (through `toolApproval.onRequest`) before an MCP server's skill enters the model's context, for the servers whose own `skills: { consent }` does not say. Default `'once-per-skill'`. See [MCP skills](#mcp-skills-experimental). |
 | `mcpInstructions` | `true` (default) \| `false`. Show the model the `instructions` MCP servers return on `initialize` (planner + executor system prompts, marked as third-party text, capped). See [MCP server instructions](#mcp-server-instructions-and-structured-results). |
 | `promptCaching` | `true` (default) \| `false` \| `{ ttl?: '5m' \| '1h', key? }`. See [Prompt caching](#prompt-caching). |
 | `outputSanitizer` | Optional `(toolName, output) => unknown` hook to redact tool results before they reach the LLM. |
@@ -1468,8 +1822,38 @@ Consent is the host's job ([tool approval](#tool-approval-and-autopilot)) — th
 | `systemPrompt` | Appended to the planner, executor, replanner, and synthesizer system prompts so the same domain context (persona, language, tone) reaches every stage. |
 | `failOnNoTools` | When `true`, `createAgent` throws if every configured MCP server failed to connect (otherwise the agent starts with zero tools and emits an `error`-level log). Default `false`. |
 | `maxConcurrentRuns` | Hard cap on concurrent `agent.run()` calls. When reached, further calls reject synchronously. Default: unlimited. Intentionally a throw, not a queue — back-pressure belongs on the caller. |
-| `persistence` | Optional `IPersistence` facade. Receives `IRunSnapshot` at run start, at every iteration boundary, and at run completion. Implementing the optional `loadRun(runId)` enables resume via `agent.run({ resumeFromRunId })`. See [`examples/persistence-sqlite.ts`](./examples/persistence-sqlite.ts) for a `node:sqlite`-backed adapter. |
+| `persistence` | Optional `IPersistence` facade. Receives `IRunSnapshot` at run start, at every iteration boundary, and at run completion, `onRunResume` when a resume starts (the new `attempt`, before any event; else that write goes to `onStepComplete`) and `onRunPark` when a run parks (status `'waiting'`; else `onStepComplete`; not fail-open). With `journal`, `onRunStart` is not fail-open either (a throw fails the run before its first step). Implementing the optional `loadRun(runId)` enables resume via `agent.run({ resumeFromRunId })`. `journal: { append(runId, entry), load(runId) }` (needs `loadRun`): the [call journal](#the-call-journal-exact-resume) - a resume replays the interrupted step instead of running it again, and a run can [park](#parking-a-run-a-persons-answer-or-a-result-from-outside). See [`examples/persistence-sqlite.ts`](./examples/persistence-sqlite.ts) for a `node:sqlite`-backed adapter. |
+| `runLease` | Off by default. `{ acquire, renew, release, ttlMs?, owner? }`: one worker at a time owns a run - acquired before it starts, renewed every `ttlMs / 3` (default `30000`), released at the end; a lost lease aborts the run and stops every persistence write (`RunLeaseError`, `lease.lost`). `agent.leaseOwner`. See [Running on many workers](#running-on-many-workers-scale-out-hooks). |
+| `sharedLimits` | Off by default. `{ beforeModelCall(call, { signal }), afterModelCall?(call, usage, { ok }) }`: asked before every language-model call (wait = a rate limit, throw = a refusal, `ModelCallRefusedError`, never retried) and told its usage. Not for media, search grounding or decision models. See [Running on many workers](#running-on-many-workers-scale-out-hooks). |
 | `logLevel` | `'none' \| 'error' \| 'warn' \| 'info' \| 'debug'` |
+
+### Your own model object
+
+`model` - and `planner`, `synthesizer` and each `executorTiers` entry - also takes a ready AI SDK language model object: the agent uses it as it is, imports no provider package for it, and needs no `providerType` or `apiKey`.
+
+```ts
+import { createOpenAI } from '@ai-sdk/openai'
+import { createAgent } from '@dudko.dev/agent'
+
+const openai = createOpenAI({ apiKey: env.OPENAI_API_KEY })
+
+const agent = await createAgent({
+  clientName: 'my-worker',
+  model: openai('gpt-5-mini'), // every stage
+  planner: openai('gpt-5'), // a stage of its own: an object, or a block as before
+  mcpServers: {},
+  maxIterations: 6,
+  maxStepsPerTask: 8,
+})
+```
+
+Why: with a model id the agent builds the model itself, with a dynamic `import()` of the provider package `providerType` names - which a runtime that bundles everything ahead of time (Cloudflare Workers / workerd) cannot do. A model object also carries what only the host has: a model wrapped in its own middleware (`wrapLanguageModel`), a Workers AI binding's model, a test mock.
+
+- **Mixing.** Stages can mix objects and ids. Over a top-level object, a stage with no block (or a block that sets nothing) runs on that object; a block that names a model id goes the provider way and needs a `providerType` - its own or the top level's (createAgent throws, naming the block, when there is none). A block with provider fields but no model id over an object throws too: there is nothing to apply them to. The top-level `providerType` / `apiKey` / `baseURL` / `providerOptions` are then only the defaults of such blocks; a block that names another provider and inherits a top-level `apiKey` throws as ever (cross-provider key inheritance), since a top level with no `providerType` has a key of no named provider. `plannerModel` / `synthesizerModel` are `{ model }` blocks.
+- **Names.** Where a model is named - `step.start`'s `model` with tiers, the `agent.model` / `agent.provider` span attributes - an object is named by its `modelId` / `provider`.
+- **Media.** `media.*Model` took objects already; a media block with a model id over a top-level object needs a `providerType` as well (`media.imageModel: model "..." is a model id, so a providerType is needed ...`).
+- **Pipelines.** A registry entry may be an object: `models: { smart: { model: openai('gpt-5') } }`. Its node's route call runs on it too.
+- **Worker subagents: no.** A model object is a class instance with methods: it cannot cross into a worker thread. `createSubagentTool` with `isolation: 'worker'` (the default) throws when the tool is created if the child's config or a profile's carries one anywhere (`config.model is a model object, which cannot cross into a worker thread ...`). Use `isolation: 'in-process'`, or give the worker child a provider config (`providerType` + a model id). In-process subagents, dynamic helpers (`spawn_subagent`, which use the caller's models) and remote subagents (no config crosses) are not affected.
 
 ### Picking models per stage
 
@@ -1607,10 +1991,11 @@ interface IAgent {
   reconnect(): Promise<void>
   close(options?: { waitForRuns?: boolean; timeoutMs?: number }): Promise<void>
   activeRuns(): number
+  readonly leaseOwner?: string // with runLease: who this agent is to the lease
 }
 ```
 
-`IAgentRunResult` is `{ text, plan, trace, iterations, usage, compactedHistory? }`. `run()` also takes `files` (audio attachments, with `media.transcriptionModel` - see [Media](#media-images-speech-and-transcription)).
+`IAgentRunResult` is `{ runId, text, plan, trace, iterations, usage, compactedHistory?, undelivered?, parked? }` (`runId`: the run's id, the one its events and snapshots carry - always set by `run()`, optional in the type only so that a hand-made result stays valid; `parked`: the run [parked](#parking-a-run-a-persons-answer-or-a-result-from-outside) and waits for `parked.items`). `run()` also takes `files` (audio attachments, with `media.transcriptionModel` - see [Media](#media-images-speech-and-transcription)), `runId` (a fresh run under an id of yours - see [Your own run id](#resume-after-crash)) and, with `resumeFromRunId`, `answers` (the answers to a parked run's items, by id).
 
 A single agent instance supports concurrent `run()` calls — each gets its own `runId` (via `AsyncLocalStorage`), usage accumulator, abort signal, and `onEvent`. Tools and models are shared.
 
@@ -1619,7 +2004,10 @@ Top-level exports beyond `createAgent`:
 - `getCurrentRunId(): string | undefined` — read the active run's id from any code reachable from `agent.run()` (planner, executor, MCP `execute`, retry sleeps, …). Useful for correlating logs/metrics across concurrent runs on a single agent instance.
 - `getCurrentRunSandbox(): string | undefined` — absolute path to the active run's sandbox directory. Native tools that need to spill binary output should write into this path so files are auto-cleaned when the run completes (set `keepSandbox: true` to retain).
 - `redactHeaders(headers)` — small helper for masking `Authorization`, `X-Api-Key`, `Cookie`, etc. when logging request headers (e.g. inside an `outputSanitizer` or your own MCP transport wrapper).
-- `createSubagentTool(options)` — [subagents](#subagents-worker_threads).
+- `isAuthError(err): boolean` — whether an error is refused credentials: a `401` / `403` `statusCode` or `status` on the error or anywhere down its `cause` / `lastError` chain (the AI SDK's `RetryError` keeps the last attempt there). The test the agent itself uses to let such a failure through instead of degrading on it (a failed replanner, for one); a host that retries runs can use it to tell "the key is wrong" from "try again".
+- `createSubagentTool(options)` — [subagents](#subagents-worker_threads); `REMOTE_SUBAGENT_LIMITS` — what a [remote](#remote-subagents-isolation-remote) child may send back.
+- `RunLeaseError`, `RUN_LEASE_DEFAULT_TTL_MS`, `ModelCallRefusedError`, `isModelCallRefused(err)` — [the scale-out hooks](#running-on-many-workers-scale-out-hooks) (`runLease`, `sharedLimits`).
+- `deferResult({ note? })`, `isDeferredResult(value)`, `JournalError`, `JOURNAL_LIMITS` and the types `IRunJournal`, `IJournalEntry` (`IJournalModelEntry` / `IJournalToolEntry` / `IJournalPendingEntry` / `IJournalAnswerEntry`), `IParkedRun`, `ParkedItem`, `ParkAnswer`, `ToolApprovalAnswer`, `ToolResultAnswer` — [the call journal](#the-call-journal-exact-resume) and [parking](#parking-a-run-a-persons-answer-or-a-result-from-outside).
 - `SPAWN_SUBAGENT_TOOL`, `SPAWN_INPUT_SCHEMA`, `SUBAGENT_DEFAULTS`, `SUBAGENT_MAX_DEPTH_LIMIT`, `resolveDynamicSubagents(subagents)`, `SubagentSpawnError`, `adoptSubagentEvent(event, parentId)` — [dynamic subagents](#dynamic-subagents-helpers-the-model-starts-itself): the tool's name and input, the defaults, the validated settings, the refusal a model reads, and the rule that places a forwarded `subagent.start` in the tree.
 - `createPipeline(definition, options)`, `nodeResolver(registries)`, `validatePipeline(definition)`, `normalizePipeline(definition)`, `testPipelineCondition(when, output)`, `renderPipelineNodeInput(input)`, `PIPELINE_LIMITS`, `PipelineNodeError`, `PipelineValidationError` — [pipelines](#pipelines).
 - `resolveThinking(setting)`, `mergeProviderOptions(...layers)` — [thinking](#thinking-reasoning).
@@ -1651,6 +2039,8 @@ dd-agent --env-file=.env
 The newer features are env-driven too: `AGENT_THINKING` (`off | minimal | low | medium | high | xhigh | <budget tokens>`), `AGENT_MAX_INPUT_TOKENS` / `AGENT_MAX_OUTPUT_TOKENS` / `AGENT_MAX_REASONING_TOKENS` / `AGENT_MAX_TOTAL_TOKENS`, `AGENT_MAX_TOOL_CALLS`, `AGENT_PER_CALL_TOKENS` (JSON `{"executor":16000,"synthesizer":0}` — per-stage output caps, `0` = no cap, see [Token limits](#token-limits-and-step-caps)), `AGENT_TOOL_APPROVAL` (`autopilot | ask-writes | ask-all | read-only`), `AGENT_TOOL_RULES` (JSON `{ "<tool or glob*>": "allow" | "ask" | "deny" }`, beats the mode — e.g. `{"github__delete_*":"deny"}`), `AGENT_EGRESS` (`on | off`; with `AGENT_EGRESS_ALLOW`, `AGENT_EGRESS_DENY`, `AGENT_EGRESS_PROTOCOLS`, `AGENT_EGRESS_ALLOW_PRIVATE` — see [Egress](#egress-what-the-model-may-fetch)), `AGENT_SEARCH` (`google | off` - Google Search through Gemini grounding, the one provider the CLI offers: another search API is a function, which an environment cannot carry; with `AGENT_SEARCH_API_KEY` (a Gemini key; `AGENT_API_KEY` is used when `AGENT_PROVIDER_TYPE=google`), `AGENT_SEARCH_MODEL`, `AGENT_SEARCH_BASE_URL`, `AGENT_SEARCH_MAX_RESULTS`, `AGENT_SEARCH_ALLOW_PRIVATE` — see [Search](#search-finding-the-page-to-fetch)), `AGENT_SANDBOX` (`on | off`; with `AGENT_SANDBOX_TIMEOUT_MS`, `AGENT_SANDBOX_MEMORY_MB` — see [Running code](#running-code-the-sandbox)), `AGENT_SUBAGENTS` (`on | off`; with `AGENT_SUBAGENTS_MAX_DEPTH`, `AGENT_SUBAGENTS_MAX_CHILDREN`, `AGENT_SUBAGENTS_MAX_CONCURRENT` — see [Dynamic subagents](#dynamic-subagents-helpers-the-model-starts-itself); `/agents` and `/stop` list and stop helpers, and an approval prompt says when a helper is asking), `AGENT_IMAGE_MODEL` / `AGENT_SPEECH_MODEL` / `AGENT_TRANSCRIPTION_MODEL` (a model id each; each mounts its tool - with `AGENT_MEDIA_PROVIDER_TYPE` / `AGENT_MEDIA_API_KEY` / `AGENT_MEDIA_BASE_URL` / `AGENT_MEDIA_PROVIDER_OPTIONS` when those models live at another provider than the main one, `AGENT_MEDIA_DIR` (default `./agent-media`), `AGENT_MEDIA_MAX_CALLS`, `AGENT_SPEECH_VOICE` — see [Media](#media-images-speech-and-transcription); in the REPL `/audio <file> [question]` attaches an audio file, and `/usage` shows the media calls beside the tokens), `AGENT_SKILLS_DIR`, `AGENT_LEARNING` (`on | off`; `AGENT_LEARNING_DIR` keeps the lessons across sessions — see [Learning](#learning-lessons-that-outlive-the-task)), `AGENT_TOOL_SELECTION_STRATEGY` (`auto | all | plan-narrowed | search`), `AGENT_CONTEXT_WINDOW_TOKENS`, `AGENT_COMPACTION_THRESHOLD` (percent of the window where auto-compaction starts, default 85) and `AGENT_COMPACTION=off`. The REPL prints the model's thoughts dimmed, auto-compacts its history with the same settings, and — when the approval mode asks — prompts `allow? [y]es / [n]o / [a]lways` right in the terminal; `/autopilot` toggles between autopilot and the last asking mode. A question nobody answers within 5 minutes is denied, and the prompt is closed with one line (`[approve] closed: no decision within 300000ms - <tool> did not run`); Ctrl-C closes it the same way (`the run was stopped`). An MCP server's question at the prompt is closed likewise when its own time runs out or the run stops. The next question is shown as usual - none waits behind one nobody can answer any more.
 
 **`AGENT_MCP_ELICITATION`** (`off` by default, `form`, `all`) lets a connected MCP server ask *you* something in the middle of a tool call ([MCP elicitation](#mcp-elicitation-a-server-asks-the-user)). The question is printed as a quotation (`| …` in front of every line: the server's words, not the CLI's) and answered at the prompt, in the same queue as the approval questions: `y` fills in the form field by field (Enter takes a field's default or skips an optional one, a value of the wrong kind is asked for again up to three times, `/cancel` dismisses), `n` declines, anything else cancels. `all` also accepts URL mode: the link is printed for you to open yourself - the CLI never opens it. What you type goes to that server only; a question nobody decided (a cap, a timeout, a form that cannot be shown) is reported as `!! <tool>: the server's question was answered "cancel" automatically (<reason>)`. The defaults of the library apply (5 minutes per question, 5 per tool call, 20 per run); helpers started with `AGENT_SUBAGENTS` cannot ask.
+
+**MCP skills at the prompt.** A server in `MCP_SERVERS` may add `"skills": true` (or `{"consent": "once-per-skill" | "ask" | "never", "dynamic": true}` - `dynamic` also takes the server's generated skills, no checksums; any other value of it is refused at start, by the server's name) with `"protocol": "auto"` or `"modern"` - `skills` without one of those is refused at start, by the server's name, since the extension is written against 2026-07-28 and would otherwise be silently off ([MCP skills](#mcp-skills-experimental)). Before one of its skills reaches the model you are shown it at the prompt, in the same queue as the approval questions: `[skill]   the server "docs" offers the skill "pdf-processing" (docs/pdf-processing)`, its description, size and URI, and the first 12 lines of exactly what the model would read, each behind `| ` (the server's words, not the CLI's; control characters removed); a generated skill adds `the server publishes no checksums for this skill: you approve the copy the agent just read, and only that copy is used` (and, from a server that cannot list its files, `the server cannot list this skill's files: that copy is its SKILL.md alone`); then `allow? [y]es / [n]o / [a]lways for this server`. `y` lets it in (for the session under `once-per-skill`, the default; for this task under `ask`), `a` every skill of that server except nested ones, anything else declines (`the user declined the skill`). A question nobody answers is closed like an approval's: `[skill]   closed: <why> - docs/pdf-processing was not loaded`. `/skills` lists the server's skills with the others. `"connectTimeoutMs"` (default 30000, `0` = no bound) bounds one server's connect.
 
 **Talking to the agent while it works.** The REPL keeps reading while a run goes. Text you type then is said to the running agent (it sees it at its next boundary and the replanner re-checks the plan — see [Steering a run](#steering-a-run-that-is-already-going)): the REPL prints `[you->agent] queued` and then `delivered (round|step|final)`, and the message enters the history as a user turn. A message that arrives while the answer is being written is sent as the next prompt (`[follow-up]`). After Ctrl-C nothing is sent behind your back: what the agent never saw is listed as `[not delivered]`. While a run goes, `/agents` lists the running subagents and `/stop <n>` (or an id prefix, or just `/stop` when one runs) stops one — the run goes on; the other REPL commands work between runs. Each subagent's own steps and tool calls are logged as `[name id] ...` lines, so parallel ones can be told apart.
 

@@ -1,5 +1,5 @@
 import type { FetchLike, OAuthClientProvider } from '@modelcontextprotocol/client'
-import type { ToolSet } from 'ai'
+import type { LanguageModel, ToolSet } from 'ai'
 import type { RunControl } from './control.ts'
 import type { IDecisionConfig, IDecisionEvent, IDecisionModel } from './decision.ts'
 import type { PipelineEvent } from './pipeline-engine.ts'
@@ -14,6 +14,9 @@ import type {
   McpElicitationSchema,
 } from './mcp-elicitation.ts'
 import type { McpProtocolMode } from './mcp-shared.ts'
+import type { McpSkillConsent, McpSkillConsentView, McpSkillsSetting } from './mcp-skills.ts'
+import type { IRunLease, RunLeaseLostReason } from './run-lease.ts'
+import type { ISharedLimits, ModelCallStage } from './shared-limits.ts'
 import type { ISubagentsConfig } from './subagent-dynamic-shared.ts'
 
 export type ProviderType =
@@ -28,6 +31,12 @@ export type ProviderType =
   | 'deepseek'
   | 'gateway'
   | 'cloudflare'
+
+// A ready AI SDK language model object - `createOpenAI({ apiKey })('gpt-5-mini')`, a model wrapped
+// in your own middleware, a test mock, a Workers AI binding's model: what `model`, a stage block
+// and a tier take besides a model id. A string is never one here: a string `model` is a model id
+// of `providerType`, as it always was.
+export type AgentModel = Exclude<LanguageModel, string>
 
 export type LogLevel = 'none' | 'error' | 'warn' | 'info' | 'debug'
 
@@ -235,7 +244,9 @@ export type ToolApprovalMode = 'autopilot' | 'ask-writes' | 'ask-all' | 'read-on
 export type ToolPermission = 'allow' | 'ask' | 'deny'
 
 export interface IToolApprovalRequest {
-  // Unique per request.
+  // Unique per request. With `persistence.journal` it is also STABLE: derived from where the
+  // question is asked in the run (its journal position), so the same question has the same id
+  // after a resume - the id `answers` names (see "Parking a run").
   id: string
   toolName: string
   // The tool input AFTER inputSanitizer.
@@ -252,6 +263,14 @@ export interface IToolApprovalRequest {
   // whatever the mode, a rule or an earlier "always allow" say (the Skills extension: a server's
   // skill must not lead to code running on this side without a person's approval).
   mcpSkills?: string[]
+  // Set when the request is not about a tool call but about an MCP server's skill that is about to
+  // enter the model's context (`load_skill`, the planner's pick, a resumed run; `skills` on a
+  // server, consent 'ask' / 'once-per-skill'): the server, the skill, its description and size
+  // and the very text the model would read - the SERVER's words, to show as plain text. `toolName`
+  // is 'load_skill'. Approve to let it in ("remember: true" = every skill of that server for the
+  // agent's life, nested ones excepted), deny to keep it out. Asked whatever the approval mode
+  // and the rules say.
+  skill?: McpSkillConsentView
 }
 
 // What the gate hands `onRequest` beside the request.
@@ -265,8 +284,14 @@ export interface IToolApprovalContext {
 
 // `remember: true` on an approval allows the tool for the rest of this agent
 // instance's life without asking again.
-export type ToolApprovalDecision =
+export type ToolApprovalAnswer =
   boolean | { approved: boolean; reason?: string; remember?: boolean }
+
+// What `onRequest` may answer: an answer, or `{ park: true }` - "the answer will come later, from
+// outside the run". The run then parks at the end of the tool round (needs
+// `persistence.journal`; without it, or for a question asked outside a tool call, it is a
+// denial). See the README, "Parking a run".
+export type ToolApprovalDecision = ToolApprovalAnswer | { park: true }
 
 export interface IToolApprovalConfig {
   // Default 'autopilot'. Switch at runtime with agent.setToolApprovalMode().
@@ -274,7 +299,9 @@ export interface IToolApprovalConfig {
   // Exact tool names or '*' globs, e.g. { 'github__delete_*': 'deny' }.
   // The most specific match wins (exact > longest glob) and beats the mode.
   rules?: Record<string, ToolPermission>
-  // Called for every 'ask'. Without it an 'ask' is a denial.
+  // Called for every 'ask'. Without it an 'ask' is a denial. `{ park: true }` instead of an
+  // answer parks the run at the end of the tool round, to be resumed with the answer later
+  // (needs persistence.journal; else, or outside a tool call, it is a denial).
   onRequest?: (
     req: IToolApprovalRequest,
     ctx: IToolApprovalContext,
@@ -340,7 +367,13 @@ export interface IMcpHttpServerConfig {
   // Off by default: without it the extension is not declared and nothing of it is sent. Needs
   // the 2026-07-28 revision (`protocol: 'auto'` or `'modern'`): the extension is written against
   // it. Third-party text - knowledge only, never policy; see the README, "MCP skills".
-  skills?: boolean
+  // `true`, or `{ consent, dynamic }`: `consent` is when a person is asked before one of its
+  // skills enters the model's context - 'once-per-skill' (default, or the agent's
+  // `mcpSkills.consent`), 'ask' (every run) or 'never' (a server you vetted); `dynamic: true` also
+  // takes its GENERATED skills (`"resources": "dynamic"`, no checksums - declined by default),
+  // each read whole into a snapshot in memory before anyone is asked, approved and used as that
+  // copy only (README, "MCP skills").
+  skills?: McpSkillsSetting
 }
 
 // Local MCP server spawned as a child process. The transport speaks JSON-RPC
@@ -358,7 +391,7 @@ export interface IMcpStdioServerConfig {
   // not know must not take the session's process with it): the command runs twice per connect.
   protocol?: McpProtocolMode
   // See IMcpHttpServerConfig.skills.
-  skills?: boolean
+  skills?: McpSkillsSetting
 }
 
 // Discriminated union: callers pick HTTP or stdio per server. Existing
@@ -372,6 +405,10 @@ export type IMcpServerConfig = IMcpHttpServerConfig | IMcpStdioServerConfig
 // Cross-provider override caveat: setting `providerType` without `apiKey`
 // throws at createAgent time - inheriting a key across providers is almost
 // always a configuration mistake (different vendors, different keys).
+//
+// A stage may also be given a model object (AgentModel) instead of this block. A block over a
+// top-level model object either names nothing (the stage runs on that object) or names a model
+// id, which needs a providerType - its own or the top level's.
 export interface IAgentStageOverride {
   providerType?: ProviderType
   baseURL?: string
@@ -389,14 +426,23 @@ export interface IAgentStageOverride {
 
 export interface IAgentConfig {
   clientName: string
-  providerType: ProviderType
+  // The provider of every model given as an id (a string `model`, a stage block's `model`). Not
+  // needed when every stage runs on a model object.
+  providerType?: ProviderType
   // Optional for providers with a default endpoint (openai, anthropic, google,
   // xai, deepseek, gateway, amazon-bedrock, google-vertex, cloudflare).
   // Required for `openai-compatible` (point at a self-hosted server) and
   // `azure` (point at the Azure OpenAI deployment URL).
   baseURL?: string
-  apiKey: string
-  model: string
+  // Optional: unset, the provider's SDK reads its own environment variable (OPENAI_API_KEY, ...);
+  // google-vertex ignores it (ADC). Not used by a model object.
+  apiKey?: string
+  // A model id of `providerType`, or a ready AI SDK model object (AgentModel), used as it is:
+  // no provider package is imported for it, and `providerType` / `apiKey` / `baseURL` /
+  // `providerOptions` do not apply to it. For hosts where the agent cannot import the provider
+  // package itself (a bundled Worker runtime), and for a model of your own (middleware, a mock).
+  // A model object cannot cross into a worker thread (createSubagentTool's 'worker' isolation).
+  model: string | AgentModel
   // Provider-specific extras forwarded to the SDK factory. See
   // IAgentStageOverride.providerOptions for details. Each per-stage override
   // can supply its own block; when absent, this top-level value is used.
@@ -404,17 +450,19 @@ export interface IAgentConfig {
   // Per-stage overrides. Use these to put planner on a small/cheap model
   // while running synthesis on a larger one, OR to mix providers entirely
   // (e.g. Gemini planner, Anthropic synthesizer). Each block is independent;
-  // omit it to inherit every default from the top level.
-  planner?: IAgentStageOverride
-  synthesizer?: IAgentStageOverride
+  // omit it to inherit every default from the top level. A model object instead of the block
+  // runs the stage on that object.
+  planner?: IAgentStageOverride | AgentModel
+  synthesizer?: IAgentStageOverride | AgentModel
   // Executor models by tier. Off unless `light` or `strong` is set: with neither, nothing about a
   // run changes. Each block is a stage override like `planner` (omitted fields inherit the top
   // level); `standard` is the top-level model unless overridden here. With tiers on, the planner
   // marks every step with a `complexity` and the executor runs it on that tier's model (low ->
   // light, medium -> standard, high -> strong); a tier that is not configured falls back to the
   // nearest configured one (the stronger of two equally near). `compaction.contextWindowTokens`
-  // must be the window of the SMALLEST of these models: every step is fitted to it.
-  executorTiers?: Partial<Record<ModelTier, IAgentStageOverride>>
+  // must be the window of the SMALLEST of these models: every step is fitted to it. A tier may be
+  // a model object instead of a block (its `modelId` names it in the events).
+  executorTiers?: Partial<Record<ModelTier, IAgentStageOverride | AgentModel>>
   // When a step fails in a way a stronger model could fix (a blocker, no result, tool arguments
   // that keep failing to parse, output cut by the cap, a failed model call), retry it on the next
   // stronger configured tier BEFORE the replanner is consulted. The retry continues the step: it
@@ -556,6 +604,13 @@ export interface IAgentConfig {
   // by a spawn_subagent helper ask too; default false: a helper's question is cancelled without
   // the callback being called).
   elicitation?: McpElicitationOptions
+  // The MCP servers' skills (`skills` on a server, experimental): `consent` - when a person is
+  // asked before a skill's text enters the model's context - for every server whose own
+  // `skills: { consent }` does not say: 'once-per-skill' (default: the first time per skill in
+  // the agent's life, again when its entry changes), 'ask' (in every run that loads it) or
+  // 'never' (no question: servers you vetted). Asked through `toolApproval.onRequest`, the request
+  // carrying `skill`; without a handler such a skill is not loaded. Autopilot does not skip it.
+  mcpSkills?: { consent?: McpSkillConsent }
   // Show the model the `instructions` a connected MCP server returned in its
   // initialize result (planner and executor system prompts, under a preamble
   // that marks them as third-party text; capped per server and in total).
@@ -582,6 +637,22 @@ export interface IAgentConfig {
   // the data back; implementations can persist for audit, debugging, or
   // resume-after-crash workflows.
   persistence?: IPersistence
+  // Scale-out hook: one worker at a time owns a run. The host's lease (any store with an atomic
+  // "take it if nobody holds it") is acquired before a run - fresh or resumed - does anything,
+  // renewed every ttlMs / 3 while it goes and released at the end. A refused acquire ends the
+  // run before it starts (RunLeaseError, `lost: false`, nothing persisted); a renew that answers
+  // false, throws or does not answer before the lease runs out aborts the run at once and stops
+  // every persistence write (RunLeaseError, `lost: true`, a `lease.lost` event). Subagents and
+  // helpers run under their parent's lease. Off unless set. See src/run-lease.ts and the README,
+  // "Running on many workers".
+  runLease?: IRunLease
+  // Scale-out hook: limits shared by many workers (a provider's rate limit, a tenant's budget).
+  // `beforeModelCall` is asked before EVERY language-model call - the four stages, compaction
+  // summaries, a pipeline's route call, helpers, subagents, escalated tiers - and may wait or
+  // refuse (ModelCallRefusedError, never retried); `afterModelCall` is told the call's usage.
+  // Media models, the search grounding call and decision models do not go through it. Off unless
+  // set: without it the models are not even wrapped. See src/shared-limits.ts.
+  sharedLimits?: ISharedLimits
   toolSelectionStrategy?: ToolSelectionStrategy
   // Sanitize an input the LLM passed to a tool BEFORE the call is dispatched
   // and BEFORE the step.tool-call event is emitted. Use to redact secrets the
@@ -796,6 +867,8 @@ type AgentEventBody =
       subagent?: { id: string; depth: number }
       // See IToolApprovalRequest.mcpSkills.
       mcpSkills?: string[]
+      // See IToolApprovalRequest.skill: the request is about an MCP server's skill.
+      skill?: McpSkillConsentView
     }
   // automatic: true for rule / mode / timeout denials nobody decided on.
   // Automatic ALLOWs emit nothing, to keep the stream quiet.
@@ -806,6 +879,9 @@ type AgentEventBody =
       approved: boolean
       reason?: string
       automatic: boolean
+      // The question was not answered: `onRequest` said `{ park: true }` (or a resumed run has no
+      // answer for it yet), and the run parks at the end of the tool round with it.
+      parked?: true
     }
   // An MCP server asked the user for input during a tool call (`onElicitation` is being called).
   // `message`, `requestedSchema` and `url` are the SERVER's text: cleaned and capped, for a UI
@@ -912,15 +988,39 @@ type AgentEventBody =
       model: string
     }
   | { type: 'revisions.exceeded'; cap: number }
+  // config.runLease: a renew answered false (`refused`), threw (`error`, the message in `error`) or
+  // did not answer before the lease ran out (`expired`). The run is aborted at once and persists
+  // nothing more: another worker may own it now. Fires once, before the run rejects with a
+  // RunLeaseError (`lost: true`).
+  | { type: 'lease.lost'; owner: string; reason: RunLeaseLostReason; error?: string }
+  // The run parked (persistence.journal): it stops without failing, its snapshot is 'waiting',
+  // and `agent.run()` resolves with `result.parked`. `items` are what it waits for.
+  | { type: 'run.parked'; items: ParkedItem[]; at: number }
+  // A resumed run stopped replaying its journal: the request made at `position` is not the one
+  // recorded there, so from here the run is live. Positions only, never content.
+  | { type: 'journal.diverged'; position: string; kind: 'model' | 'tool'; stage?: ModelCallStage }
   | { type: 'error'; error: Error; phase: 'plan' | 'execute' | 'replan' | 'synthesize' | 'init' }
   // A pipeline's own events (createPipeline): the run, each node visit, each edge decision.
   | PipelineEvent
 
-// runId is auto-populated at emit time from AsyncLocalStorage. Consumers that
-// multiplex events across concurrent runs on the same agent should filter by it.
+// runId is set on every event of a run. Consumers that multiplex events across concurrent runs
+// on the same agent should filter by it.
+// seq / attempt order a run's events, across crashes and resumes: `attempt` is 1 for a fresh run
+// and one more for every resume, `seq` counts the events of one attempt from 1. Ordered by
+// (attempt, seq) the events of a run are a total order. Delivery is at-least-once: the step a
+// crash interrupted runs again under the next attempt, so its events come again, with that
+// attempt's numbers. A subagent.event envelope is numbered in the parent run; the child event
+// inside keeps its own numbers. Events outside a run (createAgent's logs, agent.compact(), a
+// pipeline's own pipeline.* events) carry none.
 // nodeId / visit are set on the events a pipeline forwards from a node's agent (and on the
 // pipeline.node.* events themselves).
-export type AgentEvent = AgentEventBody & { runId?: string; nodeId?: string; visit?: number }
+export type AgentEvent = AgentEventBody & {
+  runId?: string
+  seq?: number
+  attempt?: number
+  nodeId?: string
+  visit?: number
+}
 
 export type EventHandler = (event: AgentEvent) => void
 
@@ -954,13 +1054,62 @@ export interface IAgentRunOptions {
   // counters; the saved sandbox dir is recreated lazily but its prior
   // contents are gone unless keepSandbox was true on the original run.
   resumeFromRunId?: string
+  // A fresh run's id, in place of a random UUID: a host that keys runs by ids of its own (a
+  // session and a turn) gives one, so that a retry finds the same run. The rule of every runId,
+  // ^[a-zA-Z0-9_-]{1,128}$. Refused together with resumeFromRunId (a resume keeps the id it
+  // names), and refused when the id is taken: persistence.loadRun has a snapshot for it (resume
+  // that run instead), or persistence.journal has entries for it. Never written over.
+  runId?: string
   // Steer the run while it goes: control.send(text) puts a message in front of the model at
   // the next boundary, control.stopSubagent(id) stops one subagent. Make it with
   // createRunControl(); one control per run.
   control?: RunControl
+  // With resumeFromRunId, for a run that parked: the answers to its pending items, by item id.
+  // An 'approval' item takes a ToolApprovalAnswer; a 'tool' item takes its result,
+  // `{ output }` or `{ error }` (untrusted: checked, cleaned and capped like any tool result).
+  // An id that is not pending is refused; an item left unanswered parks the run again. Needs
+  // persistence.journal. See the README, "Parking a run".
+  answers?: Record<string, ParkAnswer>
+}
+
+// The answer to a parked 'tool' item: the result the tool would have returned, or its failure.
+export type ToolResultAnswer = { output: unknown } | { error: string }
+
+export type ParkAnswer = ToolApprovalAnswer | ToolResultAnswer
+
+// One thing a parked run waits for. `id` is stable: derived from the item's journal position, so
+// the same item has the same id however often the run is resumed.
+//   'approval' - a question of the approval gate: a tool call to allow, or an MCP server's skill to
+//                let in (`request.skill`). Answer with a ToolApprovalAnswer.
+//   'tool'     - a tool call whose result comes from outside (the tool returned deferResult()).
+//                Answer with a ToolResultAnswer.
+export type ParkedItem =
+  | { id: string; kind: 'approval'; request: IToolApprovalRequest }
+  | {
+      id: string
+      kind: 'tool'
+      toolName: string
+      // The input AFTER inputSanitizer.
+      input: unknown
+      // What the tool said about the result to come (deferResult({ note })).
+      note?: string
+      step?: IPlanStep
+      // Set when a helper the model started made the call.
+      subagent?: { id: string; depth: number }
+    }
+
+// A parked run: which run, what it waits for, and since when (epoch ms).
+export interface IParkedRun {
+  runId: string
+  items: ParkedItem[]
+  at: number
 }
 
 export interface IAgentRunResult {
+  // The run's id: options.runId, the resumed run's, or the UUID a fresh run was given - the id of
+  // its events and snapshots, and what resumeFromRunId takes. agent.run always sets it; it is
+  // optional only so that a result made by hand (a test double) stays valid.
+  runId?: string
   text: string
   plan: IPlan
   trace: IStepResult[]
@@ -973,6 +1122,9 @@ export interface IAgentRunResult {
   // to show the model (they arrived while the answer was being written). Send them as the
   // next run. A run that throws (abort, failure) cannot return it - read control.pending().
   undelivered?: string[]
+  // Set when the run PARKED instead of finishing (persistence.journal): `text` is '' and the
+  // run waits for `parked.items`. Resume it with `resumeFromRunId` and `answers`.
+  parked?: IParkedRun
 }
 
 // Snapshot of a run handed to IPersistence hooks. Each hook receives the
@@ -986,11 +1138,12 @@ export interface IAgentRunResult {
 export interface IRunSnapshot {
   runId: string
   startedAt: number
-  // 'executing' is the only non-terminal status the runtime writes; the
-  // others are written exactly once when the run resolves. ('planning' is
+  // 'executing' and 'waiting' are the non-terminal statuses the runtime writes;
+  // the others are written exactly once when the run resolves. ('planning' is
   // intentionally omitted - we never persist before the plan is in hand,
-  // so there's no row in that state to query for.)
-  status: 'executing' | 'complete' | 'failed' | 'cancelled'
+  // so there's no row in that state to query for.) 'waiting': the run parked
+  // (persistence.journal) and waits for `parked.items`; resume it with `answers`.
+  status: 'executing' | 'waiting' | 'complete' | 'failed' | 'cancelled'
   input: string
   history?: IConversationTurn[]
   plan?: IPlan
@@ -1022,6 +1175,17 @@ export interface IRunSnapshot {
   escalations?: number
   // Helpers the model started so far (counts against subagents.dynamic.maxChildren on resume).
   subagentsSpawned?: number
+  // The attempt that wrote the snapshot: 1 for the run as first started, one more for every
+  // resume (the `attempt` of its events). A resume records its attempt BEFORE any of its events
+  // (onRunResume), so a crash at any point never lets two attempts share a number. Absent on a
+  // snapshot written before the field existed: read as 1.
+  attempt?: number
+  // With config.runLease: the owner whose run wrote it (a store can refuse a write of anyone
+  // else - fencing).
+  leaseOwner?: string
+  // Status 'waiting': what the run waits for. The rest of the snapshot is the run as it stood at
+  // the start of the step that parked: a resume replays that step from the journal.
+  parked?: IParkedRun
 }
 
 // Optional persistence facade. Write hooks fire at run start, after each
@@ -1031,13 +1195,112 @@ export interface IRunSnapshot {
 //
 // Write hooks: errors are caught and logged at warn level - persistence
 // failures must NEVER crash a run. Reads in loadRun, by contrast, propagate
-// to the caller (a missing snapshot is a configuration / programmer error).
+// to the caller (a missing snapshot is a configuration / programmer error), and
+// so does the resume write (onRunResume, or onStepComplete without it): a resume
+// whose attempt is not on record is refused before it runs.
 export interface IPersistence {
   onRunStart?: (snapshot: IRunSnapshot) => void | Promise<void>
   onStepComplete?: (snapshot: IRunSnapshot) => void | Promise<void>
   onRunComplete?: (snapshot: IRunSnapshot) => void | Promise<void>
+  // A resume is starting: the loaded snapshot with the NEW `attempt` (status 'executing'), written
+  // before the resumed run emits anything, so that a crash before its first checkpoint still
+  // leaves the attempt on record. Without it the same write goes to onStepComplete. Unlike the
+  // other write hooks this one is NOT fail-open: a throw fails the resume (before anything ran) -
+  // an attempt that is not on record would be reused by the next resume.
+  onRunResume?: (snapshot: IRunSnapshot) => void | Promise<void>
+  // The run parked: the snapshot with status 'waiting' and `parked`. Without it the same write
+  // goes to onStepComplete. NOT fail-open: a throw fails the run - a park that is not on record
+  // could not be resumed with its answers.
+  onRunPark?: (snapshot: IRunSnapshot) => void | Promise<void>
   // Optional read hook used by agent.run({ resumeFromRunId }). Returns the
   // saved snapshot, or null when not found. Implementations that don't want
   // to support resume can simply omit this method.
   loadRun?: (runId: string) => IRunSnapshot | null | Promise<IRunSnapshot | null>
+  // The call journal: every language-model response and every tool result of a run, appended as
+  // it happens, so that a resume REPLAYS the step a crash (or a park) interrupted instead of
+  // running it again: no request goes out for a recorded model call, no recorded tool call runs
+  // twice. Needs loadRun. Appends are fail-closed: one that throws ends the run as failed. It
+  // also makes parking possible. See src/journal.ts and the README, "Resume after crash".
+  journal?: IRunJournal
 }
+
+// Where a run's journal is kept: an append-only list per run, read back whole on resume, in the
+// order it was appended. Entries are plain JSON (bytes as base64, dates as ISO strings).
+export interface IRunJournal {
+  append: (runId: string, entry: IJournalEntry) => void | Promise<void>
+  load: (runId: string) => IJournalEntry[] | Promise<IJournalEntry[]>
+}
+
+interface IJournalEntryBase {
+  // Unique in the run: `a<attempt>:<kind>:<position>`.
+  id: string
+  // Where in the run the call was made, the same on every attempt: `<segment>.<n>` is the n-th
+  // model call of a segment (`0` before the loop, `1`, `2`, ... the loop's iterations, `f` the
+  // answer), `.t<i>` the i-th tool call of that model response, `.q<j>` a question asked inside
+  // that tool call, `.m<k>` a model call made inside it, `/c<k>/` a run started inside it (a
+  // helper, an in-process subagent).
+  position: string
+  // The attempt that appended it (IRunSnapshot.attempt).
+  attempt: number
+  // Epoch ms.
+  at: number
+}
+
+// A language-model call and the response the run continued with.
+export interface IJournalModelEntry extends IJournalEntryBase {
+  kind: 'model'
+  stage: ModelCallStage
+  // sha256 of the request (prompt, tools, tool choice, response format), stable serialization.
+  hash: string
+  call: 'stream' | 'generate'
+  // What the SDK needs to continue: the stream's parts (text, reasoning, tool calls, ...) or the
+  // generated content, the finish reason and the provider's metadata.
+  response: {
+    parts?: Record<string, unknown>[]
+    content?: Record<string, unknown>[]
+    finishReason: unknown
+    providerMetadata?: unknown
+    meta?: { id?: string; modelId?: string; timestamp?: string }
+  }
+  // What the call cost when it ran. A replay is not charged again.
+  usage: IUsage
+}
+
+// A tool call and its result, as the model saw it (after the output cap).
+export interface IJournalToolEntry extends IJournalEntryBase {
+  kind: 'tool'
+  // The id of the model entry whose response asked for the call.
+  parent: string
+  tool: string
+  // sha256 of the tool name and its arguments.
+  hash: string
+  ok: boolean
+  // ok: what the model was shown, and the result itself when it is small.
+  model?: unknown
+  output?: unknown
+  // !ok: the error the model was shown.
+  error?: { name: string; message: string }
+  // The result came from outside: the answer to a deferred call.
+  answered?: true
+}
+
+// Something the run parked on: a question nobody answered yet, a tool call whose result comes
+// from outside.
+export interface IJournalPendingEntry extends IJournalEntryBase {
+  kind: 'pending'
+  parent: string
+  hash: string
+  item: ParkedItem
+}
+
+// The answer to a question of the approval gate (from `onRequest`, or from `answers`).
+export interface IJournalAnswerEntry extends IJournalEntryBase {
+  kind: 'answer'
+  parent: string
+  hash: string
+  itemId: string
+  answer: { approved: boolean; reason?: string; remember?: boolean }
+}
+
+export type IJournalEntry =
+  IJournalModelEntry | IJournalToolEntry | IJournalPendingEntry | IJournalAnswerEntry

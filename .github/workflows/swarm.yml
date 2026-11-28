@@ -1,0 +1,161 @@
+name: Swarm example
+
+# examples/swarm: the Node agent as a swarm on Temporal + Postgres. ci.yml already runs its
+# typecheck, format, build and unit tests with every other project; this adds what needs services
+# - the integration tests against a real Postgres (a service container) and a Temporal dev server
+# (downloaded by @temporalio/testing) -, the image build and the Helm chart's static checks.
+# Nothing is pushed: publishing the image is swarm-image.yml.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'examples/swarm/**'
+      - 'packages/agent/**'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - '.github/workflows/swarm.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'examples/swarm/**'
+      - 'packages/agent/**'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - '.github/workflows/swarm.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: '${{ github.workflow }} @ ${{ github.event.pull_request.head.ref || github.ref }}'
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Typecheck, unit and integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: swarm
+          POSTGRES_PASSWORD: swarm
+          POSTGRES_DB: swarm
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U swarm -d swarm"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      DATABASE_URL: postgres://swarm:swarm@localhost:5432/swarm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # nx builds @dudko.dev/agent first (the swarm depends on it through workspace:*).
+      - run: pnpm nx run-many -t typecheck format:check build test -p swarm
+      - run: pnpm nx run swarm:test:integration
+
+  image:
+    name: Docker image (no push)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: swarm
+          POSTGRES_PASSWORD: swarm
+          POSTGRES_DB: swarm
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U swarm -d swarm"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build (context = the repo root)
+        run: |
+          docker build -f examples/swarm/Dockerfile -t agent-swarm:ci .
+          docker image ls agent-swarm:ci
+      # The image starts as `node` on a read-only root filesystem and applies the schema.
+      - name: Smoke - migrate
+        run: >-
+          docker run --rm --network host --read-only --tmpfs /tmp
+          -e DATABASE_URL=postgres://swarm:swarm@localhost:5432/swarm
+          agent-swarm:ci migrate
+      - name: Smoke - an unknown role is refused
+        run: |
+          set +e
+          docker run --rm agent-swarm:ci
+          test $? -eq 2
+      - name: Compose file
+        run: docker compose -f examples/swarm/compose.yaml config -q
+
+  chart:
+    name: Helm chart (lint, template, kubeconform)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # Pinned tools; bump on purpose (and their checksums with them).
+      HELM_VERSION: v4.3.2
+      HELM_SHA256: d1c0278d46beab79582d7e50f5b3dc206944ba8e577cde618513fd07daa53983
+      KUBECONFORM_VERSION: v0.8.0
+      KUBECONFORM_SHA256: 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
+      # The Kubernetes version the manifests are checked against, and the schema catalogs (pinned
+      # commits): the core kinds (yannh/kubernetes-json-schema) and the CRDs the chart can render -
+      # KEDA's ScaledObject / TriggerAuthentication - from datreeio/CRDs-catalog. Strict, and no
+      # skipping: a kind without a schema fails the check.
+      KUBERNETES_VERSION: 1.34.0
+      K8S_SCHEMAS: https://raw.githubusercontent.com/yannh/kubernetes-json-schema/e62c03bd5a52fd34ff6ac28d083e2a300e0ae7c1/{{.NormalizedKubernetesVersion}}-standalone{{.StrictSuffix}}/{{.ResourceKind}}{{.KindSuffix}}.json
+      CRD_SCHEMAS: https://raw.githubusercontent.com/datreeio/CRDs-catalog/b50f3fbc45169a14b6d2d3f767b32fd96ef4a3fa/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json
+      CHART: examples/swarm/deploy/helm/agent-swarm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install helm and kubeconform
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          cd "$RUNNER_TEMP"
+          curl -fsSLo helm.tgz "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  helm.tgz" | sha256sum -c -
+          tar -xzf helm.tgz && mv linux-amd64/helm bin/
+          curl -fsSLo kubeconform.tgz "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          echo "${KUBECONFORM_SHA256}  kubeconform.tgz" | sha256sum -c -
+          tar -xzf kubeconform.tgz -C bin kubeconform
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      # The Temporal chart (a dependency behind temporal.enabled), at the version Chart.lock pins.
+      - run: |
+          helm repo add temporal https://go.temporal.io/helm-charts
+          helm dependency build "$CHART"
+      - name: Lint (default values, every flag on)
+        run: |
+          helm lint --strict "$CHART"
+          helm lint --strict "$CHART" -f "$CHART/ci/all-on-values.yaml"
+      - name: Template and kubeconform
+        run: |
+          helm template swarm "$CHART" > default.yaml
+          helm template swarm "$CHART" -f "$CHART/ci/all-on-values.yaml" > all-on.yaml
+          for f in default.yaml all-on.yaml; do
+            kubeconform -strict -summary -kubernetes-version "$KUBERNETES_VERSION" \
+              -schema-location "$K8S_SCHEMAS" -schema-location "$CRD_SCHEMAS" "$f"
+          done
+      - name: The values schema refuses what it should
+        run: |
+          helm template swarm "$CHART" > /dev/null
+          for bad in 'agent.toolApproval=yolo' 'podSecurityContext.runAsNonRoot=false' \
+            'securityContext.readOnlyRootFilesystem=false' 'temporal.address=no-port' \
+            'gateway.auth=open' 'session.subagentMaxPerRound=0' 'session.pipelineMaxPerRound=0'; do
+            if helm template swarm "$CHART" --set "$bad" > /dev/null 2>&1; then
+              echo "accepted: $bad"; exit 1
+            fi
+          done

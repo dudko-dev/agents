@@ -1,6 +1,6 @@
 {
   "name": "@dudko.dev/agent",
-  "version": "0.0.48",
+  "version": "0.0.52",
   "type": "module",
   "description": "Tool-using planning agent over MCP servers, built on the Vercel AI SDK.",
   "keywords": [
@@ -69,6 +69,16 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
+    },
+    "./pipeline-engine": {
+      "import": {
+        "types": "./dist/pipeline-engine.d.ts",
+        "default": "./dist/pipeline-engine.js"
+      },
+      "require": {
+        "types": "./dist/pipeline-engine.d.cts",
+        "default": "./dist/pipeline-engine.cjs"
+      }
     }
   },
   "main": "./dist/index.cjs",
@@ -92,7 +102,7 @@
   "dependencies": {
     "@modelcontextprotocol/client": "^2.4.0",
     "@opentelemetry/api": "^1.10.0",
-    "ai": "^7.0.183",
+    "ai": "^7.0.184",
     "zod": "^4.6.7"
   },
   "peerDependencies": {
@@ -144,12 +154,12 @@
     }
   },
   "devDependencies": {
-    "@ai-sdk/amazon-bedrock": "^5.0.149",
-    "@ai-sdk/anthropic": "^4.0.110",
+    "@ai-sdk/amazon-bedrock": "^5.0.150",
+    "@ai-sdk/anthropic": "^4.0.111",
     "@ai-sdk/azure": "^4.0.133",
     "@ai-sdk/deepseek": "^3.0.91",
     "@ai-sdk/google": "^4.0.128",
-    "@ai-sdk/google-vertex": "^5.0.148",
+    "@ai-sdk/google-vertex": "^5.0.149",
     "@ai-sdk/openai": "^4.0.125",
     "@ai-sdk/openai-compatible": "^3.0.96",
     "@ai-sdk/provider-utils": "^5.0.85",

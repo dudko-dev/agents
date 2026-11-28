@@ -1,5 +1,6 @@
 import { createMcpHandler, McpServer, type McpRequestContext } from '@modelcontextprotocol/server'
 import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/server/validators/cf-worker'
+import { attachDemoSkills } from './skills.ts'
 import { registerDemoTools } from './tools.ts'
 
 /**
@@ -135,6 +136,9 @@ const buildServer = (ctx: McpRequestContext): McpServer => {
   // Errors are answered on the wire; nothing about a request is written anywhere else.
   server.server.onerror = () => {}
   registerDemoTools(server, { era: ctx.era, origin })
+  // The Skills extension is written against 2026-07-28: declared, and served, there only. A 2025
+  // client sees no extension and its methods are unknown (-32601); the tools are the same.
+  if (ctx.era === 'modern') attachDemoSkills(server)
   return server
 }
 

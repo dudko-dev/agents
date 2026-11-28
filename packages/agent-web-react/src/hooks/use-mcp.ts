@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { AgentToolSet } from '@dudko.dev/agent-web'
+import type { AgentToolSet, McpSkillConsent } from '@dudko.dev/agent-web'
 import type { McpAppsConnectionLike } from './use-mcp-app-host.js'
 import {
   createElicitationQueue,
@@ -87,9 +87,38 @@ export interface McpConnectOptions {
    * EXPERIMENTAL (the MCP Skills extension is Beta): load the skills the server serves into the
    * agent's skills catalog, as `<server>/<skill>` - they come with `tools`, so nothing else is
    * wired. Needs `protocol: 'auto'` or `'modern'`. Third-party text: the core loads it as
-   * knowledge only, never policy. Left out, nothing is passed (off).
+   * knowledge only, never policy, and - unless `{ consent: 'never' }` - only after a person
+   * allowed it (`useAgent().pendingApprovals`, a request with `skill`). `true` or `{ consent }`
+   * (see `McpSkillsSetting`). Left out, nothing is passed (off).
    */
-  skills?: boolean
+  skills?: McpSkillsSetting
+}
+
+/**
+ * `skills` on a server, as the hooks pass it on and remember it: `true`, or `{ consent, dynamic }`
+ * - `consent`: `'once-per-skill'` (the core's default), `'ask'` or `'never'`; `dynamic: true`: also
+ * the server's generated skills (no checksums - each read whole into a snapshot before anyone is
+ * asked, approved and used as that copy only; see the core's `McpHttpServerConfig.skills`).
+ */
+export type McpSkillsSetting = true | { consent?: McpSkillConsent; dynamic?: boolean }
+
+/**
+ * A `skills` value as the hooks take it - also from storage, so anything else is dropped: `true`,
+ * an object with a known `consent` (or none) and a boolean `dynamic` (or none) - `{ dynamic: true }`
+ * kept, `false` dropped; neither left: `true` -, else `undefined` (off).
+ */
+export const mcpSkillsSettingOf = (value: unknown): McpSkillsSetting | undefined => {
+  if (value === true) return true
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const { consent, dynamic } = value as { consent?: unknown; dynamic?: unknown }
+  const known = consent === 'ask' || consent === 'once-per-skill' || consent === 'never'
+  if (!known && consent !== undefined) return undefined
+  if (dynamic !== undefined && typeof dynamic !== 'boolean') return undefined
+  if (!known && dynamic !== true) return true
+  return {
+    ...(known ? { consent: consent as McpSkillConsent } : {}),
+    ...(dynamic === true ? { dynamic: true as const } : {}),
+  }
 }
 
 export interface UseMcpOptions {
@@ -315,8 +344,8 @@ interface OAuthRecord extends McpOAuthRecord {
   name?: string
   /** The protocol revisions the connection was asked for, kept across the redirect. */
   protocol?: McpProtocolMode
-  /** `skills: true` was asked for, kept across the redirect. */
-  skills?: boolean
+  /** `skills` was asked for (`true` or `{ consent }`), kept across the redirect. */
+  skills?: McpSkillsSetting
   /** When the redirect was started, so a stale record can't claim a callback. */
   startedAt?: number
 }
@@ -707,7 +736,7 @@ export const useMcp = (options: UseMcpOptions = {}): UseMcpReturn => {
             name,
             ...mcpOAuthRecordOf(providerOptions),
             ...(opts.protocol ? { protocol: opts.protocol } : {}),
-            ...(opts.skills ? { skills: true } : {}),
+            ...(mcpSkillsSettingOf(opts.skills) ? { skills: mcpSkillsSettingOf(opts.skills) } : {}),
             startedAt: Date.now(),
           }
           // Throws on a clientMetadataUrl or registration the core refuses (not
@@ -731,7 +760,9 @@ export const useMcp = (options: UseMcpOptions = {}): UseMcpReturn => {
               authProvider,
               // Only when asked for: without it the connection is built as it always was.
               ...(opts.protocol ? { protocol: opts.protocol } : {}),
-              ...(opts.skills ? { skills: true } : {}),
+              ...(mcpSkillsSettingOf(opts.skills)
+                ? { skills: mcpSkillsSettingOf(opts.skills) }
+                : {}),
             },
           },
           {
@@ -893,7 +924,9 @@ export const useMcp = (options: UseMcpOptions = {}): UseMcpReturn => {
           name: pending.name,
           oauth,
           ...(pending.protocol ? { protocol: pending.protocol } : {}),
-          ...(pending.skills === true ? { skills: true } : {}),
+          ...(mcpSkillsSettingOf(pending.skills)
+            ? { skills: mcpSkillsSettingOf(pending.skills) }
+            : {}),
         })
       } catch (err) {
         writeRecord(PENDING_KEY, undefined)
