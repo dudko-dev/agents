@@ -628,9 +628,17 @@ export const runGuest = async (
       }
     }
 
-    // Every entry into the guest goes through here: timed, drained, then judged.
+    // Every entry into the guest goes through here: judged, timed, drained, then judged again.
     const enter = (fn: () => void): void => {
       if (finished) {
+        return
+      }
+      // A guest whose time is spent is not entered again - for a timer, or a file call's answer.
+      // The interrupt handler alone would not stop it: it is asked only every so many operations,
+      // and a short callback never gets that far.
+      if (overTime()) {
+        interrupted = true
+        finish(timedOut())
         return
       }
       entryAt = Date.now()
@@ -680,19 +688,28 @@ export const runGuest = async (
       out.push(line)
       outChars += line.length
     })
-    expose('timer', (idHandle, msHandle) => {
-      const id = ctx.getNumber(idHandle) as number
-      const ms = ctx.getNumber(msHandle) as number
-      const previous = hostTimers.get(id)
-      if (previous !== undefined) {
-        clearTimeout(previous)
-      } else if (hostTimers.size >= MAX_TIMERS) {
-        throw guestError('RangeError', 'too many timers')
-      }
+    // A guest timer runs its callback at the time it asked for (`due`), never before. The host
+    // timer only wakes it - at that time, or after timeoutMs + 1 ms if that comes first - and woken
+    // early it looks at the deadline and nothing else: over it ends the run, otherwise it sleeps
+    // again. Waking at the deadline is not proof the deadline passed: Node's timers run on the event
+    // loop's monotonic clock, the budget on Date.now(), and a timer clamped to the deadline once ran
+    // a 60 s sleep's callback at 400 ms with the budget reading exactly 400 (not over). Nor is the
+    // watchdog always there: none runs while a file call waits, and a clamped timer then ran its
+    // callback long before its delay.
+    const schedule = (id: number, due: number): void => {
       hostTimers.set(
         id,
         setTimeout(
           () => {
+            if (Date.now() < due) {
+              if (overTime()) {
+                interrupted = true
+                finish(timedOut())
+              } else {
+                schedule(id, due)
+              }
+              return
+            }
             hostTimers.delete(id)
             enter(() => {
               const r = ctx.callFunction(internals.fire, ctx.undefined, ctx.newNumber(id))
@@ -702,10 +719,23 @@ export const runGuest = async (
               }
             })
           },
-          // A timer past the deadline never fires: the watchdog ends the run first.
-          Math.min(Math.max(0, ms), limits.timeoutMs + 1),
+          // timeoutMs + 1, not the budget left + 1: the wall clock is not judged while a file call
+          // waits, so what is left can be spent then, and the timer would wake every millisecond
+          // until the answer came.
+          Math.max(0, Math.min(due - Date.now(), limits.timeoutMs + 1)),
         ),
       )
+    }
+    expose('timer', (idHandle, msHandle) => {
+      const id = ctx.getNumber(idHandle) as number
+      const ms = ctx.getNumber(msHandle) as number
+      const previous = hostTimers.get(id)
+      if (previous !== undefined) {
+        clearTimeout(previous)
+      } else if (hostTimers.size >= MAX_TIMERS) {
+        throw guestError('RangeError', 'too many timers')
+      }
+      schedule(id, Date.now() + Math.max(0, ms))
     })
     expose('clear', (idHandle) => {
       const id = ctx.getNumber(idHandle) as number
