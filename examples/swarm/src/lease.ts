@@ -6,7 +6,8 @@
 //             on an older attempt writes nothing - no snapshot, no journal entry).
 //             Temporal runs one attempt of an activity at a time, so there is no one else to take
 //             it from; the bind's unique key and the fence are the guards against a worker that
-//             lost the turn and does not know yet.
+//             lost the turn and does not know yet (and, for a run it lost before its first
+//             snapshot, the supersede the activity makes before it names the next run).
 //   renew   - the activity heartbeat. False once Temporal says the turn is not this worker's any
 //             more: the heartbeat timed out, the worker is shutting down, the activity was reset,
 //             paused or is not found. The core then aborts the run and writes nothing more.

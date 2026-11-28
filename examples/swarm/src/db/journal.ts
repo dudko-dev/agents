@@ -3,16 +3,19 @@
 // is not sent again, a recorded tool call does not run again) and what parking needs.
 //
 // Appends are fenced like the snapshots: an entry is kept only while its attempt is not below the
-// attempt on record for the run nor below the fence a resume raised when it took the run
-// (runs.ts). A worker that lost its turn and does not know it yet (a paused process, a partition)
-// gets its append refused; the core then stops that run (an append is fail-closed), so the late
-// worker can neither add a stale entry the next resume would replay nor go on with side effects.
+// attempt on record for the run nor below its fence: the one a resume raised when it took the run
+// (runs.ts, `fenceRun`), or the top, raised by the turn's next run when it superseded this one
+// (`supersedeRun`). A worker that lost its turn and does not know it yet (a paused process, a
+// partition) gets its append refused; the core then stops that run (an append is fail-closed), so
+// the late worker can neither add a stale entry the next resume would replay nor go on with side
+// effects.
 //
 // One statement, and it takes the run's row FOR SHARE: the fence (an UPDATE of that row) waits for
 // every append that read the old fence to commit, and an append that comes after it re-reads the
 // row and is refused. So once the fence is up, the resume's `load` sees every entry an older
-// attempt will ever have - none can land behind it. (Without the lock, an append whose snapshot
-// predates the fence could commit after the resume read the journal.)
+// attempt will ever have - none can land behind it, and a superseded run's journal is final.
+// (Without the lock, an append whose snapshot predates the fence could commit after the resume
+// read the journal.)
 import type { IJournalEntry, IRunJournal } from '@dudko.dev/agent'
 import type { IQueryable, IStatement } from './pool.ts'
 

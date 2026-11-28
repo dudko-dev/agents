@@ -79,7 +79,7 @@ hooks pointed at Temporal and Postgres:
 
 | Agent hook | Here | Where |
 | --- | --- | --- |
-| `persistence` | the run's snapshot, as JSONB, in `swarm_runs`; every write fenced by `attempt` and by the fence a resume raises | [`src/db/runs.ts`](src/db/runs.ts) |
+| `persistence` | the run's snapshot, as JSONB, in `swarm_runs`; every write fenced by `attempt` and by the fence a resume raises (or the turn's next run, when it supersedes a run with no plan on record) | [`src/db/runs.ts`](src/db/runs.ts) |
 | `persistence.journal` | the call journal: every model response and tool result, in `swarm_journal`, in append order; appends fenced like the snapshots. A resume replays the step a crash (or a park) interrupted instead of running it again | [`src/db/journal.ts`](src/db/journal.ts) |
 | `toolApproval.onRequest` | `{ park: true }`: an "ask" of the approval mode parks the turn until a person answers through the gateway | [`src/subagents.ts`](src/subagents.ts) |
 | `onEvent` | every event in `swarm_events`, keyed `(session_id, run_id, attempt, seq)`, written in batches; a statement trigger sends `NOTIFY swarm_events, '<session>'` | [`src/db/events.ts`](src/db/events.ts) |
@@ -192,8 +192,9 @@ saw, as `?after=` or as `Last-Event-ID` (which an `EventSource` sends by itself 
 which wins over `after`). Without one, the stream starts at the session's beginning.
 
 `attempt` here is the turn's attempt. It is the run's own attempt, unless a worker died before the
-run's first snapshot (during planning: there is nothing to resume, so the turn starts a second run);
-the second run's attempts then count on from the first run's, so the order stays total.
+run's first snapshot (during planning: there is nothing to resume, so the turn supersedes the first
+run and starts a second one); the second run's attempts then count on from the first run's, so the
+order stays total.
 
 Delivery is **at-least-once**: the step a crash interrupted runs again under the next attempt, and
 its events come again with the new attempt's numbers (a late event of a dead attempt sorts before
@@ -423,7 +424,17 @@ visits are named by the `pipeline.node.started` events of its stream.
   attempt it claims) nothing of an older attempt is written, no snapshot and no journal entry. A
   journal append takes the run's row `FOR SHARE`, so the fence waits for any append that read the
   old one: the resume reads a journal that nothing of the old attempt can land behind. A refused
-  append stops that run (an append is fail-closed). Its late events sort before the new attempt's.
+  append stops that run (an append is fail-closed), and since every model response is appended
+  before any tool call in it runs, no tool call of that run runs after the fence is up. Its late
+  events sort before the new attempt's.
+- **...and lost it before the run's first snapshot** (the planner had not answered yet, so there
+  is no plan to resume): the retry starts the turn's next run, but first it **supersedes** the old
+  one - its `fence` goes to the top, so no attempt of it writes anything again (no snapshot, no
+  journal entry, no resume). The fence is raised in one statement that also checks the old run
+  still has no plan on record (a plan that landed first is resumed instead), it waits for any
+  journal append that read the old fence, and it is committed before the new run is even named.
+  The paused worker's next append is refused, and its run stops before any of its tool calls run.
+  The same holds for a subagent's run and a pipeline node's visit.
 - **The run itself fails** (a provider outage that outlasts the agent's own retries): the activity
   fails and Temporal retries the turn with backoff, resuming from the last checkpoint, up to
   `TURN_MAX_ATTEMPTS`; then the turn is `failed` and the session waits for the next message. A
@@ -650,6 +661,12 @@ under the same names - for anything else, build the `IAgentConfig` in code
   agent's `RunControl.send` is not wired to the session yet). Stop is.
 - **MCP elicitation** (a server asking the user mid-call) is not answered: no `onElicitation`.
 - Tool calls of a step a crash interrupted run again (at-least-once; see the core's caveats).
+- A run that has no snapshot yet cannot be resumed (the core resumes from a snapshot; a fresh run
+  under an id that has journal entries is refused), so the turn's next run asks the planner again.
+  Normally that is all such a run journaled (the first snapshot is written right after the plan,
+  before any tool call). The exception: when that first snapshot write fails (Postgres briefly
+  down - the core logs it and goes on) and the worker then dies before the step's checkpoint, the
+  step's tool calls run again in the next run.
 - Events are never pruned for you; Temporal payloads are not encrypted.
 
 ## Next steps
@@ -688,7 +705,10 @@ DATABASE_URL=postgres://swarm:swarm@localhost:5432/swarm pnpm nx run swarm:test:
   over SSE, ordering and replay from a cursor, continue-as-new and the idle end, a worker process
   killed mid-turn and the turn finished by another under attempt 2, stop and end, the limiter
   delaying and refusing (alone and inside a turn), snapshot fencing, the journal and its fence
-  (the race of a late append against a resume), the event log and its NOTIFY, a turn parked on a
+  (the race of a late append against a resume), a superseded run refused everything (and the race
+  of a late append, or a late first snapshot, against the supersede), a worker process paused
+  (SIGSTOP) before its run's first snapshot and woken after the retry finished the turn (its tool
+  call does not run; the turn ends once), the event log and its NOTIFY, a turn parked on a
   person's question and answered through the gateway (the write runs once), a partial answer, a
   partial resume parking again, stop during a park, two subagent calls run as two child workflows
   in parallel, the per-round cap, stop while children run, a worker killed while children run, a
