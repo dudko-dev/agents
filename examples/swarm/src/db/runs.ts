@@ -194,7 +194,8 @@ export const createPostgresPersistence = (db: IQueryable): IPersistence => {
     onRunStart: (s) => write(s, 'checkpoint'),
     onStepComplete: (s) => write(s, 'checkpoint'),
     onRunComplete: (s) => write(s, 'checkpoint'),
-    // Not fail-open in the core: a throw here refuses the resume.
+    // Not fail-open in the core: a throw here refuses the resume (and, with the journal, a throw of
+    // onRunStart fails the run before its first step).
     onRunResume: (s) => write(s, 'resume'),
     loadRun: async (runId) => {
       const { text, values } = loadRunSql(runId)

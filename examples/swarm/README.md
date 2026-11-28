@@ -449,8 +449,8 @@ visits are named by the `pipeline.node.started` events of its stream.
 - **A gateway dies**: nothing is lost. Its streams' clients reconnect to another replica with
   `Last-Event-ID`.
 - **Postgres is down**: turns fail and retry; snapshot writes are logged and the run goes on (the
-  core's persistence is fail-open, except the resume record); events are retried, then dropped with
-  a log.
+  core's persistence is fail-open, except the resume record, a park and - with the journal, as here -
+  the run's first snapshot); events are retried, then dropped with a log.
 
 ## Scaling
 
@@ -663,10 +663,10 @@ under the same names - for anything else, build the `IAgentConfig` in code
 - Tool calls of a step a crash interrupted run again (at-least-once; see the core's caveats).
 - A run that has no snapshot yet cannot be resumed (the core resumes from a snapshot; a fresh run
   under an id that has journal entries is refused), so the turn's next run asks the planner again.
-  Normally that is all such a run journaled (the first snapshot is written right after the plan,
-  before any tool call). The exception: when that first snapshot write fails (Postgres briefly
-  down - the core logs it and goes on) and the worker then dies before the step's checkpoint, the
-  step's tool calls run again in the next run.
+  That is all such a run journaled: the first snapshot is written right after the plan, before any
+  tool call, and with a journal the core does not go on without it (a first snapshot that cannot be
+  written - Postgres briefly down - fails the run before its first step, and the activity's retry
+  starts the next run).
 - Events are never pruned for you; Temporal payloads are not encrypted.
 
 ## Next steps
