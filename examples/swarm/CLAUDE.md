@@ -40,8 +40,15 @@ bumps, no CHANGELOG.
   run's `fence` (raised by a resume's acquire, `fenceRun`): from then on an older attempt writes
   nothing. Journal appends are fenced the same way in ONE statement that takes the run's row
   `FOR SHARE` (so the fence waits for appends that read the old one; the race test in
-  `tests/integration/postgres.test.ts` fails without it). Security boundary: a change there needs a
-  test and a mutation check.
+  `tests/integration/postgres.test.ts` fails without it). A run with no plan on record (the core
+  writes the first snapshot, `onRunStart`, only after the planner answered) cannot be resumed: the
+  activity SUPERSEDES it before it names the turn's next run (`supersedeRun`: the fence to the top,
+  `SUPERSEDED_FENCE`, so no attempt of it writes again), in one statement that re-checks "no plan"
+  under the row's lock - a plan that landed first is resumed instead (`runOne` plans again). That is
+  what stops a worker that lost the turn BEFORE the first snapshot (paused, partitioned): its next
+  append is refused, the core stops the run before its tool calls run
+  (`tests/integration/zombie.test.ts`, SIGSTOP / SIGCONT). Security boundary: a change there needs
+  a test and a mutation check.
 - **Parking.** An "ask" of the approval mode parks (`onRequest: () => ({ park: true })`,
   `subagents.ts`); the activity records the items in `swarm_parked` (what the gateway checks an
   answer against - no worker needed) and returns `parked`. Answers are checked per kind in
@@ -71,7 +78,8 @@ bumps, no CHANGELOG.
   at start.
 - **Run ids**: a fresh run's id is named by the activity (`runIdOf(stream, turn, runNo)`,
   `agent.run({ runId })`); the lease takes only the run the activity named. A run that is on record
-  is resumed (planTurn), never started again under its id.
+  is resumed (planTurn), never started again under its id; one that cannot be resumed is superseded
+  (above) before the next `run_no` is named.
 - **The cursor is `<turn>:<turn_attempt>:<seq>`**; `turn_attempt = attempt_base + attempt` so a
   turn that had to start a second run still has one total order. The turn markers use attempt `0`
   (`turn.started`) and `2147483647` (`turn.ended`).
@@ -117,7 +125,8 @@ bumps, no CHANGELOG.
   and a Temporal dev server (`@temporalio/testing` `createLocal()`, or `TEMPORAL_CLI_PATH`); the
   model is `packages/agent/tests/helpers/openai-server.ts`, imported by relative path. The crash
   tests kill a real worker process (`main.ts worker`, or `tests/integration/notes-worker.ts`: the
-  same with a native write tool, so a test can count the writes).
+  same with a native write tool, so a test can count the writes); `zombie.test.ts` pauses one
+  (SIGSTOP) instead and wakes it (SIGCONT) once the retry has finished the turn.
 
 ```bash
 pnpm nx run-many -t typecheck format:check build test -p swarm

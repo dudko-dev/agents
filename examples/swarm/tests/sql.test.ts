@@ -35,6 +35,8 @@ import {
   fenceRunSql,
   loadRunSql,
   nextAttemptBaseSql,
+  SUPERSEDED_FENCE,
+  supersedeRunSql,
   TURN_END_ATTEMPT,
   writeSnapshotSql,
 } from '../src/db/runs.ts'
@@ -256,6 +258,17 @@ test('the fence: a resume raises it to the attempt on record + 1, never lowers i
     /SET fence = GREATEST\(fence, attempt \+ 1\) WHERE run_id = \$1 RETURNING fence$/,
   )
   assert.deepEqual(f.values, ['r1'])
+})
+
+test('supersede: the fence to the top, only while the run has no plan on record', () => {
+  const s = supersedeRunSql('r1')
+  assert.match(
+    s.text,
+    /^UPDATE swarm_runs SET fence = \$2 WHERE run_id = \$1 AND \(snapshot IS NULL OR jsonb_typeof\(snapshot -> 'plan'\) IS DISTINCT FROM 'object'\) RETURNING run_id$/,
+  )
+  assert.deepEqual(s.values, ['r1', SUPERSEDED_FENCE])
+  // Above every attempt a write can carry (the attempt column is an integer).
+  assert.equal(SUPERSEDED_FENCE, 2 ** 31 - 1)
 })
 
 test('parked items: one upsert per park, answered / cancelled only from pending', () => {
