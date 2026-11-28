@@ -1,18 +1,57 @@
 import type { LanguageModel } from 'ai'
-import type { IAgentConfig, IAgentStageOverride, ProviderType } from './types.ts'
+import type { AgentModel, IAgentConfig, IAgentStageOverride, ProviderType } from './types.ts'
 
 // Concrete, fully-resolved per-stage model parameters. Built by resolveStage
 // from the top-level config + an optional override block.
 export interface IResolvedStage {
   providerType: ProviderType
   baseURL?: string
-  apiKey: string
+  // Unset: the provider's SDK reads its own environment variable.
+  apiKey?: string
   model: string
   // Provider-specific extras spread into the SDK factory after baseURL /
   // apiKey. Optional in the shape so direct callers (notably the unit
   // tests) can construct stages without a placeholder; buildModelFromStage
   // normalises a missing value to `{}` before use.
   providerOptions?: Record<string, unknown>
+}
+
+// An AI SDK model object of any kind (language, image, speech, transcription): V2 and later all
+// carry `specificationVersion`. A stage block, a resolved stage and a model id never do.
+export const isModelObject = (value: unknown): value is { readonly specificationVersion: string } =>
+  typeof value === 'object' && value !== null && 'specificationVersion' in value
+
+// A stage resolved: the model object it runs on as it is, or the stage to build from ids.
+export type StageModel = AgentModel | IResolvedStage
+
+// What a stage is called in events and telemetry: its model id.
+export const stageModelId = (stage: StageModel): string =>
+  isModelObject(stage) ? stage.modelId : stage.model
+
+const PROVIDER_FIELDS = ['providerType', 'baseURL', 'apiKey', 'providerOptions'] as const
+
+// Resolve one stage (executor / planner / synthesizer / a tier) to the model it runs on: a model
+// object given for the stage; the top-level model object when the stage names nothing of its own
+// (no block, or a block with no model id and no provider field); otherwise the provider stage
+// built from ids by resolveStage, with all its rules.
+export const resolveStageModel = (
+  config: IAgentConfig,
+  input: IAgentStageOverride | AgentModel | undefined,
+  legacyModel: string | undefined,
+  stageName: string,
+): StageModel => {
+  if (isModelObject(input)) {
+    return input
+  }
+  if (
+    isModelObject(config.model) &&
+    input?.model === undefined &&
+    legacyModel === undefined &&
+    PROVIDER_FIELDS.every((field) => input?.[field] === undefined)
+  ) {
+    return config.model
+  }
+  return resolveStage(config, input, legacyModel, stageName)
 }
 
 // Resolve a single stage (executor / planner / synthesizer) by layering an
@@ -23,7 +62,9 @@ export interface IResolvedStage {
 // default is OpenAI) MUST come with its own apiKey. Inheriting keys across
 // vendors is almost always a misconfig - the SDK would either succeed against
 // the wrong endpoint with the wrong format, or fail far away from the source
-// of confusion.
+// of confusion. A top level with no providerType (its model is an object) has a key of no named
+// provider: a stage that names one must bring its own too, unless there is no key to inherit.
+// A model id needs a providerType: the stage's own or the top level's.
 export const resolveStage = (
   config: IAgentConfig,
   override: IAgentStageOverride | undefined,
@@ -44,9 +85,25 @@ export const resolveStage = (
   // build the merged object themselves.
   const providerOptions = override?.providerOptions ?? config.providerOptions ?? {}
 
-  if (override?.providerType && override.providerType !== config.providerType && !override.apiKey) {
+  if (typeof model !== 'string') {
+    // Only a block that names a provider field but no model id, over a top-level model object.
     throw new Error(
-      `${stageName}: providerType "${override.providerType}" differs from the default "${config.providerType}" - you must also set ${stageName}.apiKey (cross-provider key inheritance is unsafe)`,
+      `${stageName}: sets a provider but no model id, and the top-level model is a model object - set ${stageName}.model, or give the stage a model object`,
+    )
+  }
+  if (!providerType) {
+    throw new Error(
+      `${stageName}: model "${model}" is a model id, so a providerType is needed (set ${stageName}.providerType or the top-level providerType${isModelObject(config.model) ? '; the top-level model is a model object' : ''})`,
+    )
+  }
+  if (
+    override?.providerType &&
+    override.providerType !== config.providerType &&
+    !override.apiKey &&
+    (config.providerType || config.apiKey)
+  ) {
+    throw new Error(
+      `${stageName}: providerType "${override.providerType}" differs from the default "${config.providerType ?? 'none'}" - you must also set ${stageName}.apiKey (cross-provider key inheritance is unsafe)`,
     )
   }
   if (REQUIRES_BASE_URL.has(providerType) && !baseURL) {
@@ -132,13 +189,18 @@ const loadProvider = async <T>(pkg: string): Promise<T> => {
 //   GOOGLE_APPLICATION_CREDENTIALS in the environment.
 // - `cloudflare` needs `accountId`: pass it via providerOptions.accountId
 //   or CLOUDFLARE_ACCOUNT_ID env var.
-export const buildModelFromStage = (
+//
+// A model object (resolveStageModel) is the model already: it is returned as it is, and no
+// provider package is imported for it.
+export const buildModelFromStage = async (
   clientName: string,
-  stage: IResolvedStage,
+  stage: StageModel,
 ): Promise<LanguageModel> =>
-  buildFromStage(clientName, stage, (provider, modelId) =>
-    (provider as (id: string) => LanguageModel)(modelId),
-  )
+  isModelObject(stage)
+    ? stage
+    : buildFromStage(clientName, stage, (provider, modelId) =>
+        (provider as (id: string) => LanguageModel)(modelId),
+      )
 
 // The media models of a provider (config.media), by the names every AI SDK provider carries
 // (ProviderV4: imageModel, speechModel, transcriptionModel).

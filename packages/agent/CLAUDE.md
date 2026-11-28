@@ -186,7 +186,10 @@
     - `examples/scale-out-memory.ts`: in-memory reference implementations (lease map with TTL,
       token bucket + per-run budget), typechecked with the package and exercised by
       `tests/scale-out-example.test.ts`.
-  - `provider.ts` (`resolveStage` / model factory per provider), `mcp.ts` (stdio + streamable-HTTP
+  - `provider.ts` (`resolveStage` / model factory per provider; `resolveStageModel` lets a stage run on
+    a ready AI SDK model object, `AgentModel` - top level, `planner` / `synthesizer`, a tier - used as it
+    is, no provider package imported: a model id still needs a `providerType`, and a model object is
+    refused for a worker subagent by `assertWorkerSafeConfig`; `tests/model-object.test.ts`), `mcp.ts` (stdio + streamable-HTTP
     MCP connections, reconnect, paginated `tools/list`) + `mcp-oauth.ts` (OAuth 2.1 provider,
     file-backed tokens; `registration: 'auto' | 'cimd' | 'dcr'`, the browser sibling's names and
     rules - change both; every rule a test in `tests/mcp-oauth-registration.test.ts`, the same tests

@@ -60,7 +60,15 @@ const APPROVAL_MODES: readonly ToolApprovalMode[] = [
 ]
 type ToolStrategy = (typeof TOOL_STRATEGIES)[number]
 
-export const loadConfig = (): IAgentConfig => {
+// The REPL's config comes from the environment: its models are ids, never model objects.
+export type ICliAgentConfig = IAgentConfig & {
+  providerType: ProviderType
+  model: string
+  planner?: IAgentStageOverride
+  synthesizer?: IAgentStageOverride
+}
+
+export const loadConfig = (): ICliAgentConfig => {
   const providerType = (process.env.AGENT_PROVIDER_TYPE ?? 'openai') as ProviderType
   if (!PROVIDERS.includes(providerType)) {
     throw new Error(`AGENT_PROVIDER_TYPE must be ${PROVIDERS.join(' | ')}, got: ${providerType}`)

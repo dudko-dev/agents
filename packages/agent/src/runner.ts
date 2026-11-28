@@ -427,8 +427,13 @@ export const runAgentLoop = async (
           'agent.run',
           {
             [ATTR.RUN_ID]: runId,
-            [ATTR.PROVIDER]: ctx.config.providerType,
-            [ATTR.MODEL]: ctx.config.model,
+            // A model object names itself: its provider and model id.
+            [ATTR.PROVIDER]:
+              typeof ctx.config.model === 'string'
+                ? ctx.config.providerType
+                : ctx.config.model.provider,
+            [ATTR.MODEL]:
+              typeof ctx.config.model === 'string' ? ctx.config.model : ctx.config.model.modelId,
           },
           async (span) => {
             try {

@@ -340,6 +340,7 @@ export type {
 
 export type {
   AgentEvent,
+  AgentModel,
   AgentStage,
   BudgetKind,
   EventHandler,

@@ -1,5 +1,5 @@
 import type { FetchLike, OAuthClientProvider } from '@modelcontextprotocol/client'
-import type { ToolSet } from 'ai'
+import type { LanguageModel, ToolSet } from 'ai'
 import type { RunControl } from './control.ts'
 import type { IDecisionConfig, IDecisionEvent, IDecisionModel } from './decision.ts'
 import type { PipelineEvent } from './pipeline-engine.ts'
@@ -31,6 +31,12 @@ export type ProviderType =
   | 'deepseek'
   | 'gateway'
   | 'cloudflare'
+
+// A ready AI SDK language model object - `createOpenAI({ apiKey })('gpt-5-mini')`, a model wrapped
+// in your own middleware, a test mock, a Workers AI binding's model: what `model`, a stage block
+// and a tier take besides a model id. A string is never one here: a string `model` is a model id
+// of `providerType`, as it always was.
+export type AgentModel = Exclude<LanguageModel, string>
 
 export type LogLevel = 'none' | 'error' | 'warn' | 'info' | 'debug'
 
@@ -399,6 +405,10 @@ export type IMcpServerConfig = IMcpHttpServerConfig | IMcpStdioServerConfig
 // Cross-provider override caveat: setting `providerType` without `apiKey`
 // throws at createAgent time - inheriting a key across providers is almost
 // always a configuration mistake (different vendors, different keys).
+//
+// A stage may also be given a model object (AgentModel) instead of this block. A block over a
+// top-level model object either names nothing (the stage runs on that object) or names a model
+// id, which needs a providerType - its own or the top level's.
 export interface IAgentStageOverride {
   providerType?: ProviderType
   baseURL?: string
@@ -416,14 +426,23 @@ export interface IAgentStageOverride {
 
 export interface IAgentConfig {
   clientName: string
-  providerType: ProviderType
+  // The provider of every model given as an id (a string `model`, a stage block's `model`). Not
+  // needed when every stage runs on a model object.
+  providerType?: ProviderType
   // Optional for providers with a default endpoint (openai, anthropic, google,
   // xai, deepseek, gateway, amazon-bedrock, google-vertex, cloudflare).
   // Required for `openai-compatible` (point at a self-hosted server) and
   // `azure` (point at the Azure OpenAI deployment URL).
   baseURL?: string
-  apiKey: string
-  model: string
+  // Optional: unset, the provider's SDK reads its own environment variable (OPENAI_API_KEY, ...);
+  // google-vertex ignores it (ADC). Not used by a model object.
+  apiKey?: string
+  // A model id of `providerType`, or a ready AI SDK model object (AgentModel), used as it is:
+  // no provider package is imported for it, and `providerType` / `apiKey` / `baseURL` /
+  // `providerOptions` do not apply to it. For hosts where the agent cannot import the provider
+  // package itself (a bundled Worker runtime), and for a model of your own (middleware, a mock).
+  // A model object cannot cross into a worker thread (createSubagentTool's 'worker' isolation).
+  model: string | AgentModel
   // Provider-specific extras forwarded to the SDK factory. See
   // IAgentStageOverride.providerOptions for details. Each per-stage override
   // can supply its own block; when absent, this top-level value is used.
@@ -431,17 +450,19 @@ export interface IAgentConfig {
   // Per-stage overrides. Use these to put planner on a small/cheap model
   // while running synthesis on a larger one, OR to mix providers entirely
   // (e.g. Gemini planner, Anthropic synthesizer). Each block is independent;
-  // omit it to inherit every default from the top level.
-  planner?: IAgentStageOverride
-  synthesizer?: IAgentStageOverride
+  // omit it to inherit every default from the top level. A model object instead of the block
+  // runs the stage on that object.
+  planner?: IAgentStageOverride | AgentModel
+  synthesizer?: IAgentStageOverride | AgentModel
   // Executor models by tier. Off unless `light` or `strong` is set: with neither, nothing about a
   // run changes. Each block is a stage override like `planner` (omitted fields inherit the top
   // level); `standard` is the top-level model unless overridden here. With tiers on, the planner
   // marks every step with a `complexity` and the executor runs it on that tier's model (low ->
   // light, medium -> standard, high -> strong); a tier that is not configured falls back to the
   // nearest configured one (the stronger of two equally near). `compaction.contextWindowTokens`
-  // must be the window of the SMALLEST of these models: every step is fitted to it.
-  executorTiers?: Partial<Record<ModelTier, IAgentStageOverride>>
+  // must be the window of the SMALLEST of these models: every step is fitted to it. A tier may be
+  // a model object instead of a block (its `modelId` names it in the events).
+  executorTiers?: Partial<Record<ModelTier, IAgentStageOverride | AgentModel>>
   // When a step fails in a way a stronger model could fix (a blocker, no result, tool arguments
   // that keep failing to parse, output cut by the cap, a failed model call), retry it on the next
   // stronger configured tier BEFORE the replanner is consulted. The retry continues the step: it
