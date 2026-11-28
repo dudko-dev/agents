@@ -180,6 +180,12 @@ export const createPipeline = (
       signal: ctx.signal,
       onEvent: ctx.emit,
     })
+    // A node's agent with persistence.journal may park its run: a pipeline cannot wait for it.
+    if (result.parked) {
+      throw new Error(
+        `node "${node.id}": its run parked (it waits for ${result.parked.items.length} answer(s) from outside), and a pipeline node cannot wait`,
+      )
+    }
     if (!node.routes?.length) return { text: result.text, usage: result.usage }
     const quick = await pickRouteWithDecisionModel(entry, node, result.text, ctx.signal, ctx.emit)
     const picked = quick?.route

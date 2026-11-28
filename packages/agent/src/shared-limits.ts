@@ -16,6 +16,7 @@
 import { wrapLanguageModel, type LanguageModel, type LanguageModelMiddleware } from 'ai'
 import { estimateTokens } from './compaction.ts'
 import { runContext } from './context.ts'
+import { journalMiddleware } from './journal.ts'
 import type { AgentStage, EventHandler, IUsage } from './types.ts'
 import { emptyUsage, normalizeUsage } from './utils.ts'
 
@@ -329,13 +330,18 @@ const middlewareOf = (
   },
 })
 
-const cache = new WeakMap<ISharedLimits, WeakMap<object, Map<ModelCallStage, LanguageModel>>>()
+// The key of the wrappers made for a call without a sharedLimits hook (the journal's alone).
+const NO_LIMITS = {} as ISharedLimits
+
+const cache = new WeakMap<ISharedLimits, WeakMap<object, Map<string, LanguageModel>>>()
 
 /**
- * The model to call for `stage`: `model` itself when no hook is in force, else `model` behind
- * the sharedLimits middleware (one wrapper per hook, model and stage). The hook in force is the
- * run's (`runContext`: the agent's own, or - for an agent without one running inside another
- * run, an in-process subagent - the run above it), else `hooks` (a call outside any run).
+ * The model to call for `stage`: `model` itself when neither hook is in force, else `model`
+ * behind the middleware of each (one wrapper per hook, model, stage and journal). The
+ * sharedLimits hook in force is the run's (`runContext`: the agent's own, or - for an agent
+ * without one running inside another run, an in-process subagent - the run above it), else
+ * `hooks` (a call outside any run). The journal's (persistence.journal, journal.ts) is the run's
+ * and goes OUTSIDE: a replayed call never reaches the sharedLimits hook.
  */
 export const limitedModel = (
   model: LanguageModel,
@@ -343,24 +349,34 @@ export const limitedModel = (
   hooks: ISharedLimits | undefined,
   log?: (message: string) => void,
 ): LanguageModel => {
-  const active = runContext.getStore()?.sharedLimits ?? hooks
-  if (!active || typeof model !== 'object' || model === null) {
+  const store = runContext.getStore()
+  const active = store?.sharedLimits ?? hooks
+  const journaled = Boolean(store?.journal)
+  if ((!active && !journaled) || typeof model !== 'object' || model === null) {
     return model
   }
-  let byModel = cache.get(active)
+  const key = active ?? NO_LIMITS
+  let byModel = cache.get(key)
   if (!byModel) {
     byModel = new WeakMap()
-    cache.set(active, byModel)
+    cache.set(key, byModel)
   }
   let byStage = byModel.get(model)
   if (!byStage) {
     byStage = new Map()
     byModel.set(model, byStage)
   }
-  let wrapped = byStage.get(stage)
+  const slot = journaled ? `${stage}+journal` : stage
+  let wrapped = byStage.get(slot)
   if (!wrapped) {
-    wrapped = wrapLanguageModel({ model, middleware: middlewareOf(active, stage, log) })
-    byStage.set(stage, wrapped)
+    wrapped = wrapLanguageModel({
+      model,
+      middleware: [
+        ...(journaled ? [journalMiddleware(stage)] : []),
+        ...(active ? [middlewareOf(active, stage, log)] : []),
+      ],
+    })
+    byStage.set(slot, wrapped)
   }
   return wrapped
 }
