@@ -21,6 +21,8 @@ import {
   createPostgresPersistence,
   createRunStore,
   SnapshotFencedError,
+  SUPERSEDED_FENCE,
+  writeSnapshotSql,
 } from '../../src/db/runs.ts'
 import { DATABASE_URL, migrated } from './harness.ts'
 
@@ -301,6 +303,132 @@ test('the journal race: an append that read the old fence lands before the resum
   const all = (await journal.load(runId)).map((e) => e.id)
   assert.deepEqual(seen, ['a1:tool:1.1.t0'])
   assert.deepEqual(all, seen, 'nothing of attempt 1 landed behind the resume')
+})
+
+const fenceOf = async (runId: string): Promise<number | undefined> =>
+  (await pool.query<{ fence: number }>('SELECT fence FROM swarm_runs WHERE run_id = $1', [runId]))
+    .rows[0]?.fence
+
+test('a superseded run writes nothing more: no snapshot, no journal entry, no resume', async () => {
+  const runs = createRunStore(pool)
+  const persistence = createPostgresPersistence(pool)
+  const journal = createPostgresJournal(pool)
+  const sessionId = randomUUID()
+  const runId = randomUUID()
+  await runs.bindRun({ runId, sessionId, turn: 1, runNo: 1, attemptBase: 0 })
+  // The planner's answer of the run, before its first snapshot.
+  await journal.append(runId, entry(1, 0))
+  // The turn's next run cannot resume it (no plan on record): it supersedes it first.
+  assert.equal(await runs.supersedeRun(runId), true)
+  assert.equal(await fenceOf(runId), SUPERSEDED_FENCE)
+  // The worker still running it (it does not know it lost the turn) writes nothing from now on.
+  await assert.rejects(Promise.resolve(journal.append(runId, entry(1, 1))), JournalFencedError)
+  for (const write of [persistence.onRunStart!, persistence.onStepComplete!]) {
+    await assert.rejects(async () => write(snapshot(runId, 1)), SnapshotFencedError)
+  }
+  // Nor can the run be taken up again by any attempt: the fence is never lowered, a resume is
+  // refused, and so is any later attempt's append.
+  assert.equal(await runs.fenceRun(runId), SUPERSEDED_FENCE)
+  await assert.rejects(
+    async () => persistence.onRunResume!(snapshot(runId, 2)),
+    SnapshotFencedError,
+  )
+  await assert.rejects(
+    async () => persistence.onRunComplete!(snapshot(runId, 1000, { status: 'complete' })),
+    SnapshotFencedError,
+  )
+  await assert.rejects(Promise.resolve(journal.append(runId, entry(2, 1))), JournalFencedError)
+  assert.equal(await persistence.loadRun!(runId), null)
+  assert.deepEqual(
+    (await journal.load(runId)).map((e) => e.id),
+    ['a1:tool:1.0.t0'],
+  )
+  // Again is a no-op; an unbound run cannot be superseded.
+  assert.equal(await runs.supersedeRun(runId), true)
+  assert.equal(await runs.supersedeRun(randomUUID()), false)
+
+  // A run with its plan on record is never superseded (it is resumed): nothing changes.
+  const planned = randomUUID()
+  await runs.bindRun({ runId: planned, sessionId, turn: 2, runNo: 1, attemptBase: 0 })
+  await persistence.onRunStart!(snapshot(planned, 1))
+  assert.equal(await runs.supersedeRun(planned), false)
+  assert.equal(await fenceOf(planned), 0)
+  await persistence.onStepComplete!(snapshot(planned, 1, { stepIndex: 1 }))
+  await journal.append(planned, entry(1, 1))
+  // One whose snapshot has no plan (it failed before its plan) is.
+  const failed = randomUUID()
+  await runs.bindRun({ runId: failed, sessionId, turn: 3, runNo: 1, attemptBase: 0 })
+  const { plan: _plan, ...noPlan } = snapshot(failed, 1, { status: 'failed', error: 'x' })
+  void _plan
+  await persistence.onRunComplete!(noPlan)
+  assert.equal(await runs.supersedeRun(failed), true)
+  await assert.rejects(Promise.resolve(journal.append(failed, entry(1, 1))), JournalFencedError)
+})
+
+test('the supersede race: an append that read the old fence lands first; a plan that lands first wins', async () => {
+  const runs = createRunStore(pool)
+  const journal = createPostgresJournal(pool)
+  const persistence = createPostgresPersistence(pool)
+  // The late worker is in the middle of an append (its statement ran, it has not committed): the
+  // supersede waits for it, and from then on the late worker's appends are refused.
+  const runId = randomUUID()
+  await runs.bindRun({ runId, sessionId: randomUUID(), turn: 1, runNo: 1, attemptBase: 0 })
+  const late = await pool.connect()
+  try {
+    await late.query('BEGIN')
+    const { text, values } = appendJournalSql(runId, entry(1, 1))
+    assert.equal((await late.query(text, values)).rowCount, 1)
+    let done = false
+    const superseding = runs.supersedeRun(runId).then((s) => {
+      done = true
+      return s
+    })
+    await new Promise((r) => setTimeout(r, 300))
+    assert.equal(done, false, 'the supersede waits for the append that read the old fence')
+    await late.query('COMMIT')
+    assert.equal(await superseding, true)
+  } finally {
+    late.release()
+  }
+  await assert.rejects(Promise.resolve(journal.append(runId, entry(1, 2))), JournalFencedError)
+  assert.deepEqual(
+    (await journal.load(runId)).map((e) => e.id),
+    ['a1:tool:1.1.t0'],
+    'nothing of the superseded run lands behind the fence',
+  )
+
+  // The late worker's FIRST SNAPSHOT (with its plan) is in flight when the turn supersedes: the
+  // supersede waits for it, sees the plan, and changes nothing - the turn resumes that run.
+  const planned = randomUUID()
+  await runs.bindRun({ runId: planned, sessionId: randomUUID(), turn: 1, runNo: 1, attemptBase: 0 })
+  const writer = await pool.connect()
+  try {
+    await writer.query('BEGIN')
+    const { text, values } = writeSnapshotSql(snapshot(planned, 1), 'checkpoint')
+    assert.equal((await writer.query(text, values)).rowCount, 1)
+    let done = false
+    const superseding = runs.supersedeRun(planned).then((s) => {
+      done = true
+      return s
+    })
+    await new Promise((r) => setTimeout(r, 300))
+    assert.equal(done, false, 'the supersede waits for the snapshot in flight')
+    await writer.query('COMMIT')
+    assert.equal(await superseding, false, 'the run has a plan now: not superseded')
+  } finally {
+    writer.release()
+  }
+  assert.equal(await fenceOf(planned), 0)
+  assert.ok((await persistence.loadRun!(planned))?.plan, 'its plan is on record, to resume')
+  // The other way round: the supersede first, then the late snapshot - refused.
+  const second = randomUUID()
+  await runs.bindRun({ runId: second, sessionId: randomUUID(), turn: 1, runNo: 1, attemptBase: 0 })
+  assert.equal(await runs.supersedeRun(second), true)
+  await assert.rejects(
+    async () => persistence.onRunStart!(snapshot(second, 1)),
+    SnapshotFencedError,
+  )
+  assert.equal(await persistence.loadRun!(second), null)
 })
 
 test('parked items: recorded, answered, cancelled - as the gateway reads them', async () => {

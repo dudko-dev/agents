@@ -92,10 +92,21 @@ test('planTurn: fresh, resume, already complete, stopped, died before its plan',
   assert.equal(planTurn(row(snapshot('failed'))).kind, 'resume', 'a failed attempt goes on')
   assert.equal(planTurn(row(snapshot('complete'))).kind, 'completed')
   assert.equal(planTurn(row(snapshot('cancelled'))).kind, 'stopped')
-  assert.deepEqual(planTurn(row(null, { runNo: 2 })), { kind: 'fresh', runNo: 3, first: false })
+  // A run with nothing to resume is superseded by the next one.
+  assert.deepEqual(planTurn(row(null, { runNo: 2 })), {
+    kind: 'fresh',
+    runNo: 3,
+    first: false,
+    supersedes: 'run-1',
+  })
   const { plan: _p, ...noPlan } = snapshot('executing')
   void _p
-  assert.equal(planTurn(row(noPlan)).kind, 'fresh')
+  assert.deepEqual(planTurn(row(noPlan)), {
+    kind: 'fresh',
+    runNo: 2,
+    first: false,
+    supersedes: 'run-1',
+  })
 })
 
 test('revokedReason: what moves a turn; a user stop does not', () => {
@@ -120,6 +131,10 @@ test("isAuthError (the core's, re-exported): 401 / 403 anywhere down the cause c
 
 interface IHarness {
   latest?: IRunRow
+  // latestRunOfTurn's answers in turn (the last one repeats), in place of `latest`.
+  latests?: (IRunRow | undefined)[]
+  // What supersedeRun answers (default: superseded).
+  supersede?: (runId: string) => boolean
   base?: number
   run: (o: IAgentRunOptions) => Promise<IAgentRunResult>
   // The static subagents' agents (their run, by name).
@@ -148,21 +163,35 @@ const setup = (h: IHarness) => {
   const cancelled: { sessionId: string; turn: number }[] = []
   const latestAsked: { stream: string; turn: number }[] = []
   const batches: IStreamBatch[] = []
+  const superseded: string[] = []
+  // The store's calls and the run's start, in order.
+  const trail: string[] = []
   let flushes = 0
   const runs: IRunStore = {
     bindRun: async (b) => {
+      trail.push(`bind ${b.runId}`)
       bound.push(b)
       return true
     },
     fenceRun: async (runId) => {
+      trail.push(`fence ${runId}`)
       fenced.push(runId)
       return 2
     },
-    latestRunOfTurn: async (stream, turn) => {
-      latestAsked.push({ stream, turn })
-      return h.latest
+    supersedeRun: async (runId) => {
+      trail.push(`supersede ${runId}`)
+      superseded.push(runId)
+      return h.supersede ? h.supersede(runId) : true
     },
-    nextAttemptBase: async () => h.base ?? 0,
+    latestRunOfTurn: async (stream, turn) => {
+      trail.push('latest')
+      latestAsked.push({ stream, turn })
+      return h.latests ? h.latests[Math.min(latestAsked.length, h.latests.length) - 1] : h.latest
+    },
+    nextAttemptBase: async () => {
+      trail.push('base')
+      return h.base ?? 0
+    },
   }
   const events: IEventStore = {
     writer: (): IEventWriter => ({
@@ -192,6 +221,7 @@ const setup = (h: IHarness) => {
   const leased = (run: (o: IAgentRunOptions) => Promise<IAgentRunResult>) => ({
     run: async (o: IAgentRunOptions) => {
       const runId = o.resumeFromRunId ?? o.runId ?? 'unnamed'
+      trail.push(`run ${runId}`)
       if (!(await lease.acquire(runId, { owner: 'w', ttlMs: 3000 }))) {
         throw new RunLeaseError(runId, 'w', false, 'refused')
       }
@@ -234,6 +264,8 @@ const setup = (h: IHarness) => {
     activities,
     bound,
     fenced,
+    superseded,
+    trail,
     markers,
     streamMarkers,
     pushed,
@@ -328,16 +360,71 @@ test('a retried turn resumes its run; a finished one returns its result without 
   assert.equal(ran, false)
 })
 
-test('a turn whose first run died before its plan starts a second run above its attempts', async () => {
+test('a turn whose first run died before its plan supersedes it, then starts a second run above its attempts', async () => {
   const t = setup({
     latest: row(null, { runId: 'dead', runNo: 1 }),
     base: 1,
     run: async () => result('again'),
   })
   await new MockActivityEnvironment().run(t.activities.runTurn, input)
-  assert.deepEqual(t.bound, [
-    { runId: runIdOf('s', 1, 2), sessionId: 's', turn: 1, runNo: 2, attemptBase: 1 },
-  ])
+  const second = runIdOf('s', 1, 2)
+  assert.deepEqual(t.bound, [{ runId: second, sessionId: 's', turn: 1, runNo: 2, attemptBase: 1 }])
+  // The first run is fenced off before anything of the second one: its attempt base, its run,
+  // its bind (the run may still be running on a worker that lost the turn).
+  assert.deepEqual(t.trail, ['latest', 'supersede dead', 'base', `run ${second}`, `bind ${second}`])
+})
+
+test('nothing is superseded by a first run, a resume, or a run that is done, stopped or parked', async () => {
+  const item = { id: 'p1', kind: 'tool', toolName: 't', input: {}, note: 'n' }
+  const waiting = snapshot('waiting', { parked: { runId: 'run-1', items: [item as never], at: 1 } })
+  for (const latest of [
+    undefined,
+    row(snapshot('executing')),
+    row(snapshot('complete', { text: 'done' })),
+    row(snapshot('cancelled')),
+    row(waiting),
+  ]) {
+    const t = setup({ ...(latest ? { latest } : {}), run: async () => result('ok') })
+    await new MockActivityEnvironment().run(t.activities.runTurn, input)
+    assert.deepEqual(t.superseded, [], latest?.snapshot?.status ?? 'no run yet')
+  }
+})
+
+test('a run that put its plan on record after it was read is resumed, not superseded', async () => {
+  let seen: IAgentRunOptions | undefined
+  const t = setup({
+    // Read with no snapshot; by the time the fence is raised, its plan is on record.
+    latests: [row(null, { runId: 'late' }), row(snapshot('executing'), { runId: 'late' })],
+    supersede: () => false,
+    run: async (o) => {
+      seen = o
+      return result('resumed')
+    },
+  })
+  const out = await new MockActivityEnvironment().run(t.activities.runTurn, input)
+  assert.equal(seen?.resumeFromRunId, 'late')
+  assert.deepEqual(t.bound, [], 'no second run')
+  assert.deepEqual(t.trail, ['latest', 'supersede late', 'latest', 'run late', 'fence late'])
+  assert.equal(out.status, 'completed')
+
+  // Still nothing to resume after a refused supersede (the row changed under the turn): the
+  // attempt is retried, and nothing runs.
+  let ran = false
+  const odd = setup({
+    latests: [row(null, { runId: 'a' }), row(null, { runId: 'b', runNo: 2 })],
+    supersede: () => false,
+    run: async () => {
+      ran = true
+      return result('no')
+    },
+  })
+  await assert.rejects(
+    async () => new MockActivityEnvironment().run(odd.activities.runTurn, input),
+    (err: unknown) =>
+      err instanceof ApplicationFailure && err.type === 'TurnMoved' && !err.nonRetryable,
+  )
+  assert.equal(ran, false)
+  assert.deepEqual(odd.bound, [])
 })
 
 const waitForAbort = (o: IAgentRunOptions): Promise<never> =>
@@ -1004,6 +1091,41 @@ test('runPipelineNode: refused when the worker lacks the node or has another one
     (err: unknown) =>
       err instanceof ApplicationFailure && err.type === TURN_REFUSED && err.nonRetryable === true,
   )
+})
+
+test('runSubagent and runPipelineNode supersede a run of theirs that died before its plan, first', async () => {
+  const child = setup({
+    latest: row(null, { runId: 'dead-child', sessionId: 's/p_sub' }),
+    base: 1,
+    run: async () => result('parent'),
+    subagents: { researcher: async () => result('child answer') },
+  })
+  await new MockActivityEnvironment().run(child.activities.runSubagent, childInput)
+  const childRun = runIdOf('s/p_sub', 1, 2)
+  assert.deepEqual(child.trail, [
+    'latest',
+    'supersede dead-child',
+    'base',
+    `run ${childRun}`,
+    `bind ${childRun}`,
+  ])
+
+  const stream = pipelineNodeStreamOf('s', 'p_pipe', 'draft', 1)
+  const node = setup({
+    latest: row(null, { runId: 'dead-visit', sessionId: stream }),
+    base: 1,
+    run: async () => result('parent'),
+    pipelines: { review: { definition: review, runs: {} } },
+  })
+  await new MockActivityEnvironment().run(node.activities.runPipelineNode, nodeInput('draft'))
+  const visitRun = runIdOf(stream, 1, 2)
+  assert.deepEqual(node.trail, [
+    'latest',
+    'supersede dead-visit',
+    'base',
+    `run ${visitRun}`,
+    `bind ${visitRun}`,
+  ])
 })
 
 test("writeStream writes a batch of a pipeline's own stream", async () => {

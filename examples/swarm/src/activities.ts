@@ -10,7 +10,8 @@
 // pure:
 //
 //   no run yet, or one that died before its plan  -> a fresh run (the next run_no of the turn),
-//                                                    under an id the activity names (`runIdOf`)
+//                                                    under an id the activity names (`runIdOf`) -
+//                                                    the one before it SUPERSEDED first
 //   a snapshot with a plan, not finished           -> resume it (`resumeFromRunId`, + `answers`)
 //   'waiting', and no answer for what it waits for -> the run is parked: report it again
 //   'complete'   -> the run finished but its result never reached Temporal: return it
@@ -85,7 +86,8 @@ export type TurnPlan =
   | { kind: 'stopped'; row: IRunRow }
   | { kind: 'parked'; row: IRunRow }
   | { kind: 'resume'; runId: string; attemptBase: number }
-  | { kind: 'fresh'; runNo: number; first: boolean }
+  // `supersedes`: the turn's run before it, which cannot be resumed (runs.ts, supersedeRun).
+  | { kind: 'fresh'; runNo: number; first: boolean; supersedes?: string }
 
 // `answers`: the ids the turn brings answers for. A 'waiting' run goes on only when it brings an
 // answer for one of the items it waits for; otherwise (a retry of an activity whose `parked`
@@ -111,7 +113,7 @@ export const planTurn = (latest: IRunRow | undefined, answers: string[] = []): T
     return { kind: 'resume', runId: latest.runId, attemptBase: latest.attemptBase }
   }
   // Bound, but it died before its plan: there is nothing to resume.
-  return { kind: 'fresh', runNo: latest.runNo + 1, first: false }
+  return { kind: 'fresh', runNo: latest.runNo + 1, first: false, supersedes: latest.runId }
 }
 
 // Why Temporal took the turn away from this worker (the lease is lost). A user's stop is not here:
@@ -272,7 +274,22 @@ export const createActivities = (deps: IActivityDeps) => {
     const { stream, turn } = o
     await events.marker({ kind: 'started', sessionId: stream, turn, body: o.started })
     const answerIds = Object.keys(o.answers ?? {})
-    const plan = planTurn(await runs.latestRunOfTurn(stream, turn), answerIds)
+    let plan = planTurn(await runs.latestRunOfTurn(stream, turn), answerIds)
+    // A fresh run after one that cannot be resumed (no plan on record): that one may still be
+    // running - on a worker that lost the turn before the run's first snapshot and does not know
+    // it yet (a paused process, a partition). Supersede it first, committed before the new run is
+    // even named: from then on it writes nothing, so its next journal append fails and the core
+    // stops it before any tool call it makes runs. One that put its plan on record after it was
+    // read is not superseded: the turn resumes it.
+    if (plan.kind === 'fresh' && plan.supersedes && !(await runs.supersedeRun(plan.supersedes))) {
+      plan = planTurn(await runs.latestRunOfTurn(stream, turn), answerIds)
+      if (plan.kind === 'fresh') {
+        throw ApplicationFailure.retryable(
+          `turn ${turn}: its latest run changed while the turn planned the next one`,
+          'TurnMoved',
+        )
+      }
+    }
     if (plan.kind === 'completed') {
       const s = plan.row.snapshot!
       return {

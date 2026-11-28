@@ -6,7 +6,8 @@
 // the moment its lease is taken (`bindRun`, before the run does anything): the retry of a turn
 // looks the run up by (session, turn) and resumes it. `run_no` counts the runs of one turn: a turn
 // whose worker died before the first snapshot (no plan yet - nothing to resume; the core also
-// refuses to start a run again under an id that has journal entries) starts a second run.
+// refuses to start a run again under an id that has journal entries) supersedes the first run and
+// starts a second one.
 //
 // Every write is fenced by `attempt`: a checkpoint may not go below the attempt on record, a
 // resume must go above it. A worker that lost its turn (a paused process, a partition) cannot
@@ -15,6 +16,12 @@
 // snapshot or the journal - from that moment an older attempt writes nothing, not even in the
 // window before the resume puts its own attempt on record. The journal's appends are fenced the
 // same way (journal.ts).
+//
+// A run that cannot be resumed (bound, but no plan on record: its first snapshot, onRunStart, is
+// written only once the planner has answered) is SUPERSEDED before its turn starts the next run
+// (`supersedeRun`): its fence goes to the top, so no attempt of it writes anything again - the
+// worker still running it (lost the turn before that first snapshot and does not know yet) gets
+// its next journal append refused and the core stops the run before any tool call it makes runs.
 import type { IPersistence, IRunSnapshot } from '@dudko.dev/agent'
 import { toJsonText } from './json.ts'
 import type { IQueryable, IStatement } from './pool.ts'
@@ -83,6 +90,23 @@ export const fenceRunSql = (runId: string): IStatement => ({
   values: [runId],
 })
 
+// A superseded run's fence: above every attempt the core gives a run (it counts them from 1, one
+// per resume), so every write of the run is refused - snapshot, journal entry, resume.
+export const SUPERSEDED_FENCE = 2147483647
+
+// Supersede a run its turn cannot resume - only while it still has no plan on record, checked in
+// the same statement that raises the fence, under the row's lock: when a late snapshot with a plan
+// committed first, nothing changes (no row), and the turn resumes that run instead. The UPDATE
+// waits for every journal append that read the old fence (they hold the row FOR SHARE); writes
+// that come after it re-read the row and are refused.
+export const supersedeRunSql = (runId: string): IStatement => ({
+  text:
+    'UPDATE swarm_runs SET fence = $2 WHERE run_id = $1 ' +
+    "AND (snapshot IS NULL OR jsonb_typeof(snapshot -> 'plan') IS DISTINCT FROM 'object') " +
+    'RETURNING run_id',
+  values: [runId, SUPERSEDED_FENCE],
+})
+
 export const loadRunSql = (runId: string): IStatement => ({
   text: 'SELECT snapshot FROM swarm_runs WHERE run_id = $1',
   values: [runId],
@@ -114,6 +138,9 @@ export interface IRunStore {
   bindRun: (binding: IRunBinding) => Promise<boolean>
   // The fence a resume raises: the attempt it claims; undefined when the run is not bound.
   fenceRun: (runId: string) => Promise<number | undefined>
+  // Supersede a run the turn cannot resume (supersedeRunSql); false when it is not bound or has
+  // a plan on record by now (resume it instead).
+  supersedeRun: (runId: string) => Promise<boolean>
   latestRunOfTurn: (sessionId: string, turn: number) => Promise<IRunRow | undefined>
   nextAttemptBase: (sessionId: string, turn: number) => Promise<number>
 }
@@ -127,6 +154,10 @@ export const createRunStore = (db: IQueryable): IRunStore => ({
     const { text, values } = fenceRunSql(runId)
     const row = (await db.query<{ fence: number }>(text, values)).rows[0]
     return row ? Number(row.fence) : undefined
+  },
+  supersedeRun: async (runId) => {
+    const { text, values } = supersedeRunSql(runId)
+    return ((await db.query(text, values)).rowCount ?? 0) > 0
   },
   latestRunOfTurn: async (sessionId, turn) => {
     const { text, values } = latestRunOfTurnSql(sessionId, turn)
