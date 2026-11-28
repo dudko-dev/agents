@@ -255,35 +255,46 @@ export type { ISandboxConfig, ISandboxError, ISandboxLimits, ISandboxResult } fr
 export { createRunControl } from './control.ts'
 export type { RunControl, SubagentInfo } from './control.ts'
 // Pipelines: a graph of agents with conditions and loops, described in plain JSON.
-export { createPipeline, nodeResolver } from './pipeline.ts'
+export { createPipeline, nodeResolver, pickPipelineRoute } from './pipeline.ts'
 export type {
   NodeResolverOptions,
   Pipeline,
   PipelineModelConfig,
   PipelineOptions,
+  PipelineRouteOptions,
+  PipelineRouteResult,
   PipelineRunOptions,
 } from './pipeline.ts'
 export {
+  matchPipelineRoute,
   normalizePipeline,
   PIPELINE_LIMITS,
+  PIPELINE_ROUTER_SYSTEM,
   PipelineNodeError,
   PipelineValidationError,
+  preparePipeline,
   renderPipelineNodeInput,
+  renderPipelineRoutePrompt,
+  runPipelineGraph,
   testPipelineCondition,
   validatePipeline,
 } from './pipeline-engine.ts'
 export type {
+  PipelineAbortBehaviour,
   PipelineCondition,
   PipelineDefinition,
   PipelineEdge,
   PipelineEvent,
+  PipelineGraphRunOptions,
   PipelineIssue,
   PipelineNode,
   PipelineNodeContext,
+  PipelineNodeEvent,
   PipelineNodeInput,
   PipelineNodeOutput,
   PipelineNodeRunner,
   PipelineNodeSource,
+  PipelinePlan,
   PipelineResult,
   PipelineRoute,
   PipelineStop,

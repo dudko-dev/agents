@@ -113,7 +113,20 @@ behind every decision.
   `index` is this package's adapter: a node run by `createAgent`, the route call
   (`generateStructured`, then plain text), `nodeResolver`. A definition is untrusted input (see
   docs/security.md): the caps, the `otherwise` rule, the condition input bound and the join
-  deferral each need a test and a mutation check.
+  deferral each need a test and a mutation check. The scheduler is PUBLIC, the same names as the
+  Node sibling: `preparePipeline` + `runPipelineGraph(plan, runNode, { input, signal?, onEvent?,
+  onAbort? })` (`onAbort` default 'reject'; createPipeline passes 'resolve'), so a host runs the
+  graph with its own node runner; `pickPipelineRoute(node, text, { agent, config, signal?,
+  onEvent? })` is the route call on its own (decision model, then the planner model), and
+  createPipeline is built on exactly these. The engine is a DETERMINISTIC scheduler by contract
+  (its header): no clock (`Date`, `performance`), no randomness (`Math.random`, `crypto`), no
+  timers, no I/O, no imports, no global the language does not define - `DOMException` /
+  `AbortController` only where the runtime has them (an `Error` named AbortError, a stand-in
+  signal). A run depends only on the definition, the input and the runner's answers in order.
+  `tests/pipeline-determinism.test.ts` (the same as the server's, which compares them) scans the
+  source and runs the engine in a `node:vm` context with only the language's globals, with and
+  without `DOMException` / `AbortController`. Docs: README ("Running the graph yourself"),
+  `docs/capabilities.md`, `docs/design.md`.
 - `src/sandbox/` — `config.sandbox` / the `run_js` tool: the model's code in QuickJS compiled to
   WebAssembly (optional peer `quickjs-emscripten`). `engine` (limits, the guest's runtime, the
   module resolver, the worker protocol, what may cross the boundary; pure, no imports) is a COPY of

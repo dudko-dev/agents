@@ -343,7 +343,20 @@
     `pipeline.ts` is this package's adapter: a node run by `createAgent`, the route call
     (`generateStructured` on the planner model), `nodeResolver`. A definition is untrusted input: the
     caps, the `otherwise` rule, the condition input bound and the join deferral each need a test
-    and a mutation check.
+    and a mutation check. The scheduler is PUBLIC, the same names in both cores: `preparePipeline` +
+    `runPipelineGraph(plan, runNode, { input, signal?, onEvent?, onAbort? })` (`onAbort` default
+    'reject'; createPipeline passes this package's), so a host runs the graph with its own node
+    runner; `pickPipelineRoute(node, text, { config, signal?, onEvent? })` is the route call on its
+    own (decision model, then the planner model; the router built once per config object), and
+    createPipeline is built on exactly these. The engine is a DETERMINISTIC scheduler by contract
+    (its header): no clock (`Date`, `performance`), no randomness (`Math.random`, `crypto`), no
+    timers, no I/O, no imports, no global the language does not define - `DOMException` /
+    `AbortController` only where the runtime has them (`abortError`, `createStopper`: an `Error`
+    named AbortError, a stand-in signal). A run depends only on the definition, the input and the
+    runner's answers in order. `tests/pipeline-determinism.test.ts` (the same in both packages,
+    compared by `pipeline-agent.test.ts`) scans the source and runs the engine in a `node:vm`
+    context with only the language's globals, with and without `DOMException` / `AbortController`;
+    a new global the engine needs goes into its `LANGUAGE_GLOBALS` only if the language defines it.
   - `tiers.ts` (`config.executorTiers` / `config.escalation`, the pure rules: `pickTier` - the
     planner's `complexity`, else `standard`; a missing tier falls back to the nearest configured one,
     the stronger of two; `escalationReasonOf` / `isEscalatableError` - what is a failure a stronger

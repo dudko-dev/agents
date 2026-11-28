@@ -752,6 +752,25 @@ the same in both. Only the adapter that runs a node with `createAgent` differs.
 - **Abort follows the package's agent**: here `run` resolves with
   `stoppedBy: 'aborted'` (as `agent.run` resolves with `stopped`); on the server
   it rejects with an `AbortError`. A failed node rejects in both.
+- **The engine is a deterministic scheduler, by contract.** `runPipelineGraph`
+  is public so that a host can run the graph with its own node runner, and the
+  host that needs it most is a durable-execution orchestrator: one that records
+  each node's answer and, after a crash, replays the scheduling code against that
+  log instead of running the nodes again. That works only if the scheduler's
+  output is a function of the definition, the input and the answers in the order
+  they arrived - so the engine reads no clock, no randomness and no timer, does no
+  I/O and imports nothing. Such orchestrators run that code in a sandbox with the
+  language and little else, so the engine does not assume the web platform
+  either: `DOMException` and `AbortController` are used where they exist (the same
+  error and signal as before) and replaced by an `Error` named `AbortError` and a
+  small signal of its own where they do not. The arrival order is part of the
+  input on purpose: a visit's answer is applied when it settles, and the
+  orchestrator replays that order exactly. A rule like this decays unless a test
+  holds it: `tests/pipeline-determinism.test.ts` parses the engine for clocks,
+  randomness, timers, host globals and imports, and runs it in a `node:vm`
+  context with only the language's globals - with and without `DOMException` and
+  `AbortController` - against a normal run. The route call (`pickPipelineRoute`)
+  is a model call and stays out of the engine, where the node runs.
 
 ## MCP: server instructions and structured results
 

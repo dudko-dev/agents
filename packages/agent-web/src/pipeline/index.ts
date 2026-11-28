@@ -31,7 +31,9 @@ import {
 /**
  * A pipeline: a graph of agents with conditions and loops, described in plain JSON. The graph
  * engine (validation, conditions, scheduling) is `engine.ts`, the same file as the Node
- * sibling's; this file is the adapter that runs a node with this package's createAgent.
+ * sibling's; this file is the adapter that runs a node with this package's createAgent, and the
+ * route call after it (`pickPipelineRoute`, public for hosts that run the graph themselves with
+ * `runPipelineGraph`).
  */
 
 export interface PipelineOptions {
@@ -68,6 +70,26 @@ interface NodeAgent {
   config: BrowserAgentConfig
 }
 
+export interface PipelineRouteOptions {
+  /**
+   * The node's agent: its planner model picks the route (structured output, then plain text), its
+   * decision model (`config.decisionModel`, resolved) is asked first.
+   */
+  agent: Agent
+  /** The config that agent was built from: the budget, temperature, timeout and `decision`. */
+  config: BrowserAgentConfig
+  signal?: AbortSignal
+  /** A decision model's `usage` and `decision` events. A handler that throws breaks nothing. */
+  onEvent?: AgentEventHandler
+}
+
+export interface PipelineRouteResult {
+  /** One of the node's labels, or undefined: no route. */
+  route?: string
+  /** What the call cost, a failed attempt and a decision model's question included. */
+  usage: IUsage
+}
+
 const aborted = (): Error => new DOMException('Aborted', 'AbortError')
 
 /**
@@ -80,7 +102,7 @@ const pickRoute = async (
   node: PipelineNode,
   text: string,
   signal: AbortSignal,
-): Promise<{ route?: string; usage: IUsage }> => {
+): Promise<PipelineRouteResult> => {
   const cfg = resolveConfig(config)
   const labels = (node.routes ?? []).map((r) => r.label)
   const call = {
@@ -128,7 +150,7 @@ const pickRouteWithDecisionModel = async (
   text: string,
   signal: AbortSignal,
   emit: (event: AgentEvent) => void,
-): Promise<{ route?: string; usage: IUsage } | undefined> => {
+): Promise<PipelineRouteResult | undefined> => {
   const model = agent.decisionModel
   const routes = node.routes ?? []
   if (!model || config.decision?.route === false || routes.length < 2) return undefined
@@ -147,6 +169,35 @@ const pickRouteWithDecisionModel = async (
     usage,
     ...(outcome.accepted && outcome.choice !== undefined ? { route: outcome.choice } : {}),
   }
+}
+
+/**
+ * The route call createPipeline makes after a node with routes answered, as a function of its
+ * own: a host that runs the graph itself (`runPipelineGraph`) calls it wherever the node ran, with
+ * the node's answer. The node's decision model first, when it is confident of a label; otherwise
+ * the node's planner model (structured output, then plain text). An answer that is not one of the
+ * labels, or a call that fails, is no route (`route` undefined); an abort rejects with an
+ * AbortError. A node without routes costs nothing.
+ */
+export const pickPipelineRoute = async (
+  node: PipelineNode,
+  text: string,
+  options: PipelineRouteOptions,
+): Promise<PipelineRouteResult> => {
+  if (!node.routes?.length) return { usage: normalizeUsage() }
+  const entry: NodeAgent = { agent: options.agent, config: options.config }
+  const signal = options.signal ?? new AbortController().signal
+  const emit = (event: AgentEvent): void => {
+    try {
+      options.onEvent?.(event)
+    } catch {
+      // A handler that throws must not change the route.
+    }
+  }
+  const quick = await pickRouteWithDecisionModel(entry, node, text, signal, emit)
+  if (quick?.route) return quick
+  const slow = await pickRoute(entry, node, text, signal)
+  return quick ? { ...slow, usage: addUsage(quick.usage, slow.usage) } : slow
 }
 
 export const createPipeline = (
@@ -191,13 +242,11 @@ export const createPipeline = (
     if (result.stopped || ctx.signal.aborted) throw aborted()
     if (failure !== undefined) throw new Error(failure)
     if (!node.routes?.length) return { text: result.final, usage: result.usage }
-    const quick = await pickRouteWithDecisionModel(entry, node, result.final, ctx.signal, ctx.emit)
-    const picked = quick?.route
-      ? quick
-      : await pickRoute(entry, node, result.final, ctx.signal).then((slow) => ({
-          ...slow,
-          usage: quick ? addUsage(quick.usage, slow.usage) : slow.usage,
-        }))
+    const picked = await pickPipelineRoute(node, result.final, {
+      ...entry,
+      signal: ctx.signal,
+      onEvent: ctx.emit,
+    })
     return {
       text: result.final,
       usage: addUsage(result.usage, picked.usage),
@@ -208,12 +257,12 @@ export const createPipeline = (
   return {
     definition: plan.definition,
     run: (run) =>
-      runPipelineGraph<AgentEvent>(
-        plan,
-        options.runNode ?? runWithAgent,
-        { input: run.input, signal: run.signal, onEvent: run.onEvent as never },
-        'resolve',
-      ),
+      runPipelineGraph<AgentEvent>(plan, options.runNode ?? runWithAgent, {
+        input: run.input,
+        signal: run.signal,
+        onEvent: run.onEvent as never,
+        onAbort: 'resolve',
+      }),
     close: async () => {
       agents.clear()
     },

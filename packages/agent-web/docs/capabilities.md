@@ -2581,6 +2581,16 @@ schedules - which is also how to test a graph without a model.
 failed node. A route is picked with `generateStructured`; a model that cannot do structured output
 is asked again in plain text.
 
+**Running the graph yourself.** The scheduler and the route call are public: `preparePipeline(definition)`
+validates and compiles, `runPipelineGraph(plan, runNode, { input, signal?, onEvent?, onAbort? })` runs
+the graph with a node runner of your own (`onAbort`: `'reject'` by default, `'resolve'` as
+`createPipeline` here), and `pickPipelineRoute(node, text, { agent, config, signal?, onEvent? })` is
+the route call `createPipeline` makes after a node, for wherever the node ran. The pure parts of the
+route call are exported too: `PIPELINE_ROUTER_SYSTEM`, `renderPipelineRoutePrompt`,
+`matchPipelineRoute`. The engine is deterministic by contract (no clock, randomness, timers or I/O;
+`AbortController` and `DOMException` only where the runtime has them). The runner's contract and an
+example: [README](../README.md#running-the-graph-yourself).
+
 ## Autonomy
 
 The default prompts make the agent act on its own:
