@@ -187,3 +187,70 @@ test('the agent: the CLI names, autopilot by default, installed providers only',
     /allow \| ask \| deny/,
   )
 })
+
+test('static subagents: SUBAGENTS profiles, checked against the worker tools', () => {
+  const mcp = '{"docs":{"url":"https://mcp.example/mcp"}}'
+  const cfg = workerConfig({
+    ...base,
+    MCP_SERVERS: mcp,
+    SUBAGENTS: JSON.stringify({
+      researcher: {
+        description: 'Research a question',
+        model: 'gpt-small',
+        systemPrompt: 'You research.',
+        tools: ['docs__search'],
+        maxIterations: 4,
+        readOnly: true,
+      },
+      thinker: { description: 'Think it over' },
+    }),
+  })
+  assert.deepEqual(cfg.subagents, {
+    researcher: {
+      description: 'Research a question',
+      model: 'gpt-small',
+      systemPrompt: 'You research.',
+      tools: ['docs__search'],
+      maxIterations: 4,
+      readOnly: true,
+    },
+    thinker: { description: 'Think it over' },
+  })
+  assert.deepEqual(workerConfig(base).subagents, {})
+  const bad =
+    (subagents: unknown, extra: Record<string, string> = {}) =>
+    () =>
+      workerConfig({ ...base, MCP_SERVERS: mcp, SUBAGENTS: JSON.stringify(subagents), ...extra })
+  assert.throws(bad([]), /SUBAGENTS must be a JSON object/)
+  assert.throws(bad({ r: 'x' }), /SUBAGENTS\.r must be an object/)
+  assert.throws(bad({ r: {} }), /SUBAGENTS\.r\.description is required/)
+  assert.throws(bad({ r: { description: 'd', config: {} } }), /unknown field\(s\) config/)
+  assert.throws(bad({ r: { description: 'd', model: '' } }), /model must be a non-empty string/)
+  assert.throws(bad({ r: { description: 'd', tools: 'docs__search' } }), /array of tool names/)
+  assert.throws(bad({ r: { description: 'd', maxIterations: 0 } }), /maxIterations/)
+  assert.throws(bad({ r: { description: 'd', readOnly: 'yes' } }), /readOnly/)
+  // Only the worker's own tools; a name that is a tool name.
+  assert.throws(
+    bad({ r: { description: 'd', tools: ['github__push'] } }),
+    /not a tool of this worker/,
+  )
+  assert.throws(bad({ r: { description: 'd', tools: ['search'] } }), /not a tool of this worker/)
+  assert.throws(bad({ 'Bad Name': { description: 'd' } }), /must match/)
+  assert.throws(bad({ docs__x: { description: 'd' } }), /must match/)
+  assert.throws(() => workerConfig({ ...base, SUBAGENTS: '{' }), /SUBAGENTS must be valid JSON/)
+})
+
+test('static subagents: the caps are session options, bounded', () => {
+  const o = sessionOptions({})
+  assert.equal(o.subagentMaxPerRound, 4)
+  assert.equal(o.subagentMaxPerSession, 50)
+  const set = sessionOptions({ SUBAGENT_MAX_PER_ROUND: '2', SUBAGENT_MAX_PER_SESSION: '0' })
+  assert.equal(set.subagentMaxPerRound, 2)
+  assert.equal(set.subagentMaxPerSession, 0, '0: no subagent call in this session')
+  assert.throws(() => sessionOptions({ SUBAGENT_MAX_PER_ROUND: '0' }), /SUBAGENT_MAX_PER_ROUND/)
+  assert.throws(() => sessionOptions({ SUBAGENT_MAX_PER_ROUND: '65' }), /SUBAGENT_MAX_PER_ROUND/)
+  assert.throws(
+    () => sessionOptions({ SUBAGENT_MAX_PER_SESSION: '-1' }),
+    /SUBAGENT_MAX_PER_SESSION/,
+  )
+})

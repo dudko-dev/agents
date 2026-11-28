@@ -1,9 +1,11 @@
 // `runLease` for the agent, held by the Temporal activity that runs the turn:
 //
 //   acquire - the run is starting inside a turn activity: bind it to that turn (a fresh run) or
-//             check it is the run the turn resumes. Temporal runs one attempt of an activity at a
-//             time, so there is no one else to take it from; the bind's unique key is the guard
-//             against a worker that lost the turn and does not know yet.
+//             check it is the run the turn resumes and raise its fence (the attempt the resume
+//             claims: from now on an older attempt writes nothing - no snapshot, no journal entry).
+//             Temporal runs one attempt of an activity at a time, so there is no one else to take
+//             it from; the bind's unique key and the fence are the guards against a worker that
+//             lost the turn and does not know yet.
 //   renew   - the activity heartbeat. False once Temporal says the turn is not this worker's any
 //             more: the heartbeat timed out, the worker is shutting down, the activity was reset,
 //             paused or is not found. The core then aborts the run and writes nothing more.
@@ -23,6 +25,7 @@ export type TurnIntent =
   | { kind: 'resume'; runId: string; attemptBase: number }
 
 export interface ITurnScope {
+  // The session - or, for a subagent's child run, its own stream (session-api.ts).
   sessionId: string
   turn: number
   intent: TurnIntent
@@ -31,12 +34,19 @@ export interface ITurnScope {
   heartbeat: (details: unknown) => void
   // Why the turn may not go on here (undefined while it may).
   revoked: () => string | undefined
+  // A session turn: what its static subagent calls may start (ITurnInput.subagents), and how
+  // many this attempt dispatched (an attempt parks at the first round that dispatches, so this
+  // is the round's count).
+  subagents?: { maxPerRound: number; remaining: number; dispatched: number }
 }
 
 const scopes = new AsyncLocalStorage<ITurnScope>()
 
 export const withTurnScope = <T>(scope: ITurnScope, fn: () => Promise<T>): Promise<T> =>
   scopes.run(scope, fn)
+
+// The turn the current code runs in (a tool's execute runs inside the run, inside its scope).
+export const currentTurnScope = (): ITurnScope | undefined => scopes.getStore()
 
 export interface IHeartbeatLease extends IRunLease {
   // The turn a run belongs to (while its lease is held).
@@ -45,6 +55,8 @@ export interface IHeartbeatLease extends IRunLease {
 
 export const createHeartbeatLease = (o: {
   bindRun: (binding: IRunBinding) => Promise<boolean>
+  // Raise the run's fence for a resume; undefined when the run is not bound (refused).
+  fenceRun: (runId: string) => Promise<number | undefined>
   ttlMs: number
   owner: string
   log?: (message: string) => void
@@ -65,6 +77,10 @@ export const createHeartbeatLease = (o: {
       }
       if (scope.intent.kind === 'resume') {
         if (runId !== scope.intent.runId) {
+          return false
+        }
+        if ((await o.fenceRun(runId)) === undefined) {
+          o.log?.(`[lease] run ${runId} is not bound: the resume is refused`)
           return false
         }
       } else if (

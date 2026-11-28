@@ -7,6 +7,7 @@ import type { Server } from 'node:http'
 import { after, before, test } from 'node:test'
 import { compareCursors, type ICursor } from '../src/cursor.ts'
 import type { IStreamRow } from '../src/db/events.ts'
+import type { IParkedRow } from '../src/db/parked.ts'
 import { createNotifyHub, type IListenClient } from '../src/db/notify.ts'
 import {
   BackendUnavailableError,
@@ -16,6 +17,7 @@ import {
   SessionEndedError,
   SessionNotFoundError,
   sseFrame,
+  subagentView,
   type IGateway,
   type ISessionBackend,
 } from '../src/gateway.ts'
@@ -33,6 +35,34 @@ const calls: { name: string; args: unknown[] }[] = []
 let failWith: Error | undefined
 let readyError: Error | undefined
 const known = new Set(['s1', 'ended'])
+// What parked turns of s1 wait for (swarm_parked).
+const parkedRow = (itemId: string, extra: Partial<IParkedRow> = {}): IParkedRow => ({
+  sessionId: 's1',
+  itemId,
+  turn: 1,
+  runId: 'r1',
+  kind: 'approval',
+  answeredBy: 'client',
+  item: { kind: 'approval' },
+  state: 'pending',
+  ...extra,
+})
+const parkedRows = new Map<string, IParkedRow>([
+  ['q1', parkedRow('q1')],
+  ['t1', parkedRow('t1', { kind: 'tool', item: { kind: 'tool', toolName: 'render' } })],
+  ['done', parkedRow('done', { state: 'answered' })],
+  ['gone', parkedRow('gone', { state: 'cancelled' })],
+  [
+    'sub1',
+    parkedRow('sub1', {
+      kind: 'tool',
+      answeredBy: 'subagent',
+      childId: 'subagent-s1-r1-sub1',
+      item: { kind: 'tool', subagent: { name: 'researcher', task: 'dig' } },
+    }),
+  ],
+])
+let parkedFails = false
 
 const backend: ISessionBackend = {
   create: async (...args) => void calls.push({ name: 'create', args }),
@@ -55,6 +85,12 @@ const backend: ISessionBackend = {
     } as ISessionView
   },
   exists: async (sessionId) => known.has(sessionId),
+  parkedItem: async (sessionId, itemId) => {
+    if (parkedFails) throw new Error('connection refused')
+    return sessionId === 's1' ? parkedRows.get(itemId) : undefined
+  },
+  subagents: async (sessionId) =>
+    sessionId === 's1' ? [...parkedRows.values()].filter((r) => r.answeredBy === 'subagent') : [],
   ready: async () => {
     if (readyError) throw readyError
   },
@@ -287,10 +323,12 @@ test('create, message, answer, stop reach the backend', async () => {
     args: ['s1', { id: messageId, text: 'hi', at: 42 }],
   })
 
-  assert.equal((await post('/sessions/s1/answers/q1', JSON.stringify({ allow: true }))).status, 202)
+  const answer = await post('/sessions/s1/answers/q1', JSON.stringify({ approved: true }))
+  assert.equal(answer.status, 202)
+  assert.deepEqual(await answer.json(), { requestId: 'q1', kind: 'approval' })
   assert.deepEqual(calls.at(-1), {
     name: 'answer',
-    args: ['s1', { requestId: 'q1', value: { allow: true }, at: 42 }],
+    args: ['s1', { requestId: 'q1', value: { approved: true }, at: 42 }],
   })
 
   assert.equal((await post('/sessions/s1/stop')).status, 202)
@@ -318,6 +356,87 @@ test('backend errors map to 404 / 409 / 503, anything else to a bare 500', async
   assert.doesNotMatch(await boom.text(), /secret internals/)
   failWith = undefined
   assert.equal((await fetch(`${base}/sessions/unknown`, { headers: auth })).status, 404)
+})
+
+test('answers: checked against the pending item and its kind before the session is signalled', async () => {
+  calls.length = 0
+  const code = async (res: Response): Promise<[number, string]> => [
+    res.status,
+    ((await res.json()) as { error?: { code: string } }).error?.code ?? 'ok',
+  ]
+  const answer = (id: string, body: unknown, session = 's1') =>
+    post(`/sessions/${session}/answers/${id}`, JSON.stringify(body))
+  // Unknown item, another session's, a cancelled one: 404.
+  assert.deepEqual(await code(await answer('nope', { approved: true })), [404, 'not_found'])
+  assert.deepEqual(await code(await answer('q1', { approved: true }, 'other')), [404, 'not_found'])
+  assert.deepEqual(await code(await answer('gone', { approved: true })), [404, 'not_found'])
+  // Answered already; answered by a subagent: 409.
+  assert.deepEqual(await code(await answer('done', { approved: true })), [409, 'already_answered'])
+  assert.deepEqual(await code(await answer('sub1', { output: 'mine' })), [
+    409,
+    'answered_by_subagent',
+  ])
+  // The shape per kind: 400.
+  assert.deepEqual(await code(await answer('q1', { output: 'x' })), [400, 'invalid_answer'])
+  assert.deepEqual(await code(await answer('q1', { approved: 'yes' })), [400, 'invalid_answer'])
+  assert.deepEqual(await code(await answer('q1', { approved: true, remember: true })), [
+    400,
+    'invalid_answer',
+  ])
+  assert.deepEqual(await code(await answer('t1', { approved: true })), [400, 'invalid_answer'])
+  assert.deepEqual(await code(await answer('t1', { output: 1, error: 'x' })), [
+    400,
+    'invalid_answer',
+  ])
+  assert.equal(calls.length, 0, 'nothing refused reached the session')
+  // A tool result: output or error.
+  assert.equal((await answer('t1', { output: { url: 'https://x' } })).status, 202)
+  assert.equal((await answer('t1', { error: 'render failed' })).status, 202)
+  assert.deepEqual(
+    calls.map((c) => (c.args[1] as { value: unknown }).value),
+    [{ output: { url: 'https://x' } }, { error: 'render failed' }],
+  )
+  // Postgres down: 503, not a 500.
+  parkedFails = true
+  assert.deepEqual(await code(await answer('q1', { approved: true })), [503, 'unavailable'])
+  parkedFails = false
+})
+
+test('subagents: listed from the session, each with its own stream', async () => {
+  const listed = await fetch(`${base}/sessions/s1/subagents`, { headers: auth })
+  assert.equal(listed.status, 200)
+  assert.deepEqual(await listed.json(), {
+    subagents: [subagentView(parkedRows.get('sub1')!)],
+  })
+  assert.deepEqual(subagentView(parkedRows.get('sub1')!), {
+    itemId: 'sub1',
+    turn: 1,
+    runId: 'r1',
+    state: 'pending',
+    workflowId: 'subagent-s1-r1-sub1',
+    name: 'researcher',
+    task: 'dig',
+    events: '/sessions/s1/subagents/sub1/events',
+  })
+  assert.equal((await fetch(`${base}/sessions/nope/subagents`, { headers: auth })).status, 404)
+  // A child's stream: rows keyed by its own stream id; an item no subagent answers is a 404.
+  append('s1/sub1', row(1, 1, 1, 'plan.created'))
+  append('s1/sub1', row(1, 2147483647, 0, 'turn.ended'))
+  const child = await readSse(`${base}/sessions/s1/subagents/sub1/events`, auth, (seen) =>
+    seen.some((e) => e.data.event.type === 'turn.ended'),
+  )
+  assert.equal(child.status, 200)
+  assert.deepEqual(
+    child.events.map((e) => e.id),
+    ['1:1:1', '1:2147483647:0'],
+  )
+  const notChild = await readSse(`${base}/sessions/s1/subagents/q1/events`, auth, () => true)
+  assert.equal(notChild.status, 404)
+  assert.ok(matchRoute('GET', '/sessions/s1/subagents/sub1/events').ok)
+  assert.deepEqual(matchRoute('GET', '/sessions/s1/subagents/a.b/events'), {
+    ok: false,
+    status: 404,
+  })
 })
 
 // --- the event stream --------------------------------------------------------------------------

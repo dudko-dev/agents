@@ -40,9 +40,11 @@ private apps and one private example:
 - `examples/swarm` — `swarm` (private, NEVER published; not in `release-plan.mjs`, and must stay
   out of it): a reference deployment of the Node agent as a horizontally scaled swarm on
   self-hosted Temporal + Postgres - a session workflow per conversation, one `agent.run` per turn as
-  an activity, the agent's scale-out hooks (`persistence`, `runLease`, `sharedLimits`, events) on
-  Temporal and Postgres, a stateless `node:http` gateway with SSE, one image (`Dockerfile`, roles
-  `gateway` | `worker` | `migrate`) and `compose.yaml`. TypeScript run directly by Node; `build`
+  an activity, the agent's scale-out hooks (`persistence` with the call journal, `runLease`,
+  `sharedLimits`, events) on Temporal and Postgres, turns that park on a person's answer, static
+  subagents as child workflows, a stateless `node:http` gateway with SSE, one image (`Dockerfile`,
+  distroless, roles `gateway` | `worker` | `migrate`), `compose.yaml` and a Helm chart
+  (`deploy/helm/agent-swarm`). TypeScript run directly by Node; `build`
   only bundles the workflow code. `test` needs nothing external; `test:integration` needs a Postgres
   (`DATABASE_URL`) and starts a Temporal dev server (`@temporalio/testing`, downloaded) - CI runs it
   in `swarm.yml`, not in `ci.yml`. It uses only the agent's public API: a change it would need in
@@ -120,9 +122,13 @@ tool. Do not infer success from "the change looks right".
   npm Trusted Publishing, tags `<dir>-v<version>` and creates a GitHub release); `live-model.yml`
   (the Node agent against a real local model: gates its publish, and runs on PRs that touch its
   dependencies); `swarm.yml` (the swarm example's integration tests against a Postgres service
-  and a Temporal dev server, and its Docker image built without a push, on changes to
-  `examples/swarm` or `packages/agent`). Do not edit `release.yml` unless asked: npm's Trusted
-  Publisher setting names that file and the `release` environment.
+  and a Temporal dev server, its Docker image built without a push, and its Helm chart's lint /
+  template / kubeconform, on changes to `examples/swarm` or `packages/agent`); `swarm-image.yml`
+  (publishes the swarm image for linux/amd64 + arm64 to `ghcr.io/dudko-dev/agent-swarm`, and to
+  `docker.io/sergdudko/agent-swarm` when the `DOCKER_USER` / `DOCKER_PAT` secrets are set: on an
+  `agent-v*` tag - after a Release run, since release.yml's tag push starts no workflow - and by
+  hand; never on PRs). Do not edit `release.yml` unless asked: npm's Trusted Publisher setting
+  names that file and the `release` environment.
 - The site and the demo are built and deployed by Cloudflare (Workers Builds: `pnpm nx build site`,
   then `wrangler.jsonc` publishes `apps/site/dist`), not by a workflow here. The site is static
   assets, served without a script; there IS a Worker script (`main`: `apps/worker/dist/index.js`,

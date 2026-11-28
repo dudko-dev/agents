@@ -12,7 +12,7 @@ test('the shipped migrations are named, ordered and create what the adapters use
   const files = await loadMigrations()
   assert.deepEqual(
     files.map((f) => f.name),
-    ['001_init.sql'],
+    ['001_init.sql', '002_parking.sql'],
   )
   const sql = files[0]!.sql
   for (const table of ['swarm_sessions', 'swarm_runs', 'swarm_events', 'swarm_limiter']) {
@@ -21,6 +21,13 @@ test('the shipped migrations are named, ordered and create what the adapters use
   assert.match(sql, /PRIMARY KEY \(session_id, run_id, attempt, seq\)/)
   assert.match(sql, /swarm_events \(session_id, turn, turn_attempt, seq\)/)
   assert.match(sql, /pg_notify\('swarm_events', s\.session_id\)/)
+  const parking = files[1]!.sql
+  assert.match(parking, /ALTER TABLE swarm_runs ADD COLUMN fence integer NOT NULL DEFAULT 0/)
+  for (const table of ['swarm_journal', 'swarm_parked']) {
+    assert.match(parking, new RegExp(`CREATE TABLE ${table} `))
+  }
+  assert.match(parking, /UNIQUE \(run_id, entry_id\)/)
+  assert.match(parking, /PRIMARY KEY \(session_id, item_id\)/)
 })
 
 test('plan: pending in order, nothing twice, an edited or unknown migration refused', () => {

@@ -10,11 +10,26 @@ import {
   insertEventsSql,
   INSERT_MAX_ROWS,
   markerRow,
+  streamMarkerRow,
 } from '../src/db/events.ts'
+import {
+  appendJournalSql,
+  createPostgresJournal,
+  JournalFencedError,
+  loadJournalSql,
+} from '../src/db/journal.ts'
+import {
+  cancelTurnSql,
+  markAnsweredSql,
+  parkedItemSql,
+  recordParkedSql,
+  subagentsOfSql,
+} from '../src/db/parked.ts'
 import { toJsonText } from '../src/db/json.ts'
 import type { IQueryable } from '../src/db/pool.ts'
 import {
   bindRunSql,
+  fenceRunSql,
   loadRunSql,
   nextAttemptBaseSql,
   TURN_END_ATTEMPT,
@@ -124,10 +139,10 @@ const snap = (attempt?: number): IRunSnapshot => ({
 
 test('snapshot writes are fenced: a checkpoint by <=, a resume by <', () => {
   const checkpoint = writeSnapshotSql(snap(2), 'checkpoint')
-  assert.match(checkpoint.text, /WHERE run_id = \$1 AND attempt <= \$4$/)
+  assert.match(checkpoint.text, /WHERE run_id = \$1 AND attempt <= \$4 AND fence <= \$4$/)
   assert.deepEqual(checkpoint.values.slice(2), ['executing', 2, 'w1'])
   assert.equal(JSON.parse(checkpoint.values[1] as string).runId, 'r1')
-  assert.match(writeSnapshotSql(snap(3), 'resume').text, /AND attempt < \$4$/)
+  assert.match(writeSnapshotSql(snap(3), 'resume').text, /AND attempt < \$4 AND fence <= \$4$/)
   // A snapshot from before attempts were recorded is attempt 1.
   assert.equal(writeSnapshotSql(snap(), 'checkpoint').values[3], 1)
   assert.deepEqual(loadRunSql('r1').values, ['r1'])
@@ -193,4 +208,108 @@ test('the event writer batches, keeps order, retries, and gives up with a count'
   w.push(ev(11))
   await new Promise((r) => setTimeout(r, 30))
   assert.equal(statements.length, 5)
+})
+
+test('the journal: an append is one fenced statement; a load reads in append order', async () => {
+  const entry = {
+    id: 'a2:tool:1.1.t0',
+    kind: 'tool',
+    position: '1.1.t0',
+    attempt: 2,
+    at: 1,
+    parent: 'a2:model:1.1',
+    tool: 'write_note',
+    hash: 'h',
+    ok: true,
+    model: 'done \u0000',
+  } as const
+  const append = appendJournalSql('r1', entry as never)
+  assert.match(append.text, /^INSERT INTO swarm_journal .* SELECT .* FROM swarm_runs /)
+  assert.match(append.text, /WHERE run_id = \$1 AND attempt <= \$3 AND fence <= \$3 FOR SHARE$/)
+  assert.deepEqual(append.values.slice(0, 3), ['r1', 'a2:tool:1.1.t0', 2])
+  assert.deepEqual(JSON.parse(append.values[3] as string), entry, 'byte for byte, NUL included')
+  assert.match(loadJournalSql('r1').text, /ORDER BY n$/)
+  // 0 rows: the attempt was fenced off - the append throws (the core stops the run).
+  let rowCount = 0
+  const db: IQueryable = {
+    query: (async (text: string) => {
+      if (text.startsWith('SELECT')) {
+        return { rows: [{ entry: JSON.stringify(entry) }], rowCount: 1 }
+      }
+      return { rows: [], rowCount }
+    }) as IQueryable['query'],
+  }
+  const journal = createPostgresJournal(db)
+  await assert.rejects(Promise.resolve(journal.append('r1', entry as never)), JournalFencedError)
+  rowCount = 1
+  await journal.append('r1', entry as never)
+  assert.deepEqual(await journal.load('r1'), [entry])
+})
+
+test('the fence: a resume raises it to the attempt on record + 1, never lowers it', () => {
+  const f = fenceRunSql('r1')
+  assert.match(
+    f.text,
+    /SET fence = GREATEST\(fence, attempt \+ 1\) WHERE run_id = \$1 RETURNING fence$/,
+  )
+  assert.deepEqual(f.values, ['r1'])
+})
+
+test('parked items: one upsert per park, answered / cancelled only from pending', () => {
+  const rec = recordParkedSql([
+    {
+      sessionId: 's',
+      itemId: 'p1',
+      turn: 2,
+      runId: 'r',
+      kind: 'approval',
+      answeredBy: 'client',
+      item: { kind: 'approval' },
+    },
+    {
+      sessionId: 's',
+      itemId: 'p2',
+      turn: 2,
+      runId: 'r',
+      kind: 'tool',
+      answeredBy: 'subagent',
+      childId: 'subagent-s-r-p2',
+      item: { kind: 'tool' },
+    },
+  ])
+  assert.match(rec.text, /VALUES \(\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8::jsonb\), \(\$9,/)
+  assert.match(rec.text, /ON CONFLICT \(session_id, item_id\) DO UPDATE .* state = 'pending'/)
+  assert.deepEqual(rec.values.slice(8, 15), [
+    's',
+    2,
+    'p2',
+    'r',
+    'tool',
+    'subagent',
+    'subagent-s-r-p2',
+  ])
+  assert.equal(rec.values[6], null)
+  assert.match(
+    markAnsweredSql('s', ['p1']).text,
+    /item_id = ANY\(\$2::text\[\]\) AND state = 'pending'$/,
+  )
+  assert.match(cancelTurnSql('s', 2).text, /AND turn = \$2 AND state = 'pending'$/)
+  assert.deepEqual(parkedItemSql('s', 'p1').values, ['s', 'p1'])
+  assert.match(subagentsOfSql('s').text, /answered_by = 'subagent'/)
+})
+
+test('subagent markers: the slot and seq the workflow chose, a run id of their own', () => {
+  const row = streamMarkerRow({
+    sessionId: 's',
+    turn: 3,
+    turnAttempt: 2,
+    seq: 1_073_741_824,
+    type: 'subagent.started',
+    body: { itemId: 'p1' },
+  })
+  assert.deepEqual(
+    [row.turn, row.turnAttempt, row.seq, row.runId, row.attempt, row.type],
+    [3, 2, 1_073_741_824, 'subagents-3', 2, 'subagent.started'],
+  )
+  assert.deepEqual(JSON.parse(row.json), { itemId: 'p1', type: 'subagent.started', turn: 3 })
 })

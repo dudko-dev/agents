@@ -1,0 +1,181 @@
+name: Swarm image
+
+# Publishes the swarm example's image (examples/swarm/Dockerfile: one image, roles gateway |
+# worker | migrate) for linux/amd64 and linux/arm64:
+#
+#   ghcr.io/dudko-dev/agent-swarm       always (GITHUB_TOKEN, packages: write)
+#   docker.io/sergdudko/agent-swarm     when the DOCKER_USER and DOCKER_PAT secrets are set; without
+#                                       them a warning, never a failure
+#
+# Tags: the agent's version (packages/agent/package.json) and `latest` when the build is of the
+# agent's release tag (agent-v<version>), `sha-<short>` always. A build of any other ref (a manual
+# run on a branch) gets `sha-<short>` only, so a release's version tag never moves to unreleased
+# code.
+#
+# When: the release tags. release.yml pushes `agent-v<version>` with GITHUB_TOKEN, and events made
+# with GITHUB_TOKEN start no workflows, so a tag push never arrives from there: this workflow also
+# runs after every Release run (workflow_run, which does start) and publishes when that run tagged
+# the agent at its commit. A tag pushed by a person starts it directly. Never on pull requests:
+# swarm.yml builds the image without a push.
+on:
+  push:
+    tags: ['agent-v*']
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Tag, branch or commit SHA to build. Empty = the branch this runs on. Version tag and latest only for agent-v<version>.'
+        type: string
+        required: false
+        default: ''
+
+concurrency:
+  group: swarm-image @ ${{ github.event.workflow_run.head_sha || github.ref }} ${{ inputs.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    name: What to build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    outputs:
+      build: ${{ steps.plan.outputs.build }}
+      sha: ${{ steps.plan.outputs.sha }}
+      tags: ${{ steps.plan.outputs.tags }}
+      version: ${{ steps.plan.outputs.version }}
+      release: ${{ steps.plan.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || inputs.ref || github.ref }}
+          fetch-depth: 1
+      - id: plan
+        name: Version, release tag, image tags
+        env:
+          EVENT: ${{ github.event_name }}
+          PUSHED_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
+          INPUT_REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          short="$(git rev-parse --short=12 HEAD)"
+          version="$(node -p "require('./packages/agent/package.json').version")"
+          tag="agent-v${version}"
+          # Is HEAD the agent's release tag? An annotated tag (release.yml's) is compared by the
+          # commit it points at (its ^{} line), a lightweight one by itself.
+          tagged="$(git ls-remote --tags origin | awk -v t="refs/tags/${tag}" \
+            '$2 == t "^{}" { d = $1 } $2 == t { p = $1 } END { print (d != "" ? d : p) }')"
+          release=false
+          if [ "$tagged" = "$sha" ]; then release=true; fi
+          build=true
+          if [ "$EVENT" = "workflow_run" ] && [ "$release" != true ]; then
+            # The Release run published no agent at this commit: nothing to do.
+            build=false
+          fi
+          if [ "$EVENT" = "push" ] && [ "$PUSHED_TAG" != "$tag" ]; then
+            echo "::warning::$PUSHED_TAG is not the agent's version tag at this commit ($tag): sha tag only."
+            release=false
+          fi
+          tags="sha-${short}"
+          if [ "$release" = true ]; then tags="${version},latest,${tags}"; fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+          echo "build=$build release=$release version=$version tags=$tags (${INPUT_REF:-$EVENT})"
+
+  image:
+    name: Build and push (linux/amd64, linux/arm64)
+    needs: resolve
+    if: needs.resolve.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    # The arm64 half builds under QEMU.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    env:
+      GHCR_IMAGE: ghcr.io/dudko-dev/agent-swarm
+      DOCKERHUB_IMAGE: docker.io/sergdudko/agent-swarm
+      DOCKER_USER: ${{ secrets.DOCKER_USER }}
+      DOCKER_PAT: ${{ secrets.DOCKER_PAT }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+      # Pinned to the node20 majors: the runner image lacks externals/node24 (see the root
+      # CLAUDE.md); each major's action.yml was checked for `runs.using`.
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Docker Hub (optional)
+        id: hub
+        run: |
+          if [ -n "$DOCKER_USER" ] && [ -n "$DOCKER_PAT" ]; then
+            echo "push=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::DOCKER_USER / DOCKER_PAT are not set: pushing to GHCR only."
+            echo "push=false" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.hub.outputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ env.DOCKER_USER }}
+          password: ${{ env.DOCKER_PAT }}
+      - id: names
+        name: Image names and labels
+        env:
+          TAGS: ${{ needs.resolve.outputs.tags }}
+          HUB: ${{ steps.hub.outputs.push }}
+        run: |
+          set -euo pipefail
+          {
+            echo 'tags<<EOF'
+            for t in ${TAGS//,/ }; do
+              echo "${GHCR_IMAGE}:${t}"
+              if [ "$HUB" = true ]; then echo "${DOCKERHUB_IMAGE}:${t}"; fi
+            done
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+          echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: examples/swarm/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.names.outputs.tags }}
+          labels: |
+            org.opencontainers.image.title=agent-swarm
+            org.opencontainers.image.description=@dudko.dev/agent as a swarm on Temporal + Postgres (roles: gateway, worker, migrate)
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.url=https://github.com/${{ github.repository }}/tree/main/examples/swarm
+            org.opencontainers.image.revision=${{ needs.resolve.outputs.sha }}
+            org.opencontainers.image.version=${{ needs.resolve.outputs.version }}
+            org.opencontainers.image.created=${{ steps.names.outputs.created }}
+            org.opencontainers.image.licenses=MIT
+          cache-from: type=gha,scope=swarm-image
+          cache-to: type=gha,scope=swarm-image,mode=max
+      - name: Summary
+        env:
+          TAGS: ${{ steps.names.outputs.tags }}
+        run: |
+          {
+            echo "### agent-swarm ${{ needs.resolve.outputs.version }}"
+            echo
+            echo '```'
+            echo "$TAGS"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

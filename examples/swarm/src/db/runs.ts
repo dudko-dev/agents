@@ -9,7 +9,11 @@
 //
 // Every write is fenced by `attempt`: a checkpoint may not go below the attempt on record, a
 // resume must go above it. A worker that lost its turn (a paused process, a partition) cannot
-// overwrite the snapshot of the attempt that replaced it.
+// overwrite the snapshot of the attempt that replaced it. And by `fence`: the attempt a resume
+// claims when it takes the run (`fenceRun`, from the lease's acquire), before it reads the
+// snapshot or the journal - from that moment an older attempt writes nothing, not even in the
+// window before the resume puts its own attempt on record. The journal's appends are fenced the
+// same way (journal.ts).
 import type { IPersistence, IRunSnapshot } from '@dudko.dev/agent'
 import { toJsonText } from './json.ts'
 import type { IQueryable, IStatement } from './pool.ts'
@@ -66,8 +70,16 @@ export const nextAttemptBaseSql = (sessionId: string, turn: number): IStatement 
 export const writeSnapshotSql = (s: IRunSnapshot, mode: SnapshotWrite): IStatement => ({
   text:
     'UPDATE swarm_runs SET snapshot = $2::jsonb, status = $3, attempt = $4, lease_owner = $5, ' +
-    `updated_at = now() WHERE run_id = $1 AND attempt ${mode === 'resume' ? '<' : '<='} $4`,
+    `updated_at = now() WHERE run_id = $1 AND attempt ${mode === 'resume' ? '<' : '<='} $4 ` +
+    'AND fence <= $4',
   values: [s.runId, toJsonText(s), s.status, s.attempt ?? 1, s.leaseOwner ?? null],
+})
+
+// A resume takes the run: the attempt it will run as (the one on record + 1) becomes the fence.
+// Never lowered; no row (the run is not bound) refuses the resume.
+export const fenceRunSql = (runId: string): IStatement => ({
+  text: 'UPDATE swarm_runs SET fence = GREATEST(fence, attempt + 1) WHERE run_id = $1 RETURNING fence',
+  values: [runId],
 })
 
 export const loadRunSql = (runId: string): IStatement => ({
@@ -99,6 +111,8 @@ interface IRunRecord {
 
 export interface IRunStore {
   bindRun: (binding: IRunBinding) => Promise<boolean>
+  // The fence a resume raises: the attempt it claims; undefined when the run is not bound.
+  fenceRun: (runId: string) => Promise<number | undefined>
   latestRunOfTurn: (sessionId: string, turn: number) => Promise<IRunRow | undefined>
   nextAttemptBase: (sessionId: string, turn: number) => Promise<number>
 }
@@ -107,6 +121,11 @@ export const createRunStore = (db: IQueryable): IRunStore => ({
   bindRun: async (binding) => {
     const { text, values } = bindRunSql(binding)
     return ((await db.query(text, values)).rowCount ?? 0) > 0
+  },
+  fenceRun: async (runId) => {
+    const { text, values } = fenceRunSql(runId)
+    const row = (await db.query<{ fence: number }>(text, values)).rows[0]
+    return row ? Number(row.fence) : undefined
   },
   latestRunOfTurn: async (sessionId, turn) => {
     const { text, values } = latestRunOfTurnSql(sessionId, turn)

@@ -21,6 +21,7 @@ import {
   str,
   type Env,
 } from './env.ts'
+import { checkSubagentProfiles, type ISubagentProfile } from './subagents.ts'
 
 export const PROVIDERS: readonly ProviderType[] = [
   'openai',
@@ -114,6 +115,85 @@ const toolRules = (env: Env): Record<string, ToolPermission> | undefined => {
   return raw as Record<string, ToolPermission>
 }
 
+// SUBAGENTS: {"researcher": {"description": "...", "model"?: "...", "systemPrompt"?: "...",
+// "tools"?: ["docs__search"], "maxIterations"?: 4, "readOnly"?: true}}. Each one is a tool of the
+// session's agent; a call runs as a child workflow on the profile (see src/subagents.ts). The
+// tools must be the worker's own (MCP_SERVERS).
+const PROFILE_KEYS = new Set([
+  'description',
+  'model',
+  'systemPrompt',
+  'tools',
+  'maxIterations',
+  'readOnly',
+])
+
+export const subagentProfilesFromEnv = (
+  env: Env,
+  mcp: Record<string, IMcpServerConfig>,
+): Record<string, ISubagentProfile> => {
+  const raw = json(env, 'SUBAGENTS')
+  if (raw === undefined) {
+    return {}
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new ConfigError(
+      'SUBAGENTS must be a JSON object of name -> { description, model?, systemPrompt?, tools?, maxIterations?, readOnly? }',
+    )
+  }
+  const out: Record<string, ISubagentProfile> = {}
+  for (const [name, value] of Object.entries(raw as Record<string, unknown>)) {
+    const v = value as Record<string, unknown>
+    if (!v || typeof v !== 'object' || Array.isArray(v)) {
+      throw new ConfigError(`SUBAGENTS.${name} must be an object`)
+    }
+    const unknown = Object.keys(v).filter((k) => !PROFILE_KEYS.has(k))
+    if (unknown.length) {
+      throw new ConfigError(`SUBAGENTS.${name}: unknown field(s) ${unknown.join(', ')}`)
+    }
+    if (typeof v.description !== 'string' || !v.description.trim()) {
+      throw new ConfigError(`SUBAGENTS.${name}.description is required (when to call it)`)
+    }
+    for (const key of ['model', 'systemPrompt'] as const) {
+      if (v[key] !== undefined && (typeof v[key] !== 'string' || !(v[key] as string).trim())) {
+        throw new ConfigError(`SUBAGENTS.${name}.${key} must be a non-empty string`)
+      }
+    }
+    const tools = v.tools
+    if (
+      tools !== undefined &&
+      !(Array.isArray(tools) && tools.every((t) => typeof t === 'string' && t.length > 0))
+    ) {
+      throw new ConfigError(`SUBAGENTS.${name}.tools must be an array of tool names`)
+    }
+    const iterations = v.maxIterations
+    if (
+      iterations !== undefined &&
+      !(
+        typeof iterations === 'number' &&
+        Number.isInteger(iterations) &&
+        iterations >= 1 &&
+        iterations <= 100
+      )
+    ) {
+      throw new ConfigError(`SUBAGENTS.${name}.maxIterations must be a whole number from 1 to 100`)
+    }
+    if (v.readOnly !== undefined && typeof v.readOnly !== 'boolean') {
+      throw new ConfigError(`SUBAGENTS.${name}.readOnly must be true or false`)
+    }
+    out[name] = {
+      description: v.description,
+      ...(typeof v.model === 'string' ? { model: v.model } : {}),
+      ...(typeof v.systemPrompt === 'string' ? { systemPrompt: v.systemPrompt } : {}),
+      ...(tools ? { tools: tools as string[] } : {}),
+      ...(iterations !== undefined ? { maxIterations: iterations as number } : {}),
+      ...(v.readOnly !== undefined ? { readOnly: v.readOnly as boolean } : {}),
+    }
+  }
+  checkSubagentProfiles(out, { mcpServers: mcp })
+  return out
+}
+
 const providerOptions = (env: Env): Record<string, unknown> | undefined => {
   const raw = json(env, 'AGENT_PROVIDER_OPTIONS')
   if (raw === undefined) {
@@ -140,8 +220,8 @@ export const agentConfigFromEnv = (env: Env): IAgentConfig => {
   if (!apiKey) {
     throw new ConfigError('AGENT_API_KEY (or AGENT_API_KEY_FILE) is required')
   }
-  // Approval: until a turn can park on a question (next step), nobody can answer an 'ask' - it is
-  // a denial. autopilot (the default) or read-only are the modes that make sense today.
+  // Approval: an 'ask' of the mode or a rule PARKS the turn until a person answers it through the
+  // gateway (POST /sessions/:id/answers/:requestId); the worker adds the onRequest (worker.ts).
   const mode = oneOf(env, 'AGENT_TOOL_APPROVAL', APPROVAL_MODES, 'autopilot')
   const rules = toolRules(env)
   const planner = str(env, 'AGENT_PLANNER_MODEL')

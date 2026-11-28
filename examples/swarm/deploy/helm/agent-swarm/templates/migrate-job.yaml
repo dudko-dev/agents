@@ -1,0 +1,51 @@
+{{- if .Values.migrate.enabled }}
+{{- /*
+The schema, before every install and upgrade: a Helm hook, so the new gateway and workers never
+start on an old schema. It runs before the release's other objects exist, so it carries its own
+environment (no ConfigMap) and the namespace's default ServiceAccount, with no token. The
+migrations are idempotent, take an advisory lock and refuse an edited file (src/db/migrate.ts).
+*/ -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "swarm.component" (list . "migrate") }}
+  labels:
+    {{- include "swarm.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: '-5'
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.migrate.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.migrate.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "swarm.podLabels" (list . "migrate") | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      {{- if not .Values.serviceAccount.create }}
+      serviceAccountName: {{ include "swarm.serviceAccountName" . }}
+      {{- end }}
+      automountServiceAccountToken: false
+      {{- include "swarm.podCommon" . | trim | nindent 6 }}
+      containers:
+        - name: migrate
+          image: {{ include "swarm.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: [migrate]
+          env:
+            - name: LOG_LEVEL
+              value: {{ .Values.logLevel | quote }}
+            {{- include "swarm.secretEnv" (list . "migrate") | trim | nindent 12 }}
+          resources:
+            {{- toYaml .Values.migrate.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            {{- include "swarm.mounts" . | nindent 12 }}
+      volumes:
+        {{- include "swarm.tmpVolume" . | nindent 8 }}
+        {{- include "swarm.secretVolume" (list . "migrate") | nindent 8 }}
+{{- end }}

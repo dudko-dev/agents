@@ -5,7 +5,14 @@ import { randomUUID } from 'node:crypto'
 import { after, before, test } from 'node:test'
 import type { AgentEvent, IRunSnapshot } from '@dudko.dev/agent'
 import pg from 'pg'
+import type { IJournalEntry } from '@dudko.dev/agent'
 import { createEventStore, EVENTS_CHANNEL } from '../../src/db/events.ts'
+import {
+  appendJournalSql,
+  createPostgresJournal,
+  JournalFencedError,
+} from '../../src/db/journal.ts'
+import { createParkedStore } from '../../src/db/parked.ts'
 import { createPostgresLimits, RateLimitRefusal } from '../../src/db/limiter.ts'
 import { migrate } from '../../src/db/migrate.ts'
 import { createNotifyHub } from '../../src/db/notify.ts'
@@ -51,7 +58,7 @@ test('migrate is idempotent', async () => {
   const r = await pool.query('SELECT name FROM swarm_migrations ORDER BY name')
   assert.deepEqual(
     r.rows.map((x) => x.name),
-    ['001_init.sql'],
+    ['001_init.sql', '002_parking.sql'],
   )
 })
 
@@ -207,4 +214,141 @@ test('the shared bucket delays calls across workers, and refuses a wait beyond t
   } finally {
     await second.end()
   }
+})
+
+const entry = (attempt: number, n: number): IJournalEntry =>
+  ({
+    id: `a${attempt}:tool:1.${n}.t0`,
+    kind: 'tool',
+    position: `1.${n}.t0`,
+    attempt,
+    at: n,
+    parent: `a${attempt}:model:1.${n}`,
+    tool: 'write_note',
+    hash: 'h',
+    ok: true,
+    model: `result ${n} \u0000 end`,
+  }) as IJournalEntry
+
+test('the journal: appends in order, read back byte for byte, fenced by the attempt on record', async () => {
+  const runs = createRunStore(pool)
+  const persistence = createPostgresPersistence(pool)
+  const journal = createPostgresJournal(pool)
+  const runId = randomUUID()
+  // Not bound: nothing to append to.
+  await assert.rejects(Promise.resolve(journal.append(runId, entry(1, 0))), JournalFencedError)
+  await runs.bindRun({ runId, sessionId: randomUUID(), turn: 1, runNo: 1, attemptBase: 0 })
+  await journal.append(runId, entry(1, 1))
+  await journal.append(runId, entry(1, 2))
+  assert.deepEqual(await journal.load(runId), [entry(1, 1), entry(1, 2)])
+  // The resume takes the run: the fence goes up to attempt 2 before it reads anything ...
+  assert.equal(await runs.fenceRun(runId), 2)
+  assert.equal(await runs.fenceRun(randomUUID()), undefined, 'an unbound run has no fence')
+  // ... and from then the worker of attempt 1 writes nothing: no entry, no checkpoint.
+  await assert.rejects(Promise.resolve(journal.append(runId, entry(1, 3))), JournalFencedError)
+  await assert.rejects(
+    Promise.resolve(persistence.onStepComplete?.(snapshot(runId, 1))),
+    SnapshotFencedError,
+  )
+  // The resume puts attempt 2 on record and appends as attempt 2.
+  await persistence.onRunResume?.(snapshot(runId, 2))
+  await journal.append(runId, entry(2, 3))
+  assert.deepEqual(
+    (await journal.load(runId)).map((e) => e.id),
+    ['a1:tool:1.1.t0', 'a1:tool:1.2.t0', 'a2:tool:1.3.t0'],
+  )
+  // A second resume of the same attempt is refused by the fence the first raised, not reused.
+  assert.equal(await runs.fenceRun(runId), 3)
+  await assert.rejects(Promise.resolve(journal.append(runId, entry(2, 4))), JournalFencedError)
+  // The same entry id twice in a run is an error, never a silent duplicate.
+  await assert.rejects(Promise.resolve(journal.append(runId, entry(2, 3))))
+  // Without a fence (a resume that took no lease), the attempt on record alone refuses an older one.
+  const other = randomUUID()
+  await runs.bindRun({ runId: other, sessionId: randomUUID(), turn: 1, runNo: 1, attemptBase: 0 })
+  await persistence.onRunResume?.(snapshot(other, 2))
+  await assert.rejects(Promise.resolve(journal.append(other, entry(1, 1))), JournalFencedError)
+  await journal.append(other, entry(2, 1))
+})
+
+test('the journal race: an append that read the old fence lands before the resume reads the journal', async () => {
+  const runs = createRunStore(pool)
+  const journal = createPostgresJournal(pool)
+  const runId = randomUUID()
+  await runs.bindRun({ runId, sessionId: randomUUID(), turn: 1, runNo: 1, attemptBase: 0 })
+  // The late worker (attempt 1) is in the middle of an append: its statement ran, it has not
+  // committed yet.
+  const late = await pool.connect()
+  try {
+    await late.query('BEGIN')
+    const { text, values } = appendJournalSql(runId, entry(1, 1))
+    assert.equal((await late.query(text, values)).rowCount, 1)
+    // The resume takes the run now: the fence must wait for that append ...
+    let fenced = false
+    const fence = runs.fenceRun(runId).then((f) => {
+      fenced = true
+      return f
+    })
+    await new Promise((r) => setTimeout(r, 300))
+    assert.equal(fenced, false, 'the fence waits for the append that read the old one')
+    await late.query('COMMIT')
+    assert.equal(await fence, 2)
+  } finally {
+    late.release()
+  }
+  // ... so the journal the resume reads has every entry attempt 1 will ever have.
+  const seen = (await journal.load(runId)).map((e) => e.id)
+  await assert.rejects(Promise.resolve(journal.append(runId, entry(1, 2))), JournalFencedError)
+  const all = (await journal.load(runId)).map((e) => e.id)
+  assert.deepEqual(seen, ['a1:tool:1.1.t0'])
+  assert.deepEqual(all, seen, 'nothing of attempt 1 landed behind the resume')
+})
+
+test('parked items: recorded, answered, cancelled - as the gateway reads them', async () => {
+  const parked = createParkedStore(pool)
+  const sessionId = randomUUID()
+  await parked.record([
+    {
+      sessionId,
+      itemId: 'p1',
+      turn: 1,
+      runId: 'r',
+      kind: 'approval',
+      answeredBy: 'client',
+      item: { kind: 'approval', request: { toolName: 'write \u0000' } },
+    },
+    {
+      sessionId,
+      itemId: 'p2',
+      turn: 1,
+      runId: 'r',
+      kind: 'tool',
+      answeredBy: 'subagent',
+      childId: 'subagent-x',
+      item: { kind: 'tool', subagent: { name: 'researcher', task: 't' } },
+    },
+  ])
+  assert.equal((await parked.item(sessionId, 'p1'))?.state, 'pending')
+  assert.equal(await parked.item(randomUUID(), 'p1'), undefined, 'per session')
+  assert.deepEqual(
+    (await parked.subagents(sessionId)).map((r) => [r.itemId, r.childId]),
+    [['p2', 'subagent-x']],
+  )
+  await parked.markAnswered(sessionId, ['p1'])
+  assert.equal((await parked.item(sessionId, 'p1'))?.state, 'answered')
+  await parked.cancelTurn(sessionId, 1)
+  assert.equal((await parked.item(sessionId, 'p1'))?.state, 'answered', 'answered stays answered')
+  assert.equal((await parked.item(sessionId, 'p2'))?.state, 'cancelled')
+  // A park again (a partial resume) puts an item back to pending.
+  await parked.record([
+    {
+      sessionId,
+      itemId: 'p2',
+      turn: 1,
+      runId: 'r',
+      kind: 'tool',
+      answeredBy: 'subagent',
+      item: { kind: 'tool' },
+    },
+  ])
+  assert.equal((await parked.item(sessionId, 'p2'))?.state, 'pending')
 })

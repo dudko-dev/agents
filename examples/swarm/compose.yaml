@@ -78,6 +78,8 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS:-}
       SESSION_IDLE_TIMEOUT_MS: ${SESSION_IDLE_TIMEOUT_MS:-86400000}
       TURN_HEARTBEAT_TIMEOUT_MS: ${TURN_HEARTBEAT_TIMEOUT_MS:-20000}
+      SUBAGENT_MAX_PER_ROUND: ${SUBAGENT_MAX_PER_ROUND:-4}
+      SUBAGENT_MAX_PER_SESSION: ${SUBAGENT_MAX_PER_SESSION:-50}
     ports:
       - '127.0.0.1:8080:8080'
     healthcheck:
@@ -100,7 +102,7 @@ services:
   worker:
     <<: *swarm
     command: ['worker']
-    # The provider keys and the agent's settings (AGENT_*, MCP_SERVERS, LIMITER_*).
+    # The provider keys and the agent's settings (AGENT_*, MCP_SERVERS, SUBAGENTS, LIMITER_*).
     env_file:
       - path: .env
         required: false
