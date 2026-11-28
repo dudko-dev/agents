@@ -21,6 +21,7 @@ import {
   str,
   type Env,
 } from './env.ts'
+import { checkPipelines, type IPipelineConfig } from './pipelines.ts'
 import { checkSubagentProfiles, type ISubagentProfile } from './subagents.ts'
 
 export const PROVIDERS: readonly ProviderType[] = [
@@ -191,6 +192,58 @@ export const subagentProfilesFromEnv = (
     }
   }
   checkSubagentProfiles(out, { mcpServers: mcp })
+  return out
+}
+
+// PIPELINES: {"review": {"description": "...", "definition": <the core's PipelineDefinition>,
+// "readOnly"?: true}}. Each one is a tool of the session's agent; a call runs as a child workflow,
+// every node visit as a child workflow of its own (src/pipelines.ts, src/workflows.ts). Every
+// definition is validated by the core (preparePipeline) and every node checked against the
+// worker: its tools and MCP servers the worker's own, no skills, no settings.
+const PIPELINE_KEYS = new Set(['description', 'definition', 'readOnly'])
+
+export const pipelinesFromEnv = (
+  env: Env,
+  base: Pick<IAgentConfig, 'tools' | 'mcpServers'>,
+  subagents: Iterable<string> = [],
+): Record<string, IPipelineConfig> => {
+  const raw = json(env, 'PIPELINES')
+  if (raw === undefined) {
+    return {}
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new ConfigError(
+      'PIPELINES must be a JSON object of name -> { description, definition, readOnly? }',
+    )
+  }
+  const out: Record<string, IPipelineConfig> = {}
+  for (const [name, value] of Object.entries(raw as Record<string, unknown>)) {
+    const v = value as Record<string, unknown>
+    if (!v || typeof v !== 'object' || Array.isArray(v)) {
+      throw new ConfigError(`PIPELINES.${name} must be an object`)
+    }
+    const unknown = Object.keys(v).filter((k) => !PIPELINE_KEYS.has(k))
+    if (unknown.length) {
+      throw new ConfigError(`PIPELINES.${name}: unknown field(s) ${unknown.join(', ')}`)
+    }
+    if (typeof v.description !== 'string' || !v.description.trim()) {
+      throw new ConfigError(`PIPELINES.${name}.description is required (when to call it)`)
+    }
+    if (!v.definition || typeof v.definition !== 'object' || Array.isArray(v.definition)) {
+      throw new ConfigError(
+        `PIPELINES.${name}.definition must be a pipeline definition (an object)`,
+      )
+    }
+    if (v.readOnly !== undefined && typeof v.readOnly !== 'boolean') {
+      throw new ConfigError(`PIPELINES.${name}.readOnly must be true or false`)
+    }
+    out[name] = {
+      description: v.description,
+      definition: v.definition as IPipelineConfig['definition'],
+      ...(v.readOnly !== undefined ? { readOnly: v.readOnly as boolean } : {}),
+    }
+  }
+  checkPipelines(out, base, subagents)
   return out
 }
 

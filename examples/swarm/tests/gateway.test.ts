@@ -16,6 +16,7 @@ import {
   matchRoute,
   SessionEndedError,
   SessionNotFoundError,
+  pipelineView,
   sseFrame,
   subagentView,
   type IGateway,
@@ -61,6 +62,15 @@ const parkedRows = new Map<string, IParkedRow>([
       item: { kind: 'tool', subagent: { name: 'researcher', task: 'dig' } },
     }),
   ],
+  [
+    'pipe1',
+    parkedRow('pipe1', {
+      kind: 'tool',
+      answeredBy: 'pipeline',
+      childId: 'pipeline-s1-r1-pipe1',
+      item: { kind: 'tool', pipeline: { name: 'review', task: 'check it' } },
+    }),
+  ],
 ])
 let parkedFails = false
 
@@ -91,6 +101,8 @@ const backend: ISessionBackend = {
   },
   subagents: async (sessionId) =>
     sessionId === 's1' ? [...parkedRows.values()].filter((r) => r.answeredBy === 'subagent') : [],
+  pipelines: async (sessionId) =>
+    sessionId === 's1' ? [...parkedRows.values()].filter((r) => r.answeredBy === 'pipeline') : [],
   ready: async () => {
     if (readyError) throw readyError
   },
@@ -376,6 +388,10 @@ test('answers: checked against the pending item and its kind before the session 
     409,
     'answered_by_subagent',
   ])
+  assert.deepEqual(await code(await answer('pipe1', { output: 'mine' })), [
+    409,
+    'answered_by_pipeline',
+  ])
   // The shape per kind: 400.
   assert.deepEqual(await code(await answer('q1', { output: 'x' })), [400, 'invalid_answer'])
   assert.deepEqual(await code(await answer('q1', { approved: 'yes' })), [400, 'invalid_answer'])
@@ -436,6 +452,114 @@ test('subagents: listed from the session, each with its own stream', async () =>
   assert.deepEqual(matchRoute('GET', '/sessions/s1/subagents/a.b/events'), {
     ok: false,
     status: 404,
+  })
+})
+
+test('pipelines: listed from the session; their own streams and their node visits', async () => {
+  const listed = await fetch(`${base}/sessions/s1/pipelines`, { headers: auth })
+  assert.equal(listed.status, 200)
+  assert.deepEqual(await listed.json(), { pipelines: [pipelineView(parkedRows.get('pipe1')!)] })
+  assert.deepEqual(pipelineView(parkedRows.get('pipe1')!), {
+    itemId: 'pipe1',
+    turn: 1,
+    runId: 'r1',
+    state: 'pending',
+    workflowId: 'pipeline-s1-r1-pipe1',
+    name: 'review',
+    task: 'check it',
+    events: '/sessions/s1/pipelines/pipe1/events',
+  })
+  assert.equal((await fetch(`${base}/sessions/nope/pipelines`, { headers: auth })).status, 404)
+  assert.equal(
+    (await fetch(`${base}/sessions/s1/pipelines`, { headers: { authorization: 'Bearer x' } }))
+      .status,
+    401,
+  )
+  // The pipeline's own stream: keyed <session>/<item>, the same frames and cursor.
+  append('s1/pipe1', row(1, 0, 0, 'turn.started'))
+  append('s1/pipe1', row(1, 1, 1, 'pipeline.started'))
+  append('s1/pipe1', row(1, 1, 2, 'pipeline.node.started'))
+  append('s1/pipe1', row(1, 2147483647, 0, 'turn.ended'))
+  const own = await readSse(
+    `${base}/sessions/s1/pipelines/pipe1/events?after=1:1:1`,
+    auth,
+    (seen) => seen.some((e) => e.data.event.type === 'turn.ended'),
+  )
+  assert.equal(own.status, 200)
+  assert.deepEqual(
+    own.events.map((e) => e.id),
+    ['1:1:2', '1:2147483647:0'],
+    'replay after the cursor',
+  )
+  // Last-Event-ID wins over ?after=.
+  const resumed = await readSse(
+    `${base}/sessions/s1/pipelines/pipe1/events?after=0:0:0`,
+    { ...auth, 'last-event-id': '1:1:2' },
+    (seen) => seen.some((e) => e.data.event.type === 'turn.ended'),
+  )
+  assert.deepEqual(
+    resumed.events.map((e) => e.id),
+    ['1:2147483647:0'],
+  )
+  // A node visit's stream: <session>/<item>/<node>/<visit>.
+  append('s1/pipe1/review/2', row(1, 1, 1, 'plan.created'))
+  append('s1/pipe1/review/2', row(1, 2147483647, 0, 'turn.ended'))
+  const visit = await readSse(
+    `${base}/sessions/s1/pipelines/pipe1/nodes/review/2/events`,
+    auth,
+    (seen) => seen.some((e) => e.data.event.type === 'turn.ended'),
+  )
+  assert.equal(visit.status, 200)
+  assert.deepEqual(
+    visit.events.map((e) => e.id),
+    ['1:1:1', '1:2147483647:0'],
+  )
+  // Not a pipeline's item (a subagent's, a person's, none): 404. A bad cursor: 400.
+  for (const path of [
+    '/sessions/s1/pipelines/sub1/events',
+    '/sessions/s1/pipelines/q1/events',
+    '/sessions/s1/pipelines/nope/events',
+    '/sessions/s1/pipelines/sub1/nodes/review/1/events',
+    '/sessions/other/pipelines/pipe1/events',
+  ]) {
+    assert.equal((await readSse(`${base}${path}`, auth, () => true)).status, 404, path)
+  }
+  assert.equal(
+    (await readSse(`${base}/sessions/s1/pipelines/pipe1/events?after=x`, auth, () => true)).status,
+    400,
+  )
+  // A subagent's stream route does not serve a pipeline's item.
+  assert.equal(
+    (await readSse(`${base}/sessions/s1/subagents/pipe1/events`, auth, () => true)).status,
+    404,
+  )
+  // Route shapes: a node id is an id, a visit is 1..999.
+  assert.deepEqual(matchRoute('GET', '/sessions/s1/pipelines/p/nodes/n_1/3/events'), {
+    ok: true,
+    route: {
+      name: 'pipelineNodeEvents',
+      sessionId: 's1',
+      requestId: 'p',
+      nodeId: 'n_1',
+      visit: '3',
+    },
+  })
+  for (const bad of [
+    '/nodes/a.b/1/',
+    '/nodes/a/0/',
+    '/nodes/a/01/',
+    '/nodes/a/1000/',
+    '/nodes/a/x/',
+  ]) {
+    assert.deepEqual(matchRoute('GET', `/sessions/s1/pipelines/p${bad}events`), {
+      ok: false,
+      status: 404,
+    })
+  }
+  assert.deepEqual(matchRoute('POST', '/sessions/s1/pipelines'), {
+    ok: false,
+    status: 405,
+    allow: 'GET',
   })
 })
 

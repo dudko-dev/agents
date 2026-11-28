@@ -14,6 +14,7 @@
 import { createSubagentTool, deferResult, type IAgentConfig } from '@dudko.dev/agent'
 import { ConfigError } from './env.ts'
 import { currentTurnScope } from './lease.ts'
+import { pipelineTools, type IPipelineConfig } from './pipelines.ts'
 
 export interface ISubagentProfile {
   // When the parent model should call it (the tool's description).
@@ -134,16 +135,23 @@ export const childAgentConfig = (base: IAgentConfig, p: ISubagentProfile): IAgen
   }
 }
 
-// The session agent's config: the worker's, with the subagents' tools and parking on a person's
-// question (an 'ask' of the approval mode parks the turn until the answer comes through the
-// gateway).
+// The session agent's config: the worker's, with the subagents' and the pipelines' tools and
+// parking on a person's question (an 'ask' of the approval mode parks the turn until the answer
+// comes through the gateway).
 export const sessionAgentConfig = (
   base: IAgentConfig,
   profiles: Record<string, ISubagentProfile>,
+  pipelines: Record<string, IPipelineConfig> = {},
 ): IAgentConfig => ({
   ...base,
-  ...(Object.keys(profiles).length
-    ? { tools: { ...(base.tools ?? {}), ...subagentTools(profiles) } }
+  ...(Object.keys(profiles).length || Object.keys(pipelines).length
+    ? {
+        tools: {
+          ...(base.tools ?? {}),
+          ...subagentTools(profiles),
+          ...pipelineTools(pipelines),
+        },
+      }
     : {}),
   toolApproval: { ...(base.toolApproval ?? {}), onRequest: () => ({ park: true }) },
 })

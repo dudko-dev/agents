@@ -87,6 +87,9 @@ session:
   # Static subagents (child workflows): calls per round of a turn, and per session.
   subagentMaxPerRound: 4
   subagentMaxPerSession: 50
+  # Pipelines (a child workflow per call, one per node visit under it): the same two caps.
+  pipelineMaxPerRound: 2
+  pipelineMaxPerSession: 20
 
 gateway:
   replicaCount: 2
@@ -195,6 +198,9 @@ agent:
   # Static subagents: {"researcher": {"description": "...", "model"?, "systemPrompt"?,
   # "tools"?: ["docs__search"], "maxIterations"?, "readOnly"?}}.
   subagents: {}
+  # Pipelines: {"review": {"description": "...", "definition": <the core's PipelineDefinition>,
+  # "readOnly"?}}. A node's tools and mcpServers must be the workers' own; no skills, no settings.
+  pipelines: {}
   maxIterations: 10
   maxStepsPerTask: 8
   logLevel: warn

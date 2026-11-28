@@ -9,7 +9,7 @@
 // runs again under the next attempt.
 import type { AgentEvent } from '@dudko.dev/agent'
 import type { ICursor } from '../cursor.ts'
-import type { IStreamMarker } from '../session-types.ts'
+import type { IStreamBatch, IStreamMarker } from '../session-types.ts'
 import { toJsonText } from './json.ts'
 import type { IQueryable, IStatement } from './pool.ts'
 import { TURN_END_ATTEMPT, TURN_START_ATTEMPT } from './runs.ts'
@@ -59,9 +59,13 @@ export const eventsAfterSql = (sessionId: string, after: ICursor, limit: number)
   values: [sessionId, after.turn, after.attempt, after.seq, limit],
 })
 
-// An event as stored: the core's event, Errors readable, capped. One a tool made huge (a large
-// output) is replaced by a stub that says so; the full result is still in the run's snapshot.
-export const eventJson = (event: AgentEvent, maxBytes: number): string => {
+// An event as stored: the core's event (or a pipeline engine's), Errors readable, capped. One a
+// tool made huge (a large output) is replaced by a stub that says so; the full result is still in
+// the run's snapshot (a pipeline's node texts: in its nodes' own streams).
+export const eventJson = (
+  event: { type: string; runId?: string; seq?: number; attempt?: number },
+  maxBytes: number,
+): string => {
   const json = toJsonText(event)
   const bytes = Buffer.byteLength(json)
   if (bytes <= maxBytes) {
@@ -119,7 +123,7 @@ export const markerRow = (m: TurnMarker): IEventRow => {
   }
 }
 
-// A subagent marker the session workflow writes (session-state.ts chooses its slot and seq: the
+// A child marker the session workflow writes (session-state.ts chooses its slot and seq: the
 // parked attempt's, above every seq of that attempt). Written once: a retry is a no-op.
 export const streamMarkerRow = (m: IStreamMarker): IEventRow => ({
   sessionId: m.sessionId,
@@ -131,6 +135,28 @@ export const streamMarkerRow = (m: IStreamMarker): IEventRow => ({
   type: m.type,
   json: toJsonText({ ...m.body, type: m.type, turn: m.turn }),
 })
+
+// A pipeline's own stream is one "run" of the workflow: turn 1, attempt 1, the engine's events
+// numbered by the workflow (pipeline-state.ts). The run id column keys the stream's rows.
+export const PIPELINE_STREAM_RUN = 'pipeline'
+
+// The rows of one batch of a pipeline's own stream: its turn.started (the first batch), then its
+// events. Written once: a retried batch is a no-op.
+export const streamBatchRows = (batch: IStreamBatch, maxBytes: number): IEventRow[] => [
+  ...(batch.started
+    ? [markerRow({ kind: 'started', sessionId: batch.stream, turn: 1, body: batch.started })]
+    : []),
+  ...batch.events.map((e) => ({
+    sessionId: batch.stream,
+    turn: 1,
+    runId: PIPELINE_STREAM_RUN,
+    attempt: 1,
+    seq: e.seq,
+    turnAttempt: 1,
+    type: e.event.type,
+    json: eventJson(e.event, maxBytes),
+  })),
+]
 
 export interface IEventWriter {
   push: (event: AgentEvent) => void
@@ -219,8 +245,10 @@ export interface IStreamRow {
 export interface IEventStore {
   writer: (options: Omit<IEventWriterOptions, 'maxEventBytes'>) => IEventWriter
   marker: (m: TurnMarker) => Promise<void>
-  // Subagent markers, in order, one statement (at most INSERT_MAX_ROWS).
+  // Child markers, in order, one statement (at most INSERT_MAX_ROWS).
   streamMarkers: (markers: IStreamMarker[]) => Promise<void>
+  // A batch of a pipeline's own stream, in order.
+  streamBatch: (batch: IStreamBatch) => Promise<void>
   after: (sessionId: string, after: ICursor, limit: number) => Promise<IStreamRow[]>
 }
 
@@ -235,6 +263,13 @@ export const createEventStore = (db: IQueryable, maxEventBytes: number): IEventS
       const { text, values } = insertEventsSql(
         markers.slice(i, i + INSERT_MAX_ROWS).map(streamMarkerRow),
       )
+      await db.query(text, values)
+    }
+  },
+  streamBatch: async (batch) => {
+    const rows = streamBatchRows(batch, maxEventBytes)
+    for (let i = 0; i < rows.length; i += INSERT_MAX_ROWS) {
+      const { text, values } = insertEventsSql(rows.slice(i, i + INSERT_MAX_ROWS))
       await db.query(text, values)
     }
   },

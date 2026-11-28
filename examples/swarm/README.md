@@ -4,8 +4,9 @@ A reference deployment of the Node agent ([`@dudko.dev/agent`](../../packages/ag
 horizontally scaled swarm: any number of stateless gateways and workers, conversations that survive
 a worker dying in the middle of a turn, one event stream per conversation that a client can leave
 and rejoin, turns that park on a person's answer (or a result from outside) and go on days later,
-static subagents run as child workflows, and limits shared by every worker. Self-hosted Temporal for
-the durable part, Postgres for the state, no Redis, one image, a Helm chart.
+static subagents and pipelines (graphs of agents) run as child workflows, and limits shared by
+every worker. Self-hosted Temporal for the durable part, Postgres for the state, no Redis, one
+image, a Helm chart.
 
 This is an **example**, not a package: private in the workspace, never published. Read it, run it,
 copy what you need.
@@ -15,6 +16,7 @@ copy what you need.
 - [The HTTP API](#the-http-api)
 - [Parking: a person's answer, a result from outside](#parking-a-persons-answer-a-result-from-outside)
 - [Static subagents: child workflows](#static-subagents-child-workflows)
+- [Pipelines: child workflows](#pipelines-child-workflows)
 - [What happens on a crash](#what-happens-on-a-crash)
 - [Scaling](#scaling)
 - [Kubernetes: the Helm chart](#kubernetes-the-helm-chart)
@@ -44,8 +46,13 @@ copy what you need.
                                      the call journal, events  │      onEvent      → swarm_events + NOTIFY
                                      (+ NOTIFY), parked items, │      runLease     → the activity heartbeat
                                      the token bucket          │      sharedLimits → swarm_limiter (row lock)
-                                                               └─ child workflow `subagent` (one per static
-                                                                  subagent call) → activity `runSubagent`
+                                                               ├─ child workflow `subagent` (one per static
+                                                               │  subagent call) → activity `runSubagent`
+                                                               └─ child workflow `pipeline` (one per pipeline
+                                                                  call): the graph engine schedules
+                                                                  └─ child workflow `pipelineNode` (one per
+                                                                     node visit, a wave in parallel)
+                                                                     → activity `runPipelineNode`
 ```
 
 **The durable unit is a session** (a conversation), and a session is a Temporal workflow,
@@ -144,19 +151,22 @@ Every route but `/healthz` and `/readyz` needs `Authorization: Bearer <token>`. 
 | --- | --- | --- |
 | `POST /sessions` | optional `{ "message": "...", "id"?: "..." }` (the first message) | `201 { sessionId, messageId? }`, `Location: /sessions/<id>` |
 | `POST /sessions/:id/messages` | `{ "text": "...", "id"?: "..." }` | `202 { messageId }`. `id` (`[A-Za-z0-9_-]{1,64}`) makes a retried POST harmless: the session drops a repeat |
-| `POST /sessions/:id/answers/:requestId` | the answer, by the item's kind: `{ "approved": true \| false, "reason"? }` or `{ "output": <JSON> }` / `{ "error": "..." }` | `202 { requestId, kind }`; `404` nothing waits for that id, `409` `already_answered` / `answered_by_subagent`, `400` `invalid_answer` - see [Parking](#parking-a-persons-answer-a-result-from-outside) |
+| `POST /sessions/:id/answers/:requestId` | the answer, by the item's kind: `{ "approved": true \| false, "reason"? }` or `{ "output": <JSON> }` / `{ "error": "..." }` | `202 { requestId, kind }`; `404` nothing waits for that id, `409` `already_answered` / `answered_by_subagent` / `answered_by_pipeline`, `400` `invalid_answer` - see [Parking](#parking-a-persons-answer-a-result-from-outside) |
 | `POST /sessions/:id/stop` | optional `{ "end": true }` | `202`. Stops the running turn and drops the messages queued behind it; `end` also ends the session |
 | `GET /sessions/:id` | | `200` the state: `status` (`idle` / `running` / `stopping` / `parked` / `ended`), `turn`, `running`, `queued`, `dropped`, `parked`, `history`, `turns` (the last 20: status, run id, attempt, text or error, usage) |
 | `GET /sessions/:id/events?after=<cursor>` | | `text/event-stream` (below) |
 | `GET /sessions/:id/subagents` | | `200 { subagents: [{ itemId, turn, runId, state, workflowId, name, task, events }] }`: the session's static subagent calls |
 | `GET /sessions/:id/subagents/:itemId/events?after=<cursor>` | | `text/event-stream`: one child's own stream (same frames, `turn` is 1) |
+| `GET /sessions/:id/pipelines` | | `200 { pipelines: [{ itemId, turn, runId, state, workflowId, name, task, events }] }`: the session's pipeline calls |
+| `GET /sessions/:id/pipelines/:itemId/events?after=<cursor>` | | `text/event-stream`: a pipeline's own stream - the graph engine's `pipeline.*` events (same frames, `turn` is 1) - see [Pipelines](#pipelines-child-workflows) |
+| `GET /sessions/:id/pipelines/:itemId/nodes/:nodeId/:visit/events?after=<cursor>` | | `text/event-stream`: one node visit's own stream (its run's events; `visit` from 1) |
 | `GET /healthz` | | `200` while the process runs |
 | `GET /readyz` | | `200` when Postgres, Temporal and the LISTEN connection answer, else `503` with `checks` |
 
 Status codes: `400` (a bad body, id, cursor or answer), `401` (no or a wrong token), `404` (no such
-route, session or pending item), `405`, `409` (`session_ended`, `already_answered`,
-`answered_by_subagent`), `413` (a body or message too long), `415`, `503` (Temporal or Postgres
-down, too many streams - with `Retry-After`).
+route, session, pending item or child stream), `405`, `409` (`session_ended`, `already_answered`,
+`answered_by_subagent`, `answered_by_pipeline`), `413` (a body or message too long), `415`, `503`
+(Temporal or Postgres down, too many streams - with `Retry-After`).
 
 ### The event stream
 
@@ -170,8 +180,10 @@ markers per turn: `turn.started` (`input`, `messageIds`) first and `turn.ended` 
 `completed` / `stopped` / `failed`, `text`, `error`, `runId`, `attempt`, `usage`) last. A turn that
 parks has, between them, the core's `run.parked` (`items`) at the end of the parked attempt, and -
 for static subagent calls - `subagent.started` (`itemId`, `name`, `task`, `workflowId`, `events`:
-the child's stream) and `subagent.ended` (`itemId`, `status`, `text` or `error`, `usage`), then the
-resumed attempt. A parked turn writes no `turn.ended` until it is over.
+the child's stream) and `subagent.ended` (`itemId`, `status`, `text` or `error`, `usage`), for
+pipeline calls `pipeline.call.started` / `pipeline.call.ended` (the same, plus `runs`, `stoppedBy`,
+the failed `nodeId`), then the resumed attempt. A parked turn writes no `turn.ended` until it is
+over.
 
 The stream replays from Postgres everything after the cursor, then goes live (`LISTEN/NOTIFY`, no
 polling). The cursor is `<turn>:<attempt>:<seq>` - a session is many runs, one per turn, so the turn
@@ -202,15 +214,15 @@ on Temporal and Postgres.
   ask; the worker answers every "ask" with `{ park: true }`. `ask-writes` asks for every tool not
   known to be read-only, `ask-all` for every one. The item's `kind` is `'approval'`.
 - **A result from outside**: a tool that returns `deferResult()` (`kind: 'tool'`). The static
-  subagents (below) are such tools; so is any tool you add whose result comes from another system
-  - a job queue, a webhook, a review.
+  subagents and the pipelines (below) are such tools; so is any tool you add whose result comes
+  from another system - a job queue, a webhook, a review.
 
 The run parks at the end of its tool round with **every** pending item of that round. The activity
 records the items in `swarm_parked` and returns `parked`; the workflow records the turn as
 `parked`. Clients see the items in the stream (the core's `run.parked`, and
 `tool.approval-requested` / `tool.approval-resolved` with `parked: true`) and in the state
 (`GET /sessions/:id`: `status: 'parked'`, `parked.requests` - `requestId`, `kind`, `question`,
-`subagent?` - and `parked.answered`). Messages sent meanwhile wait behind the parked turn.
+`subagent?`, `pipeline?` - and `parked.answered`). Messages sent meanwhile wait behind the parked turn.
 
 **Answering.** `POST /sessions/:id/answers/:requestId` with the answer, one item at a time. The
 gateway checks it against `swarm_parked` - without asking a worker, so an answer is taken while the
@@ -221,6 +233,7 @@ swarm is scaled to zero - and refuses, before the session hears of it:
 | an id nothing waits for (unknown, another session's, a stopped turn's) | `404 not_found` |
 | an item the turn already went on with | `409 already_answered` |
 | an item a subagent answers | `409 answered_by_subagent` |
+| an item a pipeline answers | `409 answered_by_pipeline` |
 | the wrong shape for the kind: an approval is `{ "approved": true \| false, "reason"? }` (no `remember`: an approval is for one call, on whichever worker), a tool result `{ "output": <JSON> }` or `{ "error": "..." }`, bounded | `400 invalid_answer` |
 
 The workflow checks it again (the authority), and the core a third time on the resume. When every
@@ -278,9 +291,115 @@ resumed attempt's, in the order the workflow wrote them - a reader that follows 
 sees one land behind its cursor). `GET /sessions/:id/subagents` lists a session's calls.
 
 **What a child cannot do.** It has nobody to ask: its approvals follow the worker's mode and rules
-and an "ask" is a denial; it has no subagents of its own; it does not park (a child that would is
-refused). Its tokens are charged to its own run (and to `sharedLimits`), not to the parent turn's
+and an "ask" is a denial; it has no subagents or pipelines of its own; it does not park (a child
+that would is refused - parking inside children, subagents and pipeline nodes alike, is a later
+change). Its tokens are charged to its own run (and to `sharedLimits`), not to the parent turn's
 `usage`; `subagent.ended` carries them.
+
+## Pipelines: child workflows
+
+`PIPELINES` (worker) names pipelines: each one a tool of the session's agent and a graph of
+agents - the core's [pipeline definition](../../packages/agent/README.md#pipelines), plain JSON:
+nodes (each an agent with its own role, model and tools), edges with conditions, routes, loops,
+limits.
+
+```bash
+PIPELINES='{"review":{"description":"Draft an answer, check it against the docs, publish it","readOnly":true,
+  "definition":{"version":1,"entry":"draft","nodes":[
+    {"id":"draft","instructions":"Write a first draft."},
+    {"id":"check","instructions":"Check it against the docs.","tools":["docs__search"],
+     "routes":[{"label":"approve"},{"label":"revise"}]},
+    {"id":"publish","instructions":"Format it for publication.","model":"gpt-4.1-mini"}],
+  "edges":[{"from":"draft","to":"check"},
+    {"from":"check","to":"publish","when":{"kind":"route","label":"approve"}},
+    {"from":"check","to":"draft","when":{"kind":"otherwise"}}],
+  "limits":{"maxNodeVisits":2,"maxRuns":8}}}}'
+```
+
+The tool takes `{ task }` (it is the core's remote subagent tool, like a static subagent's) and its
+`dispatch` answers `deferResult()` at once: the turn **parks** with one `'tool'` item per call. For
+each, the session workflow starts a child workflow **`pipeline`** (`pipeline-<session>-<run>-<item>`,
+like a subagent's), and the `task` is the pipeline's request. How it maps:
+
+- **The graph engine runs IN the workflow.** `pipeline` runs `preparePipeline` + `runPipelineGraph`
+  from [`@dudko.dev/agent/pipeline-engine`](../../packages/agent/README.md#running-the-graph-yourself),
+  a file that imports nothing and is deterministic by contract: no clock, no randomness, no I/O.
+  It is the scheduler; Temporal's history is the graph's snapshot. The workflow bundle holds the
+  engine and none of the agent's main entry (`tests/bundle.test.ts`). The definition is read once,
+  by an activity, from the worker that runs it (`pipelineDefinition`), so the history holds the graph
+  the run used.
+- **A node visit is a child workflow.** `pipelineNode` (`<pipeline id>.<node>.<visit>`) runs one
+  activity, `runPipelineNode`: one `agent.run` of the node's agent on the engine's rendering of its
+  input (`renderPipelineNodeInput`: the request, then each activating node's output), under the same
+  heartbeat lease, snapshots and call journal as a turn. The visits of a wave are started together:
+  a wave runs in parallel across the swarm, and the next wave starts once all of them have settled.
+- **The route call is where the node ran.** A node with `routes` picks one in the same activity,
+  after its run (`pickPipelineRoute` with the node agent's config: its decision model, else its
+  planner model, under `sharedLimits`); no label, or a failed call, is no route (the core's rule).
+- **A crash.** The pipeline workflow is replayed on any worker: the engine makes the same calls in
+  the same order and gets every finished visit's answer from the history - a finished node is not
+  run again. A node whose worker died is retried on another and resumes its run from its snapshot
+  and its call journal: its recorded model calls are replayed, a write it already made is not made
+  again. The route call runs after the run, so a crash after it may ask the router again (the
+  answer Temporal records is the one that counts).
+- **The answer.** `PipelineResult.text` (the last terminal node's output, clipped to 32,000
+  characters) is the call's `{ output }`. A run the definition's `limits` cut short (`stoppedBy`
+  `maxRuns` / `maxNodeVisits`) still answers, with a note the model reads (`[pipeline "review" was
+  cut short by its maxNodeVisits limit after 8 node runs: ...]`). A failed node fails the pipeline
+  (the engine's rule: the other visits in flight are cancelled) and the item is answered
+  `{ error: 'pipeline "review" failed: Pipeline node "check" failed (visit 1): ...' }`, which the
+  parent model reads like any tool error.
+- **Stop.** A session stop cancels the pipeline workflow and, through its cancellation scope, the
+  signal the engine reads (`aborted` + `addEventListener('abort')`) and every node child in flight.
+  The engine runs with `onAbort: 'reject'`: an abort is an `AbortError`, never a result that looks
+  finished, and a stopped pipeline has nobody to answer - its parked turn is stopped with it. The
+  workflow waits for its nodes to end (their streams get their `turn.ended`) and ends cancelled.
+- **Bounds.** `PIPELINE_MAX_PER_ROUND` (default 2) calls in one round, `PIPELINE_MAX_PER_SESSION`
+  (default 20) in a session (session options, fixed at its start, like the subagent caps): a call
+  beyond them is a tool error the model reads ("refused: at most 2 pipeline calls in one round")
+  and starts nothing; the workflow checks the caps again. The definition's own `limits`
+  (`maxNodeVisits`, default 3; `maxRuns`, default 25) bound each run - the engine enforces them. A
+  node's output is clipped to 32,000 characters before the edges see it.
+
+**A node resolves against the worker**, as a subagent profile does: `model` is a model id on the
+worker's provider (default: the worker's; another model drops the worker's per-stage overrides, as
+the core's `nodeResolver` does), `instructions` go under the worker's system prompt, `tools` are
+tools the worker mounts (`<server>__<tool>` of `MCP_SERVERS`, or a native tool), `mcpServers` gives
+every tool of those worker servers; a node that names none gets no tool at all. Every definition is
+validated at worker start (`preparePipeline`: a `PipelineValidationError` stops the worker with the
+pipeline and every issue), and refused there, naming the pipeline and the node: a tool or a server
+the worker does not have, `skills` (the swarm has none), `settings` (nothing here would read them),
+a node id that cannot name a workflow or a route (`[A-Za-z0-9_-]{1,64}`). A pipeline's name must
+not be a subagent's or a tool of the worker. A node has nobody to ask, exactly like a subagent
+child: its approvals follow the worker's mode and rules, an "ask" is a denial, it does not park, it
+has no subagents or pipelines of its own. A worker whose node differs from the one the run was
+planned with (PIPELINES changed during a rolling deploy) leaves the visit to another worker.
+
+**Events: three kinds of stream.**
+
+- The **parent's** stream gets `pipeline.call.started` (`itemId`, `name`, `task`, `workflowId`,
+  `events`: the pipeline's stream) and `pipeline.call.ended` (`itemId`, `status`, `text` or
+  `error`, `runs`, `usage`, `stoppedBy?`, `nodeId?`), written by the session workflow in the
+  parked attempt's slot, in one order with the subagent markers. (Not `pipeline.started`: that is
+  the engine's own event, below.) The core's own `subagent.start` for the call is there too: the
+  tool is the core's remote subagent tool.
+- The **pipeline's own** stream (`GET /sessions/:id/pipelines/:itemId/events`): `turn.started`,
+  the engine's events in the order it emitted them - `pipeline.started`, `pipeline.node.started`
+  (`nodeId`, `visit`, `from`, plus the visit's `workflowId` and `events`), `pipeline.node.finished`
+  (`text`, `route`, `usage`), `pipeline.edge`, `pipeline.node.skipped`, `pipeline.node.failed`,
+  `pipeline.finished` - then `turn.ended` (`status`, `text` or `error`, `runs`, `usage`). The
+  workflow cannot do I/O: it numbers the events (seq from 1) and writes them through ONE activity at
+  a time, each write taking everything emitted since the last one - a wave's starts together, a
+  settled visit's finish and edges together. Which event lands in which write depends only on the
+  activations the workflow replays, so the writes replay the same; and one write at a time keeps
+  the stream in order.
+- Each **node visit's** stream (`GET /sessions/:id/pipelines/:itemId/nodes/:nodeId/:visit/events`):
+  its run's events, keyed by `<session>/<item>/<node>/<visit>` like a subagent child's, from its
+  `turn.started` to its `turn.ended` (with the `route` it picked).
+
+The same cursor and replay rules (`?after=` / `Last-Event-ID`), the same auth and error codes as
+the subagent routes. `GET /sessions/:id/pipelines` lists a session's calls; a pipeline's node
+visits are named by the `pipeline.node.started` events of its stream.
 
 ## What happens on a crash
 
@@ -314,7 +433,8 @@ refused). Its tokens are charged to its own run (and to `sharedLimits`), not to 
   running anything.
 - **A worker dies while a parked turn's children run**: each child's activity is retried on
   another worker and resumes the child's run; the session starts no second child; the turn goes on
-  once they are done.
+  once they are done. A pipeline's workflow is replayed elsewhere and starts no node visit twice;
+  a node whose worker died resumes its run there (see [Pipelines](#pipelines-child-workflows)).
 - **A gateway dies**: nothing is lost. Its streams' clients reconnect to another replica with
   `Last-Event-ID`.
 - **Postgres is down**: turns fail and retry; snapshot writes are logged and the run goes on (the
@@ -433,6 +553,8 @@ workflow's input, so a running session never depends on a worker's environment):
 | `SESSION_MAX_QUEUED_MESSAGES` | `50` | Messages waiting behind a turn; more are dropped (counted in `dropped`) |
 | `SUBAGENT_MAX_PER_ROUND` | `4` | Static subagent calls in one round of a turn (1-64); more are refused with a tool error |
 | `SUBAGENT_MAX_PER_SESSION` | `50` | Static subagent calls in a session (`0`: none) |
+| `PIPELINE_MAX_PER_ROUND` | `2` | Pipeline calls in one round of a turn (1-64); more are refused with a tool error |
+| `PIPELINE_MAX_PER_SESSION` | `20` | Pipeline calls in a session (`0`: none) |
 
 **`worker`**
 
@@ -467,6 +589,7 @@ under the same names - for anything else, build the `IAgentConfig` in code
 | `AGENT_TOOL_APPROVAL` | `autopilot` | `autopilot` / `read-only` / `ask-writes` / `ask-all` - an "ask" [parks the turn](#parking-a-persons-answer-a-result-from-outside) until a person answers through the gateway |
 | `AGENT_TOOL_RULES` | - | JSON: `{"github__delete_*": "deny"}` (`ask` parks, like the mode's asks) |
 | `SUBAGENTS` | - | JSON: `{"name": {"description": "...", "model"?: "...", "systemPrompt"?: "...", "tools"?: ["server__tool"], "maxIterations"?: 4, "readOnly"?: true}}` - [static subagents](#static-subagents-child-workflows); `tools` must be the worker's own (MCP_SERVERS); none: a child that only reasons |
+| `PIPELINES` | - | JSON: `{"name": {"description": "...", "definition": <the core's PipelineDefinition>, "readOnly"?: true}}` - [pipelines](#pipelines-child-workflows); validated at start; a node's `tools` / `mcpServers` must be the worker's own, its `model` one of the worker's provider; no `skills`, no `settings` |
 | `AGENT_MAX_ITERATIONS` / `AGENT_MAX_STEPS_PER_TASK` | `10` / `8` | |
 | `AGENT_MAX_REVISIONS`, `AGENT_MAX_TOOL_CALLS`, `AGENT_MAX_TOTAL_TOKENS` | the agent's | Per-run caps |
 | `AGENT_LLM_TIMEOUT_MS`, `AGENT_LLM_MAX_RETRIES` | the agent's | |
@@ -497,7 +620,8 @@ under the same names - for anything else, build the `IAgentConfig` in code
 - **The data at rest is the conversation.** `swarm_events` holds everything the agent emitted (tool
   inputs and outputs included), `swarm_runs` the snapshots, `swarm_journal` every model response and
   tool result, `swarm_parked` the parked items (tool inputs); Temporal's history holds the messages,
-  the conversation, the answers and the subagents' answers (workflow inputs and activity results).
+  the conversation, the answers, the subagents' answers, and each pipeline's definition, its nodes'
+  inputs and outputs and its own events (workflow inputs and activity results).
   Protect both stores (access, backups, encryption at rest); there is no payload codec in this
   version.
 - **Answers are untrusted.** Whoever holds a gateway token can answer any item of any session: an
@@ -515,7 +639,11 @@ under the same names - for anything else, build the `IAgentConfig` in code
   or tokens provisioned ahead of time.
 - **Sandbox files do not move.** A run's sandbox directory lives in the `/tmp` of the worker that ran
   it; a run resumed on another worker starts with an empty one.
-- **A subagent child cannot ask anyone**: its "ask" is a denial, and it cannot park.
+- **A subagent child or a pipeline node cannot ask anyone**: its "ask" is a denial, and it cannot
+  park (parking inside children is a later change).
+- **A pipeline runs in ONE workflow history**: its definition, every node's input and output and
+  its own events are in it - keep `maxRuns` modest (the default is 25; the core allows 1000) and
+  node outputs short (each is clipped to 32,000 characters). A pipeline cannot continue-as-new.
 - **`remember` on an approval is refused**: the core's "always allow" lasts for one agent
   instance, and the next call may run on any worker.
 - **No steering inside a turn**: a message sent while a turn runs waits for the next turn (the
@@ -526,11 +654,8 @@ under the same names - for anything else, build the `IAgentConfig` in code
 
 ## Next steps
 
-- **Pipelines as child workflows**: a pipeline's nodes as workflows of their own, on the core's
-  deterministic graph engine (a `./pipeline-engine` subpath and `agent.run({ runId })` for a run
-  whose id is known in advance - a parallel core change; the swarm waits for it).
-- **The core's `isAuthError`** in place of the swarm's own reading of a refused key (the same core
-  change).
+- **Parking inside children**: a subagent child or a pipeline node that asks a person (or waits
+  for a result from outside) parks, and the parent's item waits for it.
 - **MCP elicitation** (a server asking the user mid-call) parked like an approval, once the core
   parks it.
 
@@ -546,12 +671,16 @@ DATABASE_URL=postgres://swarm:swarm@localhost:5432/swarm pnpm nx run swarm:test:
 
 - **Unit tests** (`tests/*.test.ts`): the session logic (parking, answers, children, caps, markers),
   the answer checks per kind, the gateway over loopback with fakes (routing, auth, CORS, bounds, the
-  stream, answers, the subagent routes), the cursor, the limiter's math and loop, the SQL builders
-  and the event writer, the lease and its fence, the activities in Temporal's
-  `MockActivityEnvironment` (parks, resumes, a partial resume, the child activity), the subagent
-  tool and configs, the config, the image's prune step, the Helm chart's values schema and its
-  variables, and a **replay** of recorded session histories (`tests/fixtures/*.history.json`: one
-  from before static subagents, two with children) against this workflow code.
+  stream, answers, the subagent and pipeline routes), the cursor, the limiter's math and loop, the
+  SQL builders and the event writer, the lease and its fence, the activities in Temporal's
+  `MockActivityEnvironment` (parks, resumes, a partial resume, the child activity, a pipeline
+  node's run and route call), the subagent and pipeline tools and configs (every refusal), the
+  pipeline workflow's logic with the engine driven as the workflow drives it, the config, the
+  workflow bundle (the engine in it, none of the agent's main entry, `ai`, `zod` or MCP), the
+  image's prune step, the Helm chart's values schema and its variables, and a **replay** of
+  recorded histories (`tests/fixtures/*.history.json`: a session from before static subagents, two
+  with subagent children, one with a pipeline child, the pipeline workflow and a node visit)
+  against this workflow code.
 - **Integration tests** (`tests/integration/*.test.ts`) need a **Postgres** (`DATABASE_URL`; they
   migrate it) and start a **Temporal dev server** with `@temporalio/testing` (downloaded once from
   temporal.download; or set `TEMPORAL_CLI_PATH` to a `temporal` binary). The model is the agent
@@ -562,7 +691,10 @@ DATABASE_URL=postgres://swarm:swarm@localhost:5432/swarm pnpm nx run swarm:test:
   (the race of a late append against a resume), the event log and its NOTIFY, a turn parked on a
   person's question and answered through the gateway (the write runs once), a partial answer, a
   partial resume parking again, stop during a park, two subagent calls run as two child workflows
-  in parallel, the per-round cap, stop while children run, and a worker killed while children run.
+  in parallel, the per-round cap, stop while children run, a worker killed while children run, a
+  pipeline call (a wave of two node visits side by side, a routed node, the streams and their
+  routes), the pipeline caps, stop during a pipeline, and a worker killed mid-node (another
+  finishes it; the finished node does not run again; the node's write runs once).
   `SWARM_TEST_VERBOSE=1` shows the child workers' output.
 - CI: [`.github/workflows/swarm.yml`](../../.github/workflows/swarm.yml) runs both against a
   Postgres service, builds the image (no push) and smoke-tests it, and checks the Helm chart (lint,

@@ -112,6 +112,36 @@ agent:
       description: Research one question with the docs
       tools: [docs__search]
       readOnly: true
+  pipelines:
+    review:
+      description: Draft an answer, check it against the docs, publish it
+      readOnly: true
+      definition:
+        version: 1
+        name: review
+        entry: draft
+        nodes:
+          - id: draft
+            instructions: Write a first draft.
+          - id: check
+            instructions: Check the draft against the docs.
+            tools: [docs__search]
+            routes:
+              - label: approve
+              - label: revise
+          - id: publish
+            instructions: Format it for publication.
+            model: small
+        edges:
+          - from: draft
+            to: check
+          - from: check
+            to: publish
+            when: { kind: route, label: approve }
+          - from: check
+            to: draft
+            when: { kind: otherwise }
+        limits: { maxNodeVisits: 2, maxRuns: 8 }
   extra:
     AGENT_COMPACTION: 'on'
 serviceAccount:

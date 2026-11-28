@@ -2,10 +2,11 @@
 // there, in .env.example and in compose.yaml if the stack needs it.
 import { hostname } from 'node:os'
 import type { IAgentConfig } from '@dudko.dev/agent'
-import { agentConfigFromEnv, subagentProfilesFromEnv } from './agent-config.ts'
+import { agentConfigFromEnv, pipelinesFromEnv, subagentProfilesFromEnv } from './agent-config.ts'
 import type { ILimiterConfig, LimiterScope } from './db/limiter.ts'
 import { bool, ConfigError, int, list, num, oneOf, secret, str, type Env } from './env.ts'
 import { isLogLevel, type LogLevel } from './log.ts'
+import type { IPipelineConfig } from './pipelines.ts'
 import type { ISessionOptions } from './session-types.ts'
 import type { ISubagentProfile } from './subagents.ts'
 
@@ -51,6 +52,8 @@ export interface IWorkerConfig {
   agent: IAgentConfig
   // Static subagents (SUBAGENTS): name -> profile.
   subagents?: Record<string, ISubagentProfile>
+  // Pipelines (PIPELINES): name -> description + definition.
+  pipelines?: Record<string, IPipelineConfig>
   temporal: ITemporalConfig
   database: IDatabaseConfig
   logLevel: LogLevel
@@ -113,6 +116,8 @@ export const sessionOptions = (env: Env): ISessionOptions => ({
   maxQueuedMessages: int(env, 'SESSION_MAX_QUEUED_MESSAGES', 50, { min: 1, max: 1000 }),
   subagentMaxPerRound: int(env, 'SUBAGENT_MAX_PER_ROUND', 4, { min: 1, max: 64 }),
   subagentMaxPerSession: int(env, 'SUBAGENT_MAX_PER_SESSION', 50, { min: 0, max: 10_000 }),
+  pipelineMaxPerRound: int(env, 'PIPELINE_MAX_PER_ROUND', 2, { min: 1, max: 64 }),
+  pipelineMaxPerSession: int(env, 'PIPELINE_MAX_PER_SESSION', 20, { min: 0, max: 10_000 }),
 })
 
 export const gatewayAuth = (env: Env): GatewayAuth => {
@@ -185,6 +190,7 @@ export const workerConfig = (env: Env): IWorkerConfig => {
   const bundle = str(env, 'WORKFLOW_BUNDLE_PATH')
   const limiter = limiterConfig(env)
   const agent = agentConfigFromEnv(env)
+  const subagents = subagentProfilesFromEnv(env, agent.mcpServers)
   return {
     identity: str(env, 'WORKER_IDENTITY') ?? `${hostname()}-${process.pid}`,
     maxConcurrentTurns: int(env, 'WORKER_MAX_CONCURRENT_TURNS', 10, { min: 1 }),
@@ -196,7 +202,8 @@ export const workerConfig = (env: Env): IWorkerConfig => {
     eventMaxBytes: int(env, 'EVENT_MAX_BYTES', 262_144, { min: 1024 }),
     ...(limiter ? { limiter } : {}),
     agent,
-    subagents: subagentProfilesFromEnv(env, agent.mcpServers),
+    subagents,
+    pipelines: pipelinesFromEnv(env, { mcpServers: agent.mcpServers }, Object.keys(subagents)),
     temporal: temporalConfig(env),
     database: databaseConfig(env),
     logLevel: logLevelOf(env),

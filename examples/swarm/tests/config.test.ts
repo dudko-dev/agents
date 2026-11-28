@@ -254,3 +254,101 @@ test('static subagents: the caps are session options, bounded', () => {
     /SUBAGENT_MAX_PER_SESSION/,
   )
 })
+
+test('pipelines: PIPELINES, validated by the core and checked against the worker', () => {
+  const mcp = '{"docs":{"url":"https://mcp.example/mcp"}}'
+  const definition = {
+    version: 1,
+    entry: 'draft',
+    nodes: [
+      { id: 'draft', instructions: 'Write it.' },
+      { id: 'check', tools: ['docs__search'], routes: [{ label: 'ok' }, { label: 'again' }] },
+    ],
+    edges: [
+      { from: 'draft', to: 'check' },
+      { from: 'check', to: 'draft', when: { kind: 'route', label: 'again' } },
+    ],
+    limits: { maxNodeVisits: 2, maxRuns: 6 },
+  }
+  const cfg = workerConfig({
+    ...base,
+    MCP_SERVERS: mcp,
+    PIPELINES: JSON.stringify({
+      review: { description: 'Draft and check', definition, readOnly: true },
+    }),
+  })
+  assert.deepEqual(cfg.pipelines, {
+    review: { description: 'Draft and check', definition, readOnly: true },
+  })
+  assert.deepEqual(workerConfig(base).pipelines, {})
+  const bad =
+    (pipelines: unknown, extra: Record<string, string> = {}) =>
+    () =>
+      workerConfig({ ...base, MCP_SERVERS: mcp, PIPELINES: JSON.stringify(pipelines), ...extra })
+  assert.throws(() => workerConfig({ ...base, PIPELINES: '{' }), /PIPELINES must be valid JSON/)
+  assert.throws(bad([]), /PIPELINES must be a JSON object/)
+  assert.throws(bad({ r: 'x' }), /PIPELINES\.r must be an object/)
+  assert.throws(bad({ r: { definition } }), /PIPELINES\.r\.description is required/)
+  assert.throws(bad({ r: { description: 'd' } }), /PIPELINES\.r\.definition must be a pipeline/)
+  assert.throws(bad({ r: { description: 'd', definition: [] } }), /definition must be a pipeline/)
+  assert.throws(bad({ r: { description: 'd', definition, readOnly: 'yes' } }), /readOnly/)
+  assert.throws(
+    bad({ r: { description: 'd', definition, tools: ['x'] } }),
+    /PIPELINES\.r: unknown field\(s\) tools/,
+  )
+  // The core's validation, with every issue; a node naming what the worker does not have.
+  assert.throws(
+    bad({ r: { description: 'd', definition: { ...definition, entry: 'nope' } } }),
+    /PIPELINES\.r\.definition is not a valid pipeline/,
+  )
+  assert.throws(
+    bad({
+      r: {
+        description: 'd',
+        definition: { ...definition, nodes: [{ id: 'draft', tools: ['github__push'] }], edges: [] },
+      },
+    }),
+    /PIPELINES\.r: node "draft": tool "github__push" is not a tool of this worker/,
+  )
+  assert.throws(
+    bad({
+      r: {
+        description: 'd',
+        definition: { ...definition, nodes: [{ id: 'draft', skills: ['x'] }], edges: [] },
+      },
+    }),
+    /"skills" are not supported here/,
+  )
+  // Not a subagent's name.
+  assert.throws(
+    bad(
+      { researcher: { description: 'd', definition } },
+      { SUBAGENTS: JSON.stringify({ researcher: { description: 'Research' } }) },
+    ),
+    /PIPELINES: "researcher" is already a subagent/,
+  )
+})
+
+test('pipelines: the caps are session options, bounded', () => {
+  const o = sessionOptions({})
+  assert.equal(o.pipelineMaxPerRound, 2)
+  assert.equal(o.pipelineMaxPerSession, 20)
+  const set = sessionOptions({ PIPELINE_MAX_PER_ROUND: '1', PIPELINE_MAX_PER_SESSION: '0' })
+  assert.equal(set.pipelineMaxPerRound, 1)
+  assert.equal(set.pipelineMaxPerSession, 0, '0: no pipeline call in this session')
+  assert.throws(() => sessionOptions({ PIPELINE_MAX_PER_ROUND: '0' }), /PIPELINE_MAX_PER_ROUND/)
+  assert.throws(() => sessionOptions({ PIPELINE_MAX_PER_ROUND: '65' }), /PIPELINE_MAX_PER_ROUND/)
+  assert.throws(
+    () => sessionOptions({ PIPELINE_MAX_PER_SESSION: '-1' }),
+    /PIPELINE_MAX_PER_SESSION/,
+  )
+  assert.throws(
+    () => sessionOptions({ PIPELINE_MAX_PER_SESSION: '10001' }),
+    /PIPELINE_MAX_PER_SESSION/,
+  )
+  // The gateway reads them: they are fixed when a session starts.
+  assert.equal(
+    gatewayConfig({ ...base, PIPELINE_MAX_PER_ROUND: '3' }).session.pipelineMaxPerRound,
+    3,
+  )
+})

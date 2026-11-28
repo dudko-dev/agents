@@ -58,6 +58,8 @@ test('the values schema takes the defaults and the every-flag-on values', async 
   assert.ok(validate(merged), JSON.stringify(validate.errors))
 })
 
+const pipelineDef = { version: 1, entry: 'a', nodes: [{ id: 'a' }], edges: [] }
+
 test('the values schema refuses what must not deploy', async () => {
   const validate = await validator()
   const base = await defaults()
@@ -77,6 +79,43 @@ test('the values schema refuses what must not deploy', async () => {
     ['worker.autoscaling.keda.queueTypes', 'everything'],
     ['agent.subagents', { 'Bad Name': { description: 'x' } }],
     ['agent.subagents', { researcher: {} }],
+    ['session.pipelineMaxPerRound', 0],
+    ['session.pipelineMaxPerRound', 65],
+    ['session.pipelineMaxPerSession', -1],
+    ['agent.pipelines', { 'Bad Name': { description: 'x', definition: pipelineDef } }],
+    ['agent.pipelines', { review: { definition: pipelineDef } }],
+    ['agent.pipelines', { review: { description: 'x' } }],
+    ['agent.pipelines', { review: { description: 'x', definition: pipelineDef, tools: [] } }],
+    [
+      'agent.pipelines',
+      { review: { description: 'x', definition: { ...pipelineDef, version: 2 } } },
+    ],
+    [
+      'agent.pipelines',
+      { review: { description: 'x', definition: { ...pipelineDef, nodes: [{ id: 'a.b' }] } } },
+    ],
+    [
+      'agent.pipelines',
+      {
+        review: {
+          description: 'x',
+          definition: { ...pipelineDef, nodes: [{ id: 'a', skills: ['s'] }] },
+        },
+      },
+    ],
+    [
+      'agent.pipelines',
+      {
+        review: {
+          description: 'x',
+          definition: { ...pipelineDef, nodes: [{ id: 'a', settings: { t: 1 } }] },
+        },
+      },
+    ],
+    [
+      'agent.pipelines',
+      { review: { description: 'x', definition: { ...pipelineDef, limits: { maxRuns: 0 } } } },
+    ],
     ['agent.extra', { lower_case: 'x' }],
     ['secrets.databaseUrl', { name: '', key: 'database-url' }],
     ['tmp.sizeLimit', 'lots'],
@@ -90,6 +129,14 @@ test('the values schema refuses what must not deploy', async () => {
   }
   // The bundled Temporal chart's own values pass through.
   assert.ok(validate(withValue(base, 'temporal.server', { replicaCount: 1 })))
+  // A pipeline the app takes passes; so does one given as a JSON string.
+  assert.ok(
+    validate(
+      withValue(base, 'agent.pipelines', { review: { description: 'x', definition: pipelineDef } }),
+    ),
+    JSON.stringify(validate.errors),
+  )
+  assert.ok(validate(withValue(base, 'agent.pipelines', '{"review":{}}')))
 })
 
 test("every variable the chart's ConfigMaps set is one the app reads", async () => {

@@ -88,6 +88,7 @@ export const createTemporalBackend = (o: {
     state: (sessionId) => call(sessionId, () => handle(sessionId).query(stateQuery)),
     parkedItem: (sessionId, itemId) => parked.item(sessionId, itemId),
     subagents: (sessionId) => parked.subagents(sessionId),
+    pipelines: (sessionId) => parked.pipelines(sessionId),
     exists: async (sessionId) => {
       try {
         return await exists(sessionId)

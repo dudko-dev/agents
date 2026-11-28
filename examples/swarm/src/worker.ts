@@ -10,7 +10,7 @@ import { existsSync } from 'node:fs'
 import { createServer, type Server } from 'node:http'
 import { NativeConnection, Runtime, Worker } from '@temporalio/worker'
 import { createAgent, type AgentEvent, type IAgent, type IAgentConfig } from '@dudko.dev/agent'
-import { createActivities } from './activities.ts'
+import { createActivities, type IPipelineNodeRuntime, type IPipelineRuntime } from './activities.ts'
 import type { IWorkerConfig } from './config.ts'
 import { createEventStore } from './db/events.ts'
 import { createPostgresJournal } from './db/journal.ts'
@@ -21,6 +21,12 @@ import { createPostgresPersistence, createRunStore } from './db/runs.ts'
 import { createHeartbeatLease } from './lease.ts'
 import type { ILogger } from './log.ts'
 import { DEFAULT_BUNDLE_PATH, WORKFLOWS_PATH } from './paths.ts'
+import {
+  checkPipelines,
+  pipelineNodeConfig,
+  preparedDefinition,
+  type IPipelineConfig,
+} from './pipelines.ts'
 import {
   checkSubagentProfiles,
   childAgentConfig,
@@ -34,6 +40,8 @@ export interface IRunningWorker {
   agent: IAgent
   // The static subagents' agents, by name.
   subagents: Map<string, IAgent>
+  // The pipelines' node agents, by pipeline and node id.
+  pipelines: Map<string, IPipelineRuntime & { nodes: Map<string, IPipelineNodeRuntime> }>
   // Resolves once the worker has stopped and everything it opened is closed.
   done: Promise<void>
   shutdown: () => void
@@ -113,8 +121,10 @@ export const startWorker = async (
   // Tests swap the agent's config (a scripted model) without touching the env.
   agentConfig: IAgentConfig = cfg.agent,
   profiles: Record<string, ISubagentProfile> = cfg.subagents ?? {},
+  pipelineConfigs: Record<string, IPipelineConfig> = cfg.pipelines ?? {},
 ): Promise<IRunningWorker> => {
   checkSubagentProfiles(profiles, agentConfig)
+  checkPipelines(pipelineConfigs, agentConfig, Object.keys(profiles))
   const pool = createPool(cfg.database.url, {
     max: cfg.database.poolMax,
     applicationName: 'swarm-worker',
@@ -130,14 +140,18 @@ export const startWorker = async (
     log: (message) => log.warn(message),
   })
   const sharedLimits = cfg.limiter ? createPostgresLimits(pool, cfg.limiter) : undefined
-  // Every agent of the worker - the session's and each subagent's - on the same snapshots, the
-  // same call journal (exact resume, and what parking needs), the same lease (the heartbeat of the
-  // activity it runs in) and the same shared limits.
+  // Every agent of the worker - the session's, each subagent's and each pipeline node's - on the
+  // same snapshots, the same call journal (exact resume, and what parking needs), the same lease
+  // (the heartbeat of the activity it runs in) and the same shared limits.
   const shared = {
     persistence: { ...createPostgresPersistence(pool), journal: createPostgresJournal(pool) },
     runLease: lease,
     ...(sharedLimits ? { sharedLimits } : {}),
   }
+  const agent = await createAgent(
+    { ...sessionAgentConfig(agentConfig, profiles, pipelineConfigs), ...shared },
+    agentLogger(log),
+  )
   const subagents = new Map<string, IAgent>()
   for (const [name, profile] of Object.entries(profiles)) {
     subagents.set(
@@ -145,10 +159,22 @@ export const startWorker = async (
       await createAgent({ ...childAgentConfig(agentConfig, profile), ...shared }, agentLogger(log)),
     )
   }
-  const agent = await createAgent(
-    { ...sessionAgentConfig(agentConfig, profiles), ...shared },
-    agentLogger(log),
-  )
+  // One agent per node of every pipeline. The catalog: the worker's tools as the session agent
+  // found them (a node that names one tool of a server and whole servers needs their names).
+  const catalog = agent.listTools()
+  const pipelines: IRunningWorker['pipelines'] = new Map()
+  const nodeAgents: IAgent[] = []
+  for (const [name, p] of Object.entries(pipelineConfigs)) {
+    const definition = preparedDefinition(name, p.definition)
+    const nodes = new Map<string, IPipelineNodeRuntime>()
+    for (const node of definition.nodes) {
+      const config: IAgentConfig = { ...pipelineNodeConfig(agentConfig, node, catalog), ...shared }
+      const nodeAgent = await createAgent(config, agentLogger(log))
+      nodeAgents.push(nodeAgent)
+      nodes.set(node.id, { node, agent: nodeAgent, config })
+    }
+    pipelines.set(name, { definition, nodes })
+  }
   const connection = await NativeConnection.connect(connectionOptions(cfg.temporal))
   const bundle =
     cfg.workflowBundlePath ?? (existsSync(DEFAULT_BUNDLE_PATH) ? DEFAULT_BUNDLE_PATH : undefined)
@@ -158,7 +184,7 @@ export const startWorker = async (
     taskQueue: cfg.temporal.taskQueue,
     identity: cfg.identity,
     ...(bundle ? { workflowBundle: { codePath: bundle } } : { workflowsPath: WORKFLOWS_PATH }),
-    activities: createActivities({ agent, runs, events, parked, log, subagents }),
+    activities: createActivities({ agent, runs, events, parked, log, subagents, pipelines }),
     maxConcurrentActivityTaskExecutions: cfg.maxConcurrentTurns,
     shutdownGraceTime: cfg.shutdownGraceMs,
     // A stop reaches a running turn on its next heartbeat: send them often.
@@ -171,12 +197,14 @@ export const startWorker = async (
     taskQueue: cfg.temporal.taskQueue,
     workflows: bundle ? 'bundle' : 'source',
     subagents: [...subagents.keys()],
+    pipelines: [...pipelines.keys()],
   })
   const done = worker.run().finally(async () => {
     log.info('worker stopped; closing', { identity: cfg.identity })
     health?.close()
     await agent.close().catch(() => {})
     for (const child of subagents.values()) await child.close().catch(() => {})
+    for (const node of nodeAgents) await node.close().catch(() => {})
     await connection.close().catch(() => {})
     await pool.end().catch(() => {})
   })
@@ -185,6 +213,7 @@ export const startWorker = async (
     worker,
     agent,
     subagents,
+    pipelines,
     done,
     shutdown: () => worker.shutdown(),
     ...(address && typeof address === 'object' ? { healthPort: address.port } : {}),

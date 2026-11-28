@@ -14,6 +14,9 @@ import {
   finishTurn,
   hasWork,
   initialState,
+  PIPELINE_DEFAULTS,
+  pipelineAnswerOf,
+  pipelineFinished,
   SEEN_KEPT,
   shouldContinueAsNew,
   startChildren,
@@ -24,7 +27,12 @@ import {
   TURNS_KEPT,
   view,
 } from '../src/session-state.ts'
-import { subagentStreamOf, subagentWorkflowIdOf } from '../src/session-api.ts'
+import {
+  pipelineStreamOf,
+  pipelineWorkflowIdOf,
+  subagentStreamOf,
+  subagentWorkflowIdOf,
+} from '../src/session-api.ts'
 import type { IParkedRequest, ISessionOptions } from '../src/session-types.ts'
 
 const options = (extra: Partial<ISessionOptions> = {}): ISessionOptions => ({
@@ -560,4 +568,276 @@ test('a child workflow id is a function of session, run and item - nothing else'
     return startChildren(s, 1).map((c) => c.workflowId)
   }
   assert.deepEqual(ids(), ids())
+})
+
+// --- pipelines ----------------------------------------------------------------------------------
+
+const pipe = (id: string, task = id, name = 'review'): IParkedRequest => ({
+  requestId: id,
+  kind: 'tool',
+  question: { toolName: name },
+  pipeline: { name, task },
+})
+
+test('pipelines: one child per call, ids from session + run + item, in one order with subagents', () => {
+  const s = initialState('s', options())
+  park(s, [sub('k1', 'dig'), pipe('p1', 'check it'), approval('a'), pipe('p2', 'again')], 3)
+  const starts = startChildren(s, 5)
+  assert.deepEqual(
+    starts.map((c) => [c.kind, c.requestId, c.workflowId, c.input.stream, c.input.task]),
+    [
+      ['subagent', 'k1', subagentWorkflowIdOf('s', 'r1', 'k1'), subagentStreamOf('s', 'k1'), 'dig'],
+      [
+        'pipeline',
+        'p1',
+        pipelineWorkflowIdOf('s', 'r1', 'p1'),
+        pipelineStreamOf('s', 'p1'),
+        'check it',
+      ],
+      [
+        'pipeline',
+        'p2',
+        pipelineWorkflowIdOf('s', 'r1', 'p2'),
+        pipelineStreamOf('s', 'p2'),
+        'again',
+      ],
+    ],
+  )
+  const p1 = starts[1]!
+  assert.ok(p1.kind === 'pipeline')
+  if (p1.kind === 'pipeline') {
+    assert.equal(p1.input.workflowId, p1.workflowId, 'it names its node children from its own id')
+    assert.equal(p1.input.name, 'review')
+    assert.equal(p1.input.parentRunId, 'r1')
+    assert.equal(p1.input.options.maxTurnAttempts, 3)
+  }
+  assert.equal(s.subagentsStarted, 1)
+  assert.equal(s.pipelinesStarted, 2)
+  assert.equal(childrenRunning(s), true)
+  assert.deepEqual(startChildren(s, 6), [], 'a second call starts nothing again')
+  // The started markers: one counter for both kinds, in start order.
+  assert.deepEqual(
+    s.markers.map((m) => [m.type, m.turnAttempt, m.seq, m.body.itemId]),
+    [
+      ['subagent.started', 3, SUBAGENT_MARKER_SEQ, 'k1'],
+      ['pipeline.call.started', 3, SUBAGENT_MARKER_SEQ + 1, 'p1'],
+      ['pipeline.call.started', 3, SUBAGENT_MARKER_SEQ + 2, 'p2'],
+    ],
+  )
+  assert.deepEqual(s.markers[1]!.body, {
+    itemId: 'p1',
+    name: 'review',
+    task: 'check it',
+    workflowId: pipelineWorkflowIdOf('s', 'r1', 'p1'),
+    events: '/sessions/s/pipelines/p1/events',
+  })
+  s.markers = []
+  // The ends, in the order the children end, whatever their kind; each answers its own item.
+  assert.equal(
+    pipelineFinished(
+      s,
+      'p2',
+      {
+        status: 'failed',
+        error: 'Pipeline node "b" failed (visit 1): boom',
+        runs: 2,
+        usage,
+        nodeId: 'b',
+        visit: 1,
+      },
+      7,
+    ),
+    true,
+  )
+  assert.deepEqual(s.answers.p2, {
+    requestId: 'p2',
+    value: { error: 'pipeline "review" failed: Pipeline node "b" failed (visit 1): boom' },
+    at: 7,
+    by: 'pipeline',
+  })
+  assert.equal(pipelineFinished(s, 'p2', { status: 'stopped', runs: 0, usage }, 8), false, 'once')
+  assert.equal(
+    pipelineFinished(s, 'k1', { status: 'stopped', runs: 0, usage }, 8),
+    false,
+    'a subagent',
+  )
+  assert.equal(
+    childFinished(s, 'p1', { status: 'failed', error: 'x' }, 8),
+    false,
+    'a pipeline is not a subagent child',
+  )
+  childFinished(s, 'k1', { status: 'completed', runId: 'c', attempt: 1, text: 'dug', usage }, 9)
+  pipelineFinished(s, 'p1', { status: 'completed', text: 'checked', usage, runs: 3 }, 10)
+  assert.deepEqual(s.answers.p1?.value, { output: 'checked' })
+  assert.deepEqual(
+    s.markers.map((m) => [m.type, m.seq, m.body.itemId, m.body.status]),
+    [
+      ['pipeline.call.ended', SUBAGENT_MARKER_SEQ + SUBAGENT_MARKER_SPAN, 'p2', 'failed'],
+      ['subagent.ended', SUBAGENT_MARKER_SEQ + SUBAGENT_MARKER_SPAN + 1, 'k1', 'completed'],
+      ['pipeline.call.ended', SUBAGENT_MARKER_SEQ + SUBAGENT_MARKER_SPAN + 2, 'p1', 'completed'],
+    ],
+  )
+  assert.deepEqual(s.markers[0]!.body, {
+    itemId: 'p2',
+    name: 'review',
+    status: 'failed',
+    error: 'Pipeline node "b" failed (visit 1): boom',
+    nodeId: 'b',
+    visit: 1,
+    runs: 2,
+    usage,
+  })
+  assert.deepEqual(s.markers[2]!.body, {
+    itemId: 'p1',
+    name: 'review',
+    status: 'completed',
+    text: 'checked',
+    runs: 3,
+    usage,
+  })
+  assert.equal(childrenRunning(s), false)
+  assert.equal(parkedReadyAfter(s, 'a'), true)
+  const resumed = takeTurn(s, 11)!
+  assert.deepEqual(Object.keys(resumed.answers!).sort(), ['a', 'k1', 'p1', 'p2'])
+  assert.deepEqual(resumed.pipelines, {
+    maxPerRound: PIPELINE_DEFAULTS.maxPerRound,
+    remaining: PIPELINE_DEFAULTS.maxPerSession - 2,
+  })
+  assert.equal(view(s).pipelinesStarted, 2)
+})
+
+test("pipelines: a pipeline's answer; a cap cut it short - still an answer, with a note", () => {
+  assert.deepEqual(
+    pipelineAnswerOf('review', { status: 'completed', text: 'done', usage, runs: 2 }),
+    {
+      output: 'done',
+    },
+  )
+  const cut = pipelineAnswerOf('review', {
+    status: 'completed',
+    text: 'last draft',
+    usage,
+    runs: 6,
+    stoppedBy: 'maxNodeVisits',
+  }) as { output: string }
+  assert.match(
+    cut.output,
+    /^last draft\n\n\[pipeline "review" was cut short by its maxNodeVisits limit after 6 node runs/,
+  )
+  assert.deepEqual(pipelineAnswerOf('review', { status: 'stopped', runs: 1, usage }), {
+    error: 'pipeline "review" was stopped before it answered',
+  })
+})
+
+test('pipelines: only the pipeline answers its item; a client answer is refused', () => {
+  const s = initialState('s', options())
+  park(s, [pipe('p1')])
+  assert.equal(
+    acceptAnswer(s, { requestId: 'p1', value: { output: 'mine' }, at: 2, by: 'client' }),
+    'refused',
+  )
+  assert.equal(acceptAnswer(s, { requestId: 'p1', value: { output: 'x' }, at: 2 }), 'refused')
+  assert.equal(
+    acceptAnswer(s, { requestId: 'p1', value: { output: 'x' }, at: 2, by: 'subagent' }),
+    'refused',
+    'nor a subagent',
+  )
+  assert.deepEqual(s.answers, {})
+  // Before a park, a pipeline's answer is never kept (no child runs before its park).
+  const t = initialState('t', options())
+  assert.equal(
+    acceptAnswer(t, { requestId: 'x', value: { output: 'x' }, at: 1, by: 'pipeline' }),
+    'refused',
+  )
+})
+
+test('pipelines: the caps per round and per session refuse with a tool error, never a child', () => {
+  const s = initialState(
+    's',
+    options({ pipelineMaxPerRound: 1, pipelineMaxPerSession: 2, subagentMaxPerRound: 1 }),
+  )
+  park(s, [pipe('a'), pipe('b'), sub('k1'), sub('k2')])
+  const first = startChildren(s, 1)
+  assert.deepEqual(
+    first.map((c) => c.requestId),
+    ['a', 'k1'],
+    'each kind has its own cap',
+  )
+  assert.deepEqual(s.answers.b, {
+    requestId: 'b',
+    value: { error: 'pipeline "review" refused: at most 1 pipeline calls in one round' },
+    at: 1,
+    by: 'pipeline',
+  })
+  assert.match(String((s.answers.k2?.value as { error: string }).error), /at most 1 subagent calls/)
+  pipelineFinished(s, 'a', { status: 'completed', text: 'a', usage, runs: 1 }, 2)
+  childFinished(s, 'k1', { status: 'completed', runId: 'c', attempt: 1, text: 'k', usage }, 2)
+  const resumed = takeTurn(s, 3)!
+  assert.deepEqual(resumed.pipelines, { maxPerRound: 1, remaining: 1 })
+  finishTurn(
+    s,
+    resumed,
+    { status: 'parked', runId: 'r1', attempt: 2, turnAttempt: 2, requests: [pipe('c')] },
+    4,
+  )
+  assert.deepEqual(
+    startChildren(s, 5).map((c) => c.requestId),
+    ['c'],
+  )
+  pipelineFinished(s, 'c', { status: 'completed', text: 'c', usage, runs: 1 }, 6)
+  const third = takeTurn(s, 7)!
+  assert.deepEqual(third.pipelines, { maxPerRound: 1, remaining: 0 })
+  finishTurn(
+    s,
+    third,
+    { status: 'parked', runId: 'r1', attempt: 3, turnAttempt: 3, requests: [pipe('d')] },
+    8,
+  )
+  assert.deepEqual(startChildren(s, 9), [])
+  assert.match(
+    String((s.answers.d?.value as { error: string }).error),
+    /at most 2 pipeline calls in one session/,
+  )
+})
+
+test('pipelines: only the kinds the workflow starts (each behind its own patch)', () => {
+  const s = initialState('s', options())
+  park(s, [sub('k1'), pipe('p1')])
+  assert.deepEqual(
+    startChildren(s, 1, { subagents: true, pipelines: false }).map((c) => c.requestId),
+    ['k1'],
+  )
+  assert.equal(s.answers.p1, undefined, 'not refused either: left alone')
+  assert.deepEqual(
+    startChildren(s, 2, { subagents: true, pipelines: true }).map((c) => c.requestId),
+    ['p1'],
+  )
+})
+
+test('pipelines: a stop drops a late result; continue-as-new waits for a running pipeline', () => {
+  const s = initialState('s', options({ maxTurnsPerRun: 1 }))
+  park(s, [pipe('p1')])
+  startChildren(s, 1)
+  s.markers = []
+  assert.equal(shouldContinueAsNew(s, true), false, 'a pipeline runs')
+  const next = initialState('s', options(), carry(s))
+  assert.equal(next.pipelinesStarted, 1, 'the count is carried')
+  acceptStop(s, { at: 2 }, 2)
+  assert.equal(
+    pipelineFinished(s, 'p1', { status: 'completed', text: 'late', usage, runs: 1 }, 3),
+    false,
+  )
+  assert.deepEqual(s.answers, {})
+  assert.equal(shouldContinueAsNew(s, true), false, 'the turn.ended marker first')
+})
+
+test('a session started before pipelines existed gets their defaults', () => {
+  const s = initialState('s', options())
+  acceptMessage(s, msg('m'))
+  assert.deepEqual(takeTurn(s, 0)?.pipelines, {
+    maxPerRound: PIPELINE_DEFAULTS.maxPerRound,
+    remaining: PIPELINE_DEFAULTS.maxPerSession,
+  })
+  const old = initialState('s', options(), { ...carry(s), pipelinesStarted: undefined } as never)
+  assert.equal(old.pipelinesStarted, 0)
 })

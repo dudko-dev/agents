@@ -17,4 +17,4 @@ Try it (GATEWAY_TOKENS is in the Secret above):
   curl -s -X POST localhost:8080/sessions -H "authorization: Bearer $TOKEN" \
     -H 'content-type: application/json' -d '{"message":"What is 2+2?"}'
 
-The HTTP API, parking and subagents: https://github.com/dudko-dev/agents/tree/main/examples/swarm
+The HTTP API, parking, subagents and pipelines: https://github.com/dudko-dev/agents/tree/main/examples/swarm

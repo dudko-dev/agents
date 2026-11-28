@@ -1,8 +1,9 @@
 // `runLease` for the agent, held by the Temporal activity that runs the turn:
 //
-//   acquire - the run is starting inside a turn activity: bind it to that turn (a fresh run) or
-//             check it is the run the turn resumes and raise its fence (the attempt the resume
-//             claims: from now on an older attempt writes nothing - no snapshot, no journal entry).
+//   acquire - the run is starting inside a turn activity: it must be the run the activity named
+//             (`run({ runId })` for a fresh run, `resumeFromRunId` for a resume). Bind a fresh run
+//             to its turn, or raise a resumed run's fence (the attempt the resume claims: from now
+//             on an older attempt writes nothing - no snapshot, no journal entry).
 //             Temporal runs one attempt of an activity at a time, so there is no one else to take
 //             it from; the bind's unique key and the fence are the guards against a worker that
 //             lost the turn and does not know yet.
@@ -15,29 +16,32 @@
 //
 // One agent serves every turn of the worker, so the lease finds the turn through an
 // AsyncLocalStorage the activity sets around `agent.run` (acquire runs inside that call) and then
-// by run id.
+// by run id. The activity chooses a fresh run's id itself (activities.ts, `runIdOf`), so the scope
+// knows its run before the core starts it.
 import { AsyncLocalStorage } from 'node:async_hooks'
 import type { IRunLease } from '@dudko.dev/agent'
 import type { IRunBinding } from './db/runs.ts'
 
 export type TurnIntent =
-  | { kind: 'fresh'; runNo: number; attemptBase: number }
+  | { kind: 'fresh'; runId: string; runNo: number; attemptBase: number }
   | { kind: 'resume'; runId: string; attemptBase: number }
 
 export interface ITurnScope {
-  // The session - or, for a subagent's child run, its own stream (session-api.ts).
+  // The session - or, for a child's run (a subagent, a pipeline node's visit), its own stream
+  // (session-api.ts).
   sessionId: string
   turn: number
   intent: TurnIntent
-  // Set by acquire.
+  // Set by acquire: the run holds the lease.
   runId?: string
   heartbeat: (details: unknown) => void
   // Why the turn may not go on here (undefined while it may).
   revoked: () => string | undefined
-  // A session turn: what its static subagent calls may start (ITurnInput.subagents), and how
-  // many this attempt dispatched (an attempt parks at the first round that dispatches, so this
-  // is the round's count).
+  // A session turn: what its static subagent and pipeline calls may start (ITurnInput.subagents,
+  // .pipelines), and how many this attempt dispatched (an attempt parks at the first round that
+  // dispatches, so this is the round's count).
   subagents?: { maxPerRound: number; remaining: number; dispatched: number }
+  pipelines?: { maxPerRound: number; remaining: number; dispatched: number }
 }
 
 const scopes = new AsyncLocalStorage<ITurnScope>()
@@ -71,14 +75,11 @@ export const createHeartbeatLease = (o: {
         o.log?.(`[lease] run ${runId} started outside a turn activity: refused`)
         return false
       }
-      if (scope.runId && scope.runId !== runId) {
-        // One run per turn activity: anything else would be a second run inside this one.
+      if (runId !== scope.intent.runId || (scope.runId && scope.runId !== runId)) {
+        // The run the activity named, once: anything else would be a second run inside this one.
         return false
       }
       if (scope.intent.kind === 'resume') {
-        if (runId !== scope.intent.runId) {
-          return false
-        }
         if ((await o.fenceRun(runId)) === undefined) {
           o.log?.(`[lease] run ${runId} is not bound: the resume is refused`)
           return false

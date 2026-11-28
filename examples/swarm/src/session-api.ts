@@ -22,9 +22,49 @@ export const subagentWorkflowIdOf = (sessionId: string, runId: string, itemId: s
 export const subagentStreamOf = (sessionId: string, itemId: string): string =>
   `${sessionId}/${itemId}`
 
+// The child workflow that runs one pipeline call (one item of a parked turn): the pipeline's
+// graph engine is its scheduler, and every node visit is a child workflow of its own.
+export const PIPELINE_WORKFLOW = 'pipeline'
+export const PIPELINE_NODE_WORKFLOW = 'pipelineNode'
+
+// Named like a subagent's child: from the session, the parent run and the item.
+export const pipelineWorkflowIdOf = (sessionId: string, runId: string, itemId: string): string =>
+  `pipeline-${sessionId}-${runId}-${itemId}`
+
+// The pipeline's own stream (the engine's pipeline.* events): keyed like a subagent child's.
+export const pipelineStreamOf = (sessionId: string, itemId: string): string =>
+  `${sessionId}/${itemId}`
+
+// A node visit's child workflow: the pipeline's id, the node and the visit. A node id has no '.'
+// (pipelines.ts refuses one), so the parts never run into each other.
+export const pipelineNodeWorkflowIdOf = (
+  pipelineWorkflowId: string,
+  nodeId: string,
+  visit: number,
+): string => `${pipelineWorkflowId}.${nodeId}.${visit}`
+
+// A node visit's own stream: its run (swarm_runs) and its events (swarm_events).
+export const pipelineNodeStreamOf = (
+  sessionId: string,
+  itemId: string,
+  nodeId: string,
+  visit: number,
+): string => `${sessionId}/${itemId}/${nodeId}/${visit}`
+
+// Where the gateway serves those streams.
+export const pipelineEventsPath = (sessionId: string, itemId: string): string =>
+  `/sessions/${sessionId}/pipelines/${itemId}/events`
+export const pipelineNodeEventsPath = (
+  sessionId: string,
+  itemId: string,
+  nodeId: string,
+  visit: number,
+): string => `/sessions/${sessionId}/pipelines/${itemId}/nodes/${nodeId}/${visit}/events`
+
 // patched() ids of the session workflow: a running session replays without them, a new one gets
 // them (sessions live for days).
 export const PATCH_SUBAGENTS = 'swarm-subagent-children-v1'
+export const PATCH_PIPELINES = 'swarm-pipeline-children-v1'
 
 // Signals, not updates: a signal is accepted by the server even while no worker runs, so the
 // gateway answers at once and a swarm scaled to zero still takes messages.

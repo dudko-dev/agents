@@ -51,6 +51,8 @@ data:
   SESSION_MAX_QUEUED_MESSAGES: {{ $s.maxQueuedMessages | quote }}
   SUBAGENT_MAX_PER_ROUND: {{ $s.subagentMaxPerRound | quote }}
   SUBAGENT_MAX_PER_SESSION: {{ $s.subagentMaxPerSession | quote }}
+  PIPELINE_MAX_PER_ROUND: {{ $s.pipelineMaxPerRound | quote }}
+  PIPELINE_MAX_PER_SESSION: {{ $s.pipelineMaxPerSession | quote }}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -98,6 +100,9 @@ data:
   {{- end }}
   {{- with $a.subagents }}
   SUBAGENTS: {{ include "swarm.json" . | quote }}
+  {{- end }}
+  {{- with $a.pipelines }}
+  PIPELINES: {{ include "swarm.json" . | quote }}
   {{- end }}
   AGENT_MAX_ITERATIONS: {{ $a.maxIterations | quote }}
   AGENT_MAX_STEPS_PER_TASK: {{ $a.maxStepsPerTask | quote }}
