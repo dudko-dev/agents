@@ -24,7 +24,10 @@ export default defineConfig([
     ...shared,
     entry: { index: 'src/index.ts' },
     format: ['esm', 'cjs'],
-    dts: true,
+    // The types of `./pipeline-engine` too: its JS is built below, but its d.ts must come from
+    // THIS build - the d.ts build of a block with `clean` deletes every d.ts in dist when it
+    // starts, the ones another block has already written included.
+    dts: { entry: { index: 'src/index.ts', 'pipeline-engine': 'src/pipeline-engine.ts' } },
     // The subagent tool resolves its worker entry with
     // `new URL('./subagent-worker.js', import.meta.url)`; the shim gives the
     // CJS build a real import.meta.url (pathToFileURL(__filename)).
@@ -48,6 +51,17 @@ export default defineConfig([
     entry: { 'sandbox-worker': 'src/sandbox-worker.ts' },
     format: ['esm'],
     external: ['quickjs-emscripten'],
+  },
+  {
+    ...shared,
+    // `@dudko.dev/agent/pipeline-engine`: the pipeline engine alone - a file with no imports, for
+    // an orchestrator that cannot load the agent (a workflow sandbox). A build of its own, so no
+    // chunk is shared with the main entry (`splitting: false` too);
+    // tests/pipeline-determinism.test.ts checks the built files import nothing. Its d.ts is the
+    // main block's (see there).
+    clean: false,
+    entry: { 'pipeline-engine': 'src/pipeline-engine.ts' },
+    format: ['esm', 'cjs'],
   },
   {
     ...shared,

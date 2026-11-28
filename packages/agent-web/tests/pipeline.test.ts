@@ -18,6 +18,7 @@ import {
   type PipelineNodeInput,
   type PipelineNodeOutput,
   type PipelineNodeRunner,
+  type PipelineResult,
 } from '../dist/index.js'
 
 // The graph engine, through `runNode` stubs: no agent, no model. Everything below this line is
@@ -160,6 +161,124 @@ test('pipeline: a cycle of mutual waiting resolves - every waiting node runs', a
   assert.deepEqual(p.order().sort(), ['a', 'b', 'c'])
   assert.equal(result.runs, 3)
   assert.equal(result.stoppedBy, 'maxNodeVisits')
+})
+
+// Each wave of a run, as `<node>#<visit>[<the nodes it got outputs from>]`, read off the trace.
+const wavesOf = (result: PipelineResult): string[][] => {
+  const waves: string[][] = []
+  for (const t of result.trace) {
+    if (t.type === 'node') (waves[t.wave] ??= []).push(`${t.nodeId}#${t.visit}[${t.from}]`)
+  }
+  return waves
+}
+
+// a → b → join, a → c → d → join, and back: join → a. The join and d reach each other through the
+// loop (join → a → c → d), so each waits for the other.
+const loopAround = (): PipelineDefinition =>
+  graph(
+    'a',
+    [...nodes('a', 'b', 'c', 'd'), { id: 'join', name: 'Join' }],
+    [
+      edge('a', 'b'),
+      edge('a', 'c'),
+      edge('c', 'd'),
+      edge('b', 'join'),
+      edge('d', 'join'),
+      edge('join', 'a'),
+    ],
+    { maxNodeVisits: 2 },
+  )
+
+test("pipeline: in a loop around the fan-out and the fan-in, join 'all' waits for the slower branch on every pass", async () => {
+  const p = stubbed(loopAround())
+  const result = await p.run()
+  // The wait of d for the join goes back through the loop's head (a): it is for the next pass,
+  // so d runs and the join goes on waiting for it.
+  assert.deepEqual(wavesOf(result), [
+    ['a#1[]'],
+    ['b#1[a]', 'c#1[a]'],
+    ['d#1[c]'],
+    ['join#1[b,d]'],
+    ['a#2[join]'],
+    ['b#2[a]', 'c#2[a]'],
+    ['d#2[c]'],
+    ['join#2[b,d]'],
+  ])
+  assert.deepEqual(
+    [result.runs, result.stoppedBy, result.text],
+    [10, 'maxNodeVisits', 'join output'],
+  )
+})
+
+test('pipeline: the loop may go back to any node before the fan-out, in any order of the edges', async () => {
+  // s → p → a, the fan-out and the fan-in, then join → r → p: back to p, not to the entry.
+  const edges = [
+    edge('s', 'p'),
+    edge('p', 'a'),
+    edge('a', 'b'),
+    edge('a', 'c'),
+    edge('c', 'd'),
+    edge('b', 'join'),
+    edge('d', 'join'),
+    edge('join', 'r'),
+    edge('r', 'p'),
+  ]
+  for (const order of [edges, [...edges].reverse()]) {
+    const p = stubbed(
+      graph('s', nodes('s', 'p', 'a', 'b', 'c', 'd', 'join', 'r'), order, { maxNodeVisits: 2 }),
+    )
+    const result = await p.run()
+    assert.deepEqual(
+      p.calls.filter((c) => c.nodeId === 'join').map((c) => c.input.from.map((f) => f.nodeId)),
+      [
+        ['b', 'd'],
+        ['b', 'd'],
+      ],
+    )
+    assert.deepEqual([result.runs, result.stoppedBy], [15, 'maxNodeVisits'])
+  }
+})
+
+test('pipeline: only a wait of everybody is decided by the pass - a node after a loop still waits for it to end', async () => {
+  // e → a, a ↔ b (the loop), a → x: x waits while b can still reach it (through a), however
+  // long the loop goes - b is never stuck waiting, so nothing changes here.
+  const p = stubbed(
+    graph('e', nodes('e', 'a', 'b', 'x'), [
+      edge('e', 'a'),
+      edge('a', 'b'),
+      edge('b', 'a'),
+      edge('a', 'x'),
+    ]),
+  )
+  const result = await p.run()
+  assert.deepEqual(
+    p.calls.filter((c) => c.nodeId === 'x').map((c) => c.input.from.map((f) => f.nodeId)),
+    [['a', 'a', 'a']],
+  )
+  assert.deepEqual(p.order(), ['e', 'a', 'b', 'a', 'b', 'a', 'b', 'x'])
+  assert.equal(result.stoppedBy, 'maxNodeVisits')
+})
+
+test('pipeline: a loop back INTO a branch has no head - the join and that branch run together (the known limit)', async () => {
+  // a → b → join, a → c → d → join, join → c: the cycle c → d → join → c is entered at c (from a)
+  // and at the join (from b), so no wait in it is "the next pass" and everybody runs.
+  const p = stubbed(
+    graph(
+      'a',
+      nodes('a', 'b', 'c', 'd', 'join'),
+      [
+        edge('a', 'b'),
+        edge('a', 'c'),
+        edge('c', 'd'),
+        edge('b', 'join'),
+        edge('d', 'join'),
+        edge('join', 'c'),
+      ],
+      { maxNodeVisits: 2 },
+    ),
+  )
+  const result = await p.run()
+  assert.deepEqual(wavesOf(result).slice(0, 3), [['a#1[]'], ['b#1[a]'], ['c#1[a]', 'join#1[b]']])
 })
 
 test('pipeline: several terminal nodes of the last wave are joined under their names', async () => {

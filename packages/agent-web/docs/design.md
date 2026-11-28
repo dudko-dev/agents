@@ -716,13 +716,24 @@ the same in both. Only the adapter that runs a node with `createAgent` differs.
   fire, and it has no meaning inside a loop. Instead a `join: 'all'` node waits
   while something still activated can reach it through the graph: a fan-in waits
   for the slower branch however long it is, and stops waiting the moment that
-  branch dies out. When everything activated waits for something else (a cycle),
-  nothing would ever start, so all of it starts. Reachability ignores conditions
-  on purpose: it can only make a node wait a wave longer, never deadlock it.
-  The known limit is a fan-in inside a loop: the join and a slower branch that
-  leads to it reach each other through the cycle, so they wait for each other,
-  both run, and the join fires without that branch. `join: 'any'`, or a loop
-  drawn around the whole fan-out / fan-in, is the way out.
+  branch dies out. Reachability ignores conditions on purpose: it can only make
+  a node wait a wave longer, never deadlock it.
+- **Inside a loop, a wait is for this pass or for the next.** When everything
+  activated waits for something else, the nodes reach each other through a loop:
+  typically a join inside it and its slower branch, where the branch reaches the
+  join directly and the join reaches the branch only by going round. So then only
+  the waits within one pass count: a wait that holds only by going round - back
+  along an edge to the loop's head, a node that dominates the edge's source
+  (every path from the entry to the source passes it) - is for the next pass
+  and is dropped; the branch runs, the join goes on waiting for it. Dominators are a property of the graph,
+  not of the order of its edges, so the rule is too (a depth-first search would
+  pick its back edges by that order). The rule is asked only when everybody
+  waits, which is exactly when the scheduler used to start everybody and the
+  join ran without its branch; a node fed from inside a loop still waits for
+  the loop to end, as it always did. A cycle with more than one way in (a loop
+  back into one branch) has no head: all of it starts, since nothing would
+  ever start otherwise, and the join fires without that branch - a loop back to
+  a node before the fan-out, or `join: 'any'`, is the way out there.
 - **Every edge has an id.** A UI lights edges up from events, so an edge must be
   nameable even when the author gave it no id: it gets `e<position>`, the
   normalised definition is what `pipeline.definition` returns, and

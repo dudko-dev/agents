@@ -90,6 +90,7 @@ import {
 import {
   recordResume,
   resolveResume,
+  resolveRunId,
   resumeAttemptOf,
   type RunSnapshot,
   type RunStatus,
@@ -146,6 +147,14 @@ export interface RunOptions {
    * planning again. Attachments are not stored: pass them again if the run needs them.
    */
   resumeFromRunId?: string
+  /**
+   * A fresh run's id, in place of a random one: a host that keys runs by ids of its own (a
+   * session and a turn) gives one, so that a retry finds the same run. 1-128 letters, digits,
+   * `_` or `-`, as every run id. Refused - thrown before anything of the run - together with
+   * `resumeFromRunId`, and when `persistence.loadRun` has a snapshot for it (resume that run
+   * instead): a run on record is never written over.
+   */
+  runId?: string
   /**
    * Steer the run while it goes: `control.send(text)` puts a message in front of the model
    * at the next boundary, `control.stopSubagent(id)` stops one subagent. Make it with
@@ -715,6 +724,7 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
     port: RunControlPort | undefined,
   ): Promise<RunResult> => {
     // Validated BEFORE anything is emitted or spent: a bad id throws to the caller.
+    const ownRunId = await resolveRunId(config.persistence, opts.runId, opts.resumeFromRunId)
     const resumed = await resolveResume(config.persistence, opts.resumeFromRunId)
     // Every event of the run, numbered: `attempt` is 1 for a fresh run and one more for every
     // resume, `seq` counts the events of one attempt from 1 - (attempt, seq) is their total order
@@ -735,7 +745,7 @@ export const createAgent = async (config: BrowserAgentConfig): Promise<Agent> =>
     // A resumed run is the SAME run: its goal, session and id come from the checkpoint.
     let text = (resumed?.goal ?? goal).trim()
     const sessionId = resumed?.sessionId ?? opts.sessionId ?? cfg.sessionId
-    const runId = resumed?.runId ?? newRunId()
+    const runId = resumed?.runId ?? ownRunId ?? newRunId()
     const startedAt = resumed?.startedAt ?? Date.now()
     let usage = resumed ? { ...resumed.usage } : emptyUsage()
     const result: RunResult = {
